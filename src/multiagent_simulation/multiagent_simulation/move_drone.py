@@ -9,6 +9,8 @@ master = mavutil.mavlink_connection('udp:127.0.0.1:14550')
 # Define font and element size for larger readability
 font_large = ("Arial", 16)
 padding = 20
+heartbeat_timeout = 3
+status_update_interval = 1
 
 def set_mode():
     mode = mode_combo_box.get()
@@ -51,7 +53,7 @@ def land():
 
 def update_status():
     while True:
-        if master.wait_heartbeat(timeout=1):
+        if master.wait_heartbeat(timeout=heartbeat_timeout):
             connection_status_label.configure(text="Connected", text_color="green")
         else:
             connection_status_label.configure(text="Disconnected", text_color="red")
@@ -59,7 +61,7 @@ def update_status():
         armed = master.motors_armed()
         ready_to_fly_label.configure(text="Ready to Fly" if armed else "Not Ready", text_color="green" if armed else "red")
         
-        time.sleep(1)
+        time.sleep(status_update_interval)
 
 # GUI Setup
 ctk.set_appearance_mode("dark")  # Light or Dark mode

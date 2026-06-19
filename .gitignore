@@ -4,6 +4,7 @@ install
 log
 *logs/
 mav.*
+mav_*.parm
 eeprom.bin
 terrain
 *__pycache__
