@@ -1,0 +1,24 @@
+<svg width="1200" height="360" viewBox="0 0 1200 360" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">ArduPilot multiagent simulation cover</title>
+  <desc id="desc">Drone simulation cover with multi-agent flight paths and ROS Gazebo stack.</desc>
+  <rect width="1200" height="360" rx="24" fill="#0f172a"/>
+  <rect x="44" y="44" width="1112" height="272" rx="20" fill="#172033" stroke="#2d3b57" stroke-width="2"/>
+  <g opacity=".35" stroke="#94a3b8" stroke-width="2">
+    <path d="M70 256h1060M70 206h1060M70 156h1060M70 106h1060"/>
+    <path d="M158 70v230M286 70v230M414 70v230M542 70v230M670 70v230M798 70v230M926 70v230M1054 70v230"/>
+  </g>
+  <g stroke="#f6d365" stroke-width="5" stroke-linecap="round">
+    <path d="M170 242c120-92 225-108 315-48 98 65 189 37 294-43 94-72 174-72 258-10"/>
+    <path d="M230 132c110 60 206 70 288 30 90-44 160-44 240 0"/>
+  </g>
+  <g fill="#e2e8f0">
+    <path d="M185 238l28 10-28 10-28-10 28-10Z"/>
+    <path d="M512 178l28 10-28 10-28-10 28-10Z"/>
+    <path d="M820 132l28 10-28 10-28-10 28-10Z"/>
+    <path d="M1024 136l28 10-28 10-28-10 28-10Z"/>
+  </g>
+  <g font-family="Segoe UI, Arial, sans-serif">
+    <text x="80" y="112" fill="#ffffff" font-size="46" font-weight="700">ArduPilot Multiagent Simulation</text>
+    <text x="82" y="154" fill="#b7c3d9" font-size="22">ROS 2, Gazebo, multi-UAV spawning, sensors and reproducible devcontainer workflow</text>
+  </g>
+</svg>

@@ -1,5 +1,17 @@
 # Ardupilot Multiagent Simulation
 
+<p align="center">
+  <img src="doc/portfolio-cover.svg" alt="ArduPilot multiagent simulation cover" width="100%">
+</p>
+
+![Portfolio](https://img.shields.io/badge/portfolio-drone_simulation-2f6f6d?style=flat-square)
+![ArduPilot](https://img.shields.io/badge/autopilot-ArduPilot-44546a?style=flat-square)
+![ROS 2](https://img.shields.io/badge/robotics-ROS_2-3b6ea8?style=flat-square)
+![Gazebo](https://img.shields.io/badge/simulation-Gazebo-7a5c2e?style=flat-square)
+![Docker](https://img.shields.io/badge/dev-env_container-2496ed?style=flat-square)
+
+Portfolio wrapper: this repository is kept as an ArduPilot/Gazebo multi-UAV simulation sandbox with ROS 2 integration, sensor configuration, custom worlds, and reproducible devcontainer setup. The original maintainer credit is preserved below.
+
 Simulation environment for multiagent drone systems using Ardupilot, ROS 2, and Gazebo enabling users to spawn and control multiple drones, configure sensors, and test autonomous behaviors in a reproducible and extensible setup.
 
 Maintainer: [Gilbert Tanner](mailto:gilbert.tanner@aau.at)
