@@ -1,6 +1,6 @@
 # Network/Radio Decisions
 
-Updated: 2026-07-12 UTC.
+Updated: 2026-07-13 UTC.
 
 ## Current Authoritative Decisions
 
@@ -9,6 +9,11 @@ Updated: 2026-07-12 UTC.
   historical context only.
 - Current customer-ready status is false and no historical run is accepted P0
   evidence.
+- M0 passed on clean source
+  `aae15dbbf114ac8a0fe285d6742b702188568634`, exact image
+  `sha256:2aad1f25789fc1e5c23c3a4b05c91927198ad42ff6e97cde2c26cb2f18979afb`,
+  and qualification run `m0_baseline_20260713T090234Z`. M1 is the first open
+  sequential milestone.
 - Only independent raw-derived validation can pass a gate. Runtime producers,
   postprocessors, filenames, dashboards, and summary booleans are observations,
   not acceptance authority.
@@ -49,6 +54,16 @@ Updated: 2026-07-12 UTC.
 - Dependency acceptance requires a clean tracked checkout, exact external
   revisions, completed lock, exact project-image digest, and matching runtime
   manifests. A local `latest` tag alone is not reproducible proof.
+- Normalized Python runtime manifests use `pip freeze --all
+  --exclude-editable`; editable checkout identity is bound independently by the
+  exact Git commit and source manifest. This prevents a report-only commit from
+  changing the lock through pip's embedded editable VCS revision without
+  weakening source identity.
+- M0 qualifies one inspected immutable local image and its exact runtime
+  manifests. It does not assert a bit-for-bit independent rebuild because APT,
+  rosdep, and prerequisite installers still consume mutable indices. M8 must
+  add snapshot-pinned mutable inputs, content-addressed image distribution, and
+  a no-cache manifest-equivalent reconstruction.
 - The accepted Python runtime is the hash-locked Python 3.10/x86_64 closure
   with NumPy 1.26.4, Sionna RT 1.2.2, and Mitsuba 3.8.0. Full TensorFlow/Sionna
   PHY and pybind11/cppyy are diagnostic-only because the P0 provider imports
@@ -60,6 +75,11 @@ Updated: 2026-07-12 UTC.
   private key, a repository-pinned public key/fingerprint, and a one-time
   external ledger. The private key and ledger must never enter the repository,
   run directory, or run container.
+- A minimal M0 qualification has no complete P0 raw-artifact set and therefore
+  is neither sealed nor attested. M0 instead requires adversarial
+  sealing/attestation tests and explicitly records `p0_eligible=false`; actual
+  sealing and external attestation are mandatory for the later complete
+  integrated P0 evidence set.
 - The provisioned evidence identity is `ams-evidence-2026-07-13` with public-key
   fingerprint
   `sha256:e5807a01ac1c9b54c36f5c87b8714c555ff90bc36e3c83658cb087f8341ca462`.

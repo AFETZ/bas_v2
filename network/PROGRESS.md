@@ -1,20 +1,20 @@
 # Network/Radio Progress
 
-Updated: 2026-07-12 UTC.
+Updated: 2026-07-13 UTC.
 
 Authoritative contract: `doc/network_radio_integration_plan_v2.md`.
 
 ## Acceptance Status
 
 - Customer-ready: **false**.
-- Fully closed sequential milestones: **0**.
-- Active milestone: **M0 — Truthful Validation and Reproducible Baseline**.
+- Fully closed sequential milestones: **1**.
+- Active milestone: **M1 — Healthy Base Simulator**.
 - Historical plan/status claims do not count toward v2 closure.
 
 | Milestone | Formal status | Current position |
 | --- | --- | --- |
-| M0 | `in_progress` | Fail-closed validation, provenance, sealing, external attestation, dependency closure, and ns-3 build receipts are implemented and tested; the clean tracked revision, rebuilt accepted image, and completed dependency lock are still absent. |
-| M1 | `not_started` | Collector and a 300 s diagnostic exist, but sequential M0/provenance requirements are not met and the validator was hardened after that run. |
+| M0 | `passed` | Clean tracked revision `aae15db`, exact image `sha256:2aad1f...79afb`, completed runtime lock, 124 tests, historical negative regression, and the independently revalidated exact-image probe `m0_baseline_20260713T090234Z` all pass without an M0 caveat. |
+| M1 | `in_progress` | Collector and a 300 s diagnostic exist; a new formal 300 s run from the accepted M0 source/image is the active task. |
 | M2 | `not_started` | Real one-UAV TapBridge/MAVLink diagnostic passes functional gates, but its formal result is false on provenance and M0/M1 are open. |
 | M3–M8 | `not_started` | No milestone has complete current-run acceptance evidence. |
 
@@ -37,8 +37,8 @@ below but is never added to the closed-milestone count.
   substituted manifests.
 - Added detached Ed25519 evidence attestation with an independently pinned
   public key, full raw-artifact rehashing, stopped-container inspection, and an
-  external one-time ledger. The implementation is tested; the operator key and
-  ledger are deliberately not provisioned in the repository.
+  external one-time ledger. The external private key and ledger are provisioned;
+  only the pinned public key/fingerprint is tracked in the repository.
 - Added a formal acceptance-container launcher that runs an inspected immutable
   image ID, retains the stopped container for host attestation, and injects the
   full 64-character container ID through a host-owned mount.
@@ -77,7 +77,7 @@ below but is never added to the closed-milestone count.
 Current verification:
 
 ```text
-python3 -m unittest discover -v network/tests 'test_*.py'  -> 116/116 passed
+python3 -m unittest discover -v network/tests 'test_*.py'  -> 124/124 passed
 bash network/tests/check_ns3_packet_core_config.sh          -> passed
 Python compile, shell syntax, git diff --check              -> passed
 historical false-positive validation                        -> exit 1
@@ -146,25 +146,30 @@ fixture. It has zero RX, complete loss, null mandatory latency, ARP-only/copied
 class PCAP, and no active no-bypass proof. Current validation exits `1` with
 `P0 passed: false`.
 
-## M0 Blockers
+## M0 Closure Evidence
 
-- The checkout is dirty and much of `network/` plus both plans is untracked.
-  Existing modified files may include user work, so Codex must not silently
-  commit the mixed tree.
-- `network/config/dependency_lock.yaml` remains
-  `rebuild_required_before_acceptance`.
-- Evidence signing identity is provisioned: the private Ed25519 key and one-time
-  ledger are external, while only the pinned public key/fingerprint is in the
-  repository. No accepted runtime evidence has been signed yet.
-- The running image digest is
-  `sha256:ff0a0b3b3171e51bf328ac58806afc6c1127f9aad83fee8a0727b8136bea0011`;
-  it predates the pinned Dockerfile and Python-lock changes. No replacement
-  image has been built or accepted.
-- Only about `23 GiB` is free on the Docker filesystem. Automatic pruning of
-  user-owned images/cache is not authorized.
-- Exact runtime manifests and the accepted project-image digest are still
-  `REBUILD_REQUIRED`; a clean-clone reconstruction and exact-image verification
-  have not run.
+- Accepted source commit: `aae15dbbf114ac8a0fe285d6742b702188568634`;
+  the checkout was clean during the run and remains clean after ignored run
+  artifacts.
+- Accepted image ID:
+  `sha256:2aad1f25789fc1e5c23c3a4b05c91927198ad42ff6e97cde2c26cb2f18979afb`
+  (`linux/amd64`, user `ubuntu`, 34 layers, 6,373,951,440 bytes).
+- Locked normalized manifests: pip `342` entries/
+  `36941db39413d66f80191197d8df8d771221dce3a440cbe98f9078cca012b70e`,
+  dpkg `1956` entries/
+  `bdd042c1249d3aa238997d3c5222af6eed56e56701ab64f623fb74439ecc39aa`,
+  ROS `309` entries/
+  `274b14bf4ad003e7fded28bf3e068715c13068252bd84ecb7b61abc0cd44916f`.
+- Formal probe: `runs/m0_baseline_20260713T090234Z`; dependency and provenance
+  gates pass, `acceptance_blockers=[]`, and independent host revalidation also
+  passes. The retained stopped container is
+  `5334f05783e44a3bd6fe83bc7e32d204934a433e56dc1ebd57ec2ebface18a6a`
+  with exit `0` and the exact accepted image.
+- The probe deliberately records `p0_eligible=false`: M0 qualifies the runtime
+  baseline and validator, not the later integrated packet/radio P0 result.
+  Actual evidence sealing/Ed25519 attestation remains mandatory when the full
+  P0 raw set exists; adversarial sealing/attestation behavior is already covered
+  by the M0 test suite.
 
 ## Product-Critical Open Work
 
@@ -179,5 +184,7 @@ class PCAP, and no active no-bypass proof. Current validation exits `1` with
   Gazebo/Sionna scene. The current `scenario_5uav.yaml` terrain is only about
   `200 x 150 m`; the rock visual extent does not supply a validated 20 km
   collision/RF scene.
-- M8 still needs soak/stability runs, two clean-clone passes, bundle extraction
-  validation, and customer handoff instructions.
+- M8 still needs soak/stability runs, snapshot-pinned mutable dependency inputs,
+  content-addressed image distribution, a no-cache manifest-equivalent rebuild,
+  two clean-clone passes, bundle extraction validation, and customer handoff
+  instructions.

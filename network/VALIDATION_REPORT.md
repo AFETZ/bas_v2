@@ -1,18 +1,18 @@
 # Network/Radio Validation Report
 
-Updated: 2026-07-12 UTC.
+Updated: 2026-07-13 UTC.
 
 Authoritative contract: `doc/network_radio_integration_plan_v2.md`.
 
 Customer-ready: **false**. Accepted integrated P0 run: **none**. Fully closed
-sequential milestones: **0**.
+sequential milestones: **1**.
 
 ## Strict Milestone Assessment
 
 | Milestone | Formal status | Evidence and blocker |
 | --- | --- | --- |
-| M0 | `in_progress` | Fail-closed validation, provenance, sealing, external attestation, ns-3 receipts, and 116 tests exist; the signing identity/ledger are now provisioned, but the checkout is not yet committed/clean, the dependency lock requires rebuild, and no replacement image digest/runtime manifests are accepted. |
-| M1 | `not_started` | A 300.007 s component diagnostic kept all five UAV stacks healthy, but M0 is open, provenance failed, and later validator hardening makes the older record ineligible as current evidence. |
+| M0 | `passed` | Clean tracked revision `aae15db`, exact image `sha256:2aad1f...79afb`, complete matching runtime manifests, 124 tests, the required historical negative regression, and independently revalidated probe `m0_baseline_20260713T090234Z` pass without an M0 caveat. |
+| M1 | `in_progress` | A 300.007 s diagnostic proved feasibility, but it predates the accepted M0 source/image; a new formal 300 s exact-image run is required and is the active task. |
 | M2 | `not_started` | Real MAVLink/TapBridge good/down/recovery functional gates passed diagnostically; the run is ineligible under current provenance, build-receipt, attestation, and sequential prerequisites. |
 | M3 | `not_started` | No five-UAV external packet matrix with three bidirectional traffic classes. |
 | M4 | `not_started` | Strict validator profile exists, but no accepted online Sionna causal packet run. |
@@ -21,7 +21,37 @@ sequential milestones: **0**.
 | M7 | `not_started` | No single integrated scenario matrix; no eligible kilometre-scale matched scene. |
 | M8 | `not_started` | No accepted soak, clean-clone pair, or independently extracted customer bundle. |
 
-No row has a caveat-free `passed` state, so the count is zero.
+M0 alone has a caveat-free `passed` state, so the closed sequential count is
+one. M1 remains open and therefore M2-M8 cannot yet be counted regardless of
+component diagnostics.
+
+## M0 Closure Evidence
+
+- Accepted source commit:
+  `aae15dbbf114ac8a0fe285d6742b702188568634`, clean at execution.
+- Accepted immutable image ID:
+  `sha256:2aad1f25789fc1e5c23c3a4b05c91927198ad42ff6e97cde2c26cb2f18979afb`.
+- Formal qualification run: `runs/m0_baseline_20260713T090234Z`.
+- Retained stopped container:
+  `5334f05783e44a3bd6fe83bc7e32d204934a433e56dc1ebd57ec2ebface18a6a`,
+  exit `0`, restart count `0`, exact accepted image.
+- Independent dependency and provenance gates pass with
+  `acceptance_eligible=true` and `acceptance_blockers=[]`.
+- Normalized manifest hashes match the complete lock: pip
+  `36941db39413d66f80191197d8df8d771221dce3a440cbe98f9078cca012b70e`,
+  dpkg
+  `bdd042c1249d3aa238997d3c5222af6eed56e56701ab64f623fb74439ecc39aa`,
+  and ROS
+  `274b14bf4ad003e7fded28bf3e068715c13068252bd84ecb7b61abc0cd44916f`.
+- The exact image passes `pip check`, all 21 runtime ABI/import checks, all nine
+  pinned external-source revision/cleanliness checks, and the complete 124-test
+  regression suite.
+
+The M0 probe intentionally records `p0_eligible=false`. M0 qualifies the exact
+runtime baseline and fail-closed validation behavior; it cannot claim packet
+path, sealing, attestation, or integrated P0 proof before the corresponding raw
+M1-M8 evidence exists. Full raw-evidence sealing and external Ed25519
+attestation remain mandatory for the later integrated P0 run.
 
 ## Verified Negative Regression
 
@@ -92,7 +122,7 @@ formal M2           false
 
 ## Validator Coverage
 
-The current 116-test suite covers positive controls and adversarial mutations
+The current 124-test suite covers positive controls and adversarial mutations
 for:
 
 - false summary flags, zero/impossible delivery, NaN/boolean metrics;
@@ -127,12 +157,13 @@ bash network/tests/check_ns3_packet_core_config.sh
 
 ## Current Acceptance Blockers
 
-1. Define and commit the intended implementation scope without absorbing
-   unrelated user changes; then verify a clean reconstruction.
-2. Reclaim enough Docker storage, rebuild the
-   pinned image, record its exact digest/runtime manifests, and change the lock
-   to `complete` only after every comparison passes.
-3. Produce host-attested M0 evidence from the clean revision and immutable
-   image, then rerun M1 and M2 sequentially from that accepted baseline.
-4. Implement and execute M3–M8; tests or old subsystem/video artifacts cannot
-   substitute for those runtime gates.
+1. Produce and independently validate a fresh 300-second M1 five-UAV health
+   run from the accepted M0 source and exact image.
+2. Only after M1 passes, rerun the real one-UAV M2 vertical slice with a fresh
+   ns-3 build receipt and current provenance contracts.
+3. Implement and execute M3-M7 in order; tests, old subsystem records, and
+   replay/video evidence cannot substitute for current real runtime gates.
+4. Close M8 with soak/stability evidence, content-addressed image distribution,
+   snapshot-pinned mutable dependency inputs, a no-cache manifest-equivalent
+   reconstruction, two clean-clone passes, independently extracted bundle
+   validation, and customer handoff instructions.
