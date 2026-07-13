@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "network/config/metrics_summary_schema.json",
+  "title": "Network/radio validation summary v2",
+  "type": "object",
+  "required": [
+    "run_id",
+    "p0_passed",
+    "customer_ready",
+    "validation_engine",
+    "gates"
+  ],
+  "$defs": {
+    "gate": {
+      "type": "object",
+      "required": ["status", "proof"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["passed", "failed", "not_run", "skipped", "blocked_external"]
+        },
+        "proof": {"type": "string"},
+        "details": {"type": "object"}
+      },
+      "additionalProperties": true
+    }
+  },
+  "properties": {
+    "run_id": {"type": "string", "minLength": 1},
+    "scenario": {"type": "string"},
+    "p0_passed": {"type": "boolean"},
+    "customer_ready": {"type": "boolean"},
+    "validation_engine": {
+      "type": "object",
+      "required": ["name", "schema_version"],
+      "properties": {
+        "name": {"const": "network.validation.evidence"},
+        "schema_version": {"const": 2}
+      }
+    },
+    "duration_s": {"type": "number", "minimum": 0},
+    "uav_count": {"type": "integer", "minimum": 0},
+    "traffic_classes": {
+      "type": "array",
+      "items": {"type": "string"},
+      "uniqueItems": true
+    },
+    "packets": {
+      "type": "object",
+      "properties": {
+        "control_tx": {"type": "integer", "minimum": 0},
+        "control_rx": {"type": "integer", "minimum": 0},
+        "payload_tx": {"type": "integer", "minimum": 0},
+        "payload_rx": {"type": "integer", "minimum": 0},
+        "additional_tx": {"type": "integer", "minimum": 0},
+        "additional_rx": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": true
+    },
+    "latency_ms": {
+      "type": "object",
+      "properties": {
+        "control_p50": {"type": ["number", "null"], "minimum": 0},
+        "control_p95": {"type": ["number", "null"], "minimum": 0},
+        "payload_p50": {"type": ["number", "null"], "minimum": 0},
+        "payload_p95": {"type": ["number", "null"], "minimum": 0}
+      },
+      "additionalProperties": true
+    },
+    "loss_rate": {
+      "type": "object",
+      "properties": {
+        "control": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "payload": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "additional_data": {"type": ["number", "null"], "minimum": 0, "maximum": 1}
+      },
+      "additionalProperties": true
+    },
+    "radio": {"type": "object"},
+    "gates": {
+      "type": "object",
+      "required": ["p0", "p1", "p2"],
+      "properties": {
+        "p0": {
+          "type": "object",
+          "required": [
+            "dependency_check",
+            "provenance",
+            "joint_runtime",
+            "five_uav_health",
+            "packet_provenance",
+            "no_bypass",
+            "three_traffic_classes",
+            "online_sionna",
+            "sionna_causality",
+            "link_locality",
+            "shared_medium",
+            "priority",
+            "jamming",
+            "time_coherence",
+            "scene_alignment",
+            "heatmaps",
+            "artifacts",
+            "repeatability"
+          ],
+          "additionalProperties": {"$ref": "#/$defs/gate"}
+        },
+        "p1": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/gate"}
+        },
+        "p2": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/gate"}
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"p0_passed": {"const": true}}},
+      "then": {"properties": {"customer_ready": {"const": true}}}
+    },
+    {
+      "if": {"properties": {"customer_ready": {"const": true}}},
+      "then": {"properties": {"p0_passed": {"const": true}}}
+    }
+  ],
+  "additionalProperties": true
+}

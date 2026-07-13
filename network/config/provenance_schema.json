@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "network/config/provenance_schema.json",
+  "title": "Network/radio run provenance",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_id",
+    "generated_utc",
+    "git_commit",
+    "git_dirty",
+    "git_status",
+    "git_diff_sha256",
+    "source_hash",
+    "source_files",
+    "source_manifest",
+    "config_hashes",
+    "dependency_versions",
+    "container_image",
+    "implementation",
+    "dependency_lock_status",
+    "acceptance_blockers",
+    "acceptance_eligible"
+  ],
+  "properties": {
+    "schema_version": {"const": 2},
+    "run_id": {"type": "string", "minLength": 1},
+    "generated_utc": {"type": "string", "minLength": 1},
+    "git_commit": {"type": "string", "minLength": 7},
+    "git_dirty": {"type": "boolean"},
+    "git_status": {"type": "array", "items": {"type": "string"}},
+    "git_diff_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_files": {"type": "integer", "minimum": 1},
+    "source_manifest": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+    },
+    "config_hashes": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+    },
+    "dependency_versions": {"type": "object", "minProperties": 1},
+    "container_image": {
+      "type": "object",
+      "required": ["reference", "digest", "digest_source", "runtime_container_id", "runtime_container_id_source"],
+      "properties": {
+        "reference": {"type": "string"},
+        "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "digest_source": {"const": "docker_image_inspect_host"},
+        "runtime_container_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "runtime_container_id_source": {"const": "host_bind_mount"}
+      }
+    },
+    "implementation": {
+      "type": "object",
+      "required": ["packet_ingress_mode", "medium_model", "radio_provider_id"]
+    },
+    "dependency_lock_status": {"type": "string"},
+    "acceptance_blockers": {"type": "array", "items": {"type": "string"}},
+    "acceptance_eligible": {"type": "boolean"}
+  },
+  "additionalProperties": true
+}

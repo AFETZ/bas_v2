@@ -9,3 +9,10 @@ eeprom.bin
 terrain
 *__pycache__
 .idea
+.codex-log/
+.external/
+runs/
+artifacts/
+network/swarm/.last_run
+dumpcore.sh_*.out
+dumpstack.sh_*.out

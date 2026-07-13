@@ -1,0 +1,97 @@
+schema_version: 1
+scenario: scenario_rock_demo
+
+radio:
+  carrier_hz: 2400000000
+  bandwidth_hz: 20000000
+  tx_power_dbm: 33.0
+  tx_power_w_range: [1.0, 2.0]
+  receiver_noise_figure_db: 6.0
+  receiver_sensitivity_dbm: -105.0
+  antenna:
+    tx_pattern: omni
+    rx_pattern: omni
+
+ns3:
+  shared_medium_model: csma
+  channel_rate_bps: 20000000
+  channel_delay_ms: 2
+  queue_max_packets: 100
+  simulation_duration_s: 60
+  sionna_query_period_s: 1.0
+  sionna_deadline_ms: 30000
+  require_sionna: true
+  pcap_prefix: ns3-p2mp
+
+traffic_offered_bps:
+  control: 1000
+  payload: 500000
+  additional_data: 100000
+
+priority_tos:
+  control: 184
+  payload: 40
+  additional_data: 0
+
+ipc:
+  protocol: tcp_json_lines
+  host: 127.0.0.1
+  port: 5090
+  log_file: logs/sionna_link_queries.jsonl
+
+sionna:
+  required_for_acceptance: true
+  scene:
+    id: rock_demo_v1
+    source: mitsuba_xml
+    path: src/multiagent_simulation/worlds/rock_demo/sionna_scene.xml
+    note: >
+      Gazebo and Sionna both load the same OBJ blocker in the same ENU meter
+      frame; this is the minimum mature aligned-scene path before a
+      Blender-authored customer terrain export.
+  solver:
+    max_depth: 0
+    samples_per_src: 1
+    los: true
+    specular_reflection: false
+    diffuse_reflection: false
+    refraction: false
+    diffraction: false
+    synthetic_array: true
+    seed: 42
+
+service_tier_selection:
+  - min_sinr_db: 25.0
+    service_tier_bps: 20000000
+    link_state: excellent
+    per_input: 0.001
+  - min_sinr_db: 18.0
+    service_tier_bps: 2000000
+    link_state: good
+    per_input: 0.005
+  - min_sinr_db: 12.0
+    service_tier_bps: 500000
+    link_state: usable
+    per_input: 0.02
+  - min_sinr_db: 6.0
+    service_tier_bps: 100000
+    link_state: marginal
+    per_input: 0.08
+  - min_sinr_db: 0.0
+    service_tier_bps: 10000
+    link_state: degraded
+    per_input: 0.25
+  - min_sinr_db: -6.0
+    service_tier_bps: 1000
+    link_state: critical_only
+    per_input: 0.5
+  - min_sinr_db: -999.0
+    service_tier_bps: 0
+    link_state: down
+    per_input: 1.0
+
+heatmaps:
+  default_grid_points: 31
+  altitude_m: 80.0
+  extent_m: [-600.0, 1000.0, -300.0, 300.0]
+  degradation_sinr_db: 6.0

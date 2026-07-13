@@ -1,0 +1,93 @@
+schema_version: 1
+default_backend: sim_2_4ghz
+
+backends:
+  sim_2_4ghz:
+    label: Simulated 2.4 GHz radio/network
+    status: primary_current_target
+    implementation:
+      radio_state: sionna_rt
+      packet_core: ns3
+      bridge: mavlink_and_payload_bridge
+    contract:
+      - All command, telemetry, payload, and additional-data traffic must use
+        the same modeled path before acceptance.
+      - Sionna RT must provide online radio state for the active 2.4 GHz
+        scenario.
+      - ns-3 must consume the radio state and apply service tier, delay, loss,
+        queue, contention, and PCAP/FlowMonitor evidence.
+      - No ground-control tool may reach direct SITL or legacy localhost
+        MAVLink endpoints when the modeled path is down.
+    frequency_hz: 2400000000
+    bandwidth_hz: 20000000
+    channel_model_source: network/radio_provider
+    packet_model_source: network/ns3
+    packet_core_modes:
+      csma_surrogate:
+        status: implemented_current_p0_surrogate
+        runtime_selectable: true
+        shared_medium_model: csma
+        upstream_interfaces:
+          - ns3::CsmaNetDevice
+          - ns3::FlowMonitor
+        limitations:
+          - Current P0 packet core uses ns-3 CSMA as a shared-medium surrogate,
+            not a customer modem waveform or PHY.
+          - The legacy internally generated-flow runner does not provide
+            external ingress by itself; M2 composes this same medium surrogate
+            with the separately selected `tap_bridge_external` ingress.
+      tap_bridge_external:
+        status: implemented_m2_diagnostic_fail_closed
+        runtime_selectable: false
+        shared_medium_model: csma_via_external_tap_bridge
+        upstream_interfaces:
+          - ns3::TapBridge
+        dependency_checks:
+          - ns-3 tap-bridge module
+          - Linux ip netns support
+          - /dev/net/tun availability
+        fail_closed_until:
+          - Real MAVLink good/down/recovery transactions pass independent M2 validation.
+          - A sealed M2 run correlates packet hashes across every capture point.
+          - Sequential M0 and M1 milestone prerequisites pass.
+      customer_modem_model:
+        status: future_fail_closed
+        runtime_selectable: false
+        shared_medium_model: customer_modem_specific
+        fail_closed_until:
+          - A customer modem model/interface contract is available.
+          - A no-hardware evaluation harness exists.
+          - Live RF/device probing is explicitly authorized outside the current
+            simulated P0 path.
+
+  real_modem_2_4ghz:
+    label: Physical 2.4 GHz modem backend
+    status: future_switchable_backend
+    implementation:
+      radio_state: physical_modem
+      packet_core: real_modem_link
+      bridge: same_endpoint_contract_as_sim_2_4ghz
+    contract:
+      - This backend must reuse the same command-post, UAV, traffic-class, and
+        artifact contracts as `sim_2_4ghz`.
+      - Switching to this backend must not require changing UAV control logic,
+        MAVLink system IDs, traffic-class naming, validation report layout, or
+        customer demo commands beyond a backend selection option.
+      - Physical modem setup is not part of the current P0 path.
+      - Current agents may add readiness checks and documentation, but must not
+        require, probe, or configure live radio hardware.
+    required_later:
+      - modem device path or network interface
+      - regulatory/channel configuration
+      - link bring-up and teardown scripts
+      - live PCAP capture point
+      - safety checklist for RF transmission
+
+selection:
+  environment_variable: AMS_RADIO_BACKEND
+  cli_option: --radio-backend
+  allowed_values:
+    - sim_2_4ghz
+    - real_modem_2_4ghz
+  fail_closed: true
+  current_acceptance_backend: sim_2_4ghz

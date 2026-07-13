@@ -1,0 +1,264 @@
+schema_version: 2
+plan: doc/network_radio_integration_plan_v2.md
+scenario: scenario_5uav
+validation_command: network/scripts/run_validation.sh
+validation_engine: network/validation/validate_run.py
+artifact_collection_command: network/scripts/collect_artifacts.sh
+metrics_summary_schema: network/config/metrics_summary_schema.json
+evidence_manifest_schema: network/config/evidence_manifest_schema.json
+
+customer_ready:
+  default: false
+  rule: Every P0 gate must be independently derived from raw evidence and have status passed.
+  forbid_mixed_run_evidence: true
+  forbid_producer_gate_flags: true
+
+evidence_invariants:
+  - All P0 evidence belongs to one run_id, source revision, and continuous runtime interval.
+  - Runtime producers and postprocessors may not declare acceptance.
+  - File presence and non-zero file size are not causal proof.
+  - Zero RX, complete loss, null mandatory latency, stale pose, and required-process errors fail closed.
+  - Active no-bypass proof requires live endpoint on/stopped/recovery phases.
+  - Packet provenance requires nonce correlation at every capture point plus MAVLink ACK/telemetry.
+
+run_outputs:
+  validator_outputs:
+    - validation_report.md
+    - metrics/validation_results.json
+    - metrics/summary.json
+    - logs/validation.log
+  raw_runtime_required:
+    - command.txt
+    - environment.txt
+    - logs/check_deps.log
+    - logs/check_deps.log.exit_code
+    - logs/tcpdump_control.log
+    - logs/tcpdump_payload.log
+    - logs/tcpdump_additional_data.log
+    - logs/launch.log
+    - logs/bridge.jsonl
+    - logs/ns3.log
+    - logs/sionna_link_queries.jsonl
+    - flowmon/flowmon.xml
+    - metrics/runtime_summary.json
+    - metrics/ns3_tap_build_receipt.json
+    - metrics/provenance.json
+    - metrics/joint_runtime.json
+    - logs/joint_runtime_events.jsonl
+    - metrics/five_uav_health.json
+    - logs/five_uav_launch.log
+    - logs/five_uav_health_events.jsonl
+    - metrics/packet_provenance.json
+    - logs/no_bypass_active.json
+    - logs/no_bypass_events.jsonl
+    - logs/mavlink_transactions.jsonl
+    - pcap/gcs_ingress.pcap
+    - pcap/ns3_ingress.pcap
+    - pcap/ns3_egress.pcap
+    - pcap/uav_egress.pcap
+    - pcap/control.pcap
+    - pcap/payload.pcap
+    - pcap/additional_data.pcap
+    - metrics/sionna_causality.json
+    - logs/sionna_causality_events.jsonl
+    - metrics/link_locality.json
+    - logs/link_locality_events.jsonl
+    - metrics/contention_experiment.json
+    - logs/contention_experiment_events.jsonl
+    - metrics/priority_experiment.json
+    - logs/priority_experiment_events.jsonl
+    - metrics/jammer_experiment.json
+    - logs/jammer_experiment_events.jsonl
+    - metrics/time_coherence.json
+    - logs/time_coherence_events.jsonl
+    - metrics/scene_alignment.json
+    - logs/scene_alignment_events.jsonl
+    - heatmaps/rss.png
+    - heatmaps/sinr.png
+    - heatmaps/js.png
+    - heatmaps/degradation_zone.png
+    - heatmaps/service_tier.png
+    - heatmaps/heatmap_summary.json
+    - metrics/repeatability.json
+    - logs/repeatability_events.jsonl
+  raw_seal: metrics/evidence_manifest.json
+  detached_attestation: metrics/evidence_attestation.json
+  detached_signature: metrics/evidence_attestation.sig
+
+gates:
+  p0:
+    - id: dependency_check
+      title: Dependency and runtime capability
+      pass_condition: check_deps_exit_zero_and_no_runtime_capture_permission_error
+      raw_evidence:
+        - logs/check_deps.log
+        - logs/check_deps.log.exit_code
+        - logs/tcpdump_control.log
+        - logs/tcpdump_payload.log
+        - logs/tcpdump_additional_data.log
+    - id: provenance
+      title: Source/config provenance
+      pass_condition: complete_v2_provenance_for_same_run
+      raw_evidence: [metrics/provenance.json]
+    - id: joint_runtime
+      title: Joint runtime
+      pass_condition: all_required_components_ready_healthy_and_overlap_300s
+      raw_evidence: [metrics/joint_runtime.json, logs/joint_runtime_events.jsonl]
+    - id: five_uav_health
+      title: Five-UAV health
+      pass_condition: five_models_sitls_heartbeats_fresh_odometry_unique_ids_ports_no_errors
+      raw_evidence:
+        - metrics/five_uav_health.json
+        - logs/five_uav_launch.log
+        - logs/five_uav_health_events.jsonl
+    - id: packet_provenance
+      title: Packet provenance
+      pass_condition: nonce_all_capture_points_plus_mavlink_ack_and_telemetry
+      raw_evidence:
+        - metrics/packet_provenance.json
+        - pcap/control.pcap
+        - pcap/payload.pcap
+        - pcap/additional_data.pcap
+        - metrics/runtime_summary.json
+        - logs/mavlink_transactions.jsonl
+        - pcap/gcs_ingress.pcap
+        - pcap/ns3_ingress.pcap
+        - pcap/ns3_egress.pcap
+        - pcap/uav_egress.pcap
+    - id: no_bypass
+      title: Active no-bypass
+      pass_condition: ns3_on_success_stopped_failure_recovery_success_with_live_endpoints
+      raw_evidence: [logs/no_bypass_active.json, logs/no_bypass_events.jsonl]
+    - id: three_traffic_classes
+      title: Three traffic classes
+      pass_condition: decoded_or_nonced_data_packets_and_nonzero_tx_rx_with_finite_metrics
+      raw_evidence:
+        - pcap/control.pcap
+        - pcap/payload.pcap
+        - pcap/additional_data.pcap
+        - metrics/runtime_summary.json
+    - id: online_sionna
+      title: Online Sionna
+      pass_condition: multiple_real_runtime_query_state_updates_without_mock_or_error
+      raw_evidence: [logs/sionna_link_queries.jsonl]
+    - id: sionna_causality
+      title: Sionna affects real packets
+      pass_condition: node_query_apply_packet_correlation_and_changed_outcome
+      raw_evidence: [metrics/sionna_causality.json, logs/sionna_causality_events.jsonl]
+    - id: link_locality
+      title: Link-local impairment
+      pass_condition: target_link_changes_control_link_within_tolerance
+      raw_evidence: [metrics/link_locality.json, logs/link_locality_events.jsonl]
+    - id: shared_medium
+      title: Shared-medium behavior
+      pass_condition: single_vs_concurrent_comparison_has_measurable_effect_and_bounded_queues
+      raw_evidence: [metrics/contention_experiment.json, logs/contention_experiment_events.jsonl]
+    - id: priority
+      title: Control priority
+      pass_condition: ns3_owned_priority_under_2x_load_control_p95_250ms_loss_5pct
+      raw_evidence: [metrics/priority_experiment.json, logs/priority_experiment_events.jsonl]
+    - id: jamming
+      title: Jamming off/on/off
+      pass_condition: sinr_js_and_packet_outcomes_change_and_recover
+      raw_evidence: [metrics/jammer_experiment.json, logs/jammer_experiment_events.jsonl]
+    - id: time_coherence
+      title: Time coherence
+      pass_condition: asynchronous_sionna_expiry_realtime_factor_state_age_and_late_ratio
+      raw_evidence: [metrics/time_coherence.json, logs/time_coherence_events.jsonl]
+    - id: scene_alignment
+      title: Scene/frame alignment
+      pass_condition: shared_scene_hash_frame_contract_and_landmark_error_at_most_1m
+      raw_evidence: [metrics/scene_alignment.json, logs/scene_alignment_events.jsonl]
+    - id: heatmaps
+      title: Heatmaps
+      pass_condition: five_real_provider_layers_from_same_scene_config_and_run
+      raw_evidence:
+        - heatmaps/rss.png
+        - heatmaps/sinr.png
+        - heatmaps/js.png
+        - heatmaps/degradation_zone.png
+        - heatmaps/service_tier.png
+        - heatmaps/heatmap_summary.json
+    - id: artifacts
+      title: Artifact structure
+      pass_condition: required_raw_runtime_structure_and_external_ed25519_attestation_pass
+      raw_evidence: [metrics/ns3_tap_build_receipt.json]
+    - id: repeatability
+      title: Clean-clone repeatability
+      pass_condition: two_clean_clone_runs_pass_with_pinned_dependencies
+      raw_evidence: [metrics/repeatability.json, logs/repeatability_events.jsonl]
+
+  p1:
+    - id: hitl_serial
+      title: HitL serial through modeled path
+      pass_condition: actual_ns3_and_actual_provider_nonce_loopback
+      raw_evidence:
+        - metrics/hitl_loopback_summary.json
+        - logs/hitl_loopback.jsonl
+    - id: hitl_ethernet
+      title: HitL Ethernet through modeled path
+      pass_condition: actual_ns3_and_actual_provider_nonce_loopback
+      raw_evidence:
+        - metrics/hitl_loopback_summary.json
+        - logs/hitl_loopback.jsonl
+    - id: long_run
+      title: 30-minute stability run
+      pass_condition: duration_at_least_1800s_timing_present_queues_bounded_no_crash
+      minimum_duration_s: 1800
+    - id: customer_map
+      title: Customer map
+      pass_condition: converted_loaded_and_hashed
+      raw_evidence: [metrics/customer_map.json]
+
+  p2:
+    - id: web_ui
+      title: Web UI
+    - id: advanced_cyber_models
+      title: Advanced cyber models
+    - id: alternate_simulator
+      title: Alternate simulator
+
+scenarios:
+  - id: A
+    name: Five-UAV baseline connectivity
+    required_for: [joint_runtime, five_uav_health, packet_provenance, three_traffic_classes]
+  - id: B
+    name: ns-3 stopped and recovered
+    required_for: [no_bypass]
+  - id: C
+    name: Payload congestion and priority
+    required_for: [priority]
+  - id: D
+    name: Multi-UAV contention
+    required_for: [shared_medium]
+  - id: E
+    name: Jammer off/on/off
+    required_for: [jamming, sionna_causality]
+  - id: F
+    name: Mobility and obstruction with control link
+    required_for: [sionna_causality, link_locality, scene_alignment]
+  - id: G
+    name: Heatmap generation
+    required_for: [heatmaps]
+  - id: H
+    name: PTY and Ethernet loopback
+    required_for: [hitl_serial, hitl_ethernet]
+  - id: I
+    name: Range and service-tier sweep
+    distances_km: [1, 5, 10, 20]
+    ideal_case_distance_km: 50
+    tx_power_dbm: [30, 33]
+    propagation_cases: [los, obstruction]
+
+customer_bundle:
+  root_pattern: artifacts/customer_delivery_<run_id>
+  archive_pattern: artifacts/customer_delivery_<run_id>.tar.gz
+  required:
+    - README.md
+    - run_instructions.md
+    - validation_report.md
+    - architecture.md
+    - known_limitations.md
+    - metrics/summary.json
+    - metrics/validation_results.json
+    - provenance.json

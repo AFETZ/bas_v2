@@ -1,0 +1,149 @@
+schema_version: 2
+status: rebuild_required_before_acceptance
+
+# Filled only after the pinned image is rebuilt and independently inspected.
+# The normalization algorithm is the sorted, newline-terminated output used by
+# network/scripts/write_run_provenance.py::command_manifest.
+runtime_manifest_sha256:
+  pip_freeze: REBUILD_REQUIRED
+  dpkg: REBUILD_REQUIRED
+  ros_packages: REBUILD_REQUIRED
+
+python_lock:
+  input: .devcontainer/requirements-radio.in
+  input_sha256: 7c0bf57854a1c1abd4ddd14f1c9e7559b21b3e5f7bc4ffbae7be4a3124907e84
+  lock: .devcontainer/requirements-radio.lock
+  lock_sha256: 15204b43c4077ed1371d411480630749a15165a7ee82c92377201af6783e619a
+  python_version: "3.10"
+  platform: x86_64-manylinux_2_35
+  only_binary: true
+  exclude_newer_utc: "2026-07-12T00:00:00Z"
+
+# A host operator must provision an Ed25519 key pair outside the repository,
+# commit only its public key at public_key_path, and replace the placeholders.
+# The private key and the append-only ledger must never be mounted into a run
+# container.  Until then the artifact gate intentionally fails closed.
+evidence_attestation:
+  required: true
+  status: complete
+  key_id: ams-evidence-2026-07-13
+  public_key_path: network/config/evidence_attestation_public.pem
+  public_key_sha256: sha256:e5807a01ac1c9b54c36f5c87b8714c555ff90bc36e3c83658cb087f8341ca462
+  ledger_directory: /var/lib/ams/evidence-ledger
+
+container_build_inputs:
+  platform: linux/amd64
+  user_uid: 1000
+  user_gid: 1000
+  ardupilot_ros_manifest_sha256: b4a5229b2697bef6450119c45d3029fce9f8d657b70231b4437d345279c356c0
+  ardupilot_gz_manifest_sha256: 7770603209b99d394cc920e02e459c98910873d22752e3bf9b41d4af3b07208f
+  osrf_rosdep_revision: c03e070902e188ea1cfc50edc1fe5158c02a234f
+  osrf_rosdep_list_sha256: 311c2b285185ab9f1106bd1887f9fcdab6e815f343e07418ce27a8221b6882b8
+  mpl_toolkits_namespace_shim_sha256: 6d83a9bb7af4f395e74354dc13c22ac6916184100eef959dd58bff8ba714e969
+  removed_base_file: /usr/lib/python3/dist-packages/matplotlib-3.5.1-nspkg.pth
+  gazebo_gpg_sha256: 15d0300460e0c9c0efb21fa9770c0bf228988a07d71c4fac985c2161954a25a4
+  gradle_wrapper_jar_sha256: c5a643cf80162e665cc228f7b16f343fef868e47d3a4836f62e18b7e17ac018a
+  gradle_7_6_distribution_sha256: 7ba68c54029790ab444b39d7e293d3236b2632631fb5f2e012bb28b4ff669e4b
+
+accepted_p0_path:
+  packet_ingress: tap_bridge_external
+  medium_model: csma_surrogate
+  radio_provider: tcp_jsonl_real_sionna
+  alternate_pybind_path_acceptance_eligible: false
+
+dependencies:
+  canonical_runtime_source_paths:
+    ardupilot_standalone: /workspace/ardupilot
+    ardupilot_ros2: /workspace/ardu_ws/src/ardupilot
+    micro_ros_agent: /workspace/ardu_ws/src/micro_ros_agent
+    ardupilot_gazebo: /workspace/ardu_ws/src/ardupilot_gazebo
+    ardupilot_gz: /workspace/ardu_ws/src/ardupilot_gz
+    ardupilot_sitl_models: /workspace/ardu_ws/src/ardupilot_sitl_models
+    ros_gz: /workspace/ardu_ws/src/ros_gz
+    sdformat_urdf: /workspace/ardu_ws/src/sdformat_urdf
+    micro_xrce_dds_gen: /workspace/ardu_ws/Micro-XRCE-DDS-Gen
+  ros:
+    distribution: humble
+    container_base: osrf/ros:humble-desktop@sha256:46efd5ebec72c5da478027890ac534cbcb0c2cf93482559e0f35a9fc3c05d47a
+    project_image_reference: multiagent_simulation:latest
+    project_image_digest_before_rebuild: sha256:ff0a0b3b3171e51bf328ac58806afc6c1127f9aad83fee8a0727b8136bea0011
+    acceptance_note: Rebuild after the pinned Dockerfile change and replace this digest/status.
+  gazebo:
+    release: harmonic
+    version: 8.14.0
+    ros_gz_revision: 9d7f8c721c233a9ac8b43950129d51e67905523e
+  ardupilot:
+    revision: 3c073f9a09590307e99f49f960dd0f4dac7fc5bb
+  ardupilot_ros_repos:
+    manifest: .devcontainer/ardupilot_ros2_exact.repos
+    revisions:
+      ardupilot: 3c073f9a09590307e99f49f960dd0f4dac7fc5bb
+      micro_ros_agent: 4f363a79ae96aed39dcc5269f53f73f6a70d3a2c
+  ardupilot_gz_repos:
+    manifest: .devcontainer/ardupilot_gz_exact.repos
+    revisions:
+      ardupilot_gazebo: cc0290d964dfa373531963a8fc39093a0836af0a
+      ardupilot_gz: 8df4dc1726e37504e6fc8b952d02e554cfa3176f
+      ardupilot_sitl_models: d5d6017367a509b77886379c91207edc66f77652
+      ros_gz: 9d7f8c721c233a9ac8b43950129d51e67905523e
+      sdformat_urdf: 4be22a54e48562323f3e9deecbe1bde894eb7508
+  micro_xrce_dds_gen:
+    revision: 4bc7ec2c7f77ae89cd216432f05470ad99f7faa1
+  ns3:
+    version: "3.40"
+    source_kind: official_release_archive
+    archive_url: https://www.nsnam.org/releases/ns-allinone-3.40.tar.bz2
+    archive_sha256: c0ba395b6fcb084c4d43d6117b28932f716b26aebb54498ce2f44c0c39be3e60
+    core_tree_sha256: 0119836a7c79f7470f0c2c866de9c14ddc4f22349bbd194112ff2952713b64e8
+    core_tree_excludes: [build, cmake-cache, scratch, src/lorawan]
+    path: .external/ns-3
+    required_modules:
+      - core
+      - network
+      - internet
+      - csma
+      - bridge
+      - flow-monitor
+      - mobility
+      - stats
+      - traffic-control
+      - applications
+      - tap-bridge
+  sionna_rt:
+    version: 1.2.2
+    provider: network/radio_provider/provider.py
+  mitsuba:
+    version: 3.8.0
+  numpy:
+    version: 1.26.4
+  python:
+    version_constraint: ">=3.10,<3.13"
+  python_packages:
+    PyYAML: 6.0.2
+    matplotlib: 3.10.9
+    numpy: 1.26.4
+    pymavlink: 2.4.49
+    sionna-rt: 1.2.2
+    mitsuba: 3.8.0
+
+runtime_policy:
+  system: Linux
+  machine: x86_64
+  mitsuba_variant: llvm_ad_mono_polarized
+  gpu_required: false
+  required_network_capabilities:
+    dev_net_tun: true
+    unshare_network_namespace: true
+    passwordless_sudo: true
+
+diagnostic_only:
+  ns3_sionna_pybind:
+    path: .external/ns-3-sionna
+    commit: 3d0643e7858edcf22da3deebb0d2e423ecfe2961
+    acceptance_eligible: false
+    python_packages:
+      pybind11: 2.11.1
+      cppyy: 3.5.0
+  full_sionna_phy_tensorflow:
+    acceptance_eligible: false
+    note: The accepted provider imports sionna.rt only; TensorFlow is not part of P0.

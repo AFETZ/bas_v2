@@ -1,5 +1,7 @@
 robots:
   - name: drone1
     position: [0, 1, 0, 0, 0, 0]
+    dds_udp_port: 2019
   - name: drone2
     position: [0, -1, 0, 0, 0, 0]
+    dds_udp_port: 2020

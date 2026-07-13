@@ -1,0 +1,26 @@
+schema_version: 1
+scenario: scenario_5uav
+
+jammers:
+  - id: jammer1
+    enabled: true
+    role: jammer
+    position_m: [2500.0, 2500.0, 35.0]
+    orientation_quat_xyzw: [0.0, 0.0, 0.0, 1.0]
+    center_hz: 2400000000
+    bandwidth_hz: 20000000
+    power_dbm: 40.0
+    duty_cycle: 1.0
+    antenna: omni
+    time_behavior: continuous
+  - id: jammer2_sweep_reserved
+    enabled: false
+    role: jammer
+    position_m: [-2200.0, 1800.0, 50.0]
+    orientation_quat_xyzw: [0.0, 0.0, 0.0, 1.0]
+    center_hz: 2400000000
+    bandwidth_hz: 2000000
+    power_dbm: 37.0
+    duty_cycle: 0.5
+    antenna: omni
+    time_behavior: reserved_sweep
