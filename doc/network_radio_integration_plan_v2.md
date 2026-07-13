@@ -17,7 +17,7 @@ Initial audit state when version 2 was introduced:
 
 - Customer-ready: **false**.
 - Fully closed milestones: **0**.
-- Current milestone: **M0 — truthful validation and reproducible baseline**.
+- Current milestone: **M0 — truthful validation and immutable runtime baseline**.
 - The historical run `real_packet_loop_20260702T113341Z` is retained as a
   regression fixture for false-positive detection. It is not accepted P0
   evidence.
@@ -310,9 +310,10 @@ provider uses 1 MHz, or a 20 Mbit/s service tier is selected on a modeled
 
 ## Milestone State Machine
 
-### M0 — Truthful Validation and Reproducible Baseline
+### M0 — Truthful Validation and Immutable Runtime Baseline
 
-Purpose: make false progress impossible before adding more runtime features.
+Purpose: make false progress impossible and qualify one exact, usable runtime
+artifact before adding more runtime features.
 
 Deliverables:
 
@@ -322,6 +323,8 @@ Deliverables:
 - content-aware validator;
 - regression test proving the historical false-positive run is rejected;
 - provenance schema and dependency/version record;
+- exact-image M0 dependency/provenance qualification runner whose output
+  explicitly makes no packet-path, sealing, attestation, or P0 claim;
 - durable status files updated consistently.
 
 Acceptance:
@@ -339,8 +342,16 @@ Acceptance:
   project-image digest, and matches the recorded runtime package manifests;
 - provenance independently recomputes the current source/configuration
   manifests and has no acceptance blocker;
+- the M0 qualification validator passes both `dependency_check` and
+  `provenance`, while retaining `p0_eligible=false`;
 - sealing and adversarial tests prove that raw evidence is write-once and that
   post-run mutation, cross-run substitution, and producer PASS flags fail.
+
+M0 qualifies the inspected immutable image ID and its exact runtime manifests.
+It does not claim that a later no-cache build is bit-for-bit identical: the
+current Dockerfile still consumes mutable APT, rosdep, and ArduPilot prerequisite
+indices. Independent rebuildability is an explicit M8 gate and may not be
+inferred from a cached rebuild or from two launches of the same local image.
 
 ### M1 — Healthy Base Simulator
 
@@ -520,12 +531,20 @@ Deliverables:
 - 30-minute P1 stability run;
 - two successful clean-clone executions;
 - pinned dependency manifest and container image digest;
+- content-addressed distribution of the accepted image by registry digest or
+  verified OCI-archive hash, with restoration instructions;
+- snapshot-pinned mutable package indices and versions sufficient for a fresh
+  no-cache build to reproduce the locked runtime manifests;
 - customer bundle with limitations and replayable raw evidence.
 
 Acceptance:
 
 - no crash, timeout, stale-pose failure, or unbounded queue growth;
 - both clean-clone runs pass all P0 gates;
+- a clean environment restores the accepted image by content identity and
+  independently verifies its image ID and runtime manifests;
+- a fresh no-cache source build reproduces the locked external revisions and
+  pip/dpkg/ROS manifest hashes and passes the same capability checks;
 - the bundle validator passes after extraction in a separate directory;
 - operator instructions require no oral context;
 - repository source and all integration code are tracked and reproducible.
