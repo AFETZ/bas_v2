@@ -1,13 +1,13 @@
 schema_version: 2
-status: rebuild_required_before_acceptance
+status: complete
 
-# Filled only after the pinned image is rebuilt and independently inspected.
+# Captured from the rebuilt image after independent exact-ID inspection.
 # The normalization algorithm is the sorted, newline-terminated output used by
 # network/scripts/write_run_provenance.py::command_manifest.
 runtime_manifest_sha256:
-  pip_freeze: REBUILD_REQUIRED
-  dpkg: REBUILD_REQUIRED
-  ros_packages: REBUILD_REQUIRED
+  pip_freeze: 4cef69b842bff148237f8071682a88bc6c6d557cd25ca5d67feeacf59929e3cd
+  dpkg: bdd042c1249d3aa238997d3c5222af6eed56e56701ab64f623fb74439ecc39aa
+  ros_packages: 274b14bf4ad003e7fded28bf3e068715c13068252bd84ecb7b61abc0cd44916f
 
 python_lock:
   input: .devcontainer/requirements-radio.in
@@ -66,8 +66,13 @@ dependencies:
     distribution: humble
     container_base: osrf/ros:humble-desktop@sha256:46efd5ebec72c5da478027890ac534cbcb0c2cf93482559e0f35a9fc3c05d47a
     project_image_reference: multiagent_simulation:latest
-    project_image_digest_before_rebuild: sha256:ff0a0b3b3171e51bf328ac58806afc6c1127f9aad83fee8a0727b8136bea0011
-    acceptance_note: Rebuild after the pinned Dockerfile change and replace this digest/status.
+    project_image_digest: sha256:2aad1f25789fc1e5c23c3a4b05c91927198ad42ff6e97cde2c26cb2f18979afb
+    project_image_platform: linux/amd64
+    project_image_user: ubuntu
+    project_image_size_bytes: 6373951440
+    project_image_rootfs_layers: 34
+    historical_pre_rebuild_digest: sha256:ff0a0b3b3171e51bf328ac58806afc6c1127f9aad83fee8a0727b8136bea0011
+    acceptance_note: Exact local image ID was host-inspected and matched the locked runtime manifests on 2026-07-13.
   gazebo:
     release: harmonic
     version: 8.14.0
