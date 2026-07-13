@@ -182,12 +182,12 @@ def merge_summary(run_dir: Path, links: list[dict[str, str]], queue_rows: list[d
     }
 
     # Preserve producer claims only as explicitly untrusted observations. The
-    # v2 validator never consumes these as acceptance evidence.
+    # v3 validator never consumes these as acceptance evidence.
     producer_validation = summary.pop("validation", None)
     if isinstance(producer_validation, dict):
         summary["producer_observations"] = producer_validation
 
-    # Post-processing always removes customer/P0 claims. The v2 validator
+    # Post-processing always removes customer/P0 claims. The v3 validator
     # recomputes gate results from raw evidence.
     summary["p0_passed"] = False
     summary["customer_ready"] = False

@@ -1,7 +1,7 @@
 # Network/Radio Integration Workspace
 
 This directory is the durable workspace for the packet-in-the-loop network and
-radio integration. `doc/network_radio_integration_plan_v2.md` is the
+radio integration. `doc/network_radio_integration_plan_v3.md` is the
 authoritative execution and acceptance contract; the original plan is retained
 as historical design context.
 
@@ -79,15 +79,16 @@ RUN_ID=<run_id> ./network/scripts/run_validation.sh --run-dir runs/<run_id>
 ```
 
 There is currently no accepted P0 run. `real_packet_loop_20260702T113341Z` is a
-negative validation regression fixture and must fail the v2 validator.
+negative validation regression fixture and must fail the v3 validator.
 
-Formal acceptance is currently blocked at M0. Do not relabel an interactive or
-diagnostic run as accepted: first complete the clean revision, signing-key/
-ledger provisioning, pinned image rebuild, exact runtime manifests, and
-dependency lock listed in `NEXT_TASK.md`. Formal evidence must then be launched
-with `../scripts/run_acceptance_container.sh`, sealed, host-attested, and
-independently validated. A local `latest` tag, read-only chmod, or existing
-diagnostic run does not satisfy that chain.
+Formal v3 acceptance is currently at M0 requalification. The exact pinned image,
+runtime manifests, dependency lock, signing key, and ledger are already
+provisioned; `NEXT_TASK.md` requires a clean v3 source run against that exact
+image. Minimal M0 and component-only M1 are independently validated but do not
+claim or require an integrated P0 seal/attestation. The final M7/M8 profiles must
+use the profile-specific sealing, host signature, ledger, recursive validation,
+and handoff chain defined by v3. An interactive `latest` container or diagnostic
+run cannot substitute for any formal profile.
 
 Live SINR commands:
 

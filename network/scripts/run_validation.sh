@@ -16,7 +16,7 @@ Usage: network/scripts/run_validation.sh [options]
 
 Options:
   --run-dir PATH                    Run directory to inspect.
-  --matrix PATH                     Authoritative v2 matrix to enforce.
+  --matrix PATH                     Authoritative v3 matrix to enforce.
   --long-run optional|required|skip P1 long-run policy (default: optional).
   --require-long-run                Alias for --long-run required.
   --skip-long-run                   Alias for --long-run skip.
@@ -27,7 +27,7 @@ Options:
   --no-write                        Inspect without changing the run directory.
   -h, --help                        Show this help.
 
-The v2 validator reads raw evidence from one existing run. It does not start
+The v3 validator reads raw evidence from one existing run. It does not start
 dependencies, generate traffic, fabricate active proof, or trust producer gate
 booleans. P0 failure returns exit code 1.
 EOF

@@ -140,7 +140,7 @@ export GZ_PARTITION
 
 python3 "$ROOT_DIR/network/scripts/write_run_provenance.py" \
   --run-dir "$RUN_DIR" \
-  --config "$ROOT_DIR/doc/network_radio_integration_plan_v2.md" \
+  --config "$ROOT_DIR/doc/network_radio_integration_plan_v3.md" \
   --config "$SCENARIO" \
   --config "$ROOT_DIR/network/config/endpoints.yaml" \
   --config "$ROOT_DIR/network/config/radio_backend.yaml" \

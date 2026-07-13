@@ -1,5 +1,5 @@
 schema_version: 2
-plan: doc/network_radio_integration_plan_v2.md
+plan: doc/network_radio_integration_plan_v3.md
 scenario: scenario_5uav
 validation_command: network/scripts/run_validation.sh
 validation_engine: network/validation/validate_run.py
@@ -7,9 +7,22 @@ artifact_collection_command: network/scripts/collect_artifacts.sh
 metrics_summary_schema: network/config/metrics_summary_schema.json
 evidence_manifest_schema: network/config/evidence_manifest_schema.json
 
+# The legacy single-run matrix remains useful for adversarial/component
+# validation while v3 profile-specific raw sets and recursive child validation
+# are implemented.  It must never emit customer-ready on its own.
+acceptance_profiles:
+  schema: v3_profiled
+  implementation_status: fail_closed_pending_v3_profile_validators
+  customer_ready_enabled: false
+  required_customer_profile: m8_customer_handoff
+  required_profiles:
+    - m7_single_run_candidate
+    - m8_repeatability_aggregate
+    - m8_customer_handoff
+
 customer_ready:
   default: false
-  rule: Every P0 gate must be independently derived from raw evidence and have status passed.
+  rule: The signed m8_customer_handoff profile and every recursively revalidated child gate must pass.
   forbid_mixed_run_evidence: true
   forbid_producer_gate_flags: true
 
@@ -98,7 +111,7 @@ gates:
         - logs/tcpdump_additional_data.log
     - id: provenance
       title: Source/config provenance
-      pass_condition: complete_v2_provenance_for_same_run
+      pass_condition: complete_v3_provenance_for_same_run
       raw_evidence: [metrics/provenance.json]
     - id: joint_runtime
       title: Joint runtime

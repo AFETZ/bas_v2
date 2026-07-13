@@ -597,7 +597,7 @@ class ValidatorHardeningV2Tests(unittest.TestCase):
                 yaml.safe_dump(
                     {
                         "schema_version": 2,
-                        "plan": "doc/network_radio_integration_plan_v2.md",
+                        "plan": "doc/network_radio_integration_plan_v3.md",
                         "run_outputs": {
                             "raw_runtime_required": [],
                             "validator_outputs": [],

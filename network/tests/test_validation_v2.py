@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import hashlib
 import struct
@@ -11,6 +13,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -114,6 +117,36 @@ def valid_delivery_summary() -> dict:
 
 
 class ValidationV2Tests(unittest.TestCase):
+    def test_v3_profile_policy_blocks_legacy_all_pass_customer_claim(self) -> None:
+        from network.validation.validate_run import main as validate_main
+
+        fake_gate = {"status": "passed", "proof": "forged legacy all-pass"}
+        fake_result = {
+            "schema_version": 2,
+            "validation_engine": "network.validation.evidence",
+            "run_id": "legacy_all_pass",
+            "p0_passed": True,
+            "customer_ready": True,
+            "gates": {
+                "p0": {"legacy": fake_gate},
+                "p1": {"long_run": fake_gate},
+                "p2": {},
+            },
+            "runtime_metrics": {},
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp) / "legacy_all_pass"
+            run_dir.mkdir()
+            output = io.StringIO()
+            with patch(
+                "network.validation.validate_run.evaluate_run",
+                return_value=fake_result,
+            ), contextlib.redirect_stdout(output):
+                return_code = validate_main(["--run-dir", str(run_dir), "--no-write"])
+
+        self.assertEqual(return_code, 1)
+        self.assertIn("P0 passed: false", output.getvalue())
+
     def test_zero_rx_full_loss_and_null_latency_fail(self) -> None:
         result = delivery_status(invalid_false_positive_summary())
         self.assertFalse(result["passed"])

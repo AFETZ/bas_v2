@@ -21,7 +21,7 @@ import yaml
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIGS = (
-    "doc/network_radio_integration_plan_v2.md",
+    "doc/network_radio_integration_plan_v3.md",
     "network/config/scenario_5uav.yaml",
     "network/config/endpoints.yaml",
     "network/config/radio_24ghz.yaml",

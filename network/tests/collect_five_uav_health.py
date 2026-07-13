@@ -27,6 +27,8 @@ import yaml
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
+M1_CONTRACT_ID = "ams.m1.health/v3"
+M1_PLAN_PATH = "doc/network_radio_integration_plan_v3.md"
 FATAL_LAUNCH_PATTERNS = (
     "bind error",
     "address already in use",
@@ -201,13 +203,22 @@ def run_process_monitor(
 
 
 class EventLog:
-    def __init__(self, path: Path, *, run_id: str, runtime_id: str, source_hash: str):
+    def __init__(
+        self,
+        path: Path,
+        *,
+        run_id: str,
+        runtime_id: str,
+        source_hash: str,
+        contract_sha256: str,
+    ):
         path.parent.mkdir(parents=True, exist_ok=True)
         self._handle = path.open("x", encoding="utf-8")
         self._lock = threading.Lock()
         self._run_id = run_id
         self._runtime_id = runtime_id
         self._source_hash = source_hash
+        self._contract_sha256 = contract_sha256
         self._event_seq = 0
 
     def emit(self, event: str, **fields: Any) -> None:
@@ -219,6 +230,9 @@ class EventLog:
                 "run_id": self._run_id,
                 "runtime_id": self._runtime_id,
                 "source_hash": self._source_hash,
+                "contract": M1_CONTRACT_ID,
+                "plan_version": 3,
+                "contract_sha256": self._contract_sha256,
                 "event_seq": self._event_seq,
                 "event": event,
                 "wall_utc": utc_now(),
@@ -257,6 +271,7 @@ def discover_gazebo_models(world: str, event_log: EventLog) -> tuple[set[str], s
     event_log.emit(
         "gazebo_scene_probe",
         exit_code=result.returncode,
+        world_name=world,
         model_names=sorted(name for name in names if name.startswith("uav")),
     )
     if result.returncode != 0:
@@ -306,6 +321,11 @@ def main(argv: list[str] | None = None) -> int:
     if not args.runtime_id or len(args.runtime_id) < 8:
         print("FAIL --runtime-id is required", file=sys.stderr)
         return 2
+    config_hashes = provenance.get("config_hashes") if isinstance(provenance.get("config_hashes"), dict) else {}
+    contract_sha256 = config_hashes.get(M1_PLAN_PATH)
+    if not isinstance(contract_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", contract_sha256) is None:
+        print("FAIL provenance does not bind the v3 M1 contract hash", file=sys.stderr)
+        return 2
     scenario = yaml.safe_load(args.scenario.read_text()) or {}
     robots = scenario.get("robots") or []
     sitl_home_text = str((scenario.get("base_simulation") or {}).get("sitl_home", ""))
@@ -326,6 +346,7 @@ def main(argv: list[str] | None = None) -> int:
         run_id=run_dir.name,
         runtime_id=args.runtime_id,
         source_hash=str(provenance.get("source_hash")),
+        contract_sha256=contract_sha256,
     )
     event_log.emit(
         "health_probe_start",
@@ -870,6 +891,9 @@ def main(argv: list[str] | None = None) -> int:
 
     summary = {
         "schema_version": 2,
+        "contract": M1_CONTRACT_ID,
+        "plan_version": 3,
+        "contract_sha256": contract_sha256,
         "run_id": run_dir.name,
         "runtime_id": args.runtime_id,
         "source_hash": provenance.get("source_hash"),
@@ -903,6 +927,7 @@ def main(argv: list[str] | None = None) -> int:
             },
         },
         "gazebo_model_names": sorted(name for name in models if name.startswith("uav")),
+        "gazebo_world_name": args.world,
         "launch_log": str(launch_log.relative_to(run_dir)),
         "launch_log_observation_offset": args.launch_log_observation_offset,
         "errors": all_failures,

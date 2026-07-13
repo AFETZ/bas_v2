@@ -90,11 +90,36 @@ export GZ_PARTITION
 
 python3 "$ROOT_DIR/network/scripts/write_run_provenance.py" --run-dir "$RUN_DIR" \
   > "$RUN_DIR/logs/provenance.log" 2>&1
+if ! WORLD_FILE="$(
+  python3 "$ROOT_DIR/network/scripts/write_m1_scene_provenance.py" \
+    --run-dir "$RUN_DIR" \
+    --scenario "$SCENARIO" \
+    --runtime-id "$RUNTIME_ID" \
+    2> "$RUN_DIR/logs/m1_scene_provenance.log"
+)"; then
+  cat "$RUN_DIR/logs/m1_scene_provenance.log" >&2
+  exit 1
+fi
+if ! WORLD_NAME="$(
+  python3 -c \
+    'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["gazebo"]["world_name"])' \
+    "$RUN_DIR/metrics/m1_scene_provenance.json"
+)"; then
+  printf 'FAIL could not read the derived Gazebo world name\n' >&2
+  exit 1
+fi
+{
+  printf 'world_file=%s\n' "$WORLD_FILE"
+  printf 'world_name=%s\n' "$WORLD_NAME"
+  printf 'scene_contract=ams.m1.health/v3\n'
+  printf 'scene_provenance=metrics/m1_scene_provenance.json\n'
+} >> "$RUN_DIR/environment.txt"
 
 (
   cd "$RUNTIME_DIR"
   exec setsid ros2 launch multiagent_simulation multiagent_simulation.launch.py \
     robots_config_file:="$SCENARIO" \
+    world_file:="$WORLD_FILE" \
     robot_model:="$ROBOT_MODEL" \
     gui:=false rviz:=false headless_rendering:=false \
     use_mapping_camera:=false \
@@ -128,6 +153,7 @@ python3 "$ROOT_DIR/network/tests/collect_five_uav_health.py" \
   --minimum-duration-s "$MINIMUM_DURATION_S" \
   --heartbeat-endpoint "udpin:127.0.0.1:14550" \
   --launch-log "$RUN_DIR/logs/five_uav_launch.log" \
+  --world "$WORLD_NAME" \
   --launch-log-observation-offset "$LAUNCH_LOG_OBSERVATION_OFFSET"
 COLLECTOR_RC=$?
 set -e
@@ -139,5 +165,7 @@ fi
 if (( COLLECTOR_RC != 0 )); then
   exit "$COLLECTOR_RC"
 fi
+
+python3 "$ROOT_DIR/network/scripts/validate_m1_health.py" --run-dir "$RUN_DIR"
 
 printf 'Five-UAV M1 health run complete: %s\n' "$RUN_DIR"

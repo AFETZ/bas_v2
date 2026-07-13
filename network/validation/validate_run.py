@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate one network/radio run from raw evidence and write v2 results."""
+"""Validate one network/radio run from raw evidence under the v3 contract."""
 
 from __future__ import annotations
 
@@ -65,8 +65,9 @@ def write_report(run_dir: Path, result: dict[str, Any]) -> Path:
         for gate_id, item in result["gates"]["p0"].items()
         if item["status"] != "passed"
     ]
+    blockers.extend(str(item) for item in result.get("contract_blockers", []))
     lines = [
-        "# Network/Radio Validation Report v2",
+        "# Network/Radio Validation Report v3",
         "",
         f"Generated UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}",
         f"Run directory: `{run_dir}`",
@@ -138,8 +139,8 @@ def main(argv: list[str] | None = None) -> int:
         matrix_gate_ids = tuple(item["id"] for item in matrix["gates"]["p0"])
         if matrix.get("schema_version") != 2:
             raise ValueError("schema_version is not 2")
-        if matrix.get("plan") != "doc/network_radio_integration_plan_v2.md":
-            raise ValueError("matrix does not point to the authoritative v2 plan")
+        if matrix.get("plan") != "doc/network_radio_integration_plan_v3.md":
+            raise ValueError("matrix does not point to the authoritative v3 plan")
         if matrix_gate_ids != P0_GATE_IDS:
             raise ValueError(
                 f"P0 gates differ from validator: matrix={matrix_gate_ids}, validator={P0_GATE_IDS}"
@@ -153,6 +154,22 @@ def main(argv: list[str] | None = None) -> int:
         long_run_minimum_s=args.long_run_min_duration_s,
         matrix_path=matrix_path,
     )
+    profile_policy = matrix.get("acceptance_profiles")
+    profile_policy_valid = (
+        isinstance(profile_policy, dict)
+        and profile_policy.get("schema") == "v3_profiled"
+        and profile_policy.get("required_customer_profile") == "m8_customer_handoff"
+        and profile_policy.get("customer_ready_enabled") is True
+        and profile_policy.get("implementation_status") == "complete"
+    )
+    result["acceptance_profile_policy"] = profile_policy
+    if not profile_policy_valid:
+        result["contract_blockers"] = [
+            "v3 profile-specific M7/M8 validators are fail-closed until the "
+            "m8_customer_handoff policy is implemented and enabled"
+        ]
+        result["p0_passed"] = False
+        result["customer_ready"] = False
     if args.long_run == "skip":
         result["gates"]["p1"]["long_run"] = {
             "status": "skipped",

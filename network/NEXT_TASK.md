@@ -1,14 +1,33 @@
 # Next Task
 
-Authoritative contract: `doc/network_radio_integration_plan_v2.md`.
+Authoritative contract: `doc/network_radio_integration_plan_v3.md`.
 
-Customer-ready: **false**. Fully closed milestones: **1**. Active milestone:
-**M1**.
+Customer-ready: **false**. Fully closed milestones: **0**. Active milestone:
+**M0**.
 
 ## Next Exact Action
 
-Run the formal M1 health gate for at least 300 observed seconds from the clean
-accepted M0 revision and immutable image:
+Commit the v3 contract, provenance pointer, fail-closed M1 workflow, and
+consistent zero-closure status. Then requalify the exact accepted image from a
+clean checkout:
+
+```bash
+RUN_ID=m0_v3_baseline_<UTC>
+CONTAINER_NAME=ams-m0-v3-<UTC> \
+./scripts/run_acceptance_container.sh \
+  env RUN_ID="$RUN_ID" network/scripts/run_m0_baseline.sh
+
+python3 network/scripts/validate_m0_baseline.py \
+  --run-dir "runs/$RUN_ID"
+```
+
+Retain the stopped container and independently rerun
+`validate_m0_baseline.py`. Close v3 M0 only when dependency and provenance both
+pass, the source checkout is clean, the exact image/runtime manifests still
+match, and the result retains `p0_eligible=false`.
+
+Only after that caveat-free result, execute formal M1 for at least 300 observed
+seconds and validate active Gazebo-world provenance:
 
 ```bash
 RUN_ID=m1_candidate_<UTC>
@@ -16,25 +35,9 @@ CONTAINER_NAME=ams-m1-<UTC> \
 ./scripts/run_acceptance_container.sh \
   env RUN_ID="$RUN_ID" DURATION_S=300 MINIMUM_DURATION_S=300 WARMUP_S=30 \
   network/scripts/run_five_uav_health.sh
-```
 
-Retain the stopped container and independently require both
-`provenance_status(run_dir)` and `five_uav_health_status(run_dir)` to return
-`status=passed`. Close M1 only if all five models and SITL processes remain
-healthy for the full observation, identities/ports are exact and unique, every
-UAV has fresh advancing heartbeat/odometry evidence, and the launch log has no
-bind, crash, link-down, missing-pose, or stale-pose failure.
-
-Only after that caveat-free result, execute M2:
-
-```bash
-RUN_ID=m2_candidate_<UTC>
-CONTAINER_NAME=ams-m2-<UTC> \
-./scripts/run_acceptance_container.sh \
-  env RUN_ID="$RUN_ID" network/scripts/run_one_uav_vertical_slice.sh
-
-python3 network/validation/validate_m2_vertical_slice.py \
-  --run-dir "runs/$RUN_ID"
+python3 network/scripts/validate_m1_health.py \
+  --run-dir "runs/$RUN_ID" --no-write
 ```
 
 After accepted M2, the next implementation target is M3: five isolated UAV
@@ -44,8 +47,8 @@ directions, exact capture correlation, and all-UAV no-bypass.
 Do not divert the critical path to video/dashboard polish, replay-only radio
 proof, physical modem hardware, or customer-map presentation.
 
-M0 is closed by `runs/m0_baseline_20260713T090234Z` on source `aae15db` and
-image `sha256:2aad1f...79afb`. Its deliberate `p0_eligible=false` is not a
-caveat: M0 is a baseline qualification, while full evidence sealing and
-external attestation apply when the integrated P0 raw set exists. The private
-key remains outside the repository and must never enter a run container.
+The v2 probe `m0_baseline_20260713T090234Z` on image
+`sha256:2aad1f...79afb` remains the reusable runtime baseline, but it is not v3
+closure. Full evidence sealing and external attestation apply to the later
+integrated P0 profiles. The private key remains outside the repository and must
+never enter a run container.

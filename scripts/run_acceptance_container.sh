@@ -76,11 +76,11 @@ docker start --attach "$CONTAINER_ID"
 RUN_EXIT=$?
 set -e
 
-printf '\nAcceptance container retained for host attestation.\n'
+printf '\nAcceptance container retained for independent host validation.\n'
 printf 'container_name=%s\n' "$NAME"
 printf 'container_id=%s\n' "$CONTAINER_ID"
 printf 'image_reference=%s\n' "$IMAGE"
 printf 'image_id=%s\n' "$IMAGE_ID"
 printf 'run_exit_code=%s\n' "$RUN_EXIT"
-printf 'Do not remove this container until attest_run_evidence.py succeeds.\n'
+printf 'Retain it until every validator and any attestation required by the selected profile completes.\n'
 exit "$RUN_EXIT"

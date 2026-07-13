@@ -4,20 +4,31 @@ Updated: 2026-07-13 UTC.
 
 ## Current Authoritative Decisions
 
-- `doc/network_radio_integration_plan_v2.md` supersedes the original plan for
-  sequencing, closure, acceptance, and customer-ready claims. The original is
-  historical context only.
+- `doc/network_radio_integration_plan_v3.md` supersedes v2 and the original plan
+  for sequencing, closure, acceptance, and customer-ready claims. Both older
+  plans are historical context only.
 - Current customer-ready status is false and no historical run is accepted P0
   evidence.
-- M0 passed on clean source
+- M0 passed under v2 on clean source
   `aae15dbbf114ac8a0fe285d6742b702188568634`, exact image
   `sha256:2aad1f25789fc1e5c23c3a4b05c91927198ad42ff6e97cde2c26cb2f18979afb`,
   and qualification run `m0_baseline_20260713T090234Z`. M1 is the first open
-  sequential milestone.
+  sequential milestone under v2. The v3 migration resets the formal count to
+  zero until exact-image M0 is requalified against the clean v3 source and
+  contract.
 - Only independent raw-derived validation can pass a gate. Runtime producers,
   postprocessors, filenames, dashboards, and summary booleans are observations,
   not acceptance authority.
 - Milestones are sequential and only caveat-free `passed` milestones count.
+- v3 separates final evidence into three acyclic profiles:
+  `m7_single_run_candidate`, `m8_repeatability_aggregate`, and
+  `m8_customer_handoff`. A repeatability child never contains or self-references
+  its own repeatability result; the aggregate re-hashes and revalidates both
+  independently sealed/signed children.
+- The legacy single-run validation matrix is explicitly fail-closed for
+  customer-ready output until v3 profile-specific raw sets, recursive child
+  validation, and the final handoff profile are implemented. Even a forged
+  all-green legacy result must return customer-ready false.
 - P0 uses the real TCP JSONL Sionna provider until another integration replaces
   it end-to-end. The separate pybind11 checkout remains diagnostic and its
   evidence may not be mixed into a JSONL-provider acceptance run.
@@ -42,15 +53,26 @@ Updated: 2026-07-13 UTC.
 - Stopping ns-3 must break the only route. Direct SITL ports and legacy
   localhost MAVLink paths are forbidden from the GCS namespace in acceptance
   runs.
+- The continuously healthy lifecycle supervisor and the ns-3 packet-engine
+  child are distinct identities. Only the predeclared M7 phase-B and phase-H
+  intervals may stop/restart the packet-engine; treating that planned outage as
+  a supervisor crash, or allowing any undeclared outage, is invalid.
 - M1 direct MAVProxy telemetry is allowed only as component-health evidence and
   is explicitly packet-path-ineligible.
+- M1 qualifies only the active Gazebo flight world. Its v3 scene gate binds the
+  scenario and source/install asset manifests to the raw running `gz sim`
+  world argument, live transport world/entity probe, Gazebo runtime version,
+  current source hash, and v3 contract. Gazebo/Sionna alignment begins at M4.
 - `scenario_5uav.yaml` is bounded to its actual approximately `200 x 150 m`
   terrain. M7 requires a separately named, matched and validated kilometre-scale
   Gazebo/Sionna scene; moving models outside the collision mesh or changing
   metadata alone is invalid.
+- All M7 phases A-I use one unchanged final paired Gazebo/Sionna scene with at
+  least 20 km of validated usable collision/RF geometry. Switching worlds or
+  Sionna scenes inside the candidate is forbidden.
 - Mutable status lives in `PROGRESS.md`, `VALIDATION_REPORT.md`, and
   `NEXT_TASK.md`. These reports are excluded from the implementation hash; the
-  immutable v2 plan and all runtime/configuration files are hashed.
+  immutable v3 plan and all runtime/configuration files are hashed.
 - Dependency acceptance requires a clean tracked checkout, exact external
   revisions, completed lock, exact project-image digest, and matching runtime
   manifests. A local `latest` tag alone is not reproducible proof.

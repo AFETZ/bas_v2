@@ -2,19 +2,19 @@
 
 Updated: 2026-07-13 UTC.
 
-Authoritative contract: `doc/network_radio_integration_plan_v2.md`.
+Authoritative contract: `doc/network_radio_integration_plan_v3.md`.
 
 ## Acceptance Status
 
 - Customer-ready: **false**.
-- Fully closed sequential milestones: **1**.
-- Active milestone: **M1 — Healthy Base Simulator**.
-- Historical plan/status claims do not count toward v2 closure.
+- Fully closed sequential milestones: **0**.
+- Active milestone: **M0 — Truthful Validation and Exact Runtime Qualification**.
+- Historical plan/status claims do not count toward v3 closure.
 
 | Milestone | Formal status | Current position |
 | --- | --- | --- |
-| M0 | `passed` | Clean tracked revision `aae15db`, exact image `sha256:2aad1f...79afb`, completed runtime lock, 124 tests, historical negative regression, and the independently revalidated exact-image probe `m0_baseline_20260713T090234Z` all pass without an M0 caveat. |
-| M1 | `in_progress` | Collector and a 300 s diagnostic exist; a new formal 300 s run from the accepted M0 source/image is the active task. |
+| M0 | `in_progress` | The v2 baseline passed, but v3 changes the authoritative contract/source identity. A clean exact-image v3 requalification is required before M0 can be counted again. |
+| M1 | `not_started` | Runtime/collector feasibility and the v3 fail-closed scene/health validator now exist, but sequential v3 M0 is still open and no v3 300 s run exists. |
 | M2 | `not_started` | Real one-UAV TapBridge/MAVLink diagnostic passes functional gates, but its formal result is false on provenance and M0/M1 are open. |
 | M3–M8 | `not_started` | No milestone has complete current-run acceptance evidence. |
 
@@ -23,8 +23,9 @@ below but is never added to the closed-milestone count.
 
 ## Implemented Foundation
 
-- Added the corrected immutable execution/acceptance contract v2 beside the
-  original historical plan.
+- Added the corrected v2 contract beside the original historical plan, then
+  superseded it with v3 after the full M1-M8 executability audit exposed and
+  removed the remaining acceptance-profile cycles.
 - Replaced self-certifying validation with raw-derived, fail-closed gates in
   `network/validation/`.
 - Removed PCAP substitution, synthesized no-bypass PASS files, and producer
@@ -70,6 +71,10 @@ below but is never added to the closed-milestone count.
 - Added M1 five-UAV health tooling with unique DDS ports, GPS/heartbeat/
   odometry readiness, async process monitoring, bindable-port preflight,
   fail-fast startup/readiness behavior, and write-once raw identity envelopes.
+- Added v3 M1 active-world proof that binds the scenario, v3 contract, source
+  and installed asset manifests, Gazebo version/world/entity probe, and the raw
+  running `gz sim` world argument; a standalone three-gate validator cannot
+  convert the component run into a packet-path or P0 claim.
 - Added M2 `ams-gcs -> ams-ns3/TapBridge/ns-3 -> ams-uav1 -> SITL`
   lifecycle, MAVLink probe, four-point captures, good/down/recovery runner,
   sealed evidence, and independent adversarial validator.
@@ -77,7 +82,7 @@ below but is never added to the closed-milestone count.
 Current verification:
 
 ```text
-python3 -m unittest discover -v network/tests 'test_*.py'  -> 124/124 passed
+python3 -m unittest discover -v network/tests 'test_*.py'  -> 130/130 passed
 bash network/tests/check_ns3_packet_core_config.sh          -> passed
 Python compile, shell syntax, git diff --check              -> passed
 historical false-positive validation                        -> exit 1
@@ -146,7 +151,7 @@ fixture. It has zero RX, complete loss, null mandatory latency, ARP-only/copied
 class PCAP, and no active no-bypass proof. Current validation exits `1` with
 `P0 passed: false`.
 
-## M0 Closure Evidence
+## Superseded v2 M0 Baseline
 
 - Accepted source commit: `aae15dbbf114ac8a0fe285d6742b702188568634`;
   the checkout was clean during the run and remains clean after ignored run
@@ -170,6 +175,11 @@ class PCAP, and no active no-bypass proof. Current validation exits `1` with
   Actual evidence sealing/Ed25519 attestation remains mandatory when the full
   P0 raw set exists; adversarial sealing/attestation behavior is already covered
   by the M0 test suite.
+
+This evidence closed M0 under v2 only. Under the v3 migration rule the same
+content-addressed image may be reused, but a new clean run must bind the v3
+contract, current source manifest, and current validator before M0 returns to
+`passed`.
 
 ## Product-Critical Open Work
 

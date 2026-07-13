@@ -119,9 +119,10 @@ For creating custom worlds please refer to the [Create custom world](doc/Create_
 ## Network and radio integration plan
 
 The authoritative staged ns-3, Sionna, and packet-in-the-loop execution
-contract is [Network and radio integration plan v2](doc/network_radio_integration_plan_v2.md).
-The [original plan](doc/network_radio_integration_plan.md) is retained as
-historical design context only.
+contract is [Network and radio integration plan v3](doc/network_radio_integration_plan_v3.md).
+The [v2 plan](doc/network_radio_integration_plan_v2.md) and
+[original plan](doc/network_radio_integration_plan.md) are retained as
+superseded historical context only.
 
 ## Fly the drone via position control
 

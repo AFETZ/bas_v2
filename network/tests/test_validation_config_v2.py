@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Consistency tests for the v2 plan, matrix, schemas, and validator gates."""
+"""Consistency tests for the v3 plan and retained schema-v2 evidence formats."""
 
 from __future__ import annotations
 
@@ -88,11 +88,15 @@ class ValidationConfigV2Tests(unittest.TestCase):
         matrix_ids = tuple(item["id"] for item in matrix["gates"]["p0"])
         self.assertEqual(matrix_ids, P0_GATE_IDS)
 
-    def test_matrix_points_to_authoritative_v2_plan(self) -> None:
+    def test_matrix_points_to_authoritative_v3_plan(self) -> None:
         matrix = yaml.safe_load((ROOT_DIR / "network/config/validation_matrix.yaml").read_text())
         self.assertEqual(matrix["schema_version"], 2)
-        self.assertEqual(matrix["plan"], "doc/network_radio_integration_plan_v2.md")
+        self.assertEqual(matrix["plan"], "doc/network_radio_integration_plan_v3.md")
         self.assertEqual(matrix["validation_engine"], "network/validation/validate_run.py")
+        profiles = matrix["acceptance_profiles"]
+        self.assertEqual(profiles["schema"], "v3_profiled")
+        self.assertFalse(profiles["customer_ready_enabled"])
+        self.assertEqual(profiles["required_customer_profile"], "m8_customer_handoff")
 
     def test_every_declared_p0_raw_artifact_is_in_the_sealed_set(self) -> None:
         matrix = yaml.safe_load((ROOT_DIR / "network/config/validation_matrix.yaml").read_text())

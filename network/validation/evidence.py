@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Independent evidence inspection for the network/radio v2 contract.
+"""Independent evidence inspection for the network/radio v3 contract.
 
 Runtime producers and post-processors are intentionally not trusted to declare
 P0 success. This module derives gate status from raw packet captures, counters,
