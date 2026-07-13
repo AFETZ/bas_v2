@@ -23,6 +23,7 @@ from network.scripts.write_run_provenance import (  # noqa: E402
     deterministic_source_hash,
     parse_args,
     ns3_core_tree_hash,
+    runtime_manifest_commands,
     runtime_container_identity,
     source_files,
 )
@@ -81,7 +82,6 @@ class ProvenanceV2Tests(unittest.TestCase):
             self.assertEqual(data["run_id"], "provenance_dirty")
             self.assertEqual(data["git_dirty"], bool(data["git_status"]))
             self.assertFalse(data["acceptance_eligible"])
-            self.assertIn("dependency lock is not complete", data["acceptance_blockers"])
             self.assertEqual(len(data["git_diff_sha256"]), 64)
             self.assertIn("runtime_manifests", data["dependency_versions"])
             self.assertIn("pip_freeze", data["dependency_versions"]["runtime_manifests"])
@@ -95,6 +95,25 @@ class ProvenanceV2Tests(unittest.TestCase):
             self.assertIn(".devcontainer/Dockerfile", source_manifest)
             self.assertIn(".devcontainer/ardupilot_ros2_exact.repos", source_manifest)
             self.assertIn(".devcontainer/setup.sh", source_manifest)
+
+    def test_runtime_manifest_commands_exclude_commit_coupled_editables(self) -> None:
+        commands = runtime_manifest_commands()
+        self.assertEqual(
+            commands["pip_freeze"],
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "freeze",
+                "--all",
+                "--exclude-editable",
+            ],
+        )
+        self.assertEqual(
+            commands["dpkg"],
+            ["dpkg-query", "-W", "-f=${Package}=${Version}\\n"],
+        )
+        self.assertEqual(commands["ros_packages"], ["ros2", "pkg", "list"])
 
     def test_cli_refuses_to_overwrite_existing_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

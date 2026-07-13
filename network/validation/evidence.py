@@ -755,7 +755,10 @@ def provenance_status(run_dir: Path) -> dict[str, Any]:
         "sdformat_urdf": gz_revisions.get("sdformat_urdf"),
         "micro_xrce_dds_gen": micro_xrce_lock.get("revision"),
     }
-    from network.scripts.write_run_provenance import CANONICAL_RUNTIME_SOURCE_PATHS
+    from network.scripts.write_run_provenance import (
+        CANONICAL_RUNTIME_SOURCE_PATHS,
+        runtime_manifest_commands,
+    )
 
     for name, expected_commit in expected_external_sources.items():
         record = external_sources.get(name) if isinstance(external_sources.get(name), dict) else {}
@@ -815,6 +818,7 @@ def provenance_status(run_dir: Path) -> dict[str, Any]:
     expected_runtime_manifests = lock_mapping(
         dependency_lock.get("runtime_manifest_sha256"), "runtime_manifest_sha256"
     )
+    expected_manifest_commands = runtime_manifest_commands()
     for manifest_name in ("pip_freeze", "dpkg", "ros_packages"):
         manifest = (
             runtime_manifests.get(manifest_name)
@@ -829,6 +833,8 @@ def provenance_status(run_dir: Path) -> dict[str, Any]:
             else None
         )
         if (
+            manifest.get("command") != expected_manifest_commands[manifest_name]
+            or
             manifest.get("available") is not True
             or not nonnegative_integer(manifest.get("entries"))
             or manifest.get("entries", 0) < 1

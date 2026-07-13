@@ -191,14 +191,46 @@ def runtime_capabilities() -> dict[str, object]:
 def command_manifest(args: list[str]) -> dict[str, object]:
     output = run_command(args)
     if output is None:
-        return {"available": False, "entries": 0, "sha256": None, "lines": []}
+        return {
+            "command": args,
+            "available": False,
+            "entries": 0,
+            "sha256": None,
+            "lines": [],
+        }
     lines = sorted(line.strip() for line in output.splitlines() if line.strip())
     normalized = "\n".join(lines) + ("\n" if lines else "")
     return {
+        "command": args,
         "available": True,
         "entries": len(lines),
         "sha256": hashlib.sha256(normalized.encode("utf-8")).hexdigest(),
         "lines": lines,
+    }
+
+
+def runtime_manifest_commands() -> dict[str, list[str]]:
+    """Return the exact commands whose normalized output is dependency-locked.
+
+    Editable source packages are excluded from ``pip freeze`` because their
+    output embeds the current project Git commit.  Project and external source
+    identity is already bound independently by ``git_commit``,
+    ``source_manifest``, and ``external_sources``; including the editable VCS
+    line would make committing the dependency lock change its own expected
+    hash forever.
+    """
+
+    return {
+        "pip_freeze": [
+            sys.executable,
+            "-m",
+            "pip",
+            "freeze",
+            "--all",
+            "--exclude-editable",
+        ],
+        "dpkg": ["dpkg-query", "-W", "-f=${Package}=${Version}\\n"],
+        "ros_packages": ["ros2", "pkg", "list"],
     }
 
 
@@ -297,11 +329,8 @@ def build_provenance(args: argparse.Namespace) -> dict:
             name: external_git(path) for name, path in runtime_source_paths.items()
         },
         "runtime_manifests": {
-            "pip_freeze": command_manifest([sys.executable, "-m", "pip", "freeze", "--all"]),
-            "dpkg": command_manifest(
-                ["dpkg-query", "-W", "-f=${Package}=${Version}\\n"]
-            ),
-            "ros_packages": command_manifest(["ros2", "pkg", "list"]),
+            name: command_manifest(command)
+            for name, command in runtime_manifest_commands().items()
         },
     }
 

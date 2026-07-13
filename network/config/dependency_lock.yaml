@@ -3,9 +3,11 @@ status: complete
 
 # Captured from the rebuilt image after independent exact-ID inspection.
 # The normalization algorithm is the sorted, newline-terminated output used by
-# network/scripts/write_run_provenance.py::command_manifest.
+# network/scripts/write_run_provenance.py::command_manifest. Editable packages
+# are excluded from pip_freeze because their source/commit identity is bound by
+# the independent Git, source-manifest, and external-source records.
 runtime_manifest_sha256:
-  pip_freeze: 4cef69b842bff148237f8071682a88bc6c6d557cd25ca5d67feeacf59929e3cd
+  pip_freeze: 36941db39413d66f80191197d8df8d771221dce3a440cbe98f9078cca012b70e
   dpkg: bdd042c1249d3aa238997d3c5222af6eed56e56701ab64f623fb74439ecc39aa
   ros_packages: 274b14bf4ad003e7fded28bf3e068715c13068252bd84ecb7b61abc0cd44916f
 
