@@ -15,10 +15,15 @@ Updated: 2026-07-14 UTC.
   and qualification run `m0_v3_baseline_20260713T130710Z`; the retained
   container exited `0` and independent host revalidation passed. The older v2
   M0 result is historical only.
-- M1 passed under v3 in formal run `m1_v3_candidate_20260714T072723Z` on clean
-  source `ad9c16f2fb584125bdee0ebb682612c4d89a4d50` and the exact accepted
-  image. It passed the independent provenance, 300-second five-UAV health, and
-  active Gazebo scene gates. M2 is now the first open sequential milestone.
+- M1 run `m1_v3_candidate_20260714T072723Z` is not accepted for closure even
+  though the existing three-gate validator passed. Independent raw inspection
+  found two undeclared extra MAVProxy processes during the first three samples,
+  including one zombie, plus persistent explicitly configured `ttyROS*` open
+  failures that the count-only process gate missed. The five expected MAVProxy
+  PIDs themselves remained stable; the run is rejected because exact process
+  membership and executable identity were not enforced. M1 remains the first
+  open sequential milestone until continuous identity is validated and a clean
+  replacement run passes.
 - Only independent raw-derived validation can pass a gate. Runtime producers,
   postprocessors, filenames, dashboards, and summary booleans are observations,
   not acceptance authority.

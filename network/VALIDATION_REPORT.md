@@ -5,15 +5,15 @@ Updated: 2026-07-14 UTC.
 Authoritative contract: `doc/network_radio_integration_plan_v3.md`.
 
 Customer-ready: **false**. Accepted integrated P0 run: **none**. Fully closed
-sequential milestones: **2**.
+sequential milestones: **1**.
 
 ## Strict Milestone Assessment
 
 | Milestone | Formal status | Evidence and blocker |
 | --- | --- | --- |
 | M0 | `passed` | Clean v3 run `m0_v3_baseline_20260713T130710Z` passed both formal gates and independent host revalidation on the exact accepted image. |
-| M1 | `passed` | Exact-image run `m1_v3_candidate_20260714T072723Z` passed all three v3 component gates for 300.017294 s and independent host revalidation. |
-| M2 | `in_progress` | Real MAVLink/TapBridge good/down/recovery behavior exists; the formal path is being hardened to the complete v3 raw-derived provenance/metric/topology/no-bypass contract. |
+| M1 | `in_progress` | The 300.017294 s run passed the existing three gates, but raw inspection exposed undeclared extra/zombie MAVProxy processes and 235 post-warm-up configured-serial failures that those gates did not detect. |
+| M2 | `not_started` | Real MAVLink/TapBridge behavior exists, but M1 is open and the formal M2 validator still lacks the complete v3 raw-derived provenance/metric/topology/no-bypass contract. |
 | M3 | `not_started` | No five-UAV external packet matrix with three bidirectional traffic classes. |
 | M4 | `not_started` | Strict validator profile exists, but no accepted online Sionna causal packet run. |
 | M5 | `not_started` | Strict contention/priority profiles exist, but no accepted overload runtime. |
@@ -21,8 +21,8 @@ sequential milestones: **2**.
 | M7 | `not_started` | No single integrated scenario matrix; no eligible kilometre-scale matched scene. |
 | M8 | `not_started` | No accepted soak, clean-clone pair, or independently extracted customer bundle. |
 
-M0 and M1 have separate caveat-free `passed` states under v3, so the closed
-sequential count is two. No M1 evidence was grandfathered from v2.
+Only M0 has a caveat-free `passed` state under v3, so the closed sequential
+count is one. No M1 evidence is grandfathered from v2.
 
 ## Accepted v3 M0 Evidence
 
@@ -56,7 +56,7 @@ container/provenance timestamps are authoritative. The result intentionally
 has `p0_eligible=false`, `packet_path=false`, `sealing=false`, and
 `attestation=false`. These are the correct M0 scope, not missing M0 gates.
 
-## Accepted v3 M1 Evidence
+## Unaccepted v3 M1 Diagnostic Evidence
 
 - Formal run: `runs/m1_v3_candidate_20260714T072723Z`.
 - Clean source commit:
@@ -85,10 +85,17 @@ has `p0_eligible=false`, `packet_path=false`, `sealing=false`, and
 - No listener or matching runtime process survived container exit; observed
   post-run TCP entries were only kernel `TIME_WAIT` records.
 
+This diagnostic is rejected for closure despite the existing validator result.
+Its process samples do not carry/validate the required start-tick and
+executable identities. Direct inspection shows two undeclared extra MAVProxy
+processes during the first three samples, including one zombie; the five
+expected MAVProxy PIDs themselves remained stable. The post-warm-up launch log
+also contains `235` failures to open explicitly configured `ttyROS*` endpoints.
+A stronger validator must enforce exact process membership and reject both
+conditions before a new run can count.
+
 The recorded odometry real-time factor is `0.765818..0.765825`. M1 has no RTF
-pass threshold; it neither claims nor waives the separate later M6/M7 timing
-requirement. The M1 result is correctly component-only and
-`p0_eligible=false`.
+pass threshold; it neither claims nor waives the later M6/M7 timing requirement.
 
 ## Historical v2 M0 Evidence
 
@@ -221,14 +228,14 @@ bash network/tests/check_ns3_packet_core_config.sh
 
 ## Current Acceptance Blockers
 
-1. Complete the M2 raw producer and independent validator so every v3
-   latency/loss/denominator, topology/current-state, exact identity, capture,
-   and forbidden-path claim is derived fail-closed from current raw evidence.
-2. Run and independently validate formal M2 on the accepted exact image with a
-   fresh ns-3 build receipt only after the implementation is clean and tested.
-3. Implement and execute M3-M7 in order; tests, old subsystem records, and
+1. Add immutable process/runtime identity and continuity evidence to M1,
+   reject PID/start-tick/executable changes and extra/zombie processes, and
+   eliminate the configured `ttyROS*` failures that continue after warm-up.
+2. Produce and independently validate a new clean 300-second M1 run.
+3. Only then complete and formally execute the M2 v3 evidence contract.
+4. Implement and execute M3-M7 in order; tests, old subsystem records, and
    replay/video evidence cannot substitute for current real runtime gates.
-4. Close M8 with soak/stability evidence, content-addressed image distribution,
+5. Close M8 with soak/stability evidence, content-addressed image distribution,
    snapshot-pinned mutable dependency inputs, a no-cache manifest-equivalent
    reconstruction, two clean-clone passes, independently extracted bundle
    validation, and customer handoff instructions.
