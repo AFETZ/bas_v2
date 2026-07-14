@@ -1,6 +1,6 @@
 # Network/Radio Decisions
 
-Updated: 2026-07-13 UTC.
+Updated: 2026-07-14 UTC.
 
 ## Current Authoritative Decisions
 
@@ -9,13 +9,12 @@ Updated: 2026-07-13 UTC.
   plans are historical context only.
 - Current customer-ready status is false and no historical run is accepted P0
   evidence.
-- M0 passed under v2 on clean source
-  `aae15dbbf114ac8a0fe285d6742b702188568634`, exact image
+- M0 passed under v3 on clean source
+  `95746e37014cce5a974d2dbb7d7e4c8e18b48929`, exact image
   `sha256:2aad1f25789fc1e5c23c3a4b05c91927198ad42ff6e97cde2c26cb2f18979afb`,
-  and qualification run `m0_baseline_20260713T090234Z`. M1 is the first open
-  sequential milestone under v2. The v3 migration resets the formal count to
-  zero until exact-image M0 is requalified against the clean v3 source and
-  contract.
+  and qualification run `m0_v3_baseline_20260713T130710Z`; the retained
+  container exited `0` and independent host revalidation passed. M1 is now the
+  first open sequential milestone. The older v2 M0 result is historical only.
 - Only independent raw-derived validation can pass a gate. Runtime producers,
   postprocessors, filenames, dashboards, and summary booleans are observations,
   not acceptance authority.

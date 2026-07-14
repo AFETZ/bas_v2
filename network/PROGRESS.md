@@ -1,21 +1,21 @@
 # Network/Radio Progress
 
-Updated: 2026-07-13 UTC.
+Updated: 2026-07-14 UTC.
 
 Authoritative contract: `doc/network_radio_integration_plan_v3.md`.
 
 ## Acceptance Status
 
 - Customer-ready: **false**.
-- Fully closed sequential milestones: **0**.
-- Active milestone: **M0 — Truthful Validation and Exact Runtime Qualification**.
+- Fully closed sequential milestones: **1**.
+- Active milestone: **M1 — Five-UAV Base Runtime**.
 - Historical plan/status claims do not count toward v3 closure.
 
 | Milestone | Formal status | Current position |
 | --- | --- | --- |
-| M0 | `in_progress` | The v2 baseline passed, but v3 changes the authoritative contract/source identity. A clean exact-image v3 requalification is required before M0 can be counted again. |
-| M1 | `not_started` | Runtime/collector feasibility and the v3 fail-closed scene/health validator now exist, but sequential v3 M0 is still open and no v3 300 s run exists. |
-| M2 | `not_started` | Real one-UAV TapBridge/MAVLink diagnostic passes functional gates, but its formal result is false on provenance and M0/M1 are open. |
+| M0 | `passed` | Clean exact-image v3 qualification `m0_v3_baseline_20260713T130710Z` passed dependency and provenance gates and passed independent host revalidation. |
+| M1 | `in_progress` | Runtime/collector feasibility and the v3 fail-closed scene/health validator exist; the next action is the formal 300 s exact-image run. |
+| M2 | `not_started` | Real one-UAV TapBridge/MAVLink diagnostic passes functional gates, but M1 is open and the formal M2 path still lacks all v3 raw-derived provenance/metric/topology gates. |
 | M3–M8 | `not_started` | No milestone has complete current-run acceptance evidence. |
 
 Only `passed` closes a milestone. Diagnostic or subsystem success is recorded
@@ -151,7 +151,46 @@ fixture. It has zero RX, complete loss, null mandatory latency, ARP-only/copied
 class PCAP, and no active no-bypass proof. Current validation exits `1` with
 `P0 passed: false`.
 
-## Superseded v2 M0 Baseline
+## Closed v3 M0 Qualification
+
+- Formal run: `runs/m0_v3_baseline_20260713T130710Z`.
+- Accepted source commit:
+  `95746e37014cce5a974d2dbb7d7e4c8e18b48929`, clean at execution.
+- Source manifest hash:
+  `d61482883c39243d5c6a5e995b3690fdf13f5b9f1c2e30e8fc778b83635c5c56`.
+- Accepted immutable image ID:
+  `sha256:2aad1f25789fc1e5c23c3a4b05c91927198ad42ff6e97cde2c26cb2f18979afb`.
+- Retained stopped container:
+  `afb765f5507f69d3fceaf4b4c178898e57e0e1d71b335bf7f196baa4e21ab5a7`;
+  exit `0`, restart count `0`, not OOM-killed, exact accepted image.
+- Container execution window: `2026-07-14T06:45:18.909582676Z` through
+  `2026-07-14T06:45:41.490310806Z`; provenance generated
+  `2026-07-14T06:45:40Z`.
+- v3 plan hash:
+  `18fd8309e35341e8f1fec0ae28a7dcf38cd9ae042785b20fb9b9df40e8aa7156`;
+  validation-matrix hash:
+  `f5923bdc38470519cffb35071aae95fd0c5597a24df853e324e321d0d4a48d14`.
+- Dependency and provenance gates pass, `acceptance_eligible=true`,
+  `acceptance_blockers=[]`, and the independent host validator passes.
+- The result correctly retains `p0_eligible=false` and scopes packet path,
+  sealing, and attestation to false: M0 qualifies the exact runtime and does
+  not claim later integrated evidence.
+
+The run ID is an immutable identifier allocated before execution. The
+authoritative execution and evidence times are the recorded container and
+provenance timestamps above.
+
+Locked normalized manifests remain pip `342` entries/
+`36941db39413d66f80191197d8df8d771221dce3a440cbe98f9078cca012b70e`,
+dpkg `1956` entries/
+`bdd042c1249d3aa238997d3c5222af6eed56e56701ab64f623fb74439ecc39aa`,
+and ROS `309` entries/
+`274b14bf4ad003e7fded28bf3e068715c13068252bd84ecb7b61abc0cd44916f`.
+
+This closes M0 under v3 without qualifications. M1 is now the only active
+sequential milestone.
+
+## Historical v2 M0 Baseline
 
 - Accepted source commit: `aae15dbbf114ac8a0fe285d6742b702188568634`;
   the checkout was clean during the run and remains clean after ignored run
@@ -176,14 +215,13 @@ class PCAP, and no active no-bypass proof. Current validation exits `1` with
   P0 raw set exists; adversarial sealing/attestation behavior is already covered
   by the M0 test suite.
 
-This evidence closed M0 under v2 only. Under the v3 migration rule the same
-content-addressed image may be reused, but a new clean run must bind the v3
-contract, current source manifest, and current validator before M0 returns to
-`passed`.
+This evidence closed M0 under v2 only. It is retained as history; the separate
+v3 qualification above is the evidence that now counts.
 
 ## Product-Critical Open Work
 
-- M1 must be rerun for 300 seconds from the clean, pinned M0 source/image.
+- M1 must run formally for 300 observed seconds from the clean, pinned M0
+  source/image and pass the independent three-gate validator.
 - M2 must be rerun from the same accepted source after sequential M0/M1 pass.
 - M3 still needs five isolated UAV packet endpoints and all three traffic
   classes in both directions.
