@@ -13,8 +13,12 @@ Updated: 2026-07-14 UTC.
   `95746e37014cce5a974d2dbb7d7e4c8e18b48929`, exact image
   `sha256:2aad1f25789fc1e5c23c3a4b05c91927198ad42ff6e97cde2c26cb2f18979afb`,
   and qualification run `m0_v3_baseline_20260713T130710Z`; the retained
-  container exited `0` and independent host revalidation passed. M1 is now the
-  first open sequential milestone. The older v2 M0 result is historical only.
+  container exited `0` and independent host revalidation passed. The older v2
+  M0 result is historical only.
+- M1 passed under v3 in formal run `m1_v3_candidate_20260714T072723Z` on clean
+  source `ad9c16f2fb584125bdee0ebb682612c4d89a4d50` and the exact accepted
+  image. It passed the independent provenance, 300-second five-UAV health, and
+  active Gazebo scene gates. M2 is now the first open sequential milestone.
 - Only independent raw-derived validation can pass a gate. Runtime producers,
   postprocessors, filenames, dashboards, and summary booleans are observations,
   not acceptance authority.

@@ -5,15 +5,15 @@ Updated: 2026-07-14 UTC.
 Authoritative contract: `doc/network_radio_integration_plan_v3.md`.
 
 Customer-ready: **false**. Accepted integrated P0 run: **none**. Fully closed
-sequential milestones: **1**.
+sequential milestones: **2**.
 
 ## Strict Milestone Assessment
 
 | Milestone | Formal status | Evidence and blocker |
 | --- | --- | --- |
 | M0 | `passed` | Clean v3 run `m0_v3_baseline_20260713T130710Z` passed both formal gates and independent host revalidation on the exact accepted image. |
-| M1 | `in_progress` | A 300.007 s historical diagnostic proved feasibility; formal v3 execution is now unblocked and is the active work. |
-| M2 | `not_started` | Real MAVLink/TapBridge good/down/recovery functional gates passed diagnostically; M1 is open and the current formal path still needs the complete v3 raw-derived provenance/metric/topology contract. |
+| M1 | `passed` | Exact-image run `m1_v3_candidate_20260714T072723Z` passed all three v3 component gates for 300.017294 s and independent host revalidation. |
+| M2 | `in_progress` | Real MAVLink/TapBridge good/down/recovery behavior exists; the formal path is being hardened to the complete v3 raw-derived provenance/metric/topology/no-bypass contract. |
 | M3 | `not_started` | No five-UAV external packet matrix with three bidirectional traffic classes. |
 | M4 | `not_started` | Strict validator profile exists, but no accepted online Sionna causal packet run. |
 | M5 | `not_started` | Strict contention/priority profiles exist, but no accepted overload runtime. |
@@ -21,8 +21,8 @@ sequential milestones: **1**.
 | M7 | `not_started` | No single integrated scenario matrix; no eligible kilometre-scale matched scene. |
 | M8 | `not_started` | No accepted soak, clean-clone pair, or independently extracted customer bundle. |
 
-M0 has a caveat-free `passed` state under v3, so the closed sequential count is
-one. No M1 evidence is grandfathered from v2.
+M0 and M1 have separate caveat-free `passed` states under v3, so the closed
+sequential count is two. No M1 evidence was grandfathered from v2.
 
 ## Accepted v3 M0 Evidence
 
@@ -55,6 +55,40 @@ The run ID was allocated before execution and is retained unchanged; recorded
 container/provenance timestamps are authoritative. The result intentionally
 has `p0_eligible=false`, `packet_path=false`, `sealing=false`, and
 `attestation=false`. These are the correct M0 scope, not missing M0 gates.
+
+## Accepted v3 M1 Evidence
+
+- Formal run: `runs/m1_v3_candidate_20260714T072723Z`.
+- Clean source commit:
+  `ad9c16f2fb584125bdee0ebb682612c4d89a4d50`; source hash
+  `d61482883c39243d5c6a5e995b3690fdf13f5b9f1c2e30e8fc778b83635c5c56`;
+  `acceptance_eligible=true`, `acceptance_blockers=[]`.
+- Exact image:
+  `sha256:2aad1f25789fc1e5c23c3a4b05c91927198ad42ff6e97cde2c26cb2f18979afb`;
+  retained container
+  `1f353129b340dc924a7d3a4316156be7af3903e45afa8d75ef8c15c2c6e9bbc1`,
+  stopped with exit `0`, restart count `0`, no OOM or dead state.
+- `300.017294 s` observed with `301` process samples and minimum simultaneous
+  ArduCopter/MAVProxy/micro-ROS/Gazebo counts `5/5/5/2`.
+- Every UAV had a healthy SITL and Gazebo model, exact system ID `1..5`, unique
+  DDS port `2019..2023`, `11488` fresh odometry samples, `230` heartbeats, and
+  `919` valid MAVLink positions; per-UAV failures are empty.
+- Odometry rate was `38.290896..38.291261 Hz`, final age at most
+  `0.024674 s`, and there were no invalid or nonadvancing samples.
+- The live world `map`, raw `gz sim` argv, installed
+  `modelflughafen/model.sdf`, scenario hash, Gazebo `8.14.0`, and six-file
+  source/install bundle all correlate. Bundle hash:
+  `6ab71d524ba62fc32b78613aafe3161e8f46253c297a1b0ae364437c1e491eec`.
+- Built-in validation and independent host
+  `validate_m1_health.py --no-write` both return `passed=true` with provenance,
+  five-UAV health, and scene gates passed and `failures=[]`.
+- No listener or matching runtime process survived container exit; observed
+  post-run TCP entries were only kernel `TIME_WAIT` records.
+
+The recorded odometry real-time factor is `0.765818..0.765825`. M1 has no RTF
+pass threshold; it neither claims nor waives the separate later M6/M7 timing
+requirement. The M1 result is correctly component-only and
+`p0_eligible=false`.
 
 ## Historical v2 M0 Evidence
 
@@ -187,10 +221,11 @@ bash network/tests/check_ns3_packet_core_config.sh
 
 ## Current Acceptance Blockers
 
-1. Produce and independently validate a fresh 300-second v3 M1 five-UAV health
-   run with active-world provenance on the accepted exact image.
-2. Only after M1 passes, rerun the real one-UAV M2 vertical slice with a fresh
-   ns-3 build receipt and current provenance contracts.
+1. Complete the M2 raw producer and independent validator so every v3
+   latency/loss/denominator, topology/current-state, exact identity, capture,
+   and forbidden-path claim is derived fail-closed from current raw evidence.
+2. Run and independently validate formal M2 on the accepted exact image with a
+   fresh ns-3 build receipt only after the implementation is clean and tested.
 3. Implement and execute M3-M7 in order; tests, old subsystem records, and
    replay/video evidence cannot substitute for current real runtime gates.
 4. Close M8 with soak/stability evidence, content-addressed image distribution,

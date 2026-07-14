@@ -7,15 +7,15 @@ Authoritative contract: `doc/network_radio_integration_plan_v3.md`.
 ## Acceptance Status
 
 - Customer-ready: **false**.
-- Fully closed sequential milestones: **1**.
-- Active milestone: **M1 — Five-UAV Base Runtime**.
+- Fully closed sequential milestones: **2**.
+- Active milestone: **M2 — One-UAV External Packet Vertical Slice**.
 - Historical plan/status claims do not count toward v3 closure.
 
 | Milestone | Formal status | Current position |
 | --- | --- | --- |
 | M0 | `passed` | Clean exact-image v3 qualification `m0_v3_baseline_20260713T130710Z` passed dependency and provenance gates and passed independent host revalidation. |
-| M1 | `in_progress` | Runtime/collector feasibility and the v3 fail-closed scene/health validator exist; the next action is the formal 300 s exact-image run. |
-| M2 | `not_started` | Real one-UAV TapBridge/MAVLink diagnostic passes functional gates, but M1 is open and the formal M2 path still lacks all v3 raw-derived provenance/metric/topology gates. |
+| M1 | `passed` | Formal run `m1_v3_candidate_20260714T072723Z` passed provenance, 300 s five-UAV health, and active-scene gates plus independent host revalidation. |
+| M2 | `in_progress` | The real TapBridge/MAVLink path exists; its raw contract and independent validator are being completed to cover every v3 metric, topology, current-identity, and no-bypass requirement before formal execution. |
 | M3–M8 | `not_started` | No milestone has complete current-run acceptance evidence. |
 
 Only `passed` closes a milestone. Diagnostic or subsystem success is recorded
@@ -87,6 +87,46 @@ bash network/tests/check_ns3_packet_core_config.sh          -> passed
 Python compile, shell syntax, git diff --check              -> passed
 historical false-positive validation                        -> exit 1
 ```
+
+## Closed v3 M1 Qualification
+
+- Formal run: `runs/m1_v3_candidate_20260714T072723Z`.
+- Accepted source commit:
+  `ad9c16f2fb584125bdee0ebb682612c4d89a4d50`, clean at execution;
+  implementation source hash
+  `d61482883c39243d5c6a5e995b3690fdf13f5b9f1c2e30e8fc778b83635c5c56`.
+- Exact image:
+  `sha256:2aad1f25789fc1e5c23c3a4b05c91927198ad42ff6e97cde2c26cb2f18979afb`;
+  retained stopped container
+  `1f353129b340dc924a7d3a4316156be7af3903e45afa8d75ef8c15c2c6e9bbc1`,
+  exit `0`, restart count `0`, no OOM or dead state.
+- Container execution window: `2026-07-14T07:27:29.37008259Z` through
+  `2026-07-14T07:33:26.329303893Z`; provenance generated
+  `2026-07-14T07:27:48Z`.
+- Observed health window: `300.017294 s`; raw process samples: `301`;
+  minimum simultaneous ArduCopter/MAVProxy/micro-ROS/Gazebo counts:
+  `5/5/5/2`.
+- Each UAV recorded `11488` odometry samples at
+  `38.290896..38.291261 Hz`, `230` heartbeat samples, `919` valid MAVLink
+  positions, a fresh final odometry age no greater than `0.024674 s`, no
+  invalid/nonadvancing odometry sample, and no per-UAV failure.
+- Names are exactly `uav1..uav5`, system IDs exactly `1..5`, and DDS ports
+  exactly `2019..2023`.
+- The live Gazebo world is `map`; the running world path is the installed
+  `modelflughafen/model.sdf`; all six source/install bundle hashes match with
+  bundle hash
+  `6ab71d524ba62fc32b78613aafe3161e8f46253c297a1b0ae364437c1e491eec`.
+- Built-in and independent host validators both report all three gates
+  `passed`, `failures=[]`, `acceptance_eligible=true`, and
+  `acceptance_blockers=[]`.
+- Post-run inspection found no listener or surviving ArduPilot, MAVProxy,
+  micro-ROS, or Gazebo process. The five transient TCP connections were only
+  kernel `TIME_WAIT` entries, not listeners.
+
+The observed odometry real-time factor was `0.765818..0.765825`. M1 requires
+it to be recorded, not to satisfy the later M6/M7 `0.95..1.05` timing gate, so
+this is not an M1 qualification caveat or waiver. The result correctly remains
+component-only and `p0_eligible=false`.
 
 ## Runtime Diagnostics
 
@@ -187,8 +227,8 @@ dpkg `1956` entries/
 and ROS `309` entries/
 `274b14bf4ad003e7fded28bf3e068715c13068252bd84ecb7b61abc0cd44916f`.
 
-This closes M0 under v3 without qualifications. M1 is now the only active
-sequential milestone.
+This closes M0 under v3 without qualifications. M1 has since closed separately
+and M2 is now the only active sequential milestone.
 
 ## Historical v2 M0 Baseline
 
@@ -220,9 +260,9 @@ v3 qualification above is the evidence that now counts.
 
 ## Product-Critical Open Work
 
-- M1 must run formally for 300 observed seconds from the clean, pinned M0
-  source/image and pass the independent three-gate validator.
-- M2 must be rerun from the same accepted source after sequential M0/M1 pass.
+- M2 must first gain the complete v3 raw-derived metric, topology,
+  current-identity, and forbidden-path validator gates, then be run formally
+  from the accepted source/image after the sequential M0/M1 passes.
 - M3 still needs five isolated UAV packet endpoints and all three traffic
   classes in both directions.
 - M4–M6 still need the real online Sionna-to-packet causal adapter, contention/
