@@ -18,11 +18,21 @@ import yaml
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 SOURCE_WORLDS_RELATIVE = PurePosixPath("src/multiagent_simulation/worlds")
+SOURCE_PACKAGE_RELATIVE = PurePosixPath("src/multiagent_simulation")
+INSTALLED_PACKAGE_RELATIVE = PurePosixPath(
+    "install/multiagent_simulation/share/multiagent_simulation"
+)
+LAUNCH_SOURCE_RELATIVE = PurePosixPath(
+    "src/multiagent_simulation/launch/multiagent_simulation.launch.py"
+)
 M1_SCENE_RECORD = "metrics/m1_scene_provenance.json"
 M1_CONTRACT_ID = "ams.m1.health/v3"
 M1_PLAN_PATH = "doc/network_radio_integration_plan_v3.md"
 SHA256 = re.compile(r"[0-9a-f]{64}")
 SAFE_WORLD_NAME = re.compile(r"[A-Za-z0-9_.-]{1,128}")
+SAFE_MODEL_NAME = re.compile(r"[A-Za-z0-9_.-]{1,128}")
+MAX_TRANSITIVE_RESOURCES = 256
+ROBOT_DESCRIPTION_PORT_TOKEN = "<fdm_port_in>9002</fdm_port_in>"
 
 
 def sha256_file(path: Path) -> str:
@@ -60,6 +70,13 @@ def canonical_relative(value: Any, *, label: str, suffix: str | None = None) -> 
     if suffix is not None and pure.suffix.lower() != suffix.lower():
         raise ValueError(f"{label} must end in {suffix}")
     return value
+
+
+def canonical_robot_model(value: Any) -> str:
+    model = canonical_relative(value, label="robot model")
+    if len(PurePosixPath(model).parts) != 1 or SAFE_MODEL_NAME.fullmatch(model) is None:
+        raise ValueError("robot model must be one canonical model-directory name")
+    return model
 
 
 def _lexical_under(path: Path, root: Path, *, label: str) -> Path:
@@ -259,10 +276,293 @@ def installed_bundle_manifest(
     return manifest, resolved_paths
 
 
+def _xml_local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _resource_target(origin: PurePosixPath, uri: str) -> PurePosixPath:
+    if not isinstance(uri, str):
+        raise ValueError(f"resource URI in {origin} is not text")
+    value = uri.strip()
+    if value != uri or not value:
+        raise ValueError(f"resource URI in {origin} is empty or non-canonical")
+    if value.startswith("model://"):
+        tail = canonical_relative(value.removeprefix("model://"), label="model URI")
+        parts = PurePosixPath(tail).parts
+        if SAFE_MODEL_NAME.fullmatch(parts[0]) is None:
+            raise ValueError(f"resource URI in {origin} has an invalid model name")
+        if len(parts) == 1:
+            return PurePosixPath("models") / parts[0] / "model.config"
+        return PurePosixPath("models").joinpath(*parts)
+    if value.startswith("package://"):
+        tail = canonical_relative(
+            value.removeprefix("package://"), label="package resource URI"
+        )
+        parts = PurePosixPath(tail).parts
+        if len(parts) < 2 or parts[0] != "multiagent_simulation":
+            raise ValueError(
+                f"resource URI in {origin} names an external or incomplete package"
+            )
+        return PurePosixPath(*parts[1:])
+    if "://" in value or value.startswith("/"):
+        raise ValueError(f"resource URI in {origin} uses an unsupported scheme or absolute path")
+    relative = canonical_relative(value, label=f"relative resource URI in {origin}")
+    return origin.parent / PurePosixPath(relative)
+
+
+def _validate_resource_target(target: PurePosixPath, *, origin: PurePosixPath) -> str:
+    value = target.as_posix()
+    canonical_relative(value, label=f"resolved resource from {origin}")
+    if target.parts[0] not in {"models", "worlds"}:
+        raise ValueError(f"resource from {origin} resolves outside models/worlds")
+    return value
+
+
+def _xml_resource_dependencies(
+    logical_path: str, physical_path: Path
+) -> list[tuple[str, str]]:
+    """Return every local file dependency referenced by one scene resource."""
+
+    origin = PurePosixPath(logical_path)
+    suffix = origin.suffix.lower()
+    dependencies: list[tuple[str, str]] = []
+    if suffix in {".sdf", ".config"}:
+        try:
+            document = ET.parse(physical_path)
+        except (OSError, ET.ParseError) as exc:
+            raise ValueError(f"scene resource {logical_path} is invalid XML: {exc}") from exc
+        root = document.getroot()
+        if suffix == ".config":
+            sdf_entries = [
+                element
+                for element in root
+                if _xml_local_name(element.tag) == "sdf"
+                and isinstance(element.text, str)
+                and element.text.strip()
+            ]
+            if len(sdf_entries) != 1:
+                raise ValueError(
+                    f"model config {logical_path} must select exactly one SDF file"
+                )
+            uri_values = [sdf_entries[0].text.strip()]
+        else:
+            uri_values = [
+                element.text.strip()
+                for element in root.iter()
+                if _xml_local_name(element.tag) == "uri"
+                and isinstance(element.text, str)
+                and element.text.strip()
+            ]
+        for uri in uri_values:
+            target = _resource_target(origin, uri)
+            dependencies.append((uri, _validate_resource_target(target, origin=origin)))
+    elif suffix == ".dae":
+        # COLLADA uses many internal <init_from> identifiers.  Only values under
+        # <library_images>/<image> are filesystem resources.
+        try:
+            for _event, element in ET.iterparse(physical_path, events=("end",)):
+                if _xml_local_name(element.tag) != "image":
+                    continue
+                for child in element.iter():
+                    if (
+                        _xml_local_name(child.tag) == "init_from"
+                        and isinstance(child.text, str)
+                        and child.text.strip()
+                    ):
+                        uri = child.text.strip()
+                        if uri.startswith("#"):
+                            continue
+                        target = _resource_target(origin, uri)
+                        dependencies.append(
+                            (uri, _validate_resource_target(target, origin=origin))
+                        )
+                element.clear()
+        except (OSError, ET.ParseError) as exc:
+            raise ValueError(f"COLLADA resource {logical_path} is invalid XML: {exc}") from exc
+    return sorted(set(dependencies))
+
+
+def _transitive_manifest(
+    roots: list[str],
+    *,
+    resolve_leaf: Any,
+) -> tuple[dict[str, str], list[dict[str, str]], dict[str, str]]:
+    pending = sorted(set(roots))
+    manifest: dict[str, str] = {}
+    edges: list[dict[str, str]] = []
+    resolved_paths: dict[str, str] = {}
+    while pending:
+        logical_path = pending.pop(0)
+        if logical_path in manifest:
+            continue
+        if len(manifest) >= MAX_TRANSITIVE_RESOURCES:
+            raise ValueError("scene resource closure exceeds its fail-closed size bound")
+        physical_path, resolved_relative = resolve_leaf(logical_path)
+        manifest[logical_path] = sha256_file(physical_path)
+        resolved_paths[logical_path] = resolved_relative
+        for uri, target in _xml_resource_dependencies(logical_path, physical_path):
+            edges.append({"from": logical_path, "uri": uri, "to": target})
+            if target not in manifest and target not in pending:
+                pending.append(target)
+        pending.sort()
+    return dict(sorted(manifest.items())), sorted(
+        edges, key=lambda item: (item["from"], item["uri"], item["to"])
+    ), dict(sorted(resolved_paths.items()))
+
+
+def source_scene_resource_manifest(
+    world_file: str,
+    robot_model: str,
+    *,
+    root: Path = ROOT_DIR,
+) -> tuple[dict[str, str], list[dict[str, str]]]:
+    root = Path(os.path.abspath(root))
+    robot_model = canonical_robot_model(robot_model)
+    roots = [
+        f"worlds/{world_file}",
+        f"models/{robot_model}/model.sdf",
+    ]
+
+    def resolve(logical_path: str) -> tuple[Path, str]:
+        canonical_relative(logical_path, label="source scene resource")
+        physical = regular_source_file(
+            root / SOURCE_PACKAGE_RELATIVE / logical_path,
+            root,
+            label=f"source scene resource {logical_path}",
+        )
+        return physical, (SOURCE_PACKAGE_RELATIVE / logical_path).as_posix()
+
+    files, edges, _resolved = _transitive_manifest(roots, resolve_leaf=resolve)
+    return files, edges
+
+
+def installed_scene_resource_manifest(
+    world_file: str,
+    robot_model: str,
+    *,
+    installed_package_share: Path,
+    local_root: Path,
+    runtime_root: Path,
+) -> tuple[dict[str, str], list[dict[str, str]], dict[str, str]]:
+    robot_model = canonical_robot_model(robot_model)
+    local_root = Path(os.path.abspath(local_root))
+    installed_share = _lexical_under(
+        installed_package_share, local_root, label="installed package share"
+    )
+    roots = [
+        f"worlds/{world_file}",
+        f"models/{robot_model}/model.sdf",
+    ]
+
+    def resolve(logical_path: str) -> tuple[Path, str]:
+        canonical_relative(logical_path, label="installed scene resource")
+        physical = resolve_runtime_leaf(
+            installed_share / logical_path,
+            local_root=local_root,
+            runtime_root=runtime_root,
+            label=f"installed scene resource {logical_path}",
+        )
+        return physical, physical.relative_to(local_root).as_posix()
+
+    return _transitive_manifest(roots, resolve_leaf=resolve)
+
+
+def _scenario_robots(scenario_path: Path, *, root: Path) -> list[dict[str, Any]]:
+    scenario_file = regular_source_file(scenario_path, root, label="scenario")
+    try:
+        document = yaml.safe_load(scenario_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        raise ValueError(f"scenario is not readable YAML: {exc}") from exc
+    robots = document.get("robots") if isinstance(document, dict) else None
+    if not isinstance(robots, list) or len(robots) != 5:
+        raise ValueError("M1 scenario must contain exactly five robots")
+    expected_names = [f"uav{index}" for index in range(1, 6)]
+    normalized: list[dict[str, Any]] = []
+    for index, robot in enumerate(robots):
+        if not isinstance(robot, dict):
+            raise ValueError(f"scenario robot[{index}] is not a mapping")
+        name = robot.get("name")
+        instance = robot.get("instance")
+        if name != expected_names[index] or instance != index:
+            raise ValueError("M1 scenario robot names/instances are not exactly uav1..uav5/0..4")
+        normalized.append({"name": name, "instance": instance})
+    return normalized
+
+
+def resolved_robot_descriptions(
+    scenario_path: Path,
+    robot_model: str,
+    *,
+    template_path: Path,
+    root: Path,
+) -> list[dict[str, Any]]:
+    robot_model = canonical_robot_model(robot_model)
+    try:
+        template = template_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ValueError(f"installed robot SDF template is unreadable: {exc}") from exc
+    if template.count(ROBOT_DESCRIPTION_PORT_TOKEN) != 1:
+        raise ValueError("robot SDF template must contain exactly one canonical FDM port token")
+    robots = _scenario_robots(scenario_path, root=root)
+    descriptions: list[dict[str, Any]] = []
+    for index, robot in enumerate(robots):
+        port = 9002 + 10 * index
+        description = template.replace(
+            ROBOT_DESCRIPTION_PORT_TOKEN,
+            f"<fdm_port_in>{port}</fdm_port_in>",
+        )
+        try:
+            document = ET.fromstring(description)
+        except ET.ParseError as exc:
+            raise ValueError(f"resolved robot description for {robot['name']} is invalid: {exc}") from exc
+        plugins = [
+            element
+            for element in document.iter()
+            if _xml_local_name(element.tag) == "plugin"
+            and (
+                element.attrib.get("name") == "ArduPilotPlugin"
+                or element.attrib.get("filename") == "ArduPilotPlugin"
+            )
+        ]
+        if len(plugins) != 1:
+            raise ValueError(
+                f"resolved robot description for {robot['name']} must contain one ArduPilotPlugin"
+            )
+        addresses = [
+            element.text.strip()
+            for element in plugins[0]
+            if _xml_local_name(element.tag) == "fdm_addr"
+            and isinstance(element.text, str)
+        ]
+        ports = [
+            element.text.strip()
+            for element in plugins[0]
+            if _xml_local_name(element.tag) == "fdm_port_in"
+            and isinstance(element.text, str)
+        ]
+        if addresses != ["127.0.0.1"] or ports != [str(port)]:
+            raise ValueError(
+                f"resolved robot description for {robot['name']} has unexpected FDM endpoint"
+            )
+        descriptions.append(
+            {
+                "name": robot["name"],
+                "instance": robot["instance"],
+                "fdm_addr": "127.0.0.1",
+                "fdm_port_in": port,
+                "robot_description_sha256": hashlib.sha256(
+                    description.encode("utf-8")
+                ).hexdigest(),
+            }
+        )
+    return descriptions
+
+
 def build_scene_record(
     *,
     run_dir: Path,
     scenario_path: Path,
+    robot_model: str,
     runtime_id: str,
     installed_package_share: Path,
     root: Path = ROOT_DIR,
@@ -291,6 +591,7 @@ def build_scene_record(
     if not isinstance(plan_hash, str) or plan_hash != sha256_file(plan_path):
         raise ValueError("generic provenance does not bind the current v3 contract hash")
 
+    robot_model = canonical_robot_model(robot_model)
     world_file, scenario_relative = scenario_world_file(scenario_path, root=root)
     scenario_file = root / scenario_relative
     installed_share = _lexical_under(
@@ -311,6 +612,71 @@ def build_scene_record(
     if installed_manifest != source_manifest:
         raise ValueError("installed world bundle content differs from canonical source")
 
+    source_resources, source_resource_edges = source_scene_resource_manifest(
+        world_file, robot_model, root=root
+    )
+    (
+        installed_resources,
+        installed_resource_edges,
+        installed_resource_paths,
+    ) = installed_scene_resource_manifest(
+        world_file,
+        robot_model,
+        installed_package_share=installed_share,
+        local_root=root,
+        runtime_root=root,
+    )
+    if installed_resources != source_resources or installed_resource_edges != source_resource_edges:
+        raise ValueError("installed transitive scene resources differ from canonical source")
+
+    provenance_source_manifest = (
+        provenance.get("source_manifest")
+        if isinstance(provenance.get("source_manifest"), dict)
+        else {}
+    )
+    bound_source_files: dict[str, str] = {
+        scenario_relative: sha256_file(scenario_file),
+        LAUNCH_SOURCE_RELATIVE.as_posix(): sha256_file(
+            regular_source_file(
+                root / LAUNCH_SOURCE_RELATIVE,
+                root,
+                label="multiagent launch source",
+            )
+        ),
+    }
+    bound_source_files.update(
+        {
+            (SOURCE_PACKAGE_RELATIVE / logical).as_posix(): file_hash
+            for logical, file_hash in source_resources.items()
+        }
+    )
+    bound_source_files.update(
+        {
+            (SOURCE_WORLDS_RELATIVE / logical).as_posix(): file_hash
+            for logical, file_hash in source_manifest.items()
+        }
+    )
+    bound_source_files = dict(sorted(bound_source_files.items()))
+    for relative, expected_hash in bound_source_files.items():
+        if provenance_source_manifest.get(relative) != expected_hash:
+            raise ValueError(
+                f"generic provenance source manifest does not bind scene input {relative}"
+            )
+
+    template_logical = f"models/{robot_model}/model.sdf"
+    template_path = resolve_runtime_leaf(
+        installed_share / template_logical,
+        local_root=root,
+        runtime_root=root,
+        label="installed robot SDF template",
+    )
+    robot_descriptions = resolved_robot_descriptions(
+        scenario_path,
+        robot_model,
+        template_path=template_path,
+        root=root,
+    )
+
     world_name = sdf_world_name(root / SOURCE_WORLDS_RELATIVE / world_file)
     dependency_versions = (
         provenance.get("dependency_versions")
@@ -327,7 +693,7 @@ def build_scene_record(
     ).as_posix()
     bundle_root = PurePosixPath(world_file).parts[0] if "/" in world_file else world_file
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "contract": M1_CONTRACT_ID,
         "plan_version": 3,
         "contract_path": M1_PLAN_PATH,
@@ -337,6 +703,7 @@ def build_scene_record(
         "source_hash": source_hash,
         "component_only": True,
         "p0_eligible": False,
+        "robot_model": robot_model,
         "scenario": {
             "path": scenario_relative,
             "sha256": sha256_file(scenario_file),
@@ -347,6 +714,33 @@ def build_scene_record(
             "world_name": world_name,
         },
         "runtime_checkout_path": str(root),
+        "source_manifest_binding": {
+            "files": bound_source_files,
+            "sha256": manifest_sha256(bound_source_files),
+        },
+        "resources": {
+            "roots": sorted(
+                [
+                    f"worlds/{world_file}",
+                    template_logical,
+                ]
+            ),
+            "source_package_root": SOURCE_PACKAGE_RELATIVE.as_posix(),
+            "installed_package_share_path": expected_share.as_posix(),
+            "source_files": source_resources,
+            "installed_files": installed_resources,
+            "uri_edges": source_resource_edges,
+            "source_sha256": manifest_sha256(source_resources),
+            "installed_sha256": manifest_sha256(installed_resources),
+            "resolved_installed_paths": installed_resource_paths,
+        },
+        "robot_descriptions": {
+            "template_path": template_logical,
+            "template_sha256": installed_resources[template_logical],
+            "substitution_token": ROBOT_DESCRIPTION_PORT_TOKEN,
+            "port_formula": "9002 + 10 * instance",
+            "instances": robot_descriptions,
+        },
         "source": {
             "worlds_root": SOURCE_WORLDS_RELATIVE.as_posix(),
             "active_world_path": source_world_relative,
@@ -384,6 +778,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--scenario", type=Path, required=True)
+    parser.add_argument("--robot-model", required=True)
     parser.add_argument("--runtime-id", required=True)
     parser.add_argument("--installed-package-share", type=Path)
     return parser.parse_args(argv)
@@ -404,6 +799,7 @@ def main(argv: list[str] | None = None) -> int:
         record = build_scene_record(
             run_dir=args.run_dir,
             scenario_path=args.scenario,
+            robot_model=args.robot_model,
             runtime_id=args.runtime_id,
             installed_package_share=installed_share,
         )

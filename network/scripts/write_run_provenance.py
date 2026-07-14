@@ -155,13 +155,21 @@ def runtime_container_identity() -> tuple[str, str]:
     return os.environ.get("HOSTNAME", "unknown"), "docker_hostname_diagnostic"
 
 
+def _runtime_identity_file_sha256(path: Path) -> str | None:
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        return None
+    return hashlib.sha256(value.encode("utf-8")).hexdigest() if value else None
+
+
 def runtime_capabilities() -> dict[str, object]:
     """Record the concrete host/container capabilities used by network runners."""
 
     gpu_output = run_command(
         [
             "nvidia-smi",
-            "--query-gpu=name,driver_version",
+            "--query-gpu=uuid,name,driver_version",
             "--format=csv,noheader",
         ]
     )
@@ -172,6 +180,13 @@ def runtime_capabilities() -> dict[str, object]:
         "system": platform.system(),
         "machine": platform.machine(),
         "kernel_release": platform.release(),
+        "kernel_version": platform.version(),
+        "host": {
+            "boot_id_sha256": _runtime_identity_file_sha256(
+                Path("/proc/sys/kernel/random/boot_id")
+            ),
+            "machine_id_sha256": _runtime_identity_file_sha256(Path("/etc/machine-id")),
+        },
         "mitsuba_variant": os.environ.get(
             "SIONNA_MITSUBA_VARIANT", "llvm_ad_mono_polarized"
         ),

@@ -16,6 +16,16 @@ from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 
+# MAVProxy's upstream default module list includes ``terrain``.  That module
+# performs an SRTM network download during otherwise local SITL startup, which
+# makes the five-UAV runtime depend on external connectivity.  Keep the normal
+# module set, but make the launch explicitly offline by omitting only terrain.
+MAVPROXY_OFFLINE_DEFAULT_MODULES = (
+    "log,signing,wp,rally,fence,ftp,param,relay,tuneopt,arm,mode,calibration,"
+    "rc,auxopt,misc,cmdlong,battery,output,adsb,layout"
+)
+
+
 def replace_robot_name(input_file, robot_name):
     with open(input_file, 'r') as file:
         content = file.read()
@@ -113,6 +123,12 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
     )
     
     headless_rendering = LaunchConfiguration("headless_rendering").perform(context).lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    enable_serial2 = LaunchConfiguration("enable_serial2").perform(context).lower() in {
         "1",
         "true",
         "yes",
@@ -237,6 +253,22 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
         )
         launch_actions.append(micro_ros_agent)
 
+        sitl_launch_arguments = {
+            "synthetic_clock": "True",
+            "wipe": "False",
+            "use_instance_dir": "True",
+            "model": "json",
+            "speedup": "1",
+            "slave": "0",
+            "instance": f"{instance}",
+            "sysid": f"{sysid}",
+            "defaults": defaults_file,
+            "sim_address": "127.0.0.1",
+            "home": str(robot.get("home", sitl_home)),
+        }
+        if enable_serial2:
+            sitl_launch_arguments["serial2"] = f"uart:{tty1}"
+
         sitl = IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 [
@@ -245,20 +277,7 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
                     ),
                 ]
             ),
-            launch_arguments={
-                "synthetic_clock": "True",
-                "wipe": "False",
-                "use_instance_dir": "True",
-                "model": "json",
-                "speedup": "1",
-                "slave": "0",
-                "instance": f"{instance}",
-                "sysid": f"{sysid}",
-                "serial2": f"uart:{tty1}",
-                "defaults": defaults_file,
-                "sim_address": "127.0.0.1",
-                "home": str(robot.get("home", sitl_home)),
-            }.items(),
+            launch_arguments=sitl_launch_arguments.items(),
         )
         launch_actions.append(sitl)
 
@@ -271,10 +290,13 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
                 f"tcp:{sim_address}:{master_port}",
                 "--sitl",
                 f"{sim_address}:{sitl_port}",
-                "--logfile",
-                str(mavproxy_dir / "mav.tlog"),
+                # M1 writes authoritative MAVLink observations through its
+                # structured collector; MAVProxy does not persist a second
+                # telemetry/state record for this component profile.
                 "--no-state",
                 "--non-interactive",
+                "--default-modules",
+                MAVPROXY_OFFLINE_DEFAULT_MODULES,
             ],
             cwd=str(mavproxy_dir),
             output="both",
@@ -448,6 +470,14 @@ def generate_launch_description():
                 "headless_rendering",
                 default_value="false",
                 description="Enable Gazebo's OGRE2 EGL server-side headless rendering.",
+            ),
+            DeclareLaunchArgument(
+                "enable_serial2",
+                default_value="false",
+                description=(
+                    "Attach ArduPilot SERIAL2 to a pre-created ttyROS PTY. "
+                    "Keep disabled unless the launch also owns that PTY."
+                ),
             ),
             DeclareLaunchArgument(
                 "rviz", default_value="true", description="Open RViz."

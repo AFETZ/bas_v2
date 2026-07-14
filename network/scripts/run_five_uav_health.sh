@@ -9,6 +9,8 @@ SCENARIO="${SCENARIO:-$ROOT_DIR/network/config/scenario_5uav.yaml}"
 DURATION_S="${DURATION_S:-300}"
 MINIMUM_DURATION_S="${MINIMUM_DURATION_S:-300}"
 WARMUP_S="${WARMUP_S:-30}"
+READINESS_TIMEOUT_S="${READINESS_TIMEOUT_S:-90}"
+READINESS_STABILITY_S="${READINESS_STABILITY_S:-5}"
 ROBOT_MODEL="${ROBOT_MODEL:-iris_radio_headless}"
 RUNTIME_ID="${AMS_RUNTIME_ID:-m1-$(python3 -c 'import uuid; print(uuid.uuid4())')}"
 ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-$((20 + $(printf '%s' "$RUN_ID" | cksum | awk '{print $1}') % 180))}"
@@ -61,8 +63,14 @@ printf '\n' >> "$RUN_DIR/command.txt"
   printf 'duration_s=%s\n' "$DURATION_S"
   printf 'minimum_duration_s=%s\n' "$MINIMUM_DURATION_S"
   printf 'warmup_s=%s\n' "$WARMUP_S"
+  printf 'readiness_timeout_s=%s\n' "$READINESS_TIMEOUT_S"
+  printf 'readiness_stability_s=%s\n' "$READINESS_STABILITY_S"
   printf 'robot_model=%s\n' "$ROBOT_MODEL"
+  printf 'enable_serial2=false\n'
   printf 'runtime_id=%s\n' "$RUNTIME_ID"
+  printf 'profile=m1_component\n'
+  printf 'scenario_id=scenario_5uav\n'
+  printf 'phase_manifest=readiness,measurement,finalization\n'
   printf 'ros_domain_id=%s\n' "$ROS_DOMAIN_ID"
   printf 'gz_partition=%s\n' "$GZ_PARTITION"
   printf 'component_only=true\n'
@@ -94,6 +102,7 @@ if ! WORLD_FILE="$(
   python3 "$ROOT_DIR/network/scripts/write_m1_scene_provenance.py" \
     --run-dir "$RUN_DIR" \
     --scenario "$SCENARIO" \
+    --robot-model "$ROBOT_MODEL" \
     --runtime-id "$RUNTIME_ID" \
     2> "$RUN_DIR/logs/m1_scene_provenance.log"
 )"; then
@@ -121,6 +130,7 @@ fi
     robots_config_file:="$SCENARIO" \
     world_file:="$WORLD_FILE" \
     robot_model:="$ROBOT_MODEL" \
+    enable_serial2:=false \
     gui:=false rviz:=false headless_rendering:=false \
     use_mapping_camera:=false \
     use_navigation_camera:=false \
@@ -135,14 +145,12 @@ if ! kill -0 "$LAUNCH_PID" >/dev/null 2>&1; then
   exit 1
 fi
 if grep -Eiq \
-  'bind error|bind failed|address already in use|segmentation fault|core dumped|process has died|error while starting ipvx agent' \
+  'bind error|bind failed|failed to bind|address already in use|segmentation fault|core dumped|process has died|error while starting ipvx agent|failed to open \(.*ttyros|traceback \(most recent call last\)|failed to download /srtm3?' \
   "$RUN_DIR/logs/five_uav_launch.log"; then
   printf 'FAIL five-UAV launch log contains a fatal startup marker; see %s\n' \
     "$RUN_DIR/logs/five_uav_launch.log" >&2
   exit 1
 fi
-LAUNCH_LOG_OBSERVATION_OFFSET="$(stat -c %s "$RUN_DIR/logs/five_uav_launch.log")"
-
 set +e
 python3 "$ROOT_DIR/network/tests/collect_five_uav_health.py" \
   --scenario "$SCENARIO" \
@@ -151,10 +159,11 @@ python3 "$ROOT_DIR/network/tests/collect_five_uav_health.py" \
   --launch-process-group "$LAUNCH_PID" \
   --duration-s "$DURATION_S" \
   --minimum-duration-s "$MINIMUM_DURATION_S" \
+  --readiness-timeout-s "$READINESS_TIMEOUT_S" \
+  --readiness-stability-s "$READINESS_STABILITY_S" \
   --heartbeat-endpoint "udpin:127.0.0.1:14550" \
   --launch-log "$RUN_DIR/logs/five_uav_launch.log" \
-  --world "$WORLD_NAME" \
-  --launch-log-observation-offset "$LAUNCH_LOG_OBSERVATION_OFFSET"
+  --world "$WORLD_NAME"
 COLLECTOR_RC=$?
 set -e
 
@@ -166,6 +175,9 @@ if (( COLLECTOR_RC != 0 )); then
   exit "$COLLECTOR_RC"
 fi
 
+# Freeze every launch-owned writer before independently reading bounded evidence.
+cleanup
+LAUNCH_PID=""
 python3 "$ROOT_DIR/network/scripts/validate_m1_health.py" --run-dir "$RUN_DIR"
 
 printf 'Five-UAV M1 health run complete: %s\n' "$RUN_DIR"

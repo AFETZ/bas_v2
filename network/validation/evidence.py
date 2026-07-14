@@ -8,15 +8,18 @@ structured experiment records, and process evidence.
 
 from __future__ import annotations
 
+import base64
 import csv
 import hashlib
 import json
 import math
 import os
 import re
+import shlex
 import stat
 import struct
 import subprocess
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
@@ -65,6 +68,46 @@ FIVE_UAV_HEALTH_EVENT_LOG = "logs/five_uav_health_events.jsonl"
 FIVE_UAV_LAUNCH_LOG = "logs/five_uav_launch.log"
 NO_BYPASS_EVENT_LOG = "logs/no_bypass_events.jsonl"
 MAVLINK_TRANSACTION_LOG = "logs/mavlink_transactions.jsonl"
+M1_CONTRACT_ID = "ams.m1.health/v3"
+M1_PLAN_PATH = "doc/network_radio_integration_plan_v3.md"
+M1_PROFILE = "m1_component"
+M1_SCENARIO_ID = "scenario_5uav"
+M1_PHASES = ("readiness", "measurement", "finalization")
+M1_REQUIRED_PROCESS_COUNTS = {
+    "arducopter": 5,
+    "mavproxy": 5,
+    "micro_ros_agent": 5,
+    "gazebo_server": 1,
+}
+M1_MAVPROXY_OFFLINE_DEFAULT_MODULES = (
+    "log,signing,wp,rally,fence,ftp,param,relay,tuneopt,arm,mode,calibration,"
+    "rc,auxopt,misc,cmdlong,battery,output,adsb,layout"
+)
+M1_PROCESS_NAMESPACES = ("cgroup", "ipc", "mnt", "net", "pid", "user", "uts")
+M1_CAPABILITIES = ("inheritable", "permitted", "effective", "bounding", "ambient")
+M1_ALLOWED_PROCESS_STATES = {"R", "S", "D", "I"}
+
+
+class _BoundedFailureList(list[str]):
+    """Keep fail-closed diagnostics useful without emitting unbounded JSON."""
+
+    def __init__(self, limit: int = 2000) -> None:
+        super().__init__()
+        self.limit = limit
+        self.total = 0
+
+    def append(self, value: str) -> None:
+        self.total += 1
+        if len(self) < self.limit:
+            super().append(value)
+
+    def extend(self, values: Iterable[str]) -> None:
+        for value in values:
+            self.append(value)
+
+    def __iadd__(self, values: Iterable[str]) -> "_BoundedFailureList":
+        self.extend(values)
+        return self
 
 
 def gate(status: str, proof: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -793,6 +836,17 @@ def provenance_status(run_dir: Path) -> dict[str, Any]:
         "kernel_release"
     ):
         failures.append("runtime kernel release is missing")
+    if not isinstance(capabilities.get("kernel_version"), str) or not capabilities.get(
+        "kernel_version"
+    ):
+        failures.append("runtime kernel version is missing")
+    host_identity = (
+        capabilities.get("host") if isinstance(capabilities.get("host"), dict) else {}
+    )
+    if re.fullmatch(r"[0-9a-f]{64}", str(host_identity.get("boot_id_sha256") or "")) is None:
+        failures.append("runtime host boot identity is missing")
+    if re.fullmatch(r"[0-9a-f]{64}", str(host_identity.get("machine_id_sha256") or "")) is None:
+        failures.append("runtime host machine identity is missing")
     gpu = capabilities.get("gpu") if isinstance(capabilities.get("gpu"), dict) else {}
     if not isinstance(gpu.get("available"), bool) or not isinstance(gpu.get("devices"), list):
         failures.append("GPU/runtime record is malformed")
@@ -1073,22 +1127,397 @@ def joint_runtime_status(run_dir: Path) -> dict[str, Any]:
     )
 
 
+def _m1_decode_cmdline(raw: bytes) -> list[str]:
+    if not raw:
+        return []
+    return [part.decode("utf-8", errors="replace") for part in raw.rstrip(b"\0").split(b"\0")]
+
+
+def _m1_process_role(process: dict[str, Any], argv: list[str]) -> str | None:
+    exe_name = Path(str(process.get("exe_path") or "")).name.lower()
+    argv_names = [Path(value).name.lower() for value in argv]
+    argv0 = argv_names[0] if argv_names else ""
+    if exe_name == "arducopter" and argv0 == "arducopter":
+        return "arducopter"
+    python_executable = re.fullmatch(r"python(?:3(?:\.[0-9]+)?)?", exe_name) is not None
+    mavproxy_script = (
+        argv0 == "mavproxy.py"
+        or (
+            re.fullmatch(r"python(?:3(?:\.[0-9]+)?)?", argv0) is not None
+            and len(argv_names) >= 2
+            and argv_names[1] == "mavproxy.py"
+        )
+    )
+    if python_executable and mavproxy_script:
+        return "mavproxy"
+    if exe_name == "micro_ros_agent" and argv0 == "micro_ros_agent":
+        return "micro_ros_agent"
+    launcher_is_server = exe_name.startswith("ruby")
+    has_gz_sim = any(
+        argv_names[index] == "gz" and argv[index + 1].lower() == "sim"
+        for index in range(max(0, len(argv) - 1))
+    )
+    try:
+        process_title = shlex.split(argv[0]) if len(argv) == 1 else []
+    except ValueError:
+        process_title = []
+    has_gz_sim_title = (
+        len(process_title) >= 2
+        and Path(process_title[0]).name.lower() == "gz"
+        and process_title[1].lower() == "sim"
+    )
+    if launcher_is_server and (
+        (has_gz_sim and "-s" in argv)
+        or (has_gz_sim_title and "-s" in process_title)
+    ):
+        return "gazebo_server"
+    return None
+
+
+def _m1_process_identity_digest(process: dict[str, Any]) -> str:
+    payload = {
+        key: process.get(key)
+        for key in (
+            "pid",
+            "ppid",
+            "pgid",
+            "session_id",
+            "start_ticks",
+            "cmdline_sha256",
+            "exe_path",
+            "exe_sha256",
+            "uid",
+            "namespaces",
+            "capabilities",
+        )
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _m1_identity_set_sha256(identity_digests: Iterable[str]) -> str:
+    canonical = json.dumps(sorted(identity_digests), separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _m1_argv_option(argv: list[str], name: str) -> str | None:
+    values: list[str] = []
+    for index, value in enumerate(argv):
+        if value == name and index + 1 < len(argv):
+            values.append(argv[index + 1])
+        if value.startswith(f"{name}="):
+            values.append(value.split("=", 1)[1])
+    if len(values) > 1:
+        raise ValueError(f"duplicate option {name}")
+    return values[0] if values else None
+
+
+def _m1_runtime_endpoints(
+    processes: list[dict[str, Any]],
+) -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
+    """Independently derive the active SITL/DDS endpoint matrix from raw argv."""
+    failures: list[str] = []
+    endpoints: dict[str, list[dict[str, Any]]] = {
+        role: [] for role in M1_REQUIRED_PROCESS_COUNTS
+    }
+    for process in processes:
+        if not isinstance(process, dict):
+            continue
+        try:
+            raw_cmdline = base64.b64decode(
+                str(process.get("cmdline_b64") or ""), validate=True
+            )
+        except (ValueError, TypeError):
+            raw_cmdline = b""
+        argv = _m1_decode_cmdline(raw_cmdline)
+        role = _m1_process_role(process, argv)
+        pid = process.get("pid")
+        try:
+            if role == "arducopter":
+                instance = int(str(_m1_argv_option(argv, "--instance")))
+                endpoints[role].append(
+                    {
+                        "pid": pid,
+                        "instance": instance,
+                        "system_id": int(str(_m1_argv_option(argv, "--sysid"))),
+                        "sim_address": _m1_argv_option(argv, "--sim-address"),
+                        "fdm_port_in": 9002 + 10 * instance,
+                    }
+                )
+            elif role == "mavproxy":
+                endpoints[role].append(
+                    {
+                        "pid": pid,
+                        "master": _m1_argv_option(argv, "--master"),
+                        "sitl": _m1_argv_option(argv, "--sitl"),
+                        "out": _m1_argv_option(argv, "--out"),
+                        "default_modules": _m1_argv_option(argv, "--default-modules"),
+                    }
+                )
+            elif role == "micro_ros_agent":
+                namespace = next(
+                    (
+                        value.split(":=", 1)[1]
+                        for value in argv
+                        if value.startswith("__ns:=")
+                    ),
+                    None,
+                )
+                endpoints[role].append(
+                    {
+                        "pid": pid,
+                        "transport": argv[1] if len(argv) > 1 else None,
+                        "port": int(str(_m1_argv_option(argv, "--port"))),
+                        "namespace": namespace,
+                    }
+                )
+            elif role == "gazebo_server":
+                endpoints[role].append({"pid": pid})
+        except (TypeError, ValueError):
+            failures.append(f"raw process {pid} has malformed {role} endpoint arguments")
+    for role in endpoints:
+        endpoints[role].sort(
+            key=lambda item: (
+                int(item.get("instance", item.get("port", item.get("pid", -1))) or -1),
+                int(item.get("pid") or -1),
+            )
+        )
+
+    arducopter = endpoints["arducopter"]
+    if [item.get("instance") for item in arducopter] != list(range(5)):
+        failures.append("raw ArduCopter instances are not exactly 0..4")
+    if [item.get("system_id") for item in arducopter] != list(range(1, 6)):
+        failures.append("raw ArduCopter system IDs are not exactly 1..5")
+    if {item.get("sim_address") for item in arducopter} != {"127.0.0.1"}:
+        failures.append("raw ArduCopter simulation address is not declared loopback")
+
+    mavproxy = endpoints["mavproxy"]
+    if {item.get("master") for item in mavproxy} != {
+        f"tcp:127.0.0.1:{5760 + 10 * index}" for index in range(5)
+    }:
+        failures.append("raw MAVProxy master endpoints are not five unique SITL TCP endpoints")
+    if {item.get("sitl") for item in mavproxy} != {
+        f"127.0.0.1:{5501 + 10 * index}" for index in range(5)
+    }:
+        failures.append("raw MAVProxy SITL endpoints are not five unique simulator endpoints")
+    if {(item.get("master"), item.get("sitl")) for item in mavproxy} != {
+        (
+            f"tcp:127.0.0.1:{5760 + 10 * index}",
+            f"127.0.0.1:{5501 + 10 * index}",
+        )
+        for index in range(5)
+    }:
+        failures.append("raw MAVProxy master/SITL endpoint pairing does not match instances")
+    if {item.get("out") for item in mavproxy} != {"127.0.0.1:14550"}:
+        failures.append("raw MAVProxy health output is not the declared aggregator")
+    if {item.get("default_modules") for item in mavproxy} != {
+        M1_MAVPROXY_OFFLINE_DEFAULT_MODULES
+    }:
+        failures.append("raw MAVProxy processes do not use the declared offline module set")
+
+    agents = endpoints["micro_ros_agent"]
+    if [item.get("port") for item in agents] != list(range(2019, 2024)):
+        failures.append("raw micro-ROS DDS ports are not exactly 2019..2023")
+    if [item.get("namespace") for item in agents] != [
+        f"/uav{index}" for index in range(1, 6)
+    ]:
+        failures.append("raw micro-ROS namespaces are not exactly /uav1../uav5")
+    if {item.get("transport") for item in agents} != {"udp4"}:
+        failures.append("raw micro-ROS agents do not use declared UDP transport")
+    return endpoints, failures
+
+
+def _m1_odometry_event_failures(record: dict[str, Any], context: str) -> list[str]:
+    failures: list[str] = []
+    vectors: dict[str, tuple[int, list[Any]]] = {}
+    for key, size in (
+        ("position_m", 3),
+        ("orientation_xyzw", 4),
+        ("linear_velocity_mps", 3),
+        ("angular_velocity_rad_s", 3),
+    ):
+        value = record.get(key)
+        if not isinstance(value, list) or len(value) != size or any(
+            not finite_number(item) for item in value
+        ):
+            failures.append(f"{context}.{key} is not a finite {size}-vector")
+        else:
+            vectors[key] = (size, value)
+    if "orientation_xyzw" in vectors:
+        quaternion_norm = math.sqrt(
+            sum(float(value) ** 2 for value in vectors["orientation_xyzw"][1])
+        )
+        if not 0.5 <= quaternion_norm <= 1.5:
+            failures.append(f"{context} quaternion norm is outside [0.5, 1.5]")
+    if "linear_velocity_mps" in vectors:
+        derived_speed = math.sqrt(
+            sum(float(value) ** 2 for value in vectors["linear_velocity_mps"][1])
+        )
+        if not finite_number(record.get("linear_speed_mps")) or not math.isclose(
+            float(record["linear_speed_mps"]), derived_speed, rel_tol=0.0, abs_tol=1e-9
+        ):
+            failures.append(f"{context}.linear_speed_mps differs from raw velocity")
+    if failures and record.get("valid") is True:
+        failures.append(f"{context} producer valid flag contradicts raw fields")
+    elif not failures and record.get("valid") is not True:
+        failures.append(f"{context} producer valid flag is false despite valid raw fields")
+    return failures
+
+
+def _m1_xml_local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _m1_parse_robot_description(
+    raw: bytes, context: str
+) -> tuple[dict[str, Any] | None, list[str]]:
+    failures: list[str] = []
+    try:
+        root = ET.fromstring(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ET.ParseError) as exc:
+        return None, [f"{context} is not exact UTF-8 XML: {exc}"]
+    plugins = [
+        element
+        for element in root.iter()
+        if _m1_xml_local_name(element.tag) == "plugin"
+        and (
+            str(element.attrib.get("name", "")) == "ArduPilotPlugin"
+            or str(element.attrib.get("filename", "")) == "ArduPilotPlugin"
+        )
+    ]
+    if len(plugins) != 1:
+        return None, [f"{context} has {len(plugins)} ArduPilotPlugin elements"]
+    children = {
+        _m1_xml_local_name(child.tag): (child.text or "").strip()
+        for child in plugins[0]
+    }
+    try:
+        result = {
+            "fdm_addr": children["fdm_addr"],
+            "fdm_port_in": int(children["fdm_port_in"]),
+        }
+    except (KeyError, ValueError) as exc:
+        failures.append(f"{context} has malformed FDM endpoint: {exc}")
+        result = None
+    return result, failures
+
+
+def _m1_readiness_process_snapshot(
+    sample: dict[str, Any], process_group: int
+) -> tuple[dict[str, int], dict[str, set[str]], set[str], list[str]]:
+    """Independently verify one raw readiness process snapshot."""
+    failures: list[str] = []
+    processes = sample.get("processes")
+    counts = {role: 0 for role in M1_REQUIRED_PROCESS_COUNTS}
+    role_digests = {role: set() for role in M1_REQUIRED_PROCESS_COUNTS}
+    all_digests: set[str] = set()
+    if not isinstance(processes, list) or not processes:
+        return counts, role_digests, all_digests, ["readiness process snapshot is empty"]
+    pids = [process.get("pid") for process in processes if isinstance(process, dict)]
+    if len(pids) != len(processes) or len(set(pids)) != len(pids):
+        failures.append("readiness process snapshot has duplicate/invalid PIDs")
+    for index, process in enumerate(processes):
+        context = f"readiness process[{index}]"
+        if not isinstance(process, dict):
+            failures.append(f"{context} is not an object")
+            continue
+        try:
+            raw_cmdline = base64.b64decode(
+                str(process.get("cmdline_b64") or ""), validate=True
+            )
+        except (ValueError, TypeError):
+            raw_cmdline = b""
+            failures.append(f"{context}.cmdline_b64 is invalid")
+        argv = _m1_decode_cmdline(raw_cmdline)
+        if hashlib.sha256(raw_cmdline).hexdigest() != process.get("cmdline_sha256"):
+            failures.append(f"{context}.cmdline_sha256 differs from raw argv")
+        if process.get("cmdline") != argv:
+            failures.append(f"{context}.cmdline differs from raw argv")
+        role = _m1_process_role(process, argv)
+        if process.get("role") != role:
+            failures.append(f"{context}.role differs from actual executable+argv")
+        if role in counts:
+            counts[role] += 1
+        if process.get("state") not in M1_ALLOWED_PROCESS_STATES:
+            failures.append(f"{context} has unhealthy state {process.get('state')!r}")
+        if process.get("identity_errors") != []:
+            failures.append(f"{context} has incomplete identity")
+        if process.get("pgid") != process_group or process.get("session_id") != process_group:
+            failures.append(f"{context} escaped the supervised group/session")
+        for key in ("cmdline_sha256", "exe_sha256"):
+            if re.fullmatch(r"[0-9a-f]{64}", str(process.get(key) or "")) is None:
+                failures.append(f"{context}.{key} is not SHA-256")
+        if not isinstance(process.get("exe_path"), str) or not str(
+            process.get("exe_path")
+        ).startswith("/"):
+            failures.append(f"{context}.exe_path is invalid")
+        namespaces = process.get("namespaces")
+        if not isinstance(namespaces, dict) or set(namespaces) != set(M1_PROCESS_NAMESPACES):
+            failures.append(f"{context}.namespaces is incomplete")
+        capabilities = process.get("capabilities")
+        if not isinstance(capabilities, dict) or set(capabilities) != set(M1_CAPABILITIES):
+            failures.append(f"{context}.capabilities is incomplete")
+        digest = _m1_process_identity_digest(process)
+        all_digests.add(digest)
+        if role in role_digests:
+            role_digests[role].add(digest)
+    if sample.get("counts") != counts:
+        failures.append("readiness producer counts differ from raw identities")
+    for role, required in M1_REQUIRED_PROCESS_COUNTS.items():
+        if counts[role] != required:
+            failures.append(
+                f"readiness snapshot has {counts[role]} {role}; expected exactly {required}"
+            )
+    _, endpoint_failures = _m1_runtime_endpoints(processes)
+    failures.extend(endpoint_failures)
+    return counts, role_digests, all_digests, failures
+
+
 def five_uav_health_status(run_dir: Path) -> dict[str, Any]:
     path, data = _structured_file(run_dir, "metrics/five_uav_health.json")
     if not data:
         return gate("not_run", f"{path.relative_to(run_dir)} is missing or invalid")
     uavs = data.get("uavs") if isinstance(data.get("uavs"), list) else []
-    failures: list[str] = []
+    failures = _BoundedFailureList()
     if data.get("schema_version") != 2:
-        failures.append("five-UAV health schema_version must be at least 2")
+        failures.append("five-UAV health schema_version must be 2")
     if str(data.get("run_id")) != run_dir.name:
         failures.append("five-UAV health run_id does not match run directory")
     runtime_id = data.get("runtime_id")
     if not isinstance(runtime_id, str) or len(runtime_id) < 8:
         failures.append("five-UAV health runtime_id is missing")
-    provenance = load_json(run_dir / "metrics/provenance.json")
+    provenance_path = run_dir / "metrics/provenance.json"
+    provenance = load_json(provenance_path)
+    provenance_sha256 = sha256_file(provenance_path)
     if data.get("source_hash") != provenance.get("source_hash"):
         failures.append("five-UAV source_hash does not match provenance")
+    current_contract_sha256 = sha256_file(ROOT_DIR / M1_PLAN_PATH)
+    config_hashes = (
+        provenance.get("config_hashes")
+        if isinstance(provenance.get("config_hashes"), dict)
+        else {}
+    )
+    if (
+        data.get("contract") != M1_CONTRACT_ID
+        or data.get("plan_version") != 3
+        or data.get("contract_sha256") != current_contract_sha256
+        or config_hashes.get(M1_PLAN_PATH) != current_contract_sha256
+    ):
+        failures.append("five-UAV health evidence is not bound to the current v3 contract")
+    if data.get("provenance_sha256") != provenance_sha256:
+        failures.append("five-UAV health evidence does not hash-bind current provenance")
+    if data.get("profile") != M1_PROFILE:
+        failures.append("five-UAV health profile is not m1_component")
+    if data.get("scenario_id") != M1_SCENARIO_ID:
+        failures.append("five-UAV health scenario_id is not scenario_5uav")
+    if data.get("phases") != list(M1_PHASES):
+        failures.append("five-UAV health phase manifest is invalid")
+    if data.get("clock_domains") != {
+        "monotonic": "CLOCK_MONOTONIC",
+        "wall": "CLOCK_REALTIME",
+        "correlation_event": "clock_correlation",
+    }:
+        failures.append("five-UAV clock-domain declaration is invalid")
     if data.get("component_only") is not True or data.get("packet_path_eligible") is not False:
         failures.append("five-UAV health evidence is not labeled component-only")
     observed_duration = data.get("observed_duration_s")
@@ -1103,27 +1532,46 @@ def five_uav_health_status(run_dir: Path) -> dict[str, Any]:
     if data.get("launch_log") != expected_launch_log:
         failures.append("five-UAV launch_log is not the fixed run-relative path")
     observation_offset = data.get("launch_log_observation_offset")
+    observation_end_offset = data.get("launch_log_observation_end_offset")
+    observation_sha256 = data.get("launch_log_observation_sha256")
     if not launch_log.is_file():
         failures.append("five-UAV launch log is missing")
-    elif not nonnegative_integer(observation_offset) or observation_offset > launch_log.stat().st_size:
-        failures.append("five-UAV launch-log observation offset is invalid")
+    elif (
+        not nonnegative_integer(observation_offset)
+        or not nonnegative_integer(observation_end_offset)
+        or observation_offset > observation_end_offset
+        or observation_end_offset > launch_log.stat().st_size
+    ):
+        failures.append("five-UAV bounded launch-log observation offsets are invalid")
     else:
-        launch_bytes = launch_log.read_bytes()
+        launch_bytes = launch_log.read_bytes()[:observation_end_offset]
+        if hashlib.sha256(launch_bytes).hexdigest() != observation_sha256:
+            failures.append("five-UAV bounded launch-log prefix hash differs from summary")
         full_launch_text = launch_bytes.decode(errors="replace").lower()
-        observation_text = launch_bytes[observation_offset:].decode(errors="replace").lower()
+        observation_text = launch_bytes[observation_offset:observation_end_offset].decode(errors="replace").lower()
         for marker in (
             "bind error",
             "bind failed",
+            "failed to bind",
             "address already in use",
             "segmentation fault",
             "core dumped",
             "process has died",
             "error while starting ipvx agent",
+            "failed to open (",
+            "traceback (most recent call last)",
+            "failed to download /srtm",
+            "failed to download /srtm3",
         ):
             if marker in full_launch_text:
                 failures.append(f"five-UAV launch log contains fatal marker {marker!r}")
-        if "link 1 down" in observation_text:
-            failures.append("five-UAV launch log contains runtime link-down after warm-up")
+        for marker in ("link 1 down", "no link"):
+            if marker in observation_text:
+                failures.append(
+                    f"five-UAV launch log contains runtime link failure {marker!r}"
+                )
+        if re.search(r"--serial2[^\n]*ttyros", full_launch_text):
+            failures.append("five-UAV launch configured an undeclared ttyROS SERIAL2 endpoint")
 
     if data.get("raw_event_log") != FIVE_UAV_HEALTH_EVENT_LOG:
         failures.append(
@@ -1148,10 +1596,50 @@ def five_uav_health_status(run_dir: Path) -> dict[str, Any]:
                 source_hash=data.get("source_hash"),
             )
         )
+        for index, record in enumerate(records):
+            context = f"raw[{index}]"
+            if (
+                record.get("contract") != M1_CONTRACT_ID
+                or record.get("plan_version") != 3
+                or record.get("contract_sha256") != current_contract_sha256
+            ):
+                failures.append(f"{context} is not bound to the current v3 contract")
+            if record.get("provenance_sha256") != provenance_sha256:
+                failures.append(f"{context}.provenance_sha256 does not match")
+            if record.get("profile") != M1_PROFILE:
+                failures.append(f"{context}.profile does not match M1")
+            if record.get("scenario_id") != M1_SCENARIO_ID:
+                failures.append(f"{context}.scenario_id does not match M1")
+            if record.get("phase") not in M1_PHASES:
+                failures.append(f"{context}.phase is not declared")
+            wall_time_ns = record.get("wall_time_ns")
+            if not nonnegative_integer(wall_time_ns):
+                failures.append(f"{context}.wall_time_ns is invalid")
+            else:
+                try:
+                    parsed_wall = datetime.fromisoformat(
+                        str(record.get("wall_utc")).replace("Z", "+00:00")
+                    )
+                    parsed_wall_ns = int(parsed_wall.timestamp() * 1_000_000_000)
+                except (TypeError, ValueError, OverflowError):
+                    parsed_wall_ns = -1
+                if abs(int(wall_time_ns) - parsed_wall_ns) > 1_000_000_000:
+                    failures.append(f"{context}.wall clocks do not correlate")
+        phase_order = {phase: index for index, phase in enumerate(M1_PHASES)}
+        ordered_phases = [
+            phase_order[record["phase"]]
+            for record in records
+            if record.get("phase") in phase_order
+        ]
+        if any(current < previous for previous, current in zip(ordered_phases, ordered_phases[1:])):
+            failures.append("raw M1 readiness/measurement/finalization phases are not ordered")
 
     starts = [record for record in records if record.get("event") == "health_probe_start"]
     measurement_starts = [record for record in records if record.get("event") == "measurement_start"]
     completions = [record for record in records if record.get("event") == "health_probe_complete"]
+    clock_correlations = [
+        record for record in records if record.get("event") == "clock_correlation"
+    ]
     measurement_start_ns: int | None = None
     measurement_end_ns: int | None = None
     if len(starts) != 1 or len(measurement_starts) != 1 or len(completions) != 1:
@@ -1162,6 +1650,40 @@ def five_uav_health_status(run_dir: Path) -> dict[str, Any]:
         start = starts[0]
         measurement_start = measurement_starts[0]
         completion = completions[0]
+        if not records or records[0] is not start or records[-1] is not completion:
+            failures.append("raw M1 start/completion do not bound the health log")
+        if (
+            start.get("phase") != "readiness"
+            or measurement_start.get("phase") != "measurement"
+            or completion.get("phase") != "finalization"
+        ):
+            failures.append("raw M1 lifecycle events use the wrong phase identities")
+        if (
+            start.get("component_only") is not True
+            or start.get("packet_path_eligible") is not False
+            or start.get("expected_uavs") != [f"uav{index}" for index in range(1, 6)]
+            or not finite_number(start.get("duration_s"))
+            or float(start.get("duration_s")) < 300.0
+        ):
+            failures.append("raw M1 start does not declare the five-UAV 300-second component scope")
+        readiness_timeout = start.get("readiness_timeout_s")
+        if (
+            not finite_number(readiness_timeout)
+            or not 1.0 <= float(readiness_timeout) <= 120.0
+        ):
+            failures.append("raw M1 readiness timeout is outside [1, 120] seconds")
+        readiness_stability = start.get("readiness_stability_s")
+        if (
+            not finite_number(readiness_stability)
+            or not 1.0 <= float(readiness_stability) <= 30.0
+        ):
+            failures.append("raw M1 readiness stability dwell is outside [1, 30] seconds")
+        if start.get("readiness_freshness_limits_s") != {
+            "odometry": data.get("maximum_freshness_age_s"),
+            "heartbeat": 3.0,
+            "valid_home_position": 3.0,
+        }:
+            failures.append("raw M1 readiness freshness limits are not declared consistently")
         if nonnegative_integer(measurement_start.get("measurement_started_monotonic_ns")):
             measurement_start_ns = measurement_start["measurement_started_monotonic_ns"]
         else:
@@ -1179,6 +1701,15 @@ def five_uav_health_status(run_dir: Path) -> dict[str, Any]:
                 failures.append(f"raw health start {key} does not match summary")
             if measurement_start.get(key) != expected:
                 failures.append(f"raw measurement start {key} does not match summary")
+        if measurement_start.get("launch_log_observation_offset") != observation_offset:
+            failures.append("raw measurement start does not bind the launch-log observation offset")
+        for key, expected in (
+            ("launch_log_observation_offset", observation_offset),
+            ("launch_log_observation_end_offset", observation_end_offset),
+            ("launch_log_observation_sha256", observation_sha256),
+        ):
+            if completion.get(key) != expected:
+                failures.append(f"raw completion {key} differs from summary")
         raw_duration = completion.get("observed_duration_s")
         if not finite_number(raw_duration) or not finite_number(observed_duration) or not math.isclose(
             float(raw_duration), float(observed_duration), rel_tol=0.0, abs_tol=0.01
@@ -1186,6 +1717,584 @@ def five_uav_health_status(run_dir: Path) -> dict[str, Any]:
             failures.append("raw and summarized observation durations do not match")
         if completion.get("passed") is not True or completion.get("errors"):
             failures.append("raw completion event reports failure")
+        dependency_versions = (
+            provenance.get("dependency_versions")
+            if isinstance(provenance.get("dependency_versions"), dict)
+            else {}
+        )
+        runtime_capabilities = (
+            dependency_versions.get("runtime_capabilities")
+            if isinstance(dependency_versions.get("runtime_capabilities"), dict)
+            else {}
+        )
+        container_image = (
+            provenance.get("container_image")
+            if isinstance(provenance.get("container_image"), dict)
+            else {}
+        )
+        expected_runtime_identity = {
+            "git_commit": provenance.get("git_commit"),
+            "container_id": container_image.get("runtime_container_id"),
+            "container_image_digest": container_image.get("digest"),
+            "host": runtime_capabilities.get("host"),
+            "kernel": {
+                "system": runtime_capabilities.get("system"),
+                "machine": runtime_capabilities.get("machine"),
+                "release": runtime_capabilities.get("kernel_release"),
+                "version": runtime_capabilities.get("kernel_version"),
+            },
+            "gpu": runtime_capabilities.get("gpu"),
+        }
+        if start.get("runtime_identity") != expected_runtime_identity:
+            failures.append("raw M1 runtime host/container/kernel/GPU identity does not match provenance")
+
+    readiness_events = [record for record in records if record.get("event") == "readiness"]
+    readiness_summary = (
+        data.get("readiness") if isinstance(data.get("readiness"), dict) else {}
+    )
+    readiness_process_health = (
+        data.get("process_health") if isinstance(data.get("process_health"), dict) else {}
+    )
+    readiness_process_group = readiness_process_health.get("process_group")
+    if len(readiness_events) != 1:
+        failures.append("raw M1 needs exactly one readiness decision")
+    else:
+        readiness = readiness_events[0]
+        readiness_keys = (
+            "ready",
+            "timeout_s",
+            "stability_s",
+            "stability_started_monotonic_ns",
+            "stability_completed_monotonic_ns",
+            "qualifying_process_samples",
+            "readiness_process_samples",
+            "robot_description_errors",
+            "launch_log_readiness_end_offset",
+            "odometry_counts",
+            "heartbeat_counts",
+            "mavlink_position_counts",
+            "mavlink_valid_home_position_counts",
+            "odometry_age_s",
+            "heartbeat_age_s",
+            "mavlink_valid_home_position_age_s",
+            "freshness_limits_s",
+        )
+        if readiness.get("phase") != "readiness" or readiness.get("ready") is not True:
+            failures.append("raw M1 readiness decision is not a successful readiness-phase event")
+        if readiness.get("error") is not None:
+            failures.append("raw M1 readiness decision reports an error")
+        elapsed = readiness.get("elapsed_s")
+        timeout_s = readiness.get("timeout_s")
+        if (
+            not finite_number(timeout_s)
+            or not finite_number(elapsed)
+            or not 0.0 <= float(elapsed) <= float(timeout_s) + 0.25
+            or not 1.0 <= float(timeout_s) <= 120.0
+        ):
+            failures.append("raw M1 readiness timing is outside the declared timeout")
+        if len(starts) == 1 and timeout_s != starts[0].get("readiness_timeout_s"):
+            failures.append("raw M1 readiness timeout differs from probe start")
+        stability_s = readiness.get("stability_s")
+        stability_started_ns = readiness.get("stability_started_monotonic_ns")
+        stability_completed_ns = readiness.get("stability_completed_monotonic_ns")
+        if (
+            len(starts) != 1
+            or stability_s != starts[0].get("readiness_stability_s")
+            or not finite_number(stability_s)
+            or not nonnegative_integer(stability_started_ns)
+            or not nonnegative_integer(stability_completed_ns)
+            or stability_completed_ns < stability_started_ns
+            or (stability_completed_ns - stability_started_ns) / 1_000_000_000
+            < float(stability_s)
+        ):
+            failures.append("raw M1 readiness decision lacks the declared stable dwell")
+        if readiness.get("robot_description_errors") != []:
+            failures.append("raw M1 readiness reports robot-description errors")
+        if readiness.get("launch_log_readiness_end_offset") != observation_offset:
+            failures.append("readiness log boundary does not equal measurement start offset")
+        for key in readiness_keys:
+            if readiness_summary.get(key) != readiness.get(key):
+                failures.append(f"M1 readiness summary {key} differs from raw decision")
+        summarized_elapsed = readiness_summary.get("elapsed_s")
+        if not finite_number(summarized_elapsed) or not finite_number(elapsed) or not math.isclose(
+            float(summarized_elapsed), float(elapsed), rel_tol=0.0, abs_tol=0.001
+        ):
+            failures.append("M1 readiness elapsed summary differs from raw decision")
+        expected_names = [f"uav{index}" for index in range(1, 6)]
+        expected_ids = [str(index) for index in range(1, 6)]
+        odometry_counts = readiness.get("odometry_counts")
+        heartbeat_counts = readiness.get("heartbeat_counts")
+        position_counts = readiness.get("mavlink_position_counts")
+        valid_position_counts = readiness.get("mavlink_valid_home_position_counts")
+        if (
+            not isinstance(odometry_counts, dict)
+            or sorted(odometry_counts) != expected_names
+            or any(not nonnegative_integer(value) or value < 2 for value in odometry_counts.values())
+        ):
+            failures.append("raw M1 readiness lacks two odometry samples for every UAV")
+        for label, values, minimum in (
+            ("heartbeat", heartbeat_counts, 1),
+            ("MAVLink position", position_counts, 2),
+            ("valid MAVLink home position", valid_position_counts, 2),
+        ):
+            if (
+                not isinstance(values, dict)
+                or sorted(values) != expected_ids
+                or any(not nonnegative_integer(value) or value < minimum for value in values.values())
+            ):
+                failures.append(f"raw M1 readiness lacks required {label} samples")
+        readiness_seq = readiness.get("event_seq")
+        prior_readiness = [
+            record
+            for record in records
+            if nonnegative_integer(readiness_seq)
+            and record.get("event_seq", math.inf) < readiness_seq
+            and record.get("phase") == "readiness"
+        ]
+        for name in expected_names:
+            raw_odometry = [
+                record
+                for record in prior_readiness
+                if record.get("event") == "readiness_odometry" and record.get("uav") == name
+            ]
+            raw_count = len(raw_odometry)
+            if not isinstance(odometry_counts, dict) or raw_count < odometry_counts.get(name, math.inf):
+                failures.append(f"{name}: raw readiness odometry does not support decision counts")
+            if any(
+                record.get("valid") is not True
+                or record.get("source_topic") != f"/{name}/odometry"
+                for record in raw_odometry
+            ):
+                failures.append(f"{name}: raw readiness odometry is invalid")
+            for raw_index, record in enumerate(raw_odometry):
+                failures.extend(
+                    _m1_odometry_event_failures(
+                        record, f"{name}.readiness_odometry[{raw_index}]"
+                    )
+                )
+        for system_id in range(1, 6):
+            key = str(system_id)
+            raw_heartbeats = [
+                record
+                for record in prior_readiness
+                if record.get("event") == "readiness_heartbeat"
+                and record.get("system_id") == system_id
+            ]
+            raw_heartbeat_count = len(raw_heartbeats)
+            raw_positions = [
+                record
+                for record in prior_readiness
+                if record.get("event") == "readiness_mavlink_global_position"
+                and record.get("system_id") == system_id
+            ]
+            raw_valid_positions = sum(
+                record.get("component_id") == 1
+                and finite_number(record.get("lat_deg"))
+                and finite_number(record.get("lon_deg"))
+                and finite_number(record.get("relative_alt_m"))
+                and finite_number(record.get("home_distance_m"))
+                and abs(float(record["lat_deg"])) >= 1.0
+                and abs(float(record["lon_deg"])) >= 1.0
+                and -20.0 <= float(record["relative_alt_m"]) <= 100.0
+                and 0.0 <= float(record["home_distance_m"]) <= 500.0
+                for record in raw_positions
+            )
+            if any(
+                record.get("component_id") != 1
+                or record.get("mav_type") != 2
+                or record.get("autopilot") != 3
+                for record in raw_heartbeats
+            ):
+                failures.append(f"system {system_id}: raw readiness heartbeat identity is invalid")
+            if not isinstance(heartbeat_counts, dict) or raw_heartbeat_count < heartbeat_counts.get(key, math.inf):
+                failures.append(f"system {system_id}: raw readiness heartbeat count is unsupported")
+            if not isinstance(position_counts, dict) or len(raw_positions) < position_counts.get(key, math.inf):
+                failures.append(f"system {system_id}: raw readiness position count is unsupported")
+            if not isinstance(valid_position_counts, dict) or raw_valid_positions < valid_position_counts.get(key, math.inf):
+                failures.append(f"system {system_id}: raw valid-home count is unsupported")
+
+        freshness_limits = readiness.get("freshness_limits_s")
+        expected_freshness_limits = {
+            "odometry": data.get("maximum_freshness_age_s"),
+            "heartbeat": 3.0,
+            "valid_home_position": 3.0,
+        }
+        if freshness_limits != expected_freshness_limits:
+            failures.append("raw M1 readiness freshness limits differ from contract")
+        for label, ages, expected_keys, limit_key in (
+            ("odometry", readiness.get("odometry_age_s"), expected_names, "odometry"),
+            ("heartbeat", readiness.get("heartbeat_age_s"), expected_ids, "heartbeat"),
+            (
+                "valid-home position",
+                readiness.get("mavlink_valid_home_position_age_s"),
+                expected_ids,
+                "valid_home_position",
+            ),
+        ):
+            limit = expected_freshness_limits[limit_key]
+            if (
+                not isinstance(ages, dict)
+                or sorted(ages) != sorted(expected_keys)
+                or not finite_number(limit)
+                or any(
+                    not finite_number(value) or not 0.0 <= float(value) <= float(limit)
+                    for value in ages.values()
+                )
+            ):
+                failures.append(f"raw M1 readiness {label} is not currently fresh")
+
+        readiness_process_events = [
+            record
+            for record in prior_readiness
+            if record.get("event") == "readiness_process_sample"
+        ]
+        if readiness.get("readiness_process_samples") != len(readiness_process_events):
+            failures.append("readiness process-sample count differs from raw events")
+        stable_process_events = [
+            record
+            for record in readiness_process_events
+            if nonnegative_integer(stability_started_ns)
+            and nonnegative_integer(stability_completed_ns)
+            and nonnegative_integer(record.get("sampled_monotonic_ns"))
+            and stability_started_ns
+            <= record["sampled_monotonic_ns"]
+            <= stability_completed_ns
+        ]
+        if (
+            readiness.get("qualifying_process_samples") != len(stable_process_events)
+            or len(stable_process_events) < 2
+        ):
+            failures.append("stable readiness dwell lacks the declared raw process samples")
+        stable_sample_ns = [
+            record.get("sampled_monotonic_ns") for record in stable_process_events
+        ]
+        stable_timing = sequence_metrics_ns(stable_sample_ns)
+        if (
+            stable_timing is None
+            or not nonnegative_integer(stability_started_ns)
+            or not nonnegative_integer(stability_completed_ns)
+            or stable_sample_ns[0] != stability_started_ns
+            or stable_sample_ns[-1] != stability_completed_ns
+            or stable_timing["max_gap_s"] > 1.5
+        ):
+            failures.append("stable readiness process samples do not continuously cover the dwell")
+
+        baseline_role_digests: dict[str, set[str]] | None = None
+        baseline_all_digests: set[str] | None = None
+        launch_bytes = launch_log.read_bytes() if launch_log.is_file() else b""
+        for sample_index, sample in enumerate(stable_process_events):
+            context = f"stable readiness sample[{sample_index}]"
+            if (
+                sample.get("phase") != "readiness"
+                or sample.get("qualifying") is not True
+                or sample.get("streams_ready") is not True
+                or sample.get("process_healthy") is not True
+                or sample.get("robot_descriptions_ready") is not True
+                or sample.get("link_down_detected") is not False
+                or sample.get("fatal_launch_marker_detected") is not False
+                or sample.get("reasons") != []
+                or sample.get("error") not in (None, "")
+            ):
+                failures.append(f"{context} is not independently eligible")
+            scan_start = sample.get("launch_log_scanned_start_offset")
+            scan_end = sample.get("launch_log_scanned_end_offset")
+            if (
+                not nonnegative_integer(scan_start)
+                or not nonnegative_integer(scan_end)
+                or scan_start > scan_end
+                or scan_end > len(launch_bytes)
+            ):
+                failures.append(f"{context} has invalid launch-log scan bounds")
+            else:
+                scan_text = launch_bytes[scan_start:scan_end].decode(errors="replace").lower()
+                if any(marker in scan_text for marker in ("link 1 down", "no link")):
+                    failures.append(f"{context} launch-log bytes contain a link failure")
+            _, role_digests, all_digests, sample_failures = _m1_readiness_process_snapshot(
+                sample,
+                int(readiness_process_group)
+                if nonnegative_integer(readiness_process_group)
+                else -1,
+            )
+            failures.extend(f"{context}: {failure}" for failure in sample_failures)
+            if baseline_role_digests is None:
+                baseline_role_digests = role_digests
+                baseline_all_digests = all_digests
+            elif role_digests != baseline_role_digests or all_digests != baseline_all_digests:
+                failures.append(f"{context} changed process identity during the dwell")
+
+            sample_ns = sample.get("sampled_monotonic_ns")
+            details = sample.get("stream_details")
+            if not isinstance(details, dict) or not nonnegative_integer(sample_ns):
+                failures.append(f"{context} lacks raw stream freshness details")
+                continue
+            if (
+                not nonnegative_integer(sample.get("monotonic_ns"))
+                or abs(sample_ns - sample["monotonic_ns"]) > 1_000_000_000
+            ):
+                failures.append(f"{context} sampled clock is not bound to event monotonic time")
+            for name in expected_names:
+                raw_odometry = [
+                    record
+                    for record in prior_readiness
+                    if record.get("event") == "readiness_odometry"
+                    and record.get("uav") == name
+                    and nonnegative_integer(record.get("monotonic_ns"))
+                    and record["monotonic_ns"] <= sample_ns
+                ]
+                if len(raw_odometry) < 2:
+                    failures.append(f"{context}: {name} lacks two current odometry samples")
+                else:
+                    failures.extend(
+                        _m1_odometry_event_failures(raw_odometry[-1], f"{context}.{name}.odometry")
+                    )
+                    age_s = (sample_ns - raw_odometry[-1]["monotonic_ns"]) / 1_000_000_000
+                    odometry_limit = expected_freshness_limits["odometry"]
+                    if (
+                        not finite_number(odometry_limit)
+                        or not 0.0 <= age_s <= float(odometry_limit)
+                    ):
+                        failures.append(f"{context}: {name} odometry is stale")
+            for system_id in range(1, 6):
+                raw_heartbeats = [
+                    record
+                    for record in prior_readiness
+                    if record.get("event") == "readiness_heartbeat"
+                    and record.get("system_id") == system_id
+                    and nonnegative_integer(record.get("monotonic_ns"))
+                    and record["monotonic_ns"] <= sample_ns
+                ]
+                raw_positions = [
+                    record
+                    for record in prior_readiness
+                    if record.get("event") == "readiness_mavlink_global_position"
+                    and record.get("system_id") == system_id
+                    and nonnegative_integer(record.get("monotonic_ns"))
+                    and record["monotonic_ns"] <= sample_ns
+                    and record.get("component_id") == 1
+                    and finite_number(record.get("lat_deg"))
+                    and finite_number(record.get("lon_deg"))
+                    and abs(float(record["lat_deg"])) >= 1.0
+                    and abs(float(record["lon_deg"])) >= 1.0
+                ]
+                if not raw_heartbeats or any(
+                    raw_heartbeats[-1].get(key) != expected
+                    for key, expected in (("component_id", 1), ("mav_type", 2), ("autopilot", 3))
+                ):
+                    failures.append(f"{context}: system {system_id} lacks current ArduPilot heartbeat")
+                elif (sample_ns - raw_heartbeats[-1]["monotonic_ns"]) / 1_000_000_000 > 3.0:
+                    failures.append(f"{context}: system {system_id} heartbeat is stale")
+                if len(raw_positions) < 2:
+                    failures.append(f"{context}: system {system_id} lacks two valid home positions")
+                elif (sample_ns - raw_positions[-1]["monotonic_ns"]) / 1_000_000_000 > 3.0:
+                    failures.append(f"{context}: system {system_id} valid home position is stale")
+
+    robot_description_events = [
+        record for record in records if record.get("event") == "robot_description_probe"
+    ]
+    robot_summary = (
+        data.get("robot_descriptions")
+        if isinstance(data.get("robot_descriptions"), list)
+        else []
+    )
+    independently_parsed_robots: list[dict[str, Any]] = []
+    if len(robot_description_events) != 1:
+        failures.append("raw M1 needs exactly one live robot_description probe")
+    else:
+        probe = robot_description_events[0]
+        probe_robots = probe.get("robots")
+        if probe.get("phase") != "readiness" or not isinstance(probe_robots, list):
+            failures.append("raw robot_description probe is outside readiness or malformed")
+        else:
+            for index, robot in enumerate(probe_robots):
+                expected_name = f"uav{index + 1}"
+                context = f"robot_description[{index}]"
+                if not isinstance(robot, dict):
+                    failures.append(f"{context} is not an object")
+                    continue
+                try:
+                    raw_description = base64.b64decode(
+                        str(robot.get("robot_description_b64") or ""), validate=True
+                    )
+                except (ValueError, TypeError):
+                    raw_description = b""
+                    failures.append(f"{context}.robot_description_b64 is invalid")
+                actual_hash = hashlib.sha256(raw_description).hexdigest()
+                if actual_hash != robot.get("robot_description_sha256"):
+                    failures.append(f"{context} hash differs from exact parameter bytes")
+                parsed, parse_failures = _m1_parse_robot_description(
+                    raw_description, context
+                )
+                failures.extend(parse_failures)
+                if (
+                    robot.get("name") != expected_name
+                    or robot.get("namespace") != f"/{expected_name}"
+                ):
+                    failures.append(f"{context} canonical UAV identity is invalid")
+                if parsed is not None:
+                    if (
+                        parsed.get("fdm_addr") != "127.0.0.1"
+                        or parsed.get("fdm_port_in") != 9002 + index * 10
+                        or robot.get("fdm_addr") != parsed.get("fdm_addr")
+                        or robot.get("fdm_port_in") != parsed.get("fdm_port_in")
+                    ):
+                        failures.append(f"{context} live ArduPilotPlugin FDM endpoint is invalid")
+                    independently_parsed_robots.append(
+                        {
+                            "name": expected_name,
+                            "namespace": f"/{expected_name}",
+                            "fdm_addr": parsed.get("fdm_addr"),
+                            "fdm_port_in": parsed.get("fdm_port_in"),
+                            "robot_description_sha256": actual_hash,
+                        }
+                    )
+    if independently_parsed_robots != robot_summary:
+        failures.append("robot-description summary differs from independently parsed raw XML")
+
+    gazebo_probe_events = [
+        record for record in records if record.get("event") == "gazebo_scene_probe"
+    ]
+    if len(gazebo_probe_events) != 1:
+        failures.append("raw M1 needs exactly one successful Gazebo scene probe")
+    else:
+        gazebo_probe = gazebo_probe_events[0]
+        expected_gazebo_command = [
+            "gz",
+            "service",
+            "-s",
+            "/world/map/scene/info",
+            "--reqtype",
+            "gz.msgs.Empty",
+            "--reptype",
+            "gz.msgs.Scene",
+            "--timeout",
+            "5000",
+            "--req",
+            "",
+        ]
+        if (
+            gazebo_probe.get("phase") != "finalization"
+            or gazebo_probe.get("exit_code") != 0
+            or gazebo_probe.get("world_name") != "map"
+            or gazebo_probe.get("command") != expected_gazebo_command
+        ):
+            failures.append("raw Gazebo scene probe command/result is invalid")
+        decoded_gazebo: dict[str, bytes] = {}
+        for stream in ("stdout", "stderr"):
+            try:
+                raw_stream = base64.b64decode(
+                    str(gazebo_probe.get(f"{stream}_b64") or ""), validate=True
+                )
+            except (ValueError, TypeError):
+                raw_stream = b""
+                failures.append(f"raw Gazebo {stream} base64 is invalid")
+            if hashlib.sha256(raw_stream).hexdigest() != gazebo_probe.get(
+                f"{stream}_sha256"
+            ):
+                failures.append(f"raw Gazebo {stream} hash differs from exact bytes")
+            decoded_gazebo[stream] = raw_stream
+        gazebo_text = (
+            decoded_gazebo.get("stdout", b"") + b"\n" + decoded_gazebo.get("stderr", b"")
+        ).decode(errors="replace")
+        raw_gazebo_names = sorted(
+            {
+                name
+                for name in re.findall(r'\bname:\s*"([^"]+)"', gazebo_text)
+                if name.startswith("uav")
+            }
+        )
+        expected_gazebo_names = [f"uav{index}" for index in range(1, 6)]
+        if (
+            raw_gazebo_names != expected_gazebo_names
+            or gazebo_probe.get("model_names") != raw_gazebo_names
+            or data.get("gazebo_model_names") != raw_gazebo_names
+            or data.get("gazebo_world_name") != "map"
+        ):
+            failures.append("Gazebo model inventory differs from exact raw scene response")
+
+    correlations_by_point = {
+        point: [
+            record
+            for record in clock_correlations
+            if record.get("correlation_point") == point
+        ]
+        for point in ("measurement_start", "measurement_end")
+    }
+    if len(clock_correlations) != 2 or any(
+        len(values) != 1 for values in correlations_by_point.values()
+    ):
+        failures.append("raw M1 needs exactly two measurement clock-correlation samples")
+    else:
+        start_clock = correlations_by_point["measurement_start"][0]
+        end_clock = correlations_by_point["measurement_end"][0]
+        for label, clock in (("start", start_clock), ("end", end_clock)):
+            if (
+                clock.get("phase") != "measurement"
+                or clock.get("monotonic_clock") != "CLOCK_MONOTONIC"
+                or clock.get("wall_clock") != "CLOCK_REALTIME"
+                or not nonnegative_integer(clock.get("monotonic_ns"))
+                or not nonnegative_integer(clock.get("wall_time_ns"))
+            ):
+                failures.append(f"raw M1 {label} clock correlation is malformed")
+        start_clock_ns = start_clock.get("monotonic_ns")
+        end_clock_ns = end_clock.get("monotonic_ns")
+        if (
+            measurement_start_ns is not None
+            and nonnegative_integer(start_clock_ns)
+            and start_clock_ns > measurement_start_ns
+        ):
+            failures.append("raw M1 start clock sample does not precede measurement")
+        if (
+            measurement_end_ns is not None
+            and nonnegative_integer(end_clock_ns)
+            and end_clock_ns < measurement_end_ns
+        ):
+            failures.append("raw M1 end clock sample does not follow measurement")
+        if all(
+            nonnegative_integer(clock.get(key))
+            for clock in (start_clock, end_clock)
+            for key in ("monotonic_ns", "wall_time_ns")
+        ):
+            start_offset = start_clock["wall_time_ns"] - start_clock["monotonic_ns"]
+            end_offset = end_clock["wall_time_ns"] - end_clock["monotonic_ns"]
+            if abs(end_offset - start_offset) > 1_000_000_000:
+                failures.append("raw M1 CLOCK_REALTIME/CLOCK_MONOTONIC correlation drift exceeds 1 second")
+
+    try:
+        summary_started = datetime.fromisoformat(
+            str(data.get("started_utc")).replace("Z", "+00:00")
+        ).timestamp()
+        summary_ended = datetime.fromisoformat(
+            str(data.get("ended_utc")).replace("Z", "+00:00")
+        ).timestamp()
+    except (TypeError, ValueError, OverflowError):
+        failures.append("five-UAV UTC start/end timestamps are invalid")
+    else:
+        if summary_ended <= summary_started:
+            failures.append("five-UAV UTC interval is not positive")
+        if finite_number(observed_duration) and not math.isclose(
+            summary_ended - summary_started,
+            float(observed_duration),
+            rel_tol=0.0,
+            abs_tol=2.0,
+        ):
+            failures.append("five-UAV UTC interval differs from monotonic observation duration")
+        raw_start_wall_ns = (
+            measurement_starts[0].get("wall_time_ns") if len(measurement_starts) == 1 else None
+        )
+        end_clock_records = correlations_by_point.get("measurement_end", [])
+        raw_end_wall_ns = (
+            end_clock_records[0].get("wall_time_ns") if len(end_clock_records) == 1 else None
+        )
+        if (
+            not nonnegative_integer(raw_start_wall_ns)
+            or abs(summary_started - raw_start_wall_ns / 1_000_000_000) > 1.0
+        ):
+            failures.append("five-UAV UTC start does not correlate with raw measurement clock")
+        if (
+            not nonnegative_integer(raw_end_wall_ns)
+            or abs(summary_ended - raw_end_wall_ns / 1_000_000_000) > 1.0
+        ):
+            failures.append("five-UAV UTC end does not correlate with raw measurement clock")
 
     names = {str(item.get("name")) for item in uavs if isinstance(item, dict)}
     expected = {f"uav{i}" for i in range(1, 6)}
@@ -1198,6 +2307,18 @@ def five_uav_health_status(run_dir: Path) -> dict[str, Any]:
             continue
         sysids.append(item.get("system_id"))
         dds_ports.append(item.get("dds_udp_port"))
+        expected_name = str(item.get("name"))
+        try:
+            expected_index = int(expected_name.removeprefix("uav"))
+        except ValueError:
+            expected_index = -1
+        if (
+            item.get("system_id") != expected_index
+            or item.get("dds_udp_port") != 2018 + expected_index
+        ):
+            failures.append(
+                f"{expected_name}: system ID/DDS port do not match the canonical UAV identity"
+            )
         for key in ("gazebo_model", "sitl_healthy", "heartbeat", "odometry_fresh"):
             if item.get(key) is not True:
                 failures.append(f"{item.get('name')}: {key} is not true")
@@ -1282,6 +2403,117 @@ def five_uav_health_status(run_dir: Path) -> dict[str, Any]:
                 failures.append(f"{name}: MAVLink pose raw count does not match summary")
             if any(record.get("valid") is not True for record in odom_events):
                 failures.append(f"{name}: raw odometry contains invalid samples")
+            for raw_index, record in enumerate(odom_events):
+                failures.extend(
+                    _m1_odometry_event_failures(
+                        record, f"{name}.odometry[{raw_index}]"
+                    )
+                )
+            if [record.get("sequence") for record in odom_events] != list(
+                range(1, len(odom_events) + 1)
+            ):
+                failures.append(f"{name}: raw odometry sequence is not contiguous")
+            if [record.get("sequence") for record in heartbeat_events] != list(
+                range(1, len(heartbeat_events) + 1)
+            ):
+                failures.append(f"{name}: raw heartbeat sequence is not contiguous")
+            if [record.get("sequence") for record in pose_events] != list(
+                range(1, len(pose_events) + 1)
+            ):
+                failures.append(f"{name}: raw MAVLink pose sequence is not contiguous")
+            if any(record.get("source_topic") != f"/{name}/odometry" for record in odom_events):
+                failures.append(f"{name}: raw odometry source topic is not canonical")
+            raw_positions: list[list[float]] = []
+            raw_speeds: list[float] = []
+            for record in odom_events:
+                position = record.get("position_m")
+                speed_value = record.get("linear_speed_mps")
+                if (
+                    not isinstance(position, list)
+                    or len(position) != 3
+                    or any(not finite_number(value) for value in position)
+                    or not finite_number(speed_value)
+                ):
+                    failures.append(f"{name}: raw odometry position/speed is malformed")
+                    continue
+                raw_positions.append([float(value) for value in position])
+                raw_speeds.append(float(speed_value))
+            if raw_positions:
+                first_position = raw_positions[0]
+                last_position = raw_positions[-1]
+                raw_max_displacement = max(
+                    math.sqrt(
+                        sum(
+                            (position[index] - first_position[index]) ** 2
+                            for index in range(3)
+                        )
+                    )
+                    for position in raw_positions
+                )
+                raw_max_speed = max(raw_speeds)
+                if item.get("odometry_first_position_m") != first_position:
+                    failures.append(f"{name}: first odometry position differs from raw")
+                if item.get("odometry_last_position_m") != last_position:
+                    failures.append(f"{name}: last odometry position differs from raw")
+                if not finite_number(item.get("odometry_max_displacement_m")) or not math.isclose(
+                    float(item["odometry_max_displacement_m"]),
+                    raw_max_displacement,
+                    rel_tol=0.0,
+                    abs_tol=1e-5,
+                ):
+                    failures.append(f"{name}: maximum displacement differs from raw odometry")
+                if not finite_number(item.get("odometry_max_speed_mps")) or not math.isclose(
+                    float(item["odometry_max_speed_mps"]),
+                    raw_max_speed,
+                    rel_tol=0.0,
+                    abs_tol=1e-5,
+                ):
+                    failures.append(f"{name}: maximum speed differs from raw odometry")
+            if any(
+                record.get("component_id") != 1
+                or record.get("mav_type") != 2
+                or record.get("autopilot") != 3
+                for record in heartbeat_events
+            ):
+                failures.append(f"{name}: raw heartbeat is not from the expected ArduPilot vehicle component")
+            raw_pose_values: list[tuple[float, float]] = []
+            raw_valid_home_count = 0
+            for record in pose_events:
+                lat = record.get("lat_deg")
+                lon = record.get("lon_deg")
+                relative_alt = record.get("relative_alt_m")
+                home_distance = record.get("home_distance_m")
+                if (
+                    record.get("component_id") != 1
+                    or any(
+                        not finite_number(value)
+                        for value in (lat, lon, relative_alt, home_distance)
+                    )
+                    or not -90.0 <= float(lat) <= 90.0
+                    or not -180.0 <= float(lon) <= 180.0
+                    or not -20.0 <= float(relative_alt) <= 100.0
+                    or not 0.0 <= float(home_distance) <= 500.0
+                ):
+                    failures.append(f"{name}: raw MAVLink pose is malformed or out of bounds")
+                    continue
+                raw_pose_values.append((float(relative_alt), float(home_distance)))
+                if abs(float(lat)) >= 1.0 and abs(float(lon)) >= 1.0:
+                    raw_valid_home_count += 1
+            if raw_pose_values:
+                raw_min_alt = min(value[0] for value in raw_pose_values)
+                raw_max_alt = max(value[0] for value in raw_pose_values)
+                raw_max_home_distance = max(value[1] for value in raw_pose_values)
+                for key, derived in (
+                    ("mavlink_minimum_relative_alt_m", raw_min_alt),
+                    ("mavlink_maximum_relative_alt_m", raw_max_alt),
+                    ("mavlink_maximum_home_distance_m", raw_max_home_distance),
+                ):
+                    if not finite_number(item.get(key)) or not math.isclose(
+                        float(item[key]), derived, rel_tol=0.0, abs_tol=1e-6
+                    ):
+                        failures.append(f"{name}: {key} differs from raw MAVLink poses")
+            if item.get("mavlink_valid_home_position_count") != raw_valid_home_count:
+                failures.append(f"{name}: valid-home count differs from raw MAVLink poses")
             odom_arrival = sequence_metrics_ns(
                 [record.get("monotonic_ns") for record in odom_events]
             )
@@ -1337,25 +2569,280 @@ def five_uav_health_status(run_dir: Path) -> dict[str, Any]:
     if (
         len(dds_ports) != 5
         or any(not isinstance(port, int) for port in dds_ports)
-        or len(set(dds_ports)) != 5
+        or sorted(dds_ports) != list(range(2019, 2024))
     ):
         failures.append(f"DDS ports are not five unique values: {dds_ports}")
     if data.get("errors"):
         failures.append("five-UAV health record reports errors")
-    process_health = data.get("process_health") if isinstance(data.get("process_health"), dict) else {}
-    required_processes = {"arducopter": 5, "mavproxy": 5, "micro_ros_agent": 5, "gazebo": 1}
-    minimums = process_health.get("observed_minimums") if isinstance(process_health.get("observed_minimums"), dict) else {}
+    allowed_m1_events = {
+        "health_probe_start",
+        "health_probe_failed",
+        "heartbeat_endpoint_failed",
+        "heartbeat_worker_failed",
+        "heartbeat_unstamped",
+        "readiness_odometry",
+        "readiness_heartbeat",
+        "readiness_mavlink_global_position",
+        "readiness_process_sample",
+        "robot_description_probe",
+        "readiness",
+        "measurement_start",
+        "clock_correlation",
+        "odometry",
+        "heartbeat",
+        "mavlink_global_position",
+        "process_sample",
+        "health_probe_interrupted",
+        "gazebo_scene_probe",
+        "gazebo_scene_probe_failed",
+        "health_probe_complete",
+    }
+    unexpected_events = sorted(
+        {
+            str(record.get("event"))
+            for record in records
+            if record.get("event") not in allowed_m1_events
+        }
+    )
+    if unexpected_events:
+        failures.append(f"raw M1 contains unexpected event types: {unexpected_events}")
+    fatal_runtime_events = {
+        "health_probe_failed",
+        "heartbeat_endpoint_failed",
+        "heartbeat_worker_failed",
+        "health_probe_interrupted",
+        "gazebo_scene_probe_failed",
+    }
+    observed_fatal_events = sorted(
+        {str(record.get("event")) for record in records if record.get("event") in fatal_runtime_events}
+    )
+    if observed_fatal_events:
+        failures.append(f"raw M1 contains fatal lifecycle events: {observed_fatal_events}")
+    for record in records:
+        event_name = str(record.get("event") or "")
+        if (
+            event_name in {
+                "measurement_start",
+                "clock_correlation",
+                "odometry",
+                "heartbeat",
+                "mavlink_global_position",
+                "process_sample",
+                "health_probe_interrupted",
+            }
+            and record.get("phase") != "measurement"
+        ):
+            failures.append(f"raw M1 event {event_name!r} is outside measurement phase")
+        if (
+            event_name.startswith("readiness")
+            or event_name
+            in {"health_probe_start", "health_probe_failed", "robot_description_probe"}
+        ) and record.get("phase") != "readiness":
+            failures.append(f"raw M1 event {event_name!r} is outside readiness phase")
+        if event_name in {
+            "gazebo_scene_probe",
+            "gazebo_scene_probe_failed",
+            "health_probe_complete",
+        } and record.get("phase") != "finalization":
+            failures.append(f"raw M1 event {event_name!r} is outside finalization phase")
+
+    process_health = (
+        data.get("process_health") if isinstance(data.get("process_health"), dict) else {}
+    )
+    process_group = process_health.get("process_group")
+    if not nonnegative_integer(process_group) or process_group <= 0:
+        failures.append("process-health supervised process group is invalid")
+    if process_health.get("required_exact_counts") != M1_REQUIRED_PROCESS_COUNTS:
+        failures.append("process-health exact-count contract is invalid")
     process_events = [record for record in records if record.get("event") == "process_sample"]
     if process_health.get("samples") != len(process_events) or not process_events:
         failures.append("process-health raw samples are missing or count-mismatched")
-    for name, required in required_processes.items():
-        raw_minimum = min(
-            (record.get("counts", {}).get(name, 0) for record in process_events if isinstance(record.get("counts"), dict)),
-            default=0,
-        )
-        if minimums.get(name) != raw_minimum or raw_minimum < required:
-            failures.append(f"process {name} did not remain at required count {required}")
-    return gate("passed" if not failures else "failed", "five-UAV health evidence evaluated", {"failures": failures})
+    process_timestamps = [record.get("monotonic_ns") for record in process_events]
+    process_timing = sequence_metrics_ns(process_timestamps)
+    derived_first_delay: float | None = None
+    derived_last_age: float | None = None
+    if process_timing is None:
+        failures.append("process-health sample clocks are missing or nonadvancing")
+    elif measurement_start_ns is not None and measurement_end_ns is not None:
+        derived_first_delay = (
+            process_timing["first_ns"] - measurement_start_ns
+        ) / 1_000_000_000
+        derived_last_age = (
+            measurement_end_ns - process_timing["last_ns"]
+        ) / 1_000_000_000
+        if (
+            not 0.0 <= derived_first_delay <= 2.0
+            or not 0.0 <= derived_last_age <= 2.0
+            or process_timing["max_gap_s"] > 2.0
+        ):
+            failures.append("process-health samples do not cover the complete measurement window")
+        for key, derived in (
+            ("first_sample_delay_s", derived_first_delay),
+            ("last_sample_age_s", derived_last_age),
+            ("maximum_sample_gap_s", process_timing["max_gap_s"]),
+        ):
+            summarized = process_health.get(key)
+            if not finite_number(summarized) or not math.isclose(
+                float(summarized), float(derived), rel_tol=0.0, abs_tol=0.1
+            ):
+                failures.append(f"process-health summarized {key} differs from raw clocks")
+
+    counts_by_role: dict[str, list[int]] = {
+        role: [] for role in M1_REQUIRED_PROCESS_COUNTS
+    }
+    baseline_by_role: dict[str, set[str]] | None = None
+    baseline_all: set[str] | None = None
+    for sample_index, sample in enumerate(process_events):
+        processes = sample.get("processes")
+        if not isinstance(processes, list) or not processes:
+            failures.append(f"process_sample[{sample_index}] lacks raw process identities")
+            for role in counts_by_role:
+                counts_by_role[role].append(0)
+            continue
+        if sample.get("phase") != "measurement":
+            failures.append(f"process_sample[{sample_index}] is outside measurement phase")
+        if sample.get("error") not in (None, ""):
+            failures.append(f"process_sample[{sample_index}] reports a sampling error")
+        pids = [process.get("pid") for process in processes if isinstance(process, dict)]
+        if len(pids) != len(processes) or len(set(pids)) != len(pids):
+            failures.append(f"process_sample[{sample_index}] has duplicate or invalid PIDs")
+
+        derived_counts = {role: 0 for role in M1_REQUIRED_PROCESS_COUNTS}
+        role_digests = {role: set() for role in M1_REQUIRED_PROCESS_COUNTS}
+        all_digests: set[str] = set()
+        for process_index, process in enumerate(processes):
+            context = f"process_sample[{sample_index}].processes[{process_index}]"
+            if not isinstance(process, dict):
+                failures.append(f"{context} is not an object")
+                continue
+            try:
+                cmdline_raw = base64.b64decode(
+                    str(process.get("cmdline_b64") or ""), validate=True
+                )
+            except (ValueError, TypeError):
+                cmdline_raw = b""
+                failures.append(f"{context}.cmdline_b64 is invalid")
+            argv = _m1_decode_cmdline(cmdline_raw)
+            if hashlib.sha256(cmdline_raw).hexdigest() != process.get("cmdline_sha256"):
+                failures.append(f"{context}.cmdline_sha256 does not match raw cmdline")
+            if process.get("cmdline") != argv:
+                failures.append(f"{context}.cmdline does not match raw cmdline")
+            if not isinstance(process.get("command"), str) or not isinstance(
+                process.get("arguments"), str
+            ):
+                failures.append(f"{context} lacks human-readable command arguments")
+            role = _m1_process_role(process, argv)
+            if process.get("role") != role:
+                failures.append(f"{context}.role does not match independently decoded argv")
+            if role in derived_counts:
+                derived_counts[role] += 1
+            state = process.get("state")
+            if state == "Z":
+                failures.append(f"{context} is a zombie process")
+            elif state not in M1_ALLOWED_PROCESS_STATES:
+                failures.append(f"{context} has unhealthy process state {state!r}")
+            if process.get("identity_errors") != []:
+                failures.append(f"{context} has incomplete process identity")
+            for key, minimum in (
+                ("pid", 1),
+                ("ppid", 0),
+                ("pgid", 1),
+                ("session_id", 1),
+                ("start_ticks", 1),
+                ("uid", 0),
+            ):
+                value = process.get(key)
+                if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+                    failures.append(f"{context}.{key} is invalid")
+            if process.get("pgid") != process_group or process.get("session_id") != process_group:
+                failures.append(f"{context} escaped the supervised process group/session")
+            if not isinstance(process.get("exe_path"), str) or not str(
+                process.get("exe_path")
+            ).startswith("/"):
+                failures.append(f"{context}.exe_path is invalid")
+            for key in ("cmdline_sha256", "exe_sha256"):
+                if re.fullmatch(r"[0-9a-f]{64}", str(process.get(key) or "")) is None:
+                    failures.append(f"{context}.{key} is not SHA-256")
+            namespaces = process.get("namespaces")
+            if not isinstance(namespaces, dict) or set(namespaces) != set(
+                M1_PROCESS_NAMESPACES
+            ):
+                failures.append(f"{context}.namespaces is incomplete")
+            else:
+                for name in M1_PROCESS_NAMESPACES:
+                    if re.fullmatch(rf"{name}:\[[0-9]+\]", str(namespaces.get(name) or "")) is None:
+                        failures.append(f"{context}.namespaces.{name} is invalid")
+            capabilities = process.get("capabilities")
+            if not isinstance(capabilities, dict) or set(capabilities) != set(
+                M1_CAPABILITIES
+            ):
+                failures.append(f"{context}.capabilities is incomplete")
+            elif any(
+                re.fullmatch(r"[0-9a-f]{16}", str(value or "")) is None
+                for value in capabilities.values()
+            ):
+                failures.append(f"{context}.capabilities is invalid")
+            if role == "arducopter" and "--serial2" in argv:
+                failures.append(f"{context} configured SERIAL2 in the M1 component profile")
+            identity_digest = _m1_process_identity_digest(process)
+            all_digests.add(identity_digest)
+            if role in role_digests:
+                role_digests[role].add(identity_digest)
+
+        if sample.get("counts") != derived_counts:
+            failures.append(f"process_sample[{sample_index}] producer counts differ from raw identities")
+        for role, required in M1_REQUIRED_PROCESS_COUNTS.items():
+            observed = derived_counts[role]
+            counts_by_role[role].append(observed)
+            if observed != required:
+                failures.append(
+                    f"process_sample[{sample_index}] has {observed} {role}; expected exactly {required}"
+                )
+        if baseline_by_role is None:
+            baseline_by_role = role_digests
+            baseline_all = all_digests
+        else:
+            for role in M1_REQUIRED_PROCESS_COUNTS:
+                if role_digests[role] != baseline_by_role[role]:
+                    failures.append(f"process_sample[{sample_index}] changed {role} identity set")
+            if all_digests != baseline_all:
+                failures.append(f"process_sample[{sample_index}] changed launch process identity set")
+
+    derived_ranges = {
+        role: {
+            "minimum": min(values, default=0),
+            "maximum": max(values, default=0),
+        }
+        for role, values in counts_by_role.items()
+    }
+    derived_endpoints, endpoint_failures = _m1_runtime_endpoints(
+        process_events[0].get("processes", []) if process_events else []
+    )
+    failures.extend(endpoint_failures)
+    if process_health.get("runtime_endpoints") != derived_endpoints:
+        failures.append("process-health runtime endpoint matrix differs from raw argv")
+    if process_health.get("observed_count_ranges") != derived_ranges:
+        failures.append("process-health count ranges differ from raw process identities")
+    derived_role_hashes = {
+        role: _m1_identity_set_sha256((baseline_by_role or {}).get(role, set()))
+        for role in M1_REQUIRED_PROCESS_COUNTS
+    }
+    if process_health.get("stable_identity_set_sha256") != derived_role_hashes:
+        failures.append("process-health role identity hashes differ from raw process identities")
+    derived_all_hash = (
+        _m1_identity_set_sha256(baseline_all) if baseline_all is not None else None
+    )
+    if process_health.get("all_process_identity_set_sha256") != derived_all_hash:
+        failures.append("process-health full identity hash differs from raw process identities")
+    return gate(
+        "passed" if not failures else "failed",
+        "five-UAV health evidence evaluated",
+        {
+            "failures": list(failures),
+            "failure_count": failures.total,
+            "failures_truncated": failures.total > len(failures),
+        },
+    )
 
 
 def no_bypass_status(run_dir: Path) -> dict[str, Any]:

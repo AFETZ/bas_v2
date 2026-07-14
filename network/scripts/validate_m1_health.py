@@ -4,11 +4,15 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import json
 import os
 import re
+import shlex
 import stat
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Callable
 
@@ -27,12 +31,21 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from network.scripts.write_m1_scene_provenance import (  # noqa: E402
+    LAUNCH_SOURCE_RELATIVE,
+    ROBOT_DESCRIPTION_PORT_TOKEN,
+    SOURCE_PACKAGE_RELATIVE,
+    SOURCE_WORLDS_RELATIVE,
+    canonical_robot_model,
     installed_bundle_manifest,
+    installed_scene_resource_manifest,
     manifest_sha256,
+    resolve_runtime_leaf,
+    resolved_robot_descriptions,
     scenario_world_file,
     sdf_world_name,
     sha256_file,
     source_bundle_manifest,
+    source_scene_resource_manifest,
 )
 from network.validation.evidence import (  # noqa: E402
     five_uav_health_status,
@@ -106,10 +119,42 @@ def _call_gate(name: str, function: Callable[[Path], dict[str, Any]], run_dir: P
     return result
 
 
-def _gazebo_world_arguments(arguments: str) -> list[str]:
-    if re.search(r"(?:^|\s)(?:\S*/)?gz\s+sim(?:\s|$)", arguments) is None:
-        return []
-    return re.findall(r"(?<!\S)(/[^\s'\"]+\.sdf)(?!\S)", arguments)
+def _decoded_process_argv(process: dict[str, Any]) -> tuple[list[str], str | None]:
+    encoded = process.get("cmdline_b64")
+    if not isinstance(encoded, str) or not encoded:
+        return [], "cmdline_b64 is missing"
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (ValueError, TypeError) as exc:
+        return [], f"cmdline_b64 is invalid: {exc}"
+    if not raw or b"\0" not in raw:
+        return [], "raw cmdline is empty or not NUL-delimited"
+    trimmed = raw.rstrip(b"\0")
+    if not trimmed:
+        return [], "raw cmdline has no arguments"
+    fields = trimmed.split(b"\0")
+    if any(not field for field in fields):
+        return [], "raw cmdline contains an empty interior argument"
+    try:
+        argv = [field.decode("utf-8", errors="strict") for field in fields]
+    except UnicodeDecodeError as exc:
+        return [], f"raw cmdline is not UTF-8: {exc}"
+    if process.get("cmdline_sha256") != hashlib.sha256(raw).hexdigest():
+        return [], "cmdline_sha256 does not match cmdline_b64"
+    return argv, None
+
+
+def _gazebo_server_argv(argv: list[str]) -> list[str]:
+    if len(argv) == 1:
+        try:
+            tokens = shlex.split(argv[0])
+        except ValueError:
+            return []
+    else:
+        tokens = list(argv)
+    if len(tokens) >= 2 and Path(tokens[0]).name == "gz" and tokens[1] == "sim":
+        return ["gz", *tokens[1:]]
+    return []
 
 
 def scene_status(run_dir: Path) -> dict[str, Any]:
@@ -120,8 +165,8 @@ def scene_status(run_dir: Path) -> dict[str, Any]:
 
     provenance = load_json(run_dir / "metrics/provenance.json")
     health = load_json(run_dir / "metrics/five_uav_health.json")
-    if record.get("schema_version") != 1:
-        failures.append("scene provenance schema_version is not 1")
+    if record.get("schema_version") != 2:
+        failures.append("scene provenance schema_version is not 2")
     config_hashes = provenance.get("config_hashes") if isinstance(provenance.get("config_hashes"), dict) else {}
     current_contract_hash = (
         sha256_file(ROOT_DIR / M1_PLAN_PATH) if (ROOT_DIR / M1_PLAN_PATH).is_file() else None
@@ -148,6 +193,12 @@ def scene_status(run_dir: Path) -> dict[str, Any]:
         failures.append("scene source_hash does not match provenance")
     if record.get("component_only") is not True or record.get("p0_eligible") is not False:
         failures.append("scene provenance is not labeled component-only/non-P0")
+
+    try:
+        robot_model = canonical_robot_model(record.get("robot_model"))
+    except Exception as exc:
+        failures.append(f"recorded robot_model is invalid: {exc}")
+        robot_model = "invalid"
 
     scenario = record.get("scenario") if isinstance(record.get("scenario"), dict) else {}
     gazebo = record.get("gazebo") if isinstance(record.get("gazebo"), dict) else {}
@@ -251,6 +302,128 @@ def scene_status(run_dir: Path) -> dict[str, Any]:
     if installed.get("resolved_bundle_paths") != resolved_paths:
         failures.append("recorded installed world resolution differs from active install")
 
+    resources = record.get("resources") if isinstance(record.get("resources"), dict) else {}
+    expected_resource_roots = sorted(
+        [
+            f"worlds/{world_file}",
+            f"models/{robot_model}/model.sdf",
+        ]
+    )
+    try:
+        current_source_resources, current_resource_edges = source_scene_resource_manifest(
+            world_file, robot_model, root=ROOT_DIR
+        )
+    except Exception as exc:
+        failures.append(f"canonical transitive source resources failed validation: {exc}")
+        current_source_resources, current_resource_edges = {}, []
+    try:
+        (
+            current_installed_resources,
+            current_installed_edges,
+            current_installed_resource_paths,
+        ) = installed_scene_resource_manifest(
+            world_file,
+            robot_model,
+            installed_package_share=ROOT_DIR / INSTALLED_SHARE,
+            local_root=ROOT_DIR,
+            runtime_root=runtime_root,
+        )
+    except Exception as exc:
+        failures.append(f"active installed transitive resources failed validation: {exc}")
+        current_installed_resources, current_installed_edges = {}, []
+        current_installed_resource_paths = {}
+    if current_installed_resources != current_source_resources:
+        failures.append("installed transitive scene resources differ from canonical source")
+    if current_installed_edges != current_resource_edges:
+        failures.append("installed transitive scene URI graph differs from canonical source")
+    if resources.get("roots") != expected_resource_roots:
+        failures.append("recorded transitive scene roots are not canonical")
+    if resources.get("source_package_root") != SOURCE_PACKAGE_RELATIVE.as_posix():
+        failures.append("recorded source package root is not canonical")
+    if resources.get("installed_package_share_path") != INSTALLED_SHARE:
+        failures.append("recorded installed resource root is not canonical")
+    if resources.get("source_files") != current_source_resources:
+        failures.append("recorded transitive source resource manifest differs from checkout")
+    if resources.get("installed_files") != current_installed_resources:
+        failures.append("recorded transitive installed resource manifest differs from install")
+    if resources.get("uri_edges") != current_resource_edges:
+        failures.append("recorded transitive URI graph differs from checkout")
+    if resources.get("source_sha256") != manifest_sha256(current_source_resources):
+        failures.append("recorded transitive source resource hash is invalid")
+    if resources.get("installed_sha256") != manifest_sha256(current_installed_resources):
+        failures.append("recorded transitive installed resource hash is invalid")
+    if resources.get("resolved_installed_paths") != current_installed_resource_paths:
+        failures.append("recorded installed transitive resource resolution differs")
+
+    binding = (
+        record.get("source_manifest_binding")
+        if isinstance(record.get("source_manifest_binding"), dict)
+        else {}
+    )
+    expected_binding_files: dict[str, str] = {
+        scenario_relative: sha256_file(scenario_path) if scenario_path.is_file() else "invalid",
+    }
+    launch_path = ROOT_DIR / LAUNCH_SOURCE_RELATIVE
+    if launch_path.is_file():
+        expected_binding_files[LAUNCH_SOURCE_RELATIVE.as_posix()] = sha256_file(launch_path)
+    else:
+        failures.append("canonical multiagent launch source is missing")
+    expected_binding_files.update(
+        {
+            (SOURCE_PACKAGE_RELATIVE / logical).as_posix(): file_hash
+            for logical, file_hash in current_source_resources.items()
+        }
+    )
+    expected_binding_files.update(
+        {
+            (SOURCE_WORLDS_RELATIVE / logical).as_posix(): file_hash
+            for logical, file_hash in current_source.items()
+        }
+    )
+    expected_binding_files = dict(sorted(expected_binding_files.items()))
+    if binding.get("files") != expected_binding_files:
+        failures.append("recorded scene source-manifest binding differs from active inputs")
+    if binding.get("sha256") != manifest_sha256(expected_binding_files):
+        failures.append("recorded scene source-manifest binding hash is invalid")
+    for relative, expected_hash in expected_binding_files.items():
+        if source_manifest.get(relative) != expected_hash:
+            failures.append(f"accepted source manifest does not bind scene input {relative}")
+
+    robot_description_record = (
+        record.get("robot_descriptions")
+        if isinstance(record.get("robot_descriptions"), dict)
+        else {}
+    )
+    template_logical = f"models/{robot_model}/model.sdf"
+    try:
+        template_path = resolve_runtime_leaf(
+            ROOT_DIR / INSTALLED_SHARE / template_logical,
+            local_root=ROOT_DIR,
+            runtime_root=runtime_root,
+            label="installed robot SDF template",
+        )
+        expected_robot_descriptions = resolved_robot_descriptions(
+            scenario_path,
+            robot_model,
+            template_path=template_path,
+            root=ROOT_DIR,
+        )
+    except Exception as exc:
+        failures.append(f"canonical per-UAV robot descriptions failed validation: {exc}")
+        expected_robot_descriptions = []
+    if robot_description_record.get("template_path") != template_logical:
+        failures.append("recorded robot-description template path is not canonical")
+    if robot_description_record.get("template_sha256") != current_installed_resources.get(
+        template_logical
+    ):
+        failures.append("recorded robot-description template hash is invalid")
+    if robot_description_record.get("substitution_token") != ROBOT_DESCRIPTION_PORT_TOKEN:
+        failures.append("recorded robot-description substitution token is invalid")
+    if robot_description_record.get("port_formula") != "9002 + 10 * instance":
+        failures.append("recorded robot-description port formula is invalid")
+    if robot_description_record.get("instances") != expected_robot_descriptions:
+        failures.append("recorded per-UAV robot descriptions differ from deterministic launch inputs")
+
     raw_path = run_dir / RAW_HEALTH_LOG
     records: list[dict[str, Any]] = []
     try:
@@ -284,33 +457,95 @@ def scene_status(run_dir: Path) -> dict[str, Any]:
     process_samples = [item for item in records if item.get("event") == "process_sample"]
     if not process_samples:
         failures.append("raw health log contains no process samples")
-    launch_assignment = f"world_file:={world_file}"
+    expected_launch_assignments = {
+        "world_file": f"world_file:={world_file}",
+        "robot_model": f"robot_model:={robot_model}",
+    }
+    expected_gazebo_argv = ["gz", "sim", "-v4", "-s", "-r", expected_runtime_world]
+    expected_robot_names = [f"uav{index}" for index in range(1, 6)]
     for index, sample in enumerate(process_samples):
         processes = sample.get("processes")
         if not isinstance(processes, list) or not processes:
-            failures.append(f"process_sample[{index}] lacks raw process arguments")
+            failures.append(f"process_sample[{index}] lacks raw process identities")
             continue
-        arguments = [
-            process.get("arguments")
-            for process in processes
-            if isinstance(process, dict) and isinstance(process.get("arguments"), str)
+        decoded: list[tuple[dict[str, Any], list[str]]] = []
+        for process_index, process in enumerate(processes):
+            if not isinstance(process, dict):
+                failures.append(
+                    f"process_sample[{index}].processes[{process_index}] is not an object"
+                )
+                continue
+            argv, argv_error = _decoded_process_argv(process)
+            if argv_error:
+                failures.append(
+                    f"process_sample[{index}].processes[{process_index}] {argv_error}"
+                )
+                continue
+            decoded.append((process, argv))
+
+        launch_argvs = [
+            argv
+            for _process, argv in decoded
+            if any(
+                argv[position : position + 3]
+                == ["launch", "multiagent_simulation", "multiagent_simulation.launch.py"]
+                for position in range(max(0, len(argv) - 2))
+            )
         ]
-        if not any(launch_assignment in value.split() for value in arguments):
-            failures.append(f"process_sample[{index}] lacks explicit launch world_file assignment")
-        gazebo_worlds = [
-            world
-            for value in arguments
-            for world in _gazebo_world_arguments(value)
-        ]
-        if not gazebo_worlds:
-            failures.append(f"process_sample[{index}] lacks a Gazebo world argument")
-        elif set(gazebo_worlds) != {expected_runtime_world}:
+        if len(launch_argvs) != 1:
             failures.append(
-                f"process_sample[{index}] Gazebo world differs from active installed world: {sorted(set(gazebo_worlds))}"
+                f"process_sample[{index}] must contain exactly one raw multiagent launch argv"
+            )
+        else:
+            launch_argv = launch_argvs[0]
+            for assignment_name, expected_assignment in expected_launch_assignments.items():
+                observed = [
+                    value for value in launch_argv if value.startswith(f"{assignment_name}:=")
+                ]
+                if observed != [expected_assignment]:
+                    failures.append(
+                        f"process_sample[{index}] raw launch {assignment_name} assignment differs: {observed}"
+                    )
+
+        gazebo_argvs = [
+            normalized
+            for _process, argv in decoded
+            if (normalized := _gazebo_server_argv(argv))
+        ]
+        if len(gazebo_argvs) != 1:
+            failures.append(
+                f"process_sample[{index}] must contain exactly one raw Gazebo server argv"
+            )
+        elif gazebo_argvs[0] != expected_gazebo_argv:
+            failures.append(
+                f"process_sample[{index}] raw Gazebo server argv differs: {gazebo_argvs[0]}"
+            )
+
+        robot_state_names: list[str] = []
+        for process, argv in decoded:
+            executable_names = {
+                Path(str(process.get("exe_path") or "")).name,
+                Path(argv[0]).name if argv else "",
+            }
+            if "robot_state_publisher" not in executable_names:
+                continue
+            namespaces = [
+                value.removeprefix("__ns:=/")
+                for value in argv
+                if value.startswith("__ns:=/")
+            ]
+            if len(namespaces) != 1:
+                failures.append(
+                    f"process_sample[{index}] robot_state_publisher has non-exact namespace argv"
+                )
+            else:
+                robot_state_names.append(namespaces[0])
+        if sorted(robot_state_names) != expected_robot_names:
+            failures.append(
+                f"process_sample[{index}] robot_state_publisher namespaces are not exactly uav1..uav5"
             )
 
     scene_probes = [item for item in records if item.get("event") == "gazebo_scene_probe"]
-    expected_models = [f"uav{index}" for index in range(1, 6)]
     if len(scene_probes) != 1:
         failures.append("raw health log must contain exactly one live Gazebo scene probe")
     else:
@@ -319,8 +554,121 @@ def scene_status(run_dir: Path) -> dict[str, Any]:
             failures.append("live Gazebo scene probe did not exit zero")
         if scene_probe.get("world_name") != current_world_name:
             failures.append("live Gazebo transport world name differs from canonical SDF")
-        if scene_probe.get("model_names") != expected_models:
-            failures.append("live Gazebo entity inventory is not exactly uav1..uav5")
+        expected_scene_command = [
+            "gz",
+            "service",
+            "-s",
+            f"/world/{current_world_name}/scene/info",
+            "--reqtype",
+            "gz.msgs.Empty",
+            "--reptype",
+            "gz.msgs.Scene",
+            "--timeout",
+            "5000",
+            "--req",
+            "",
+        ]
+        if scene_probe.get("command") != expected_scene_command:
+            failures.append("live Gazebo scene probe command is not canonical")
+        response_b64 = scene_probe.get("stdout_b64", scene_probe.get("response_b64"))
+        response_hash = scene_probe.get(
+            "stdout_sha256", scene_probe.get("response_sha256")
+        )
+        try:
+            if not isinstance(response_b64, str) or not response_b64:
+                raise ValueError("raw Gazebo response is missing")
+            response = base64.b64decode(response_b64, validate=True)
+            if hashlib.sha256(response).hexdigest() != response_hash:
+                raise ValueError("raw Gazebo response hash does not match")
+            response_text = response.decode("utf-8", errors="strict")
+            derived_models = sorted(
+                {
+                    name
+                    for name in re.findall(r'\bname:\s*"([^"]+)"', response_text)
+                    if re.fullmatch(r"uav[1-5]", name)
+                }
+            )
+        except (ValueError, TypeError, UnicodeDecodeError) as exc:
+            failures.append(f"raw Gazebo scene response is invalid: {exc}")
+            derived_models = []
+        if derived_models != expected_robot_names:
+            failures.append("raw Gazebo entity response is not exactly uav1..uav5")
+        if scene_probe.get("model_names") != derived_models:
+            failures.append("summarized Gazebo entity names differ from raw response")
+        try:
+            stderr_b64 = scene_probe.get("stderr_b64")
+            if not isinstance(stderr_b64, str):
+                raise ValueError("raw Gazebo stderr is missing")
+            raw_stderr = base64.b64decode(stderr_b64, validate=True)
+            if hashlib.sha256(raw_stderr).hexdigest() != scene_probe.get("stderr_sha256"):
+                raise ValueError("raw Gazebo stderr hash does not match")
+        except (ValueError, TypeError) as exc:
+            failures.append(f"raw Gazebo scene stderr is invalid: {exc}")
+
+    robot_probes = [
+        item for item in records if item.get("event") == "robot_description_probe"
+    ]
+    if len(robot_probes) != 1:
+        failures.append("raw health log must contain exactly one robot-description probe")
+    else:
+        probed_robots = robot_probes[0].get("robots")
+        if not isinstance(probed_robots, list) or len(probed_robots) != 5:
+            failures.append("robot-description probe must contain exactly five robots")
+            probed_robots = []
+        for index, expected in enumerate(expected_robot_descriptions):
+            if index >= len(probed_robots) or not isinstance(probed_robots[index], dict):
+                failures.append(f"robot-description probe lacks uav{index + 1}")
+                continue
+            observed = probed_robots[index]
+            if observed.get("name") != expected["name"] or observed.get("namespace") != (
+                f"/{expected['name']}"
+            ):
+                failures.append(
+                    f"robot-description probe[{index}] name/namespace is not canonical"
+                )
+            try:
+                encoded_description = observed.get("robot_description_b64")
+                if not isinstance(encoded_description, str) or not encoded_description:
+                    raise ValueError("robot_description_b64 is missing")
+                description_bytes = base64.b64decode(encoded_description, validate=True)
+                description_hash = hashlib.sha256(description_bytes).hexdigest()
+                description_xml = ET.fromstring(description_bytes)
+                plugins = [
+                    element
+                    for element in description_xml.iter()
+                    if element.tag.rsplit("}", 1)[-1] == "plugin"
+                    and (
+                        element.attrib.get("name") == "ArduPilotPlugin"
+                        or element.attrib.get("filename") == "ArduPilotPlugin"
+                    )
+                ]
+                if len(plugins) != 1:
+                    raise ValueError("live robot-description lacks one exact ArduPilotPlugin")
+                addresses = [
+                    element.text.strip()
+                    for element in plugins[0]
+                    if element.tag.rsplit("}", 1)[-1] == "fdm_addr"
+                    and isinstance(element.text, str)
+                ]
+                ports = [
+                    element.text.strip()
+                    for element in plugins[0]
+                    if element.tag.rsplit("}", 1)[-1] == "fdm_port_in"
+                    and isinstance(element.text, str)
+                ]
+                if description_hash != expected["robot_description_sha256"]:
+                    raise ValueError("live robot-description hash differs from deterministic input")
+                if addresses != [expected["fdm_addr"]] or ports != [
+                    str(expected["fdm_port_in"])
+                ]:
+                    raise ValueError("live robot-description FDM endpoint differs")
+                if observed.get("robot_description_sha256") not in (
+                    None,
+                    description_hash,
+                ):
+                    raise ValueError("reported robot-description hash differs from raw bytes")
+            except (ValueError, TypeError, ET.ParseError) as exc:
+                failures.append(f"robot-description probe[{index}] is invalid: {exc}")
 
     return gate(
         "passed" if not failures else "failed",
@@ -331,6 +679,8 @@ def scene_status(run_dir: Path) -> dict[str, Any]:
             "runtime_world_path": expected_runtime_world,
             "process_samples": len(process_samples),
             "bundle_files": len(current_source),
+            "transitive_resource_files": len(current_source_resources),
+            "robot_model": robot_model,
             "world_name": current_world_name,
         },
     )
