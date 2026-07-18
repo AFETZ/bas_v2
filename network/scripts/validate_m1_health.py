@@ -768,9 +768,19 @@ def _package_runtime_inputs(package_root: Path) -> dict[str, str]:
     candidates: list[Path] = [package_root / "package.xml"]
     for directory in ("config", "launch", "models", "worlds", "rviz"):
         root = package_root / directory
-        if root.is_symlink() or not root.is_dir():
+        root_info = root.lstat()
+        if not stat.S_ISDIR(root_info.st_mode):
             raise ValueError(f"package runtime-input directory is unavailable: {directory}")
-        candidates.extend(path for path in root.rglob("*") if path.is_file())
+        for path in root.rglob("*"):
+            info = path.lstat()
+            if stat.S_ISDIR(info.st_mode):
+                continue
+            relative = path.relative_to(package_root).as_posix()
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise ValueError(
+                    f"package runtime input is linked or special: {relative}"
+                )
+            candidates.append(path)
     result: dict[str, str] = {}
     for path in sorted(candidates, key=lambda item: item.relative_to(package_root).as_posix()):
         relative = path.relative_to(package_root).as_posix()
@@ -893,12 +903,14 @@ def runtime_inputs_status(run_dir: Path) -> dict[str, Any]:
             else {}
         )
         expected_consumed_nodes = ["Q0", "Q1"]
+        supported_profiles = {"m1_component", "flight_capacity_prerequisite"}
         if (
-            qualification.get("profile") != "m1_component"
+            qualification.get("profile") not in supported_profiles
             or qualification.get("consumed_nodes") != expected_consumed_nodes
         ):
             failures.append(
-                "accepted provenance does not consume exactly M1 qualification nodes Q0,Q1"
+                "accepted provenance does not consume exactly Q0,Q1 for a supported "
+                "five-UAV qualification profile"
             )
 
         vector = (

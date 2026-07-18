@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -462,6 +463,18 @@ class M1SceneValidatorTests(unittest.TestCase):
                 result["details"]["recorded_package_input_count"],
             )
 
+            provenance_path = run_dir / "metrics/provenance.json"
+            provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+            provenance["qualification_consumption"]["profile"] = (
+                "flight_capacity_prerequisite"
+            )
+            provenance_path.write_text(json.dumps(provenance), encoding="utf-8")
+            with mock.patch.object(validator, "ROOT_DIR", root):
+                capacity_profile = validator.runtime_inputs_status(run_dir)
+            self.assertEqual(capacity_profile["status"], "passed", capacity_profile)
+            provenance["qualification_consumption"]["profile"] = "m1_component"
+            provenance_path.write_text(json.dumps(provenance), encoding="utf-8")
+
             downstream_q4 = (
                 root
                 / "src/multiagent_simulation/worlds/m4_downstream/m4_only.sdf"
@@ -479,7 +492,6 @@ class M1SceneValidatorTests(unittest.TestCase):
             )
             self.assertEqual(current_downstream_changed["details"], result["details"])
 
-            provenance_path = run_dir / "metrics/provenance.json"
             provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
             provenance["source_manifest"].pop(
                 "src/multiagent_simulation/launch/multiagent_simulation.launch.py"
@@ -494,25 +506,44 @@ class M1SceneValidatorTests(unittest.TestCase):
         )
 
     def test_launch_import_bytecode_cannot_pollute_installed_bundle(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            run_dir = self.make_fixture(root)
-            cache = (
-                run_dir
-                / "runtime_overlay/install/multiagent_simulation/share/"
-                "multiagent_simulation/launch/__pycache__"
+        cases = {
+            "bytecode": "installed package inputs differ",
+            "directory_symlink": "linked or special",
+            "fifo": "linked or special",
+        }
+        for case, expected_failure in cases.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                run_dir = self.make_fixture(root)
+                installed_share = (
+                    run_dir
+                    / "runtime_overlay/install/multiagent_simulation/share/"
+                    "multiagent_simulation"
+                )
+                if case == "bytecode":
+                    cache = installed_share / "launch/__pycache__"
+                    cache.mkdir()
+                    (
+                        cache / "multiagent_simulation.launch.cpython-310.pyc"
+                    ).write_bytes(b"runtime-generated-bytecode")
+                elif case == "directory_symlink":
+                    outside = root / "untracked_runtime_alias_target"
+                    outside.mkdir()
+                    (outside / "payload.sdf").write_text(
+                        "<sdf version='1.9'/>", encoding="utf-8"
+                    )
+                    (installed_share / "worlds/untracked_alias").symlink_to(
+                        outside, target_is_directory=True
+                    )
+                else:
+                    os.mkfifo(installed_share / "worlds/untracked_fifo")
+                with mock.patch.object(validator, "ROOT_DIR", root):
+                    result = validator.runtime_inputs_status(run_dir)
+            self.assertEqual(result["status"], "failed")
+            self.assertIn(
+                expected_failure,
+                "\n".join(result["details"]["failures"]),
             )
-            cache.mkdir()
-            (cache / "multiagent_simulation.launch.cpython-310.pyc").write_bytes(
-                b"runtime-generated-bytecode"
-            )
-            with mock.patch.object(validator, "ROOT_DIR", root):
-                result = validator.runtime_inputs_status(run_dir)
-        self.assertEqual(result["status"], "failed")
-        self.assertIn(
-            "installed package inputs differ",
-            "\n".join(result["details"]["failures"]),
-        )
 
     def test_runner_disables_installed_launch_bytecode_before_overlay_build(self) -> None:
         runner = (
