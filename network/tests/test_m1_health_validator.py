@@ -110,6 +110,12 @@ class M1SceneValidatorTests(unittest.TestCase):
             "<license>GPL-3.0</license></package>\n",
             encoding="utf-8",
         )
+        downstream_q4 = package_root / "worlds/m4_downstream/m4_only.sdf"
+        downstream_q4.parent.mkdir()
+        downstream_q4.write_text(
+            "<sdf version='1.9'><world name='downstream_q4'/></sdf>\n",
+            encoding="utf-8",
+        )
 
         run_dir = root / "runs/m1_fixture"
         (run_dir / "metrics").mkdir(parents=True)
@@ -119,6 +125,10 @@ class M1SceneValidatorTests(unittest.TestCase):
             / "runtime_overlay/install/multiagent_simulation/share/multiagent_simulation"
         )
         shutil.copytree(source_bundle, installed_share / "worlds/fixture")
+        shutil.copytree(
+            downstream_q4.parent,
+            installed_share / "worlds/m4_downstream",
+        )
         shutil.copytree(source_models, installed_share / "models")
         (installed_share / "launch").mkdir()
         shutil.copy2(launch, installed_share / "launch/multiagent_simulation.launch.py")
@@ -126,8 +136,7 @@ class M1SceneValidatorTests(unittest.TestCase):
         shutil.copytree(package_root / "rviz", installed_share / "rviz")
         shutil.copy2(package_root / "package.xml", installed_share / "package.xml")
         source_hash = "a" * 64
-        source_inputs = [
-            scenario,
+        allowed_package_inputs = [
             launch,
             package_root / "package.xml",
             *sorted(path for path in (package_root / "config").rglob("*") if path.is_file()),
@@ -135,6 +144,8 @@ class M1SceneValidatorTests(unittest.TestCase):
             *sorted(path for path in source_bundle.rglob("*") if path.is_file()),
             *sorted(path for path in source_models.rglob("*") if path.is_file()),
         ]
+        source_inputs = [scenario, *allowed_package_inputs]
+        qualification_inputs = [*source_inputs, downstream_q4]
         provenance = {
             "source_hash": source_hash,
             "git_commit": "a" * 40,
@@ -143,6 +154,21 @@ class M1SceneValidatorTests(unittest.TestCase):
             "source_manifest": {
                 path.relative_to(root).as_posix(): producer.sha256_file(path)
                 for path in source_inputs
+            },
+            "qualification_consumption": {
+                "profile": "m1_component",
+                "consumed_nodes": ["Q0", "Q1"],
+            },
+            "qualification_content_vector": {
+                "entry_manifest": [
+                    {
+                        "path": path.relative_to(root).as_posix(),
+                        "owner": "Q4" if path == downstream_q4 else "Q1",
+                        "kind": "regular",
+                        "blob_sha256": producer.sha256_file(path),
+                    }
+                    for path in qualification_inputs
+                ]
             },
         }
         (run_dir / "metrics/provenance.json").write_text(
@@ -426,7 +452,46 @@ class M1SceneValidatorTests(unittest.TestCase):
             run_dir = self.make_fixture(root)
             with mock.patch.object(validator, "ROOT_DIR", root):
                 result = validator.runtime_inputs_status(run_dir)
-        self.assertEqual(result["status"], "passed", result)
+            self.assertEqual(result["status"], "passed", result)
+            self.assertEqual(
+                result["details"]["recorded_package_input_count"],
+                result["details"]["installed_package_input_count"],
+            )
+            self.assertLess(
+                result["details"]["qualified_package_input_count"],
+                result["details"]["recorded_package_input_count"],
+            )
+
+            downstream_q4 = (
+                root
+                / "src/multiagent_simulation/worlds/m4_downstream/m4_only.sdf"
+            )
+            downstream_q4.write_text(
+                "<sdf version='1.9'><world name='changed_after_record'/></sdf>\n",
+                encoding="utf-8",
+            )
+            with mock.patch.object(validator, "ROOT_DIR", root):
+                current_downstream_changed = validator.runtime_inputs_status(run_dir)
+            self.assertEqual(
+                current_downstream_changed["status"],
+                "passed",
+                current_downstream_changed,
+            )
+            self.assertEqual(current_downstream_changed["details"], result["details"])
+
+            provenance_path = run_dir / "metrics/provenance.json"
+            provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+            provenance["source_manifest"].pop(
+                "src/multiagent_simulation/launch/multiagent_simulation.launch.py"
+            )
+            provenance_path.write_text(json.dumps(provenance), encoding="utf-8")
+            with mock.patch.object(validator, "ROOT_DIR", root):
+                missing_binding = validator.runtime_inputs_status(run_dir)
+        self.assertEqual(missing_binding["status"], "failed")
+        self.assertIn(
+            "accepted provenance does not exactly bind qualified package inputs",
+            "\n".join(missing_binding["details"]["failures"]),
+        )
 
     def test_launch_import_bytecode_cannot_pollute_installed_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -487,22 +552,34 @@ class M1SceneValidatorTests(unittest.TestCase):
         self.assertNotIn('\n                "mavproxy.py",', launch)
 
     def test_mutated_installed_runtime_config_fails(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            run_dir = self.make_fixture(root)
-            installed = (
-                run_dir
-                / "runtime_overlay/install/multiagent_simulation/share/"
-                "multiagent_simulation/config/gazebo-iris.parm"
+        for case in ("mutated_qualified", "mutated_downstream"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                run_dir = self.make_fixture(root)
+                installed_share = (
+                    run_dir
+                    / "runtime_overlay/install/multiagent_simulation/share/"
+                    "multiagent_simulation"
+                )
+                if case == "mutated_qualified":
+                    installed = installed_share / "config/gazebo-iris.parm"
+                    installed.write_text("FRAME_CLASS 99\n", encoding="utf-8")
+                else:
+                    installed = (
+                        installed_share
+                        / "worlds/m4_downstream/m4_only.sdf"
+                    )
+                    installed.write_text(
+                        "<sdf version='1.9'><world name='forged_q4'/></sdf>\n",
+                        encoding="utf-8",
+                    )
+                with mock.patch.object(validator, "ROOT_DIR", root):
+                    result = validator.runtime_inputs_status(run_dir)
+            self.assertEqual(result["status"], "failed")
+            self.assertIn(
+                "installed package inputs differ",
+                "\n".join(result["details"]["failures"]),
             )
-            installed.write_text("FRAME_CLASS 99\n", encoding="utf-8")
-            with mock.patch.object(validator, "ROOT_DIR", root):
-                result = validator.runtime_inputs_status(run_dir)
-        self.assertEqual(result["status"], "failed")
-        self.assertIn(
-            "installed package inputs differ",
-            "\n".join(result["details"]["failures"]),
-        )
 
     def test_forged_summary_cannot_hide_wrong_raw_gazebo_world(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

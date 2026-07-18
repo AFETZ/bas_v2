@@ -879,24 +879,163 @@ def runtime_inputs_status(run_dir: Path) -> dict[str, Any]:
             failures.append("run-local installed launch differs from committed source")
     except OSError as exc:
         failures.append(f"run-local installed launch cannot be hashed: {exc}")
+    recorded_inputs: dict[str, str] = {}
+    qualified_inputs: dict[str, str] = {}
+    current_qualified_inputs: dict[str, str] = {}
+    installed_inputs: dict[str, str] = {}
     try:
         source_package = ROOT_DIR / "src/multiagent_simulation"
-        source_inputs = _package_runtime_inputs(source_package)
         installed_inputs = _package_runtime_inputs(installed_share)
-        if installed_inputs != source_inputs:
-            failures.append("run-local installed package inputs differ from committed source")
+
+        qualification = (
+            provenance.get("qualification_consumption")
+            if isinstance(provenance.get("qualification_consumption"), dict)
+            else {}
+        )
+        expected_consumed_nodes = ["Q0", "Q1"]
+        if (
+            qualification.get("profile") != "m1_component"
+            or qualification.get("consumed_nodes") != expected_consumed_nodes
+        ):
+            failures.append(
+                "accepted provenance does not consume exactly M1 qualification nodes Q0,Q1"
+            )
+
+        vector = (
+            provenance.get("qualification_content_vector")
+            if isinstance(provenance.get("qualification_content_vector"), dict)
+            else {}
+        )
+        raw_entries = vector.get("entry_manifest")
+        if not isinstance(raw_entries, list):
+            failures.append("qualification vector entry manifest is unavailable")
+            raw_entries = []
+        package_prefix = "src/multiagent_simulation/"
+        package_directories = {"config", "launch", "models", "worlds", "rviz"}
+        seen_paths: set[str] = set()
+        recorded_owners: dict[str, str] = {}
+        for entry in raw_entries:
+            if not isinstance(entry, dict):
+                failures.append("qualification vector contains a malformed entry")
+                continue
+            tracked = entry.get("path")
+            if not isinstance(tracked, str) or not tracked:
+                failures.append("qualification vector contains a malformed path")
+                continue
+            if tracked in seen_paths:
+                failures.append(f"qualification vector contains duplicate path {tracked}")
+                continue
+            seen_paths.add(tracked)
+            if not tracked.startswith(package_prefix):
+                continue
+            relative = tracked[len(package_prefix) :]
+            try:
+                relative_path = PurePosixPath(relative)
+            except ValueError:
+                failures.append(f"qualification vector package path is invalid: {tracked}")
+                continue
+            relevant = relative == "package.xml" or (
+                len(relative_path.parts) >= 2
+                and relative_path.parts[0] in package_directories
+            )
+            if not relevant:
+                continue
+            if (
+                not relative
+                or relative_path.is_absolute()
+                or any(part in {"", ".", ".."} for part in relative_path.parts)
+                or relative_path.as_posix() != relative
+            ):
+                failures.append(f"qualification vector package path is invalid: {tracked}")
+                continue
+            owner = entry.get("owner")
+            if owner not in {f"Q{index}" for index in range(9)}:
+                failures.append(
+                    f"qualification vector has invalid owner for package input {tracked}"
+                )
+                continue
+            if entry.get("kind") != "regular":
+                failures.append(
+                    f"qualification vector package input is not regular: {tracked}"
+                )
+                continue
+            recorded_hash = entry.get("blob_sha256")
+            if (
+                not isinstance(recorded_hash, str)
+                or re.fullmatch(r"[0-9a-f]{64}", recorded_hash) is None
+            ):
+                failures.append(
+                    f"qualification vector hash is invalid for package input {tracked}"
+                )
+                continue
+            recorded_inputs[relative] = recorded_hash
+            recorded_owners[relative] = owner
+
         source_manifest = (
             provenance.get("source_manifest")
             if isinstance(provenance.get("source_manifest"), dict)
             else {}
         )
-        for relative, expected_hash in source_inputs.items():
-            tracked = f"src/multiagent_simulation/{relative}"
-            if source_manifest.get(tracked) != expected_hash:
-                failures.append(f"accepted provenance does not bind package input {tracked}")
+        if not isinstance(provenance.get("source_manifest"), dict):
+            failures.append("accepted provenance source manifest is unavailable")
+
+        consumed_owners = set(expected_consumed_nodes)
+        qualified_inputs = {
+            relative: recorded_hash
+            for relative, recorded_hash in recorded_inputs.items()
+            if recorded_owners.get(relative) in consumed_owners
+        }
+        selective_manifest_inputs: dict[str, str] = {}
+        for tracked, recorded_hash in source_manifest.items():
+            if not isinstance(tracked, str) or not tracked.startswith(package_prefix):
+                continue
+            relative = tracked[len(package_prefix) :]
+            relative_path = PurePosixPath(relative)
+            relevant = relative == "package.xml" or (
+                len(relative_path.parts) >= 2
+                and relative_path.parts[0] in package_directories
+            )
+            if relevant:
+                selective_manifest_inputs[relative] = recorded_hash
+        if selective_manifest_inputs != qualified_inputs:
+            failures.append(
+                "accepted provenance does not exactly bind qualified package inputs"
+            )
+
+        for relative, recorded_hash in qualified_inputs.items():
+            path = source_package / relative
+            try:
+                info = path.lstat()
+            except OSError as exc:
+                failures.append(
+                    f"qualified current package input is unavailable: {relative}: {exc}"
+                )
+                continue
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or stat.S_ISLNK(info.st_mode)
+                or info.st_nlink != 1
+            ):
+                failures.append(
+                    f"qualified current package input is linked or special: {relative}"
+                )
+                continue
+            current_hash = sha256_file(path)
+            current_qualified_inputs[relative] = current_hash
+            if current_hash != recorded_hash:
+                failures.append(
+                    f"qualified current package input differs from recorded vector: {relative}"
+                )
+        if current_qualified_inputs != qualified_inputs:
+            failures.append(
+                "qualified current package inputs differ from the recorded M1 subset"
+            )
+
+        if installed_inputs != recorded_inputs:
+            failures.append(
+                "run-local installed package inputs differ from the recorded qualification vector"
+            )
     except (OSError, ValueError) as exc:
-        source_inputs = {}
-        installed_inputs = {}
         failures.append(f"complete run-local package input comparison failed: {exc}")
 
     return gate(
@@ -911,7 +1050,10 @@ def runtime_inputs_status(run_dir: Path) -> dict[str, Any]:
             ),
             "build_command": command,
             "build_log_bytes": len(build_log.encode("utf-8")),
-            "source_package_input_count": len(source_inputs),
+            "source_package_input_count": len(recorded_inputs),
+            "recorded_package_input_count": len(recorded_inputs),
+            "qualified_package_input_count": len(qualified_inputs),
+            "current_qualified_package_input_count": len(current_qualified_inputs),
             "installed_package_input_count": len(installed_inputs),
             "python_dont_write_bytecode": environment.get(
                 "python_dont_write_bytecode"
@@ -921,7 +1063,12 @@ def runtime_inputs_status(run_dir: Path) -> dict[str, Any]:
             "python_no_user_site": environment.get("python_no_user_site"),
             "pymavlink_origin": environment.get("pymavlink_origin"),
             "package_inputs_sha256": hashlib.sha256(
-                json.dumps(source_inputs, sort_keys=True, separators=(",", ":")).encode(
+                json.dumps(recorded_inputs, sort_keys=True, separators=(",", ":")).encode(
+                    "utf-8"
+                )
+            ).hexdigest(),
+            "qualified_package_inputs_sha256": hashlib.sha256(
+                json.dumps(qualified_inputs, sort_keys=True, separators=(",", ":")).encode(
                     "utf-8"
                 )
             ).hexdigest(),
