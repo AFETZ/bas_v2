@@ -1502,6 +1502,7 @@ def _host_execution_identity(
             entry = by_path.get(relative)
             if (
                 not isinstance(entry, dict)
+                or entry.get("owner") != "Q0"
                 or entry.get("object_type") != "blob"
                 or entry.get("git_mode") != "100755"
                 or SHA256.fullmatch(str(entry.get("blob_sha256") or "")) is None

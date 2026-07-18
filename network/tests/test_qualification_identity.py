@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Callable
 from unittest import mock
 
+import yaml
+
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
@@ -876,6 +878,19 @@ class RepositoryQualificationPolicyTests(unittest.TestCase):
                 {path for path, owner in assignments.items() if owner == node},
                 expected,
             )
+
+        dependency_lock = yaml.safe_load(
+            (ROOT_DIR / "network/config/dependency_lock.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        critical_executables = dependency_lock["m0_execution_policy"][
+            "critical_source_executables"
+        ]
+        self.assertTrue(critical_executables)
+        self.assertEqual(len(critical_executables), len(set(critical_executables)))
+        for relative in critical_executables:
+            self.assertEqual(assignments.get(relative), "Q0", relative)
 
 
 if __name__ == "__main__":

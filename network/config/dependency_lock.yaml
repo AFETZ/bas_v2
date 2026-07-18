@@ -69,7 +69,6 @@ m0_execution_policy:
     - network/scripts/run_m0_host_final.sh
     - network/scripts/run_m0_host_reexecution.sh
     - network/scripts/run_status_validation.sh
-    - network/scripts/finalize_m1_host.py
     - network/scripts/m0_bin/python3
     - network/scripts/check_deps.sh
     - network/scripts/verify_m0_runtime_lock.py
