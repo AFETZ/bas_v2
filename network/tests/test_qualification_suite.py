@@ -150,10 +150,12 @@ class QualificationSuiteTests(unittest.TestCase):
             }
         )
 
+        sys_path_before = list(sys.path)
         suite, manifest, _digest = prepare_node_test_suite(self.root, "Q0", vector)
         self.assertEqual(manifest["test_modules"], [q0_module])
         self.assertEqual(suite.countTestCases(), 1)
         self.assertNotIn(q1_module, sys.modules)
+        self.assertEqual(sys.path, sys_path_before)
 
     def test_extra_discovered_method_fails_closed_against_frozen_ids(self) -> None:
         module = "test_q0_extra_method_fixture"
@@ -170,8 +172,10 @@ class QualificationSuiteTests(unittest.TestCase):
             [f"{module}.ExampleTests.test_first"],
         )
         vector = self.vector({test_path: "Q0", manifest: "Q0"})
+        sys_path_before = list(sys.path)
         with self.assertRaisesRegex(QualificationSuiteError, "frozen ordered"):
             prepare_node_test_suite(self.root, "Q0", vector)
+        self.assertEqual(sys.path, sys_path_before)
 
     def test_new_owned_module_missing_from_manifest_fails_before_import(self) -> None:
         first = "test_q0_manifested_fixture"

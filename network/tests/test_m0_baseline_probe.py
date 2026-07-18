@@ -43,6 +43,16 @@ class M0BaselineProbeTests(unittest.TestCase):
     PYTHON_BYTES = 12345
     PYTHON_SHA256 = "d" * 64
 
+    def setUp(self) -> None:
+        inherited = os.environ.pop("AMS_M0_ARTIFACT_ROOT", None)
+
+        def restore() -> None:
+            os.environ.pop("AMS_M0_ARTIFACT_ROOT", None)
+            if inherited is not None:
+                os.environ["AMS_M0_ARTIFACT_ROOT"] = inherited
+
+        self.addCleanup(restore)
+
     def test_capability_probe_success_marker_preserves_newline(self) -> None:
         printf_command = validator.M0_CAPABILITY_COMMAND_SCRIPT.rsplit("; ", 1)[1]
         completed = subprocess.run(
@@ -986,6 +996,8 @@ class M0BaselineProbeTests(unittest.TestCase):
             fresh_source = root.parent / f".ams-m0-fresh-source.{uuid.uuid4().hex}"
             fresh_source.mkdir()
             with mock.patch.object(validator, "ROOT_DIR", root), mock.patch.object(
+                validator, "_inside_docker_runtime", return_value=False
+            ), mock.patch.object(
                 validator, "_host_checkout_snapshot", side_effect=[(snapshot, None), (snapshot, None)]
             ), mock.patch.object(
                 validator, "_checkout_snapshot", return_value=(snapshot, None)
@@ -1058,6 +1070,8 @@ class M0BaselineProbeTests(unittest.TestCase):
             control.mkdir()
             self.addCleanup(shutil.rmtree, control, True)
             with mock.patch.object(validator, "ROOT_DIR", root), mock.patch.object(
+                validator, "_inside_docker_runtime", return_value=False
+            ), mock.patch.object(
                 validator, "_host_checkout_snapshot", return_value=(snapshot, None)
             ), mock.patch.object(
                 validator,
@@ -1076,6 +1090,19 @@ class M0BaselineProbeTests(unittest.TestCase):
             any("identities are not coherent" in failure for failure in failures), failures
         )
         reexecute.assert_not_called()
+
+    def test_host_final_refuses_container_runtime_marker(self) -> None:
+        with mock.patch.object(
+            validator, "_inside_docker_runtime", return_value=True
+        ):
+            result = validator.host_final_gate(
+                Path("/tmp/not-inspected-run"),
+                "b" * 64,
+                initial_control_dir=Path("/tmp/not-inspected-control"),
+            )
+        self.assertEqual(result["status"], "failed", result)
+        self.assertEqual(result["proof"], "host-final must execute on the Docker host")
+        self.assertEqual(result["details"]["failures"], ["/.dockerenv is present"])
 
     def test_explicit_host_final_gate_is_added_without_recursive_default(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1144,16 +1171,29 @@ class M0BaselineProbeTests(unittest.TestCase):
         self.assertFalse(document["p0_eligible"])
 
     def test_runner_refuses_to_reuse_existing_run(self) -> None:
-        run_id = f"m0_existing_{uuid.uuid4().hex}"
-        run_dir = ROOT_DIR / "runs" / run_id
-        run_dir.mkdir(parents=True)
-        sentinel = run_dir / "sentinel"
-        sentinel.write_text("unchanged\n", encoding="utf-8")
-        try:
+        with tempfile.TemporaryDirectory() as temp:
+            run_id = f"m0_existing_{uuid.uuid4().hex}"
+            run_root = Path(temp) / "runs"
+            run_dir = run_root / run_id
+            run_dir.mkdir(parents=True)
+            sentinel = run_dir / "sentinel"
+            sentinel.write_text("unchanged\n", encoding="utf-8")
+            environment = {
+                key: value
+                for key, value in os.environ.items()
+                if not key.startswith("AMS_M0_")
+            }
+            environment.update(
+                {
+                    "RUN_ID": run_id,
+                    "RUN_DIR": str(run_dir),
+                    "AMS_M0_ARTIFACT_ROOT": str(run_root),
+                }
+            )
             result = subprocess.run(
                 ["bash", str(ROOT_DIR / "network/scripts/run_m0_baseline.sh")],
                 cwd=ROOT_DIR,
-                env={**os.environ, "RUN_ID": run_id},
+                env=environment,
                 capture_output=True,
                 text=True,
                 check=False,
@@ -1162,8 +1202,6 @@ class M0BaselineProbeTests(unittest.TestCase):
             self.assertIn("immutable snapshot acceptance path", result.stderr)
             self.assertEqual(sentinel.read_text(encoding="utf-8"), "unchanged\n")
             self.assertEqual(list(run_dir.iterdir()), [sentinel])
-        finally:
-            shutil.rmtree(run_dir)
 
     def test_runner_contains_no_sealing_or_attestation_command(self) -> None:
         text = (ROOT_DIR / "network/scripts/run_m0_baseline.sh").read_text(encoding="utf-8")

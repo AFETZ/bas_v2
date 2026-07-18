@@ -9,7 +9,7 @@ milestone: **M0**.
 
 1. Complete the independent audit of the current M0 boundary.
 2. Rerun the exact-image runtime lock after the final manifest/policy edits.
-3. Verify 181/181 frozen Q0 IDs, shell/Python syntax and `git diff --check`.
+3. Verify 182/182 frozen Q0 IDs, shell/Python syntax and `git diff --check`.
 4. Commit a clean technical base.
 5. Allocate one new M0 run ID, execute the unprivileged exact-image collector,
    perform host-final fresh-source re-execution and isolated capability probe,

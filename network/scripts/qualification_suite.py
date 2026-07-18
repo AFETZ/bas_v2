@@ -356,31 +356,37 @@ def discover_owned_test_suite(
     )
     combined = unittest.TestSuite()
     discovered_ids: list[str] = []
-    loader = unittest.defaultTestLoader
-    for module in modules:
-        expected_path = (test_root / f"{module}.py").resolve(strict=True)
-        preloaded_origin = _module_origin(module)
-        if preloaded_origin is not None and preloaded_origin != expected_path:
-            raise QualificationSuiteError(
-                f"preloaded test module has the wrong origin: {module}: {preloaded_origin}"
+    loader = unittest.TestLoader()
+    sys_path_before = list(sys.path)
+    try:
+        for module in modules:
+            expected_path = (test_root / f"{module}.py").resolve(strict=True)
+            preloaded_origin = _module_origin(module)
+            if preloaded_origin is not None and preloaded_origin != expected_path:
+                raise QualificationSuiteError(
+                    f"preloaded test module has the wrong origin: {module}: {preloaded_origin}"
+                )
+            discovered = loader.discover(
+                str(test_root),
+                pattern=f"{module}.py",
+                top_level_dir=str(test_root),
             )
-        discovered = loader.discover(
-            str(test_root),
-            pattern=f"{module}.py",
-            top_level_dir=str(test_root),
-        )
-        module_tests = list(flatten_suite(discovered))
-        module_ids = [test.id() for test in module_tests]
-        if not module_ids or any(value.split(".", 1)[0] != module for value in module_ids):
-            raise QualificationSuiteError(
-                f"{node} discovery for {module} is empty, failed, or cross-module"
-            )
-        if _module_origin(module) != expected_path:
-            raise QualificationSuiteError(
-                f"discovered test module has the wrong origin: {module}"
-            )
-        combined.addTests(discovered)
-        discovered_ids.extend(module_ids)
+            module_tests = list(flatten_suite(discovered))
+            module_ids = [test.id() for test in module_tests]
+            if not module_ids or any(
+                value.split(".", 1)[0] != module for value in module_ids
+            ):
+                raise QualificationSuiteError(
+                    f"{node} discovery for {module} is empty, failed, or cross-module"
+                )
+            if _module_origin(module) != expected_path:
+                raise QualificationSuiteError(
+                    f"discovered test module has the wrong origin: {module}"
+                )
+            combined.addTests(discovered)
+            discovered_ids.extend(module_ids)
+    finally:
+        sys.path[:] = sys_path_before
     if (
         discovered_ids != sorted(discovered_ids)
         or len(discovered_ids) != len(set(discovered_ids))

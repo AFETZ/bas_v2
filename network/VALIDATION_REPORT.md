@@ -11,7 +11,7 @@ sequential milestones: **0**.
 
 | Milestone | Formal status | Evidence and blocker |
 | --- | --- | --- |
-| M0 | `in_progress` | The hardened implementation and frozen 181-test Q0 suite pass in preflight, but no receipt produced by the current qualification boundary exists yet. |
+| M0 | `in_progress` | The hardened implementation and frozen 182-test Q0 suite pass in preflight, but no receipt produced by the current qualification boundary exists yet. |
 | M1 | `not_started` | Hardened implementation exists; sequential execution waits for M0 and then requires a new clean uninterrupted 300-second five-UAV run. |
 | M2 | `not_started` | Existing one-UAV packet-path diagnostics cannot precede M1 closure. |
 | M3 | `not_started` | No accepted five-UAV, three-class, bidirectional external ns-3 matrix. |
@@ -35,7 +35,7 @@ separate three-file live-status descendant both pass.
 
 ## Current Technical Evidence
 
-- Current frozen Q0 preflight: **181/181 passed** across the complete focused test set; the formal exact-image execution is still pending.
+- Current frozen Q0 preflight: **182/182 passed** across the complete focused test set; the formal exact-image execution is still pending.
 - Focused runtime-lock, M0 host-final and status-lint suites: **53/53 passed**.
 - The exact immutable image remains
   `sha256:9456aa370188987f7b21ba16514d5805dc10bbbe26c322ca3241fedde80014f0`.

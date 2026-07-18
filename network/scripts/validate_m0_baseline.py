@@ -211,6 +211,12 @@ def gate(status: str, proof: str, details: dict[str, Any] | None = None) -> dict
     return result
 
 
+def _inside_docker_runtime() -> bool:
+    """Return the host-final trust-boundary marker through a testable seam."""
+
+    return Path("/.dockerenv").exists()
+
+
 def _m0_run_root() -> Path:
     value = os.environ.get("AMS_M0_ARTIFACT_ROOT")
     return Path(value) if value else ROOT_DIR / "runs"
@@ -1717,7 +1723,7 @@ def _parse_host_unittest_output(
 
 def _legacy_host_final_gate_unused(run_dir: Path, expected_container_id: str) -> dict[str, Any]:
     failures: list[str] = []
-    if Path("/.dockerenv").exists():
+    if _inside_docker_runtime():
         return gate(
             "failed",
             "host-final validation must execute on the Docker host",
@@ -3153,7 +3159,7 @@ def host_final_gate(
     failures: list[str] = []
     owned_host_validation = False
     fresh_source_path: Path | None = None
-    if Path("/.dockerenv").exists():
+    if _inside_docker_runtime():
         return gate("failed", "host-final must execute on the Docker host", {"failures": ["/.dockerenv is present"]})
     if CONTAINER_ID.fullmatch(expected_container_id) is None:
         return gate("failed", "host-final container ID is malformed", {"failures": ["full lowercase container ID required"]})

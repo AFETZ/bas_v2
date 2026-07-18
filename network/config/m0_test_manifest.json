@@ -64,6 +64,7 @@
     "test_m0_baseline_probe.M0BaselineProbeTests.test_generator_zero_does_not_override_failed_provenance_status",
     "test_m0_baseline_probe.M0BaselineProbeTests.test_hardlinked_leaf_is_rejected",
     "test_m0_baseline_probe.M0BaselineProbeTests.test_host_final_reexecutes_dependencies_and_full_suite",
+    "test_m0_baseline_probe.M0BaselineProbeTests.test_host_final_refuses_container_runtime_marker",
     "test_m0_baseline_probe.M0BaselineProbeTests.test_host_final_rejects_consistent_container_substitution",
     "test_m0_baseline_probe.M0BaselineProbeTests.test_logs_and_metrics_symlink_parents_are_rejected",
     "test_m0_baseline_probe.M0BaselineProbeTests.test_missing_discovered_test_fails_closed",
