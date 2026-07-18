@@ -209,6 +209,21 @@ class EvidenceAttestationV2Tests(unittest.TestCase):
             verification = verify_evidence_attestation(fixture.run_dir, fixture.trust())
             self.assertEqual(verification["status"], "failed")
 
+    def test_manifest_listed_raw_mutation_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            fixture = Fixture(Path(temporary))
+            fixture.attest()
+            raw_path = fixture.run_dir / "metrics/joint_runtime.json"
+            _replace_readonly(raw_path, raw_path.read_bytes() + b" ")
+            verification = verify_evidence_attestation(
+                fixture.run_dir, fixture.trust()
+            )
+            self.assertEqual(verification["status"], "failed", verification)
+            self.assertIn(
+                "raw evidence does not match manifest",
+                "\n".join(verification["details"]["failures"]),
+            )
+
     def test_existing_outputs_and_external_ledger_forbid_resigning(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             fixture = Fixture(Path(temporary))

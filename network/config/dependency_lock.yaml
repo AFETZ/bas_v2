@@ -7,17 +7,17 @@ status: complete
 # are excluded from pip_freeze because their source/commit identity is bound by
 # the independent Git, source-manifest, and external-source records.
 runtime_manifest_sha256:
-  pip_freeze: 32dc50a7ee822df78700f55cd55f7a3b73ea8161df3a9ca8c8be8ee4d5e75b0f
+  pip_freeze: 36941db39413d66f80191197d8df8d771221dce3a440cbe98f9078cca012b70e
   dpkg: a15632deb743e50e6ca7f5807382db896a2f69cf854bedc9dbc8a9d47067ae88
-  ros_packages: 182e8d89ec14795d131d2f1d25c35b1b3f1d430505ee4b74c74f5bc10a71dffb
+  ros_packages: 0b1d47e01d3f92b96a85cb04dd867e13579d23caf933092a8113a94fec5503da
 
 # The complete ordered M0 unittest identity is a tracked, hash-locked
 # acceptance input. Discovery must match it byte-for-byte; counts alone never
 # qualify a suite.
 m0_test_manifest:
   path: network/config/m0_test_manifest.json
-  sha256: da9e44b776fbe7e127fa3688e34c1eb4c9eed6f0625abbd37add23f7c4945698
-  ordered_test_count: 179
+  sha256: daae82ed5f0b57354558bd214040927d772dc75bf30956172751e2ad929534cb
+  ordered_test_count: 181
 
 # Exact command-resolution and Python import boundary used by both M0 suite
 # executions. Source scripts are content-bound by Q0; immutable image and host

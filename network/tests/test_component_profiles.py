@@ -35,6 +35,17 @@ class ComponentProfileTests(unittest.TestCase):
             "    set -u\n",
             entrypoint,
         )
+        self.assertIn(
+            "export PATH=/opt/ros/humble/bin:/usr/local/sbin:/usr/local/bin:"
+            "/usr/sbin:/usr/bin:/sbin:/bin\n",
+            entrypoint,
+        )
+        self.assertIn(
+            'export PYTHONPATH="/tmp/ams-m0-overlay-${M0_RUN_ID}/install/'
+            'multiagent_simulation/lib/python3.10/site-packages:'
+            '$AMS_M0_BASE_PYTHONPATH"\n',
+            entrypoint,
+        )
 
     def test_root_component_git_checks_use_only_exact_checkout_safe_directory(self) -> None:
         entrypoint = (

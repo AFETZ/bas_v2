@@ -895,12 +895,49 @@ class M0BaselineProbeTests(unittest.TestCase):
         self.assertIn("validation-suite source bytes changed during execution", failures)
 
     def test_required_semantic_coverage_cannot_disappear_with_discovery(self) -> None:
+        manifest = json.loads(
+            (ROOT_DIR / "network/config/m0_test_manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        required_ids = {
+            test_id
+            for test_ids in validator.REQUIRED_M0_COVERAGE.values()
+            for test_id in test_ids
+        }
+        self.assertLessEqual(required_ids, set(manifest["ordered_test_ids"]))
         removed = validator.REQUIRED_M0_COVERAGE["arp_only"][0]
         discovered = [test_id for test_id in self.TEST_IDS if test_id != removed]
         failures = validator._required_coverage_failures(
             discovered, discovered, context="fixture"
         )
         self.assertTrue(any("arp_only" in failure for failure in failures), failures)
+
+    def test_cross_run_provenance_run_id_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp) / "expected_run"
+            metrics = run_dir / "metrics"
+            metrics.mkdir(parents=True)
+            (metrics / "provenance.json").write_text(
+                json.dumps(
+                    {
+                        "run_id": "substituted_run",
+                        "git_commit": "a" * 40,
+                        "git_dirty": False,
+                        "source_hash": "b" * 64,
+                        "config_hashes": {},
+                        "dependency_versions": {},
+                        "container_image": {},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            result = validator.provenance_status(run_dir)
+        self.assertEqual(result["status"], "failed", result)
+        self.assertEqual(
+            result["proof"], "provenance run_id does not match run directory"
+        )
 
     def test_retained_container_inspection_requires_prestart_host_record(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

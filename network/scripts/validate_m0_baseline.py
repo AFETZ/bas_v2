@@ -74,10 +74,10 @@ REQUIRED_M0_COVERAGE: dict[str, tuple[str, ...]] = {
         "test_validation_v2.ValidationV2Tests.test_synthesized_no_bypass_text_is_ignored",
     ),
     "raw_mutation": (
-        "test_validator_hardening_v2.ValidatorHardeningV2Tests.test_artifact_seal_detects_raw_mutation_and_excludes_summary",
+        "test_evidence_attestation_v2.EvidenceAttestationV2Tests.test_manifest_listed_raw_mutation_fails_closed",
     ),
     "cross_run_substitution": (
-        "test_provenance_v2.ProvenanceV2Tests.test_cross_run_provenance_is_rejected",
+        "test_m0_baseline_probe.M0BaselineProbeTests.test_cross_run_provenance_run_id_fails_closed",
     ),
     "signature_mismatch": (
         "test_evidence_attestation_v2.EvidenceAttestationV2Tests.test_manifest_or_signature_mutation_fails_closed",

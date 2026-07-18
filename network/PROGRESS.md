@@ -32,7 +32,7 @@ diagnostics are foundation evidence, not milestone closure.
 - Q0–Q8 identity is derived from committed Git objects; the conservative
   bootstrap assigns every tracked technical byte to Q0 and excludes only the
   three mutable status documents.
-- The exact ordered M0 suite contains **179 unique test IDs** and is bound by
+- The exact ordered M0 suite contains **181 unique test IDs** and is bound by
   `network/config/dependency_lock.yaml`.
 - Python execution records exact ordered `sys.path`, `.pth` inventory,
   customization/plugin state, every loaded module origin and byte hash, and
@@ -51,7 +51,7 @@ diagnostics are foundation evidence, not milestone closure.
 
 ```text
 python3 -m unittest discover -b -s network/tests -p 'test_*.py'
-  -> 179/179 passed across the complete focused preflight set
+  -> 181/181 passed across the complete focused preflight set
 
 Focused M0 runtime/host/status suites
   -> 53/53 passed
@@ -82,7 +82,7 @@ M0 closes.
 ## Immediate Critical Path
 
 1. Finish independent M0 audit and exact-image runtime-lock rerun.
-2. Commit one clean technical base containing the 179-ID manifest.
+2. Commit one clean technical base containing the 181-ID manifest.
 3. Execute captured M0, independent exact-image re-execution, isolated
    capability probe and atomic host-final publication.
 4. Create the exact three-file status-only descendant and pass live-status

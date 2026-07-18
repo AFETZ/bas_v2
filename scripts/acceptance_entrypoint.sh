@@ -47,6 +47,9 @@ if [[ "${AMS_M0_SOURCE_MODE:-}" == "clean_git_clone_ro" ]]; then
     printf 'FAIL M0 collection security profile is not exact\n' >&2
     exit 2
   fi
+  # Workspace setup hooks prepend developer/tool paths. Formal M0 resolves
+  # every executable through the narrower path locked in dependency_lock.yaml.
+  export PATH=/opt/ros/humble/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
   CAP_BOUNDING="$(awk '$1 == "CapBnd:" {print $2}' /proc/self/status)"
   NO_NEW_PRIVS="$(awk '$1 == "NoNewPrivs:" {print $2}' /proc/self/status)"
   if [[ "$CAP_BOUNDING" != "0000000000000000" ]] || \
@@ -97,7 +100,7 @@ if [[ "${AMS_M0_SOURCE_MODE:-}" == "clean_git_clone_ro" ]]; then
   export GIT_OPTIONAL_LOCKS=0
   export AMS_M0_PYTHON_GUARD="$PWD/network/scripts/m0_python_guard"
   export AMS_M0_BASE_PYTHONPATH="$AMS_M0_PYTHON_GUARD:$PWD:/workspace/ardu_ws/install/ros_gz_interfaces/local/lib/python3.10/dist-packages:/workspace/ardu_ws/build/ardupilot_dds_tests:/workspace/ardu_ws/install/ardupilot_dds_tests/lib/python3.10/site-packages:/workspace/ardu_ws/install/ardupilot_sitl/local/lib/python3.10/dist-packages:/workspace/ardu_ws/install/ardupilot_msgs/local/lib/python3.10/dist-packages:/opt/ros/humble/lib/python3.10/site-packages:/opt/ros/humble/local/lib/python3.10/dist-packages:/home/ubuntu/.local/lib/python3.10/site-packages:/usr/local/lib/python3.10/dist-packages:/usr/lib/python3/dist-packages"
-  export PYTHONPATH="$AMS_M0_BASE_PYTHONPATH"
+  export PYTHONPATH="/tmp/ams-m0-overlay-${M0_RUN_ID}/install/multiagent_simulation/lib/python3.10/site-packages:$AMS_M0_BASE_PYTHONPATH"
   if [[ "$(/usr/bin/python3.10 -c 'import pathlib,sitecustomize,sys; print(str(sys.flags.no_site) + ":" + str(int(getattr(sitecustomize,"AMS_M0_INERT_SITECUSTOMIZE",False))) + ":" + str(int("usercustomize" in sys.modules)) + ":" + str(pathlib.Path(sitecustomize.__file__).resolve()))')" != "0:1:0:$PWD/network/scripts/m0_python_guard/sitecustomize.py" ]]; then
     printf 'FAIL normal child Python did not load exactly the tracked inert guard\n' >&2
     exit 2
