@@ -965,6 +965,19 @@ class StatusDocumentsLiveValidatorTests(unittest.TestCase):
         self.assertTrue(result["passed"], result)
         self.assertEqual(result["report_commit"], self.fixture._git("rev-parse", "HEAD").stdout.strip())
 
+        initial = {
+            "Mounts": [
+                {"Destination": "/workspace", "Source": "/tmp/source"},
+                {"Destination": "/run/output", "Source": "/tmp/output"},
+            ]
+        }
+        final = copy.deepcopy(initial)
+        final["Mounts"].reverse()
+        self.assertEqual(
+            _container_immutable_fingerprint(initial),
+            _container_immutable_fingerprint(final),
+        )
+
     def test_passing_booleans_cannot_hide_forged_host_reexecution(self) -> None:
         self.fixture.rewrite_receipt(
             lambda receipt: receipt["gates"]["host_final"]["details"].update(

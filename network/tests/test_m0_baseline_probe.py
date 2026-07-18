@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import hashlib
 import io
 import json
@@ -1222,6 +1223,38 @@ class M0BaselineProbeTests(unittest.TestCase):
         self.assertFalse(document["passed"])
         self.assertFalse(document["p0_eligible"])
 
+        failed_host_result = {
+            "formal_accepted": False,
+            "passed": False,
+            "failures": ["host_final: exact diagnostic failure"],
+            "gates": {
+                "host_final": {
+                    "status": "failed",
+                    "proof": "exact diagnostic failure",
+                    "details": {"failures": ["primary host-final cause"]},
+                }
+            },
+        }
+        output = io.StringIO()
+        with mock.patch.object(validator, "ROOT_DIR", root), mock.patch.object(
+            validator, "evaluate_m0_baseline", return_value=failed_host_result
+        ), contextlib.redirect_stdout(output):
+            return_code = validator.main(
+                [
+                    "--run-dir",
+                    str(run_dir),
+                    "--require-host-final",
+                    "--expected-container-id",
+                    "b" * 64,
+                    "--initial-control-dir",
+                    str(root / "control"),
+                    "--publish-run-dir",
+                    str(root / "runs/published"),
+                ]
+            )
+        self.assertEqual(return_code, 1)
+        self.assertEqual(json.loads(output.getvalue()), failed_host_result)
+
     def test_runner_refuses_to_reuse_existing_run(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             run_id = f"m0_existing_{uuid.uuid4().hex}"
@@ -1259,6 +1292,120 @@ class M0BaselineProbeTests(unittest.TestCase):
         text = (ROOT_DIR / "network/scripts/run_m0_baseline.sh").read_text(encoding="utf-8")
         self.assertNotIn("seal_run_evidence.py", text)
         self.assertNotIn("attest_run_evidence.py", text)
+
+        wrapper = (ROOT_DIR / "scripts/run_acceptance_container.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            'M0_ARTIFACT_STAGING="$(cd -- "$M0_ARTIFACT_STAGING" && pwd -P)"',
+            wrapper,
+        )
+        writer_marker = (
+            '  /usr/bin/python3 - "$M0_CONTROL_STAGING" "$CONTAINER_ID" '
+            '"$IMAGE_ID" \\\n    "$M0_ARTIFACT_STAGING" <<\'PY\'\n'
+        )
+        writer_start = wrapper.index(writer_marker) + len(writer_marker)
+        writer = wrapper[writer_start:].split("\nPY\n", 1)[0]
+        self.assertIn('getattr(os, "O_NOFOLLOW", 0)', writer)
+
+        with tempfile.TemporaryDirectory() as temp:
+            temp_root = Path(temp)
+            control = temp_root / "control"
+            artifact = temp_root / "artifact"
+            control.mkdir()
+            artifact.mkdir()
+            (control / "initial_container_inspect.json").write_text(
+                "[]\n", encoding="utf-8"
+            )
+            (control / "initial_image_inspect.json").write_text(
+                "[]\n", encoding="utf-8"
+            )
+            linked_artifact = temp_root / "artifact-link"
+            linked_artifact.symlink_to(artifact, target_is_directory=True)
+            rejected = subprocess.run(
+                [
+                    "/usr/bin/python3",
+                    "-",
+                    str(control),
+                    "b" * 64,
+                    "sha256:" + "a" * 64,
+                    str(linked_artifact),
+                ],
+                input=writer,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertFalse((control / "prestart_inspection_record.json").exists())
+            accepted = subprocess.run(
+                [
+                    "/usr/bin/python3",
+                    "-",
+                    str(control),
+                    "b" * 64,
+                    "sha256:" + "a" * 64,
+                    str(artifact),
+                ],
+                input=writer,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+            prestart = json.loads(
+                (control / "prestart_inspection_record.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(prestart["artifact_root_initial"]["path"], str(artifact))
+        validator_text = (
+            ROOT_DIR / "network/scripts/validate_m0_baseline.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "'all,\"capabilities=compute,utility\"'",
+            validator_text,
+        )
+        self.assertIn(
+            '"NVIDIA_DRIVER_CAPABILITIES=compute,utility"',
+            validator_text,
+        )
+
+        initial = {
+            "Mounts": [
+                {"Destination": "/workspace", "Source": "/tmp/source"},
+                {"Destination": "/run/output", "Source": "/tmp/output"},
+            ]
+        }
+        final = copy.deepcopy(initial)
+        final["Mounts"].reverse()
+        self.assertEqual(
+            validator._container_immutable_fingerprint(initial),
+            validator._container_immutable_fingerprint(final),
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            checkout = Path(temp) / "project"
+            subprocess.run(
+                [
+                    "/usr/bin/git",
+                    "clone",
+                    "--quiet",
+                    "--no-hardlinks",
+                    str(ROOT_DIR),
+                    str(checkout),
+                ],
+                check=True,
+            )
+            commit = subprocess.run(
+                ["/usr/bin/git", "-C", str(checkout), "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            snapshot, error = validator._checkout_snapshot(checkout, commit)
+        self.assertIsNone(error)
+        self.assertEqual(snapshot["git_commit"], commit)
 
     def test_formal_dependency_probe_is_exactly_q0_scoped(self) -> None:
         policy = json.loads(

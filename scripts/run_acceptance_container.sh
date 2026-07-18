@@ -136,6 +136,8 @@ if (($# == 3)) && [[ "$1" == "env" ]] && \
   chmod -R a-w "$M0_SOURCE_SNAPSHOT"
   M0_ARTIFACT_STAGING="$(mktemp -d "$ROOT_DIR/../.ams-m0-artifacts-$M0_RUN_ID.XXXXXXXXXX")"
   M0_CONTROL_STAGING="$(mktemp -d "$ROOT_DIR/../.ams-m0-control-$M0_RUN_ID.XXXXXXXXXX")"
+  M0_ARTIFACT_STAGING="$(cd -- "$M0_ARTIFACT_STAGING" && pwd -P)"
+  M0_CONTROL_STAGING="$(cd -- "$M0_CONTROL_STAGING" && pwd -P)"
   chmod 0700 "$M0_CONTROL_STAGING"
 fi
 if (($# == 7)) && [[ "$1" == "timeout" ]] && \
@@ -588,15 +590,45 @@ if ((M0_MODE == 1)); then
 import datetime
 import hashlib
 import json
+import os
 import pathlib
+import stat
 import sys
 
 root = pathlib.Path(sys.argv[1])
 container_id, image_id = sys.argv[2:4]
 artifact_root = pathlib.Path(sys.argv[4])
-artifact_info = artifact_root.stat(follow_symlinks=False)
-if not artifact_root.is_dir() or artifact_root.is_symlink() or any(artifact_root.iterdir()):
-    raise SystemExit("artifact staging is not one empty real directory")
+if (
+    not artifact_root.is_absolute()
+    or artifact_root != pathlib.Path(os.path.normpath(str(artifact_root)))
+    or artifact_root.resolve(strict=True) != artifact_root
+):
+    raise SystemExit("artifact staging path is not canonical and symlink-free")
+descriptor = os.open(
+    artifact_root,
+    os.O_RDONLY
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_DIRECTORY", 0)
+    | getattr(os, "O_NOFOLLOW", 0),
+)
+try:
+    artifact_info = os.fstat(descriptor)
+    opened_root = pathlib.Path(f"/proc/self/fd/{descriptor}").resolve(strict=True)
+    if (
+        opened_root != artifact_root
+        or not stat.S_ISDIR(artifact_info.st_mode)
+        or os.listdir(descriptor)
+    ):
+        raise SystemExit("artifact staging is not one empty real directory")
+    artifact_info_after = os.fstat(descriptor)
+finally:
+    os.close(descriptor)
+stable = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_mtime_ns", "st_ctime_ns")
+if any(
+    getattr(artifact_info, field) != getattr(artifact_info_after, field)
+    for field in stable
+):
+    raise SystemExit("artifact staging changed during prestart inspection")
 container_raw = (root / "initial_container_inspect.json").read_bytes()
 image_raw = (root / "initial_image_inspect.json").read_bytes()
 record = {

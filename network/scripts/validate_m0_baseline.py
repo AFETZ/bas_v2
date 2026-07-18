@@ -1979,7 +1979,9 @@ def _checkout_snapshot(
         vector = qualification_content_vector(root, expected_commit)
         manifest, manifest_sha256 = load_frozen_test_manifest(root)
         plan_path = root / "doc/network_radio_integration_plan_v3.md"
-        _plan_bytes, plan_sha256 = _sha256_path(plan_path)
+        _plan_bytes, plan_sha256 = _sha256_path(
+            plan_path, additional_root=root
+        )
         return {
             "git_commit": expected_commit,
             "source_file_count": len(bindings),
@@ -2318,14 +2320,20 @@ def _container_immutable_fingerprint(document: dict[str, Any]) -> dict[str, Any]
     config = document.get("Config") if isinstance(document.get("Config"), dict) else {}
     host = document.get("HostConfig") if isinstance(document.get("HostConfig"), dict) else {}
     mounts = document.get("Mounts") if isinstance(document.get("Mounts"), list) else []
-    normalized_mounts = [
+    normalized_mounts = sorted(
+        [
             {
                 key: mount.get(key)
                 for key in ("Type", "Source", "Destination", "Mode", "RW", "Propagation")
             }
             for mount in mounts
             if isinstance(mount, dict)
-        ]
+        ],
+        key=lambda record: (
+            str(record.get("Destination")),
+            str(record.get("Source")),
+        ),
+    )
     return {
         "Image": document.get("Image"),
         "Config": {
@@ -2814,7 +2822,9 @@ def _run_in_fresh_exact_image(
     try:
         create = _run_host_command(
             [
-                "docker", "create", "--cap-drop=ALL",
+                "docker", "create",
+                "--gpus", 'all,"capabilities=compute,utility"',
+                "--cap-drop=ALL",
                 "--security-opt=no-new-privileges:true", "--network=none",
                 "--user", "ubuntu", "--restart=no", "--read-only",
                 "--tmpfs", "/tmp:rw,nosuid,nodev,exec,size=4g,mode=1777",
@@ -2828,6 +2838,9 @@ def _run_in_fresh_exact_image(
                 "-e", "AMS_M0_ARTIFACT_ROOT=/run/ams/m0-artifacts",
                 "-e", "AMS_M0_COLLECTION_SECURITY=cap_drop_all_no_new_privileges",
                 "-e", "AMS_M0_CAPABILITY_PROBE_MODE=host_final_isolated_exact_image",
+                "-e", "NVIDIA_VISIBLE_DEVICES=all",
+                "-e", "NVIDIA_DRIVER_CAPABILITIES=compute,utility",
+                "-e", "SIONNA_MITSUBA_VARIANT=cuda_ad_mono_polarized",
                 "-e", "GZ_VERSION=harmonic",
                 "-v", f"{identity_path}:/run/ams/container_id:ro",
                 "-v", f"{source_snapshot}:{CONTAINER_WORKDIR}:ro",
@@ -2899,6 +2912,9 @@ def _run_in_fresh_exact_image(
             "USER": "ubuntu",
             "LOGNAME": "ubuntu",
             "HOME": "/home/ubuntu",
+            "NVIDIA_VISIBLE_DEVICES": "all",
+            "NVIDIA_DRIVER_CAPABILITIES": "compute,utility",
+            "SIONNA_MITSUBA_VARIANT": "cuda_ad_mono_polarized",
             "AMS_CONTAINER_IMAGE": image_digest,
             "AMS_CONTAINER_IMAGE_DIGEST": image_digest,
             "AMS_CONTAINER_IMAGE_DIGEST_SOURCE": "docker_image_inspect_host",
@@ -2938,6 +2954,7 @@ def _run_in_fresh_exact_image(
                 ["label=disable", "no-new-privileges:true"],
             )
             or host.get("Devices") != []
+            or host.get("DeviceRequests") != EXPECTED_GPU_DEVICE_REQUESTS
         ):
             failures.append("fresh exact-image Config/HostConfig is not exact")
         mounts = final_doc.get("Mounts") if isinstance(final_doc.get("Mounts"), list) else []
@@ -3938,8 +3955,8 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError(publish_error or "host receipt was not published")
             # The dict is mutated by _publish_host_receipt before serialization.
             result["run_dir"] = result["published_run_dir"]
-        elif args.publish_run_dir is not None:
-            raise ValueError("--publish-run-dir is valid only for passing host-final")
+        elif args.publish_run_dir is not None and not args.require_host_final:
+            raise ValueError("--publish-run-dir requires --require-host-final")
     except Exception as exc:  # Preserve a machine-readable fail-closed result.
         result = {
             "schema_version": 3,

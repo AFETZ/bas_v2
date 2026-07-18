@@ -2004,6 +2004,20 @@ def _container_immutable_fingerprint(document: dict[str, Any]) -> dict[str, Any]
     config = document.get("Config") if isinstance(document.get("Config"), dict) else {}
     host = document.get("HostConfig") if isinstance(document.get("HostConfig"), dict) else {}
     mounts = document.get("Mounts") if isinstance(document.get("Mounts"), list) else []
+    normalized_mounts = sorted(
+        [
+            {
+                key: mount.get(key)
+                for key in ("Type", "Source", "Destination", "Mode", "RW", "Propagation")
+            }
+            for mount in mounts
+            if isinstance(mount, dict)
+        ],
+        key=lambda record: (
+            str(record.get("Destination")),
+            str(record.get("Source")),
+        ),
+    )
     return {
         "Image": document.get("Image"),
         "Config": {
@@ -2025,14 +2039,7 @@ def _container_immutable_fingerprint(document: dict[str, Any]) -> dict[str, Any]
                 "DeviceRequests",
             )
         },
-        "Mounts": [
-            {
-                key: mount.get(key)
-                for key in ("Type", "Source", "Destination", "Mode", "RW", "Propagation")
-            }
-            for mount in mounts
-            if isinstance(mount, dict)
-        ],
+        "Mounts": normalized_mounts,
     }
 
 
