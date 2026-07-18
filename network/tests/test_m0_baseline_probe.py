@@ -510,6 +510,8 @@ class M0BaselineProbeTests(unittest.TestCase):
         root: Path,
         run_dir: Path,
         provenance: dict[str, object] | None = None,
+        *,
+        expected_source_commit: str = "HEAD",
     ) -> dict[str, object]:
         independent = provenance or {
             "status": "passed",
@@ -526,13 +528,53 @@ class M0BaselineProbeTests(unittest.TestCase):
             "_runtime_executable_identity",
             return_value=(self.PYTHON_BYTES, self.PYTHON_SHA256, None),
         ):
-            return validator.evaluate_m0_baseline(run_dir)
+            return validator.evaluate_m0_baseline(
+                run_dir, expected_source_commit=expected_source_commit
+            )
 
     def test_pass_requires_all_independent_gates(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             run_dir = self.make_run(root)
             result = self.evaluate(root, run_dir)
+            execution_commit = json.loads(
+                (run_dir / "metrics/provenance.json").read_text(encoding="utf-8")
+            )["git_commit"]
+            for relative in suite_runner.MUTABLE_STATUS_OUTPUTS:
+                path = root / relative
+                path.write_text(
+                    path.read_text(encoding="utf-8") + "status descendant\n",
+                    encoding="utf-8",
+                )
+            subprocess.run(
+                ["/usr/bin/git", "-C", str(root), "add", *suite_runner.MUTABLE_STATUS_OUTPUTS],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "/usr/bin/git",
+                    "-C",
+                    str(root),
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "status descendant",
+                ],
+                check=True,
+            )
+            wrong_head = self.evaluate(root, run_dir)
+            status_revalidated = self.evaluate(
+                root,
+                run_dir,
+                expected_source_commit=execution_commit,
+            )
+            technical = root / "network/scripts/run_m0_baseline.sh"
+            technical.write_text("#!/usr/bin/env bash\n# changed Q0\n", encoding="utf-8")
+            q0_changed = self.evaluate(
+                root,
+                run_dir,
+                expected_source_commit=execution_commit,
+            )
 
         self.assertFalse(result["passed"])
         self.assertTrue(result["captured_qualified"])
@@ -549,6 +591,19 @@ class M0BaselineProbeTests(unittest.TestCase):
         self.assertFalse(result["scope"]["packet_path"])
         self.assertFalse(result["scope"]["sealing"])
         self.assertFalse(result["scope"]["attestation"])
+        self.assertEqual(
+            wrong_head["gates"]["validation_adversarial_suite"]["status"],
+            "failed",
+        )
+        self.assertTrue(status_revalidated["captured_qualified"], status_revalidated)
+        self.assertEqual(
+            status_revalidated["gates"]["validation_adversarial_suite"]["status"],
+            "passed",
+        )
+        self.assertEqual(
+            q0_changed["gates"]["validation_adversarial_suite"]["status"],
+            "failed",
+        )
 
     def test_nonzero_dependency_exit_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1021,6 +1076,7 @@ class M0BaselineProbeTests(unittest.TestCase):
                     source_commit="1" * 40,
                     image_reference="multiagent_simulation:latest",
                     initial_control_dir=control,
+                    evidence_phase="initial_final",
                 )
             joined = "\n".join(failures)
             self.assertIn("prestart control path", joined)
@@ -1069,7 +1125,7 @@ class M0BaselineProbeTests(unittest.TestCase):
                     },
                     [],
                 ),
-            ), mock.patch.object(
+            ) as retained_inspection, mock.patch.object(
                 validator,
                 "_run_in_fresh_exact_image",
                 return_value=(
@@ -1105,6 +1161,20 @@ class M0BaselineProbeTests(unittest.TestCase):
         self.assertEqual(
             result["details"]["fresh_exact_image_reexecution"]["passing_test_count"],
             len(self.TEST_IDS),
+        )
+        self.assertEqual(retained_inspection.call_count, 2)
+        self.assertEqual(
+            [
+                call.kwargs.get("evidence_phase")
+                for call in retained_inspection.call_args_list
+            ],
+            ["initial_final", "reinspection"],
+        )
+        self.assertTrue(
+            all(
+                call.kwargs.get("host_validation_dir") is not None
+                for call in retained_inspection.call_args_list
+            )
         )
 
     def test_host_final_rejects_consistent_container_substitution(self) -> None:
@@ -1254,6 +1324,25 @@ class M0BaselineProbeTests(unittest.TestCase):
             )
         self.assertEqual(return_code, 1)
         self.assertEqual(json.loads(output.getvalue()), failed_host_result)
+
+        for extra_args in (
+            ["--captured-producer-mode", "--expected-source-commit", "not-a-commit"],
+            ["--expected-source-commit", "a" * 40],
+        ):
+            output = io.StringIO()
+            with mock.patch.object(validator, "evaluate_m0_baseline") as evaluate, \
+                    contextlib.redirect_stdout(output):
+                return_code = validator.main(
+                    ["--run-dir", str(run_dir), *extra_args]
+                )
+            document = json.loads(output.getvalue())
+            self.assertEqual(return_code, 1)
+            self.assertFalse(document["passed"])
+            self.assertIn(
+                "--expected-source-commit is restricted",
+                document["failures"][0],
+            )
+            evaluate.assert_not_called()
 
     def test_runner_refuses_to_reuse_existing_run(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -37,6 +37,7 @@ MAX_TEST_LOG_BYTES = 16 * 1024 * 1024
 MAX_BUILD_LOG_BYTES = 32 * 1024 * 1024
 MAX_RUNTIME_LOCK_BYTES = 128 * 1024
 SHA256 = re.compile(r"[0-9a-f]{64}")
+SHA1 = re.compile(r"[0-9a-f]{40}")
 IMAGE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 UTC_TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 CONTAINER_ID = re.compile(r"[0-9a-f]{64}")
@@ -734,7 +735,9 @@ def runtime_lock_gate(run_dir: Path) -> dict[str, Any]:
     )
 
 
-def validation_suite_gate(run_dir: Path) -> dict[str, Any]:
+def validation_suite_gate(
+    run_dir: Path, *, expected_source_commit: str = "HEAD"
+) -> dict[str, Any]:
     failures: list[str] = []
     parsed_outcomes: list[tuple[str, str]] = []
     producer_exit, exit_error = _producer_exit_code(
@@ -961,7 +964,9 @@ def validation_suite_gate(run_dir: Path) -> dict[str, Any]:
             import_policy = None
             failures.append(f"M0 Python import policy could not be rederived: {exc}")
         try:
-            expected_vector = qualification_content_vector(ROOT_DIR, "HEAD")
+            expected_vector = qualification_content_vector(
+                ROOT_DIR, expected_source_commit
+            )
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             expected_vector = None
             failures.append(f"qualification content vector could not be recomputed: {exc}")
@@ -2366,10 +2371,13 @@ def _inspect_retained_container(
     source_commit: str,
     image_reference: str,
     initial_control_dir: Path,
+    evidence_phase: str,
     host_validation_dir: Path | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     failures: list[str] = []
     details: dict[str, Any] = {}
+    if evidence_phase not in {"initial_final", "reinspection"}:
+        raise ValueError("retained-container evidence phase is invalid")
     record, record_raw, record_error = _read_control_json(
         initial_control_dir, "prestart_inspection_record.json", MAX_TEST_RESULT_BYTES
     )
@@ -2617,12 +2625,17 @@ def _inspect_retained_container(
     if initial and final and _container_immutable_fingerprint(initial) != _container_immutable_fingerprint(final):
         failures.append("retained container immutable configuration changed after collection")
 
+    evidence_root = f"retained/{evidence_phase}"
     raw_values = {
-        "retained/prestart_inspection_record.json": record_raw or b"",
-        "retained/initial_container_inspect.json": container_raw or b"",
-        "retained/initial_image_inspect.json": image_raw or b"",
-        "retained/final_container_inspect.json": final_result.stdout.encode("utf-8"),
-        "retained/final_image_inspect.json": final_image_result.stdout.encode("utf-8"),
+        f"{evidence_root}/prestart_inspection_record.json": record_raw or b"",
+        f"{evidence_root}/initial_container_inspect.json": container_raw or b"",
+        f"{evidence_root}/initial_image_inspect.json": image_raw or b"",
+        f"{evidence_root}/final_container_inspect.json": final_result.stdout.encode(
+            "utf-8"
+        ),
+        f"{evidence_root}/final_image_inspect.json": final_image_result.stdout.encode(
+            "utf-8"
+        ),
     }
     if host_validation_dir is not None:
         for relative, payload in raw_values.items():
@@ -3284,6 +3297,8 @@ def host_final_gate(
             source_commit=source_commit,
             image_reference=str(image_reference),
             initial_control_dir=initial_control_dir,
+            evidence_phase="initial_final",
+            host_validation_dir=host_validation_dir,
         )
         failures.extend(inspect_failures)
         retained_source_identity, retained_source_error = _checkout_snapshot(
@@ -3360,6 +3375,7 @@ def host_final_gate(
             source_commit=str(source_commit),
             image_reference=str(image_reference),
             initial_control_dir=initial_control_dir,
+            evidence_phase="reinspection",
             host_validation_dir=host_validation_dir,
         )
         failures.extend(after_failures)
@@ -3738,6 +3754,7 @@ def evaluate_m0_baseline(
     expected_container_id: str | None = None,
     initial_control_dir: Path | None = None,
     host_validation_dir: Path | None = None,
+    expected_source_commit: str = "HEAD",
 ) -> dict[str, Any]:
     safe_run_dir, input_error = _safe_run_directory(
         run_dir, allow_staging=require_host_final
@@ -3760,7 +3777,9 @@ def evaluate_m0_baseline(
         gates = {
             "dependency_check": dependency_gate(safe_run_dir),
             "runtime_lock": runtime_lock_gate(safe_run_dir),
-            "validation_adversarial_suite": validation_suite_gate(safe_run_dir),
+            "validation_adversarial_suite": validation_suite_gate(
+                safe_run_dir, expected_source_commit=expected_source_commit
+            ),
             "provenance": provenance_gate(safe_run_dir),
         }
         run_id = safe_run_dir.name
@@ -3922,6 +3941,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="emit a non-formal captured receipt; passed/formal_accepted remain false",
     )
+    parser.add_argument(
+        "--expected-source-commit",
+        help="technical commit used only for status-descendant captured revalidation",
+    )
     return parser.parse_args(argv)
 
 
@@ -3929,6 +3952,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     host_validation_staging: Path | None = None
     try:
+        expected_source_commit = args.expected_source_commit or "HEAD"
+        if args.expected_source_commit is not None and (
+            not args.captured_producer_mode
+            or args.require_host_final
+            or SHA1.fullmatch(args.expected_source_commit) is None
+        ):
+            raise ValueError(
+                "--expected-source-commit is restricted to captured status revalidation"
+            )
         if args.require_host_final:
             host_validation_staging = Path(
                 tempfile.mkdtemp(
@@ -3942,6 +3974,7 @@ def main(argv: list[str] | None = None) -> int:
             expected_container_id=args.expected_container_id,
             initial_control_dir=args.initial_control_dir,
             host_validation_dir=host_validation_staging,
+            expected_source_commit=expected_source_commit,
         )
         if args.require_host_final and result.get("formal_accepted") is True:
             if args.publish_run_dir is None:

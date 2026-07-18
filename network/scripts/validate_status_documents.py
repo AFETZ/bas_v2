@@ -93,12 +93,23 @@ FORMAL_GATE_NAMES = {
     "provenance",
     "host_final",
 }
-RETAINED_CONTROL_FILE_NAMES = (
-    "retained/prestart_inspection_record.json",
-    "retained/initial_container_inspect.json",
-    "retained/initial_image_inspect.json",
-    "retained/final_container_inspect.json",
-    "retained/final_image_inspect.json",
+RETAINED_CONTROL_BASENAMES = (
+    "prestart_inspection_record.json",
+    "initial_container_inspect.json",
+    "initial_image_inspect.json",
+    "final_container_inspect.json",
+    "final_image_inspect.json",
+)
+RETAINED_CONTROL_FILE_NAMES_BY_PHASE = {
+    phase: tuple(
+        f"retained/{phase}/{name}" for name in RETAINED_CONTROL_BASENAMES
+    )
+    for phase in ("initial_final", "reinspection")
+}
+RETAINED_CONTROL_FILE_NAMES = tuple(
+    name
+    for phase in ("initial_final", "reinspection")
+    for name in RETAINED_CONTROL_FILE_NAMES_BY_PHASE[phase]
 )
 M1_NEXT_COMMAND_ARGV = [
     "scripts/run_acceptance_container.sh",
@@ -1655,12 +1666,18 @@ def _validate_published_artifacts(
     for relative, entry in entries.items():
         if not isinstance(entry, dict) or entry.get("kind") != "file":
             continue
+        expected_bytes = entry.get("bytes")
         try:
             payload = _secure_read_relative(
                 root,
                 f"runs/{run_id}/{relative}",
                 maximum_bytes=MAX_RECEIPT_BYTES,
                 require_read_only=True,
+                allow_empty=(
+                    not isinstance(expected_bytes, bool)
+                    and isinstance(expected_bytes, int)
+                    and expected_bytes == 0
+                ),
             )
         except ValueError as exc:
             failures.append(str(exc))
@@ -2841,12 +2858,20 @@ def _validate_control_raw(
     host_details = receipt.get("gates", {}).get("host_final", {}).get("details", {})
     raw_bindings = (
         (
-            "retained",
+            "retained initial/final",
+            host_details.get("retained_container_initial_final", {}).get("raw_sha256")
+            if isinstance(host_details, dict)
+            and isinstance(host_details.get("retained_container_initial_final"), dict)
+            else None,
+            set(RETAINED_CONTROL_FILE_NAMES_BY_PHASE["initial_final"]),
+        ),
+        (
+            "retained reinspection",
             host_details.get("retained_container_reinspection", {}).get("raw_sha256")
             if isinstance(host_details, dict)
             and isinstance(host_details.get("retained_container_reinspection"), dict)
             else None,
-            set(RETAINED_CONTROL_FILE_NAMES),
+            set(RETAINED_CONTROL_FILE_NAMES_BY_PHASE["reinspection"]),
         ),
         (
             "fresh",
@@ -2932,7 +2957,6 @@ def _validate_control_raw(
     if len(documents) != len(RETAINED_CONTROL_FILE_NAMES):
         return failures
 
-    prestart = documents["retained/prestart_inspection_record.json"]
     expected_prestart_keys = {
         "schema_version",
         "contract",
@@ -2943,109 +2967,6 @@ def _validate_control_raw(
         "initial_container_inspect",
         "initial_image_inspect",
     }
-    if not isinstance(prestart, dict) or set(prestart) != expected_prestart_keys:
-        failures.append("prestart inspection record schema is not exact")
-        prestart = {}
-    if (
-        prestart.get("schema_version") != 1
-        or prestart.get("contract") != "ams.m0.prestart-inspection/v1"
-        or prestart.get("container_id") != container_id
-        or prestart.get("image_id") != image_digest
-        or UTC_TIMESTAMP.fullmatch(str(prestart.get("created_utc") or "")) is None
-    ):
-        failures.append("prestart inspection record identity is invalid")
-    artifact_initial = prestart.get("artifact_root_initial")
-    if (
-        not isinstance(artifact_initial, dict)
-        or set(artifact_initial)
-        != {
-            "path",
-            "device",
-            "inode",
-            "mode",
-            "entry_count",
-            "content_manifest_sha256",
-        }
-        or not isinstance(artifact_initial.get("path"), str)
-        or not Path(artifact_initial.get("path", "")).is_absolute()
-        or Path(artifact_initial.get("path", "")).parent != root.parent
-        or re.fullmatch(
-            rf"\.ams-m0-artifacts-{re.escape(run_id)}\.[A-Za-z0-9]{{10}}",
-            Path(artifact_initial.get("path", "")).name,
-        )
-        is None
-        or any(
-            isinstance(artifact_initial.get(key), bool)
-            or not isinstance(artifact_initial.get(key), int)
-            for key in ("device", "inode", "mode", "entry_count")
-        )
-        or artifact_initial.get("entry_count") != 0
-        or artifact_initial.get("mode") != 0o700
-        or artifact_initial.get("device", 0) < 1
-        or artifact_initial.get("inode", 0) < 1
-        or artifact_initial.get("content_manifest_sha256") != _sha256(b"[]")
-    ):
-        failures.append("prestart empty artifact-root identity is invalid")
-    for key, name in (
-        ("initial_container_inspect", "retained/initial_container_inspect.json"),
-        ("initial_image_inspect", "retained/initial_image_inspect.json"),
-    ):
-        producer_name = name.removeprefix("retained/")
-        expected = {
-            "path": producer_name,
-            "bytes": len(payloads[name]),
-            "sha256": _sha256(payloads[name]),
-        }
-        if prestart.get(key) != expected:
-            failures.append(f"prestart raw binding is invalid: {key}")
-
-    def one_document(name: str) -> dict[str, Any]:
-        value = documents.get(name)
-        return value[0] if isinstance(value, list) and len(value) == 1 and isinstance(value[0], dict) else {}
-
-    initial_container = one_document("retained/initial_container_inspect.json")
-    final_container = one_document("retained/final_container_inspect.json")
-    initial_image = one_document("retained/initial_image_inspect.json")
-    final_image = one_document("retained/final_image_inspect.json")
-    initial_state = initial_container.get("State") if isinstance(initial_container.get("State"), dict) else {}
-    final_state = final_container.get("State") if isinstance(final_container.get("State"), dict) else {}
-    if (
-        initial_container.get("Id") != container_id
-        or initial_container.get("Image") != image_digest
-        or initial_state.get("Status") != "created"
-        or initial_state.get("Running") is not False
-        or initial_container.get("RestartCount") != 0
-    ):
-        failures.append("raw initial container inspection is invalid")
-    expected_final_state = {
-        "Status": "exited",
-        "Running": False,
-        "Paused": False,
-        "Restarting": False,
-        "OOMKilled": False,
-        "Dead": False,
-        "ExitCode": 0,
-    }
-    if (
-        final_container.get("Id") != container_id
-        or final_container.get("Image") != image_digest
-        or final_container.get("RestartCount") != 0
-        or any(final_state.get(key) != value for key, value in expected_final_state.items())
-    ):
-        failures.append("raw final container inspection is not exact exited/zero")
-    if initial_image.get("Id") != image_digest or final_image.get("Id") != image_digest:
-        failures.append("raw image inspections do not bind the exact image digest")
-    if initial_image != final_image:
-        failures.append("raw exact image inspection changed during M0 finalization")
-
-    config = final_container.get("Config") if isinstance(final_container.get("Config"), dict) else {}
-    host = (
-        final_container.get("HostConfig")
-        if isinstance(final_container.get("HostConfig"), dict)
-        else {}
-    )
-    environment, environment_failures = _docker_environment(config.get("Env"))
-    failures.extend(environment_failures)
     expected_environment = {
         "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         "LANG": "C.UTF-8",
@@ -3070,135 +2991,281 @@ def _validate_control_raw(
         "AMS_M0_COLLECTION_SECURITY": "cap_drop_all_no_new_privileges",
         "AMS_M0_CAPABILITY_PROBE_MODE": "host_final_isolated_exact_image",
     }
-    if (
-        environment != expected_environment
-    ):
-        failures.append("raw retained-container environment is not the exact M0 environment")
     expected_command = [
         "scripts/acceptance_entrypoint.sh",
         "env",
         f"RUN_ID={run_id}",
         "network/scripts/run_m0_baseline.sh",
     ]
-    if (
-        config.get("Image") != image_digest
-        or config.get("User") != "ubuntu"
-        or config.get("Entrypoint") != ["/ros_entrypoint.sh"]
-        or config.get("Cmd") != expected_command
-        or config.get("WorkingDir") != "/workspace/multiagent_simulation"
-    ):
-        failures.append("raw retained-container Config identity is not exact")
-    if (
-        host.get("Privileged") is not False
-        or host.get("NetworkMode") != "none"
-        or host.get("ReadonlyRootfs") is not True
-        or host.get("RestartPolicy") != {"Name": "no", "MaximumRetryCount": 0}
-        or host.get("Tmpfs")
-        != {"/tmp": "rw,nosuid,nodev,exec,size=4g,mode=1777"}
-        or host.get("CapAdd") is not None
-        or host.get("CapDrop") != ["ALL"]
-        or host.get("SecurityOpt")
-        not in (
-            ["no-new-privileges"],
-            ["no-new-privileges:true"],
-            ["label=disable", "no-new-privileges"],
-            ["label=disable", "no-new-privileges:true"],
-        )
-        or host.get("Devices") != []
-    ):
-        failures.append("raw retained-container HostConfig isolation is not exact")
-
-    mounts = final_container.get("Mounts") if isinstance(final_container.get("Mounts"), list) else []
-    by_destination = {
-        mount.get("Destination"): mount for mount in mounts if isinstance(mount, dict)
+    expected_final_state = {
+        "Status": "exited",
+        "Running": False,
+        "Paused": False,
+        "Restarting": False,
+        "OOMKilled": False,
+        "Dead": False,
+        "ExitCode": 0,
     }
-    expected_destinations = {
-        "/run/ams/container_id",
-        "/run/ams/m0-artifacts",
-        "/workspace/multiagent_simulation",
-        "/workspace/multiagent_simulation/.external/ns-3",
-    }
-    if len(mounts) != 4 or len(by_destination) != 4 or set(by_destination) != expected_destinations:
-        failures.append("raw retained-container mount destination set is not exact")
-    artifact_path = (
-        artifact_initial.get("path") if isinstance(artifact_initial, dict) else None
-    )
-    source_path = next(
-        (
-            value
-            for value in (
-                mount.get("Source") for mount in mounts if isinstance(mount, dict)
-            )
-            if isinstance(value, str)
-            and re.fullmatch(r"/tmp/ams-m0-source\.[A-Za-z0-9]{10}", value)
-        ),
-        None,
-    )
-    identity_path = next(
-        (
-            value
-            for value in (
-                mount.get("Source") for mount in mounts if isinstance(mount, dict)
-            )
-            if isinstance(value, str)
-            and re.fullmatch(r"/tmp/ams-container-id\.[A-Za-z0-9]{10}", value)
-        ),
-        None,
-    )
-    expected_mounts = {
-        "/run/ams/container_id": (identity_path, False),
-        "/run/ams/m0-artifacts": (artifact_path, True),
-        "/workspace/multiagent_simulation": (source_path, False),
-        "/workspace/multiagent_simulation/.external/ns-3": (
-            str((root / ".external/ns-3").resolve(strict=False)),
-            False,
-        ),
-    }
-    for destination, (source, writable) in expected_mounts.items():
-        mount = by_destination.get(destination, {})
-        if (
-            not source
-            or mount.get("Type") != "bind"
-            or mount.get("Source") != source
-            or mount.get("RW") is not writable
-            or mount.get("Mode") != ("rw" if writable else "ro")
-            or mount.get("Propagation") != "rprivate"
-        ):
-            failures.append(f"raw retained-container mount is invalid: {destination}")
-    if _container_immutable_fingerprint(initial_container) != _container_immutable_fingerprint(
-        final_container
-    ):
-        failures.append("raw retained-container immutable configuration changed")
-    fingerprint_sha256 = _sha256(_canonical_json(_container_immutable_fingerprint(final_container)))
     host_details = receipt.get("gates", {}).get("host_final", {}).get("details", {})
-    retained_records = (
-        host_details.get("retained_container_initial_final"),
-        host_details.get("retained_container_reinspection"),
-    )
-    raw_hashes = {
-        "prestart_record_sha256": _sha256(
-            payloads["retained/prestart_inspection_record.json"]
-        ),
-        "initial_container_inspect_sha256": _sha256(
-            payloads["retained/initial_container_inspect.json"]
-        ),
-        "initial_image_inspect_sha256": _sha256(
-            payloads["retained/initial_image_inspect.json"]
-        ),
-        "final_container_inspect_sha256": _sha256(
-            payloads["retained/final_container_inspect.json"]
-        ),
-        "final_image_inspect_sha256": _sha256(
-            payloads["retained/final_image_inspect.json"]
-        ),
-    }
-    expected_mount_sources = sorted(
-        str(mount.get("Source")) for mount in mounts if isinstance(mount, dict)
-    )
-    for retained in retained_records:
-        if not isinstance(retained, dict):
-            continue
+    phase_results: dict[str, dict[str, Any]] = {}
+    for phase, receipt_key in (
+        ("initial_final", "retained_container_initial_final"),
+        ("reinspection", "retained_container_reinspection"),
+    ):
+        phase_names = {
+            basename: f"retained/{phase}/{basename}"
+            for basename in RETAINED_CONTROL_BASENAMES
+        }
+
+        def one_document(basename: str) -> dict[str, Any]:
+            value = documents.get(phase_names[basename])
+            return (
+                value[0]
+                if isinstance(value, list)
+                and len(value) == 1
+                and isinstance(value[0], dict)
+                else {}
+            )
+
+        prestart_name = phase_names["prestart_inspection_record.json"]
+        prestart = documents[prestart_name]
+        if not isinstance(prestart, dict) or set(prestart) != expected_prestart_keys:
+            failures.append(f"{phase} prestart inspection record schema is not exact")
+            prestart = {}
         if (
+            prestart.get("schema_version") != 1
+            or prestart.get("contract") != "ams.m0.prestart-inspection/v1"
+            or prestart.get("container_id") != container_id
+            or prestart.get("image_id") != image_digest
+            or UTC_TIMESTAMP.fullmatch(str(prestart.get("created_utc") or ""))
+            is None
+        ):
+            failures.append(f"{phase} prestart inspection record identity is invalid")
+        artifact_initial = prestart.get("artifact_root_initial")
+        if (
+            not isinstance(artifact_initial, dict)
+            or set(artifact_initial)
+            != {
+                "path",
+                "device",
+                "inode",
+                "mode",
+                "entry_count",
+                "content_manifest_sha256",
+            }
+            or not isinstance(artifact_initial.get("path"), str)
+            or not Path(artifact_initial.get("path", "")).is_absolute()
+            or Path(artifact_initial.get("path", "")).parent != root.parent
+            or re.fullmatch(
+                rf"\.ams-m0-artifacts-{re.escape(run_id)}\.[A-Za-z0-9]{{10}}",
+                Path(artifact_initial.get("path", "")).name,
+            )
+            is None
+            or any(
+                isinstance(artifact_initial.get(key), bool)
+                or not isinstance(artifact_initial.get(key), int)
+                for key in ("device", "inode", "mode", "entry_count")
+            )
+            or artifact_initial.get("entry_count") != 0
+            or artifact_initial.get("mode") != 0o700
+            or artifact_initial.get("device", 0) < 1
+            or artifact_initial.get("inode", 0) < 1
+            or artifact_initial.get("content_manifest_sha256") != _sha256(b"[]")
+        ):
+            failures.append(f"{phase} prestart empty artifact-root identity is invalid")
+        for key, basename in (
+            ("initial_container_inspect", "initial_container_inspect.json"),
+            ("initial_image_inspect", "initial_image_inspect.json"),
+        ):
+            name = phase_names[basename]
+            expected = {
+                "path": basename,
+                "bytes": len(payloads[name]),
+                "sha256": _sha256(payloads[name]),
+            }
+            if prestart.get(key) != expected:
+                failures.append(f"{phase} prestart raw binding is invalid: {key}")
+
+        initial_container = one_document("initial_container_inspect.json")
+        final_container = one_document("final_container_inspect.json")
+        initial_image = one_document("initial_image_inspect.json")
+        final_image = one_document("final_image_inspect.json")
+        initial_state = (
+            initial_container.get("State")
+            if isinstance(initial_container.get("State"), dict)
+            else {}
+        )
+        final_state = (
+            final_container.get("State")
+            if isinstance(final_container.get("State"), dict)
+            else {}
+        )
+        if (
+            initial_container.get("Id") != container_id
+            or initial_container.get("Image") != image_digest
+            or initial_state.get("Status") != "created"
+            or initial_state.get("Running") is not False
+            or initial_container.get("RestartCount") != 0
+        ):
+            failures.append(f"{phase} raw initial container inspection is invalid")
+        if (
+            final_container.get("Id") != container_id
+            or final_container.get("Image") != image_digest
+            or final_container.get("RestartCount") != 0
+            or any(
+                final_state.get(key) != value
+                for key, value in expected_final_state.items()
+            )
+        ):
+            failures.append(f"{phase} raw final container is not exact exited/zero")
+        if initial_image.get("Id") != image_digest or final_image.get("Id") != image_digest:
+            failures.append(f"{phase} raw image inspections do not bind exact image")
+        if initial_image != final_image:
+            failures.append(f"{phase} raw exact image inspection changed")
+
+        config = (
+            final_container.get("Config")
+            if isinstance(final_container.get("Config"), dict)
+            else {}
+        )
+        host = (
+            final_container.get("HostConfig")
+            if isinstance(final_container.get("HostConfig"), dict)
+            else {}
+        )
+        environment, environment_failures = _docker_environment(config.get("Env"))
+        failures.extend(f"{phase}: {item}" for item in environment_failures)
+        if environment != expected_environment:
+            failures.append(f"{phase} retained-container environment is not exact")
+        if (
+            config.get("Image") != image_digest
+            or config.get("User") != "ubuntu"
+            or config.get("Entrypoint") != ["/ros_entrypoint.sh"]
+            or config.get("Cmd") != expected_command
+            or config.get("WorkingDir") != "/workspace/multiagent_simulation"
+        ):
+            failures.append(f"{phase} retained-container Config identity is not exact")
+        if (
+            host.get("Privileged") is not False
+            or host.get("NetworkMode") != "none"
+            or host.get("ReadonlyRootfs") is not True
+            or host.get("RestartPolicy") != {"Name": "no", "MaximumRetryCount": 0}
+            or host.get("Tmpfs")
+            != {"/tmp": "rw,nosuid,nodev,exec,size=4g,mode=1777"}
+            or host.get("CapAdd") is not None
+            or host.get("CapDrop") != ["ALL"]
+            or host.get("SecurityOpt")
+            not in (
+                ["no-new-privileges"],
+                ["no-new-privileges:true"],
+                ["label=disable", "no-new-privileges"],
+                ["label=disable", "no-new-privileges:true"],
+            )
+            or host.get("Devices") != []
+            or host.get("DeviceRequests") != EXPECTED_GPU_DEVICE_REQUESTS
+        ):
+            failures.append(f"{phase} retained-container HostConfig isolation is not exact")
+
+        mounts = (
+            final_container.get("Mounts")
+            if isinstance(final_container.get("Mounts"), list)
+            else []
+        )
+        by_destination = {
+            mount.get("Destination"): mount
+            for mount in mounts
+            if isinstance(mount, dict)
+        }
+        expected_destinations = {
+            "/run/ams/container_id",
+            "/run/ams/m0-artifacts",
+            "/workspace/multiagent_simulation",
+            "/workspace/multiagent_simulation/.external/ns-3",
+        }
+        if (
+            len(mounts) != 4
+            or len(by_destination) != 4
+            or set(by_destination) != expected_destinations
+        ):
+            failures.append(f"{phase} retained-container mount set is not exact")
+        artifact_path = (
+            artifact_initial.get("path")
+            if isinstance(artifact_initial, dict)
+            else None
+        )
+        source_path = next(
+            (
+                value
+                for value in (
+                    mount.get("Source")
+                    for mount in mounts
+                    if isinstance(mount, dict)
+                )
+                if isinstance(value, str)
+                and re.fullmatch(r"/tmp/ams-m0-source\.[A-Za-z0-9]{10}", value)
+            ),
+            None,
+        )
+        identity_path = next(
+            (
+                value
+                for value in (
+                    mount.get("Source")
+                    for mount in mounts
+                    if isinstance(mount, dict)
+                )
+                if isinstance(value, str)
+                and re.fullmatch(r"/tmp/ams-container-id\.[A-Za-z0-9]{10}", value)
+            ),
+            None,
+        )
+        expected_mounts = {
+            "/run/ams/container_id": (identity_path, False),
+            "/run/ams/m0-artifacts": (artifact_path, True),
+            "/workspace/multiagent_simulation": (source_path, False),
+            "/workspace/multiagent_simulation/.external/ns-3": (
+                str((root / ".external/ns-3").resolve(strict=False)),
+                False,
+            ),
+        }
+        for destination, (source, writable) in expected_mounts.items():
+            mount = by_destination.get(destination, {})
+            if (
+                not source
+                or mount.get("Type") != "bind"
+                or mount.get("Source") != source
+                or mount.get("RW") is not writable
+                or mount.get("Mode") != ("rw" if writable else "ro")
+                or mount.get("Propagation") != "rprivate"
+            ):
+                failures.append(f"{phase} retained mount is invalid: {destination}")
+        initial_fingerprint = _container_immutable_fingerprint(initial_container)
+        final_fingerprint = _container_immutable_fingerprint(final_container)
+        if initial_fingerprint != final_fingerprint:
+            failures.append(f"{phase} retained immutable configuration changed")
+        fingerprint_sha256 = _sha256(_canonical_json(final_fingerprint))
+        expected_mount_sources = sorted(
+            str(mount.get("Source"))
+            for mount in mounts
+            if isinstance(mount, dict)
+        )
+        retained = host_details.get(receipt_key) if isinstance(host_details, dict) else None
+        raw_hashes = {
+            "prestart_record_sha256": _sha256(payloads[prestart_name]),
+            "initial_container_inspect_sha256": _sha256(
+                payloads[phase_names["initial_container_inspect.json"]]
+            ),
+            "initial_image_inspect_sha256": _sha256(
+                payloads[phase_names["initial_image_inspect.json"]]
+            ),
+            "final_container_inspect_sha256": _sha256(
+                payloads[phase_names["final_container_inspect.json"]]
+            ),
+            "final_image_inspect_sha256": _sha256(
+                payloads[phase_names["final_image_inspect.json"]]
+            ),
+        }
+        if not isinstance(retained, dict) or (
             any(retained.get(key) != value for key, value in raw_hashes.items())
             or retained.get("immutable_fingerprint_sha256") != fingerprint_sha256
             or retained.get("mount_sources") != expected_mount_sources
@@ -3206,10 +3273,32 @@ def _validate_control_raw(
             or retained.get("raw_sha256")
             != {
                 name: _sha256(payloads[name])
-                for name in RETAINED_CONTROL_FILE_NAMES
+                for name in RETAINED_CONTROL_FILE_NAMES_BY_PHASE[phase]
             }
         ):
-            failures.append("retained-container receipt hashes do not rederive from raw inspect")
+            failures.append(
+                f"{phase} retained receipt hashes do not rederive from raw inspect"
+            )
+        phase_results[phase] = {
+            "fingerprint": final_fingerprint,
+            "source_snapshot": source_path,
+            "mount_sources": expected_mount_sources,
+        }
+
+    if len(phase_results) == 2:
+        for basename in RETAINED_CONTROL_BASENAMES:
+            if basename == "final_container_inspect.json":
+                continue
+            first = f"retained/initial_final/{basename}"
+            second = f"retained/reinspection/{basename}"
+            if payloads[first] != payloads[second]:
+                failures.append(
+                    f"retained-container stable raw changed across phases: {basename}"
+                )
+        if phase_results["initial_final"] != phase_results["reinspection"]:
+            failures.append(
+                "retained-container normalized identity changed across host-final"
+            )
     if isinstance(host_details, dict):
         failures.extend(_validate_source_raw(payloads, host_details))
         failures.extend(
@@ -3249,7 +3338,7 @@ def _validate_control_raw(
 
 
 def _rederive_published_m0(
-    root: Path, run_id: str
+    root: Path, run_id: str, execution_commit: str
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Re-run the committed captured-artifact validator on the published run."""
 
@@ -3260,6 +3349,8 @@ def _rederive_published_m0(
         "--run-dir",
         f"runs/{run_id}",
         "--captured-producer-mode",
+        "--expected-source-commit",
+        execution_commit,
     ]
     environment = {
         "PATH": "/usr/bin:/bin",
@@ -3520,7 +3611,9 @@ def _validate_receipt(
         or not provenance_status.get("proof")
     ):
         failures.append("provenance gate details are not independently passing")
-    published_gates, published_error = _rederive_published_m0(root, str(run_id))
+    published_gates, published_error = _rederive_published_m0(
+        root, str(run_id), execution_commit
+    )
     if published_error:
         failures.append(published_error)
     elif published_gates != {
@@ -3664,7 +3757,10 @@ def _validate_receipt(
         "raw_sha256",
     }
     retained_values: list[dict[str, Any]] = []
-    for label in ("retained_container_initial_final", "retained_container_reinspection"):
+    for label, phase in (
+        ("retained_container_initial_final", "initial_final"),
+        ("retained_container_reinspection", "reinspection"),
+    ):
         retained = details.get(label)
         if not isinstance(retained, dict) or set(retained) != retained_keys:
             failures.append(f"{label} schema is not exact")
@@ -3717,10 +3813,24 @@ def _validate_receipt(
                 )
             )
             or not isinstance(retained.get("raw_sha256"), dict)
+            or set(retained.get("raw_sha256", {}))
+            != set(RETAINED_CONTROL_FILE_NAMES_BY_PHASE[phase])
+            or any(
+                SHA256.fullmatch(str(value or "")) is None
+                for value in retained.get("raw_sha256", {}).values()
+            )
         ):
             failures.append(f"{label} identities are invalid")
-    if len(retained_values) == 2 and retained_values[0] != retained_values[1]:
-        failures.append("retained container changed across host-final inspection")
+    if len(retained_values) == 2:
+        stable_keys = retained_keys - {
+            "final_container_inspect_sha256",
+            "raw_sha256",
+        }
+        if any(
+            retained_values[0].get(key) != retained_values[1].get(key)
+            for key in stable_keys
+        ):
+            failures.append("retained container changed across host-final inspection")
 
     fresh = details.get("fresh_exact_image_reexecution")
     fresh_keys = {

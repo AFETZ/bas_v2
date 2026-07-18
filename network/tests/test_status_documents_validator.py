@@ -276,7 +276,18 @@ class LiveStatusFixture:
                 "ctime_ns": 4,
                 "bytes": 1,
                 "sha256": sha256(b"x"),
-            }
+            },
+            "logs/m0_runtime_lock_producer.log": {
+                "kind": "file",
+                "mode": 0o400,
+                "device": 1,
+                "inode": 5,
+                "links": 1,
+                "mtime_ns": 3,
+                "ctime_ns": 4,
+                "bytes": 0,
+                "sha256": sha256(b""),
+            },
         }
         return {
             "root_identity": {
@@ -423,13 +434,38 @@ class LiveStatusFixture:
             ],
             sort_keys=True,
         ).encode("utf-8")
+        reinspection_container = json.dumps(
+            [
+                {
+                    **common,
+                    "Mounts": list(reversed(mounts)),
+                    "State": {
+                        "Status": "exited",
+                        "Running": False,
+                        "Paused": False,
+                        "Restarting": False,
+                        "OOMKilled": False,
+                        "Dead": False,
+                        "ExitCode": 0,
+                    },
+                }
+            ],
+            sort_keys=True,
+        ).encode("utf-8")
         image = json.dumps([{"Id": self.image_digest}], sort_keys=True).encode("utf-8")
-        payloads = {
-            "retained/initial_container_inspect.json": initial_container,
-            "retained/initial_image_inspect.json": image,
-            "retained/final_container_inspect.json": final_container,
-            "retained/final_image_inspect.json": image,
-        }
+        payloads: dict[str, bytes] = {}
+        for phase, phase_final in (
+            ("initial_final", final_container),
+            ("reinspection", reinspection_container),
+        ):
+            payloads.update(
+                {
+                    f"retained/{phase}/initial_container_inspect.json": initial_container,
+                    f"retained/{phase}/initial_image_inspect.json": image,
+                    f"retained/{phase}/final_container_inspect.json": phase_final,
+                    f"retained/{phase}/final_image_inspect.json": image,
+                }
+            )
         prestart = {
             "schema_version": 1,
             "contract": "ams.m0.prestart-inspection/v1",
@@ -455,9 +491,13 @@ class LiveStatusFixture:
                 "sha256": sha256(image),
             },
         }
-        payloads["retained/prestart_inspection_record.json"] = (
+        prestart_payload = (
             json.dumps(prestart, indent=2, sort_keys=True) + "\n"
         ).encode("utf-8")
+        for phase in ("initial_final", "reinspection"):
+            payloads[f"retained/{phase}/prestart_inspection_record.json"] = (
+                prestart_payload
+            )
         payloads.update(
             {
                 "fresh/initial_container_inspect.json": b"fresh-initial\n",
@@ -534,6 +574,12 @@ class LiveStatusFixture:
         captured_log.parent.mkdir(parents=True, exist_ok=True)
         captured_log.write_bytes(b"x")
         captured_log.chmod(0o444)
+        empty_log = (
+            self.root
+            / f"runs/{self.run_id}/logs/m0_runtime_lock_producer.log"
+        )
+        empty_log.write_bytes(b"")
+        empty_log.chmod(0o444)
         (self.root / f"runs/{self.run_id}/metrics").mkdir(parents=True, exist_ok=True)
         records, payloads = self._write_control_files()
         execution_contract = self.execution_contract
@@ -550,51 +596,58 @@ class LiveStatusFixture:
             "plan_sha256": self.plan_sha256,
         }
         artifact = self._snapshot("captured")
-        retained = {
-            "container_id": self.container_id,
-            "image_digest": self.image_digest,
-            "source_snapshot": "/tmp/ams-m0-source.Abcdef1234",
-            "prestart_record_sha256": sha256(
-                payloads["retained/prestart_inspection_record.json"]
-            ),
-            "initial_container_inspect_sha256": sha256(
-                payloads["retained/initial_container_inspect.json"]
-            ),
-            "initial_image_inspect_sha256": sha256(
-                payloads["retained/initial_image_inspect.json"]
-            ),
-            "final_container_inspect_sha256": sha256(
-                payloads["retained/final_container_inspect.json"]
-            ),
-            "final_image_inspect_sha256": sha256(
-                payloads["retained/final_image_inspect.json"]
-            ),
-            "immutable_fingerprint_sha256": sha256(
-                canonical(
-                    _container_immutable_fingerprint(
-                        json.loads(payloads["retained/final_container_inspect.json"])[0]
-                    )
-                )
-            ),
-            "mount_sources": sorted(
-                [
-                    f"/tmp/.ams-m0-artifacts-{self.run_id}.Abcdef1234",
-                    "/tmp/ams-container-id.Abcdef1234",
-                    "/tmp/ams-m0-source.Abcdef1234",
-                    str(self.root / ".external/ns-3"),
-                ]
-            ),
-            "raw_sha256": {
-                name: sha256(payloads[name])
+        def retained_record(phase: str) -> dict[str, Any]:
+            prefix = f"retained/{phase}"
+            phase_names = tuple(
+                f"{prefix}/{name}"
                 for name in (
-                    "retained/prestart_inspection_record.json",
-                    "retained/initial_container_inspect.json",
-                    "retained/initial_image_inspect.json",
-                    "retained/final_container_inspect.json",
-                    "retained/final_image_inspect.json",
+                    "prestart_inspection_record.json",
+                    "initial_container_inspect.json",
+                    "initial_image_inspect.json",
+                    "final_container_inspect.json",
+                    "final_image_inspect.json",
                 )
-            },
-        }
+            )
+            final_name = f"{prefix}/final_container_inspect.json"
+            return {
+                "container_id": self.container_id,
+                "image_digest": self.image_digest,
+                "source_snapshot": "/tmp/ams-m0-source.Abcdef1234",
+                "prestart_record_sha256": sha256(
+                    payloads[f"{prefix}/prestart_inspection_record.json"]
+                ),
+                "initial_container_inspect_sha256": sha256(
+                    payloads[f"{prefix}/initial_container_inspect.json"]
+                ),
+                "initial_image_inspect_sha256": sha256(
+                    payloads[f"{prefix}/initial_image_inspect.json"]
+                ),
+                "final_container_inspect_sha256": sha256(payloads[final_name]),
+                "final_image_inspect_sha256": sha256(
+                    payloads[f"{prefix}/final_image_inspect.json"]
+                ),
+                "immutable_fingerprint_sha256": sha256(
+                    canonical(
+                        _container_immutable_fingerprint(
+                            json.loads(payloads[final_name])[0]
+                        )
+                    )
+                ),
+                "mount_sources": sorted(
+                    [
+                        f"/tmp/.ams-m0-artifacts-{self.run_id}.Abcdef1234",
+                        "/tmp/ams-container-id.Abcdef1234",
+                        "/tmp/ams-m0-source.Abcdef1234",
+                        str(self.root / ".external/ns-3"),
+                    ]
+                ),
+                "raw_sha256": {
+                    name: sha256(payloads[name]) for name in phase_names
+                },
+            }
+
+        retained_initial_final = retained_record("initial_final")
+        retained_reinspection = retained_record("reinspection")
         fresh = {
             "container_id": "6" * 64,
             "image_digest": self.image_digest,
@@ -680,8 +733,8 @@ class LiveStatusFixture:
             "producer_source_identity": source,
             "fresh_source_before": source,
             "fresh_source_after": source,
-            "retained_container_initial_final": retained,
-            "retained_container_reinspection": retained,
+            "retained_container_initial_final": retained_initial_final,
+            "retained_container_reinspection": retained_reinspection,
             "fresh_exact_image_reexecution": fresh,
             "isolated_target_runtime_capability": capability,
             "host_validation_content_manifest": host_content_manifest,
@@ -961,6 +1014,17 @@ class StatusDocumentsLiveValidatorTests(unittest.TestCase):
         self.fixture.close()
 
     def test_exact_status_only_descendant_and_host_receipt_pass(self) -> None:
+        retained = self.fixture.receipt["gates"]["host_final"]["details"]
+        first = retained["retained_container_initial_final"]
+        second = retained["retained_container_reinspection"]
+        self.assertNotEqual(
+            first["final_container_inspect_sha256"],
+            second["final_container_inspect_sha256"],
+        )
+        self.assertEqual(
+            first["immutable_fingerprint_sha256"],
+            second["immutable_fingerprint_sha256"],
+        )
         result = validate_live_status(self.fixture.root)
         self.assertTrue(result["passed"], result)
         self.assertEqual(result["report_commit"], self.fixture._git("rev-parse", "HEAD").stdout.strip())
@@ -1101,55 +1165,82 @@ class StatusDocumentsLiveValidatorTests(unittest.TestCase):
 
     def test_privileged_raw_container_cannot_hide_behind_receipt_hashes(self) -> None:
         details = self.fixture.receipt["gates"]["host_final"]["details"]
-        parsed: dict[str, tuple[bytes, dict[str, Any]]] = {}
-        for name in (
-            "retained/initial_container_inspect.json",
-            "retained/final_container_inspect.json",
+        for phase, retained_name in (
+            ("initial_final", "retained_container_initial_final"),
+            ("reinspection", "retained_container_reinspection"),
         ):
-            path = self.fixture.root / f"runs/{self.fixture.run_id}/host_validation/{name}"
-            path.chmod(0o600)
-            document = json.loads(path.read_text(encoding="utf-8"))
-            document[0]["HostConfig"]["Privileged"] = True
-            raw = json.dumps(document, sort_keys=True).encode("utf-8")
-            path.write_bytes(raw)
-            path.chmod(0o444)
-            parsed[name] = (raw, document[0])
-            self.fixture.receipt["host_validation_raw"]["files"][name] = {
-                "bytes": len(raw),
-                "sha256": sha256(raw),
-                "published_mode": 0o400,
-            }
-        fingerprint = sha256(
-            canonical(
-                _container_immutable_fingerprint(
-                    parsed["retained/final_container_inspect.json"][1]
+            parsed: dict[str, tuple[bytes, dict[str, Any]]] = {}
+            for basename in (
+                "initial_container_inspect.json",
+                "final_container_inspect.json",
+            ):
+                name = f"retained/{phase}/{basename}"
+                path = (
+                    self.fixture.root
+                    / f"runs/{self.fixture.run_id}/host_validation/{name}"
+                )
+                path.chmod(0o600)
+                document = json.loads(path.read_text(encoding="utf-8"))
+                document[0]["HostConfig"]["Privileged"] = True
+                raw = json.dumps(document, sort_keys=True).encode("utf-8")
+                path.write_bytes(raw)
+                path.chmod(0o444)
+                parsed[basename] = (raw, document[0])
+                self.fixture.receipt["host_validation_raw"]["files"][name] = {
+                    "bytes": len(raw),
+                    "sha256": sha256(raw),
+                    "published_mode": 0o400,
+                }
+            fingerprint = sha256(
+                canonical(
+                    _container_immutable_fingerprint(
+                        parsed["final_container_inspect.json"][1]
+                    )
                 )
             )
-        )
-        for retained_name in (
-            "retained_container_initial_final",
-            "retained_container_reinspection",
-        ):
             retained = details[retained_name]
             retained["initial_container_inspect_sha256"] = sha256(
-                parsed["retained/initial_container_inspect.json"][0]
+                parsed["initial_container_inspect.json"][0]
             )
             retained["final_container_inspect_sha256"] = sha256(
-                parsed["retained/final_container_inspect.json"][0]
+                parsed["final_container_inspect.json"][0]
             )
             retained["immutable_fingerprint_sha256"] = fingerprint
-            retained["raw_sha256"]["retained/initial_container_inspect.json"] = sha256(
-                parsed["retained/initial_container_inspect.json"][0]
-            )
-            retained["raw_sha256"]["retained/final_container_inspect.json"] = sha256(
-                parsed["retained/final_container_inspect.json"][0]
-            )
+            retained["raw_sha256"][
+                f"retained/{phase}/initial_container_inspect.json"
+            ] = sha256(parsed["initial_container_inspect.json"][0])
+            retained["raw_sha256"][
+                f"retained/{phase}/final_container_inspect.json"
+            ] = sha256(parsed["final_container_inspect.json"][0])
         self.fixture.rewrite_receipt(lambda _receipt: None)
         result = validate_live_status(self.fixture.root)
         self.assertFalse(result["passed"], result)
         self.assertTrue(any("HostConfig isolation" in item for item in result["failures"]), result)
 
     def test_unmanifested_host_control_file_is_rejected(self) -> None:
+        missing_fixture = LiveStatusFixture()
+        try:
+            missing_control = (
+                missing_fixture.root
+                / f"runs/{missing_fixture.run_id}/host_validation"
+            )
+            missing_phase = missing_control / "retained/reinspection"
+            missing_control.chmod(0o700)
+            missing_phase.chmod(0o700)
+            (
+                missing_phase / "final_container_inspect.json"
+            ).unlink()
+            missing_phase.chmod(0o500)
+            missing_control.chmod(0o500)
+            missing_result = validate_live_status(missing_fixture.root)
+            self.assertFalse(missing_result["passed"], missing_result)
+            self.assertTrue(
+                any("extra/missing files" in item for item in missing_result["failures"]),
+                missing_result,
+            )
+        finally:
+            missing_fixture.close()
+
         control = self.fixture.root / f"runs/{self.fixture.run_id}/host_validation"
         control.chmod(0o700)
         extra = control / "unmanifested.bin"
