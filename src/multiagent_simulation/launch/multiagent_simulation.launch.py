@@ -287,7 +287,7 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
 
         mavproxy = ExecuteProcess(
             cmd=[
-                "mavproxy.py",
+                "/home/ubuntu/.local/bin/mavproxy.py",
                 "--out",
                 str(robot.get("mavproxy_out", "127.0.0.1:14550")),
                 "--master",

@@ -454,6 +454,10 @@ class M1SceneValidatorTests(unittest.TestCase):
             Path(__file__).resolve().parents[1]
             / "scripts/run_five_uav_health.sh"
         ).read_text(encoding="utf-8")
+        launch = (
+            Path(__file__).resolve().parents[2]
+            / "src/multiagent_simulation/launch/multiagent_simulation.launch.py"
+        ).read_text(encoding="utf-8")
         dont_write = "export PYTHONDONTWRITEBYTECODE=1"
         cache_prefix = "export PYTHONPYCACHEPREFIX=/tmp/ams-m1-pycache"
         build = "BUILD_COMMAND=("
@@ -479,6 +483,8 @@ class M1SceneValidatorTests(unittest.TestCase):
             runner,
         )
         self.assertIn('"$M1_PYTHON" "$ROOT_DIR/network/tests/collect_five_uav_health.py"', runner)
+        self.assertIn('"/home/ubuntu/.local/bin/mavproxy.py"', launch)
+        self.assertNotIn('\n                "mavproxy.py",', launch)
 
     def test_mutated_installed_runtime_config_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
