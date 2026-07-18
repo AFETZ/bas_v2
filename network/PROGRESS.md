@@ -1,90 +1,27 @@
 # Network/Radio Progress
 
-Updated: 2026-07-17 UTC.
-
 Authoritative contract: `doc/network_radio_integration_plan_v3.md`.
 
-## Acceptance Status
+Customer-ready: **false**.
 
-- Customer-ready: **false**.
-- Fully closed sequential milestones: **0**.
-- Active milestone: **M0 — Truthful Validation and Exact Runtime Qualification**.
-- Earlier M0/M1 runs are diagnostic history only: the current v3
-  qualification boundary is stronger and does not grandfather them.
+Fully closed sequential milestones: **1**.
 
-| Milestone | Formal status | Current position |
+Active milestone: **M1**.
+
+| Milestone | Formal status | Authority |
 | --- | --- | --- |
-| M0 | `in_progress` | Technical hardening and the complete frozen suite pass locally; a new atomic host-final receipt has not yet been published. |
-| M1 | `not_started` | The hardened five-UAV runner/validator exists, but M1 cannot count before the replacement M0 receipt and a new clean 300-second run. |
-| M2–M8 | `not_started` | No later milestone has caveat-free current sequential evidence. |
+| M0 | `passed` | Closed by cited immutable host-final receipt. |
+| M1 | `not_started` | Sequentially pending. |
+| M2 | `not_started` | Sequentially pending. |
+| M3 | `not_started` | Sequentially pending. |
+| M4 | `not_started` | Sequentially pending. |
+| M5 | `not_started` | Sequentially pending. |
+| M6 | `not_started` | Sequentially pending. |
+| M7 | `not_started` | Sequentially pending. |
+| M8 | `not_started` | Sequentially pending. |
 
-Only `passed` closes a milestone. Code, unit tests, historical runs and
-diagnostics are foundation evidence, not milestone closure.
+Only `passed` closes a milestone.
 
-## Implemented M0 Foundation
-
-- Formal suite production and independent re-execution are unprivileged:
-  empty capability bounding set, `no-new-privileges`, `network=none`,
-  read-only source/rootfs, isolated writable overlay and initially empty
-  artifact mount.
-- Target TUN/network-namespace/sudo capability is tested separately in the
-  same immutable image without candidate source, artifact or receipt mounts.
-- Q0–Q8 identity is derived from committed Git objects; the conservative
-  bootstrap assigns every tracked technical byte to Q0 and excludes only the
-  three mutable status documents.
-- The exact ordered M0 suite contains **182 unique test IDs** and is bound by
-  `network/config/dependency_lock.yaml`.
-- Python execution records exact ordered `sys.path`, `.pth` inventory,
-  customization/plugin state, every loaded module origin and byte hash, and
-  rejects host/writable/unlocked imports.
-- Critical image, source and host-final executables are path/hash locked;
-  command resolution and runtime package manifests are recomputed live.
-- Host finalization rederives captured gates, checks the retained container,
-  uses a fresh never-producer-mounted source clone and second exact-image
-  execution, retains recursive raw host evidence, and publishes with one
-  fsynced no-replace rename.
-- Live status authority is separate from technical evidence and accepts only a
-  clean descendant changing exactly `PROGRESS.md`, `VALIDATION_REPORT.md` and
-  `NEXT_TASK.md` while citing the canonical receipt.
-
-## Current Verification
-
-```text
-python3 -m unittest discover -b -s network/tests -p 'test_*.py'
-  -> 182/182 passed across the complete focused preflight set
-
-Focused M0 runtime/host/status suites
-  -> 53/53 passed
-
-Exact image live runtime checks
-  -> image/external/ns-3/executable identities passed;
-     stale pip/ROS manifest hashes were found and replaced only after two
-     identical live recomputations; final full exact-image rerun is pending.
-```
-
-## M1 Foundation Already Implemented
-
-- Five expected ArduCopter, MAVProxy and micro-ROS identities plus one Gazebo
-  server are sampled at no more than 1.5-second gaps using PID, start ticks,
-  executable path/hash, command line, namespace/cgroup and parent identity.
-- Readiness and measurement use one continuous baseline; extra, zombie,
-  stopped, missing, replaced or unallowlisted processes fail closed.
-- Five unique system IDs, DDS/SITL/FDM endpoints, fresh heartbeat/odometry,
-  live world/entity inventory and transitive scene assets are independently
-  validated.
-- Disabled optional serial endpoints may not be opened; fatal launch markers
-  or post-readiness endpoint errors fail the candidate.
-
-These implementation facts do not close M1. A new clean exact-image run must
-remain healthy for at least 300 seconds and pass independent revalidation after
-M0 closes.
-
-## Immediate Critical Path
-
-1. Finish independent M0 audit and exact-image runtime-lock rerun.
-2. Commit one clean technical base containing the 182-ID manifest.
-3. Execute captured M0, independent exact-image re-execution, isolated
-   capability probe and atomic host-final publication.
-4. Create the exact three-file status-only descendant and pass live-status
-   lint; only then count M0 as one closed milestone.
-5. Execute and independently validate the new 300-second five-UAV M1 run.
+<!-- AMS_LIVE_STATUS_METADATA_BEGIN
+{"contract":"ams.live-status/v1","evidence":{"kind":"m0_host_final_receipt","milestone":"M0","qualification_contract_sha256":"5b2e1c2af384a3dbb940ec4acaa625d83ea81683a3145482636ce9ec143a94ba","receipt_path":"runs/m0_formal_20260718T152942Z/metrics/m0_host_final_receipt.json","receipt_sha256":"0da76ce357a303ba666d82e017a56ee10e3f157605ca9f6faa903046ae8fa505","run_id":"m0_formal_20260718T152942Z"},"execution_commit":"4a699d4bc80fb947e078224e2761b2262ab2b68f","next_command":{"argv":["scripts/run_acceptance_container.sh","timeout","--signal=TERM","--kill-after=20s","600s","env","RUN_ID=<allocate-once-before-execution>","network/scripts/run_five_uav_health.sh"],"argv_sha256":"c9a9016a956e01659462bd33190b90ebf067161371d51cc0592d3c91f13df3ab","milestone":"M1","tracked_inputs":[{"git_mode":"100755","git_object_id":"4368b99da460d74556dfc01156442d79a3cfa03c","path":"network/scripts/run_five_uav_health.sh","sha256":"e5505d48988c3c947437c4e5cae2de437c4c142b29738c6026c755cb03a083ab"},{"git_mode":"100755","git_object_id":"1bac4c3ba13d804b7f82d6232765e0410903892a","path":"scripts/run_acceptance_container.sh","sha256":"f5752803d42ae1633d883a352a8f1f99121e7bb220646397dcd5e618dc871c68"}]},"plan_contract":{"path":"doc/network_radio_integration_plan_v3.md","sha256":"bd4512efc9eaed7b546124020b1a356b21f8fe19120aff81db19d0b9d4057da7"},"qualification":{"consumed_nodes":["Q0"],"policy_id":"q0_q1_q2_granular/v1","policy_path":"network/config/qualification_path_ownership.json","policy_sha256":"e9397e80840871617312238ddcc7f16c87ad8f507b92a1ff739535e8ca94fb9c","vector_commit":"4a699d4bc80fb947e078224e2761b2262ab2b68f","vector_sha256":"ac8e9249c49a75c684f10fd4a4dcf1c6229a2349a525ff59e5f616bb889f7d6f"},"schema_version":1,"state":{"active_milestone":"M1","customer_ready":false,"fully_closed_sequential_milestones":1},"technical_base_commit":"4a699d4bc80fb947e078224e2761b2262ab2b68f"}
+AMS_LIVE_STATUS_METADATA_END -->
