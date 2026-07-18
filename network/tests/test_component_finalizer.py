@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -35,6 +36,8 @@ def mount(destination: str, source: Path, writable: bool) -> dict:
 
 class ComponentFinalizerTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.sys_path_before = list(sys.path)
+        self.addCleanup(self.assert_sys_path_unchanged)
         self.profile = load_profiles()["flight_capacity_prerequisite"]
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -65,6 +68,11 @@ class ComponentFinalizerTests(unittest.TestCase):
             "canonical_path": "runs/m0_fixture/metrics/m0_host_final_receipt.json",
             "sha256": "5" * 64,
         }
+
+    def assert_sys_path_unchanged(self) -> None:
+        observed = list(sys.path)
+        sys.path[:] = self.sys_path_before
+        self.assertEqual(observed, self.sys_path_before)
 
     def main_documents(self) -> tuple[dict, dict]:
         required = [

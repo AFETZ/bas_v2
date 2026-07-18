@@ -31,6 +31,15 @@ from network.scripts.host_finalization_common import (  # noqa: E402
     M0_CAPABILITY_COMMAND_SCRIPT,
     M0_CAPABILITY_STDOUT,
 )
+from network.validation.component_profiles import (  # noqa: E402
+    expected_gpu_device_requests,
+    load_profiles,
+)
+from network.validation.qualification_identity import (  # noqa: E402
+    qualification_consumption,
+    qualification_content_vector,
+    qualification_prefixes_equal,
+)
 
 STATUS_PATHS = (
     "network/PROGRESS.md",
@@ -1037,8 +1046,6 @@ def _validate_metadata_v2(
             "M2 next-command record is not the canonical ineligible prerequisite state"
         )
     try:
-        from network.validation.component_profiles import load_profiles  # noqa: PLC0415
-
         profiles = load_profiles(
             root / "network/config/component_acceptance_profiles.json"
         )
@@ -4591,11 +4598,6 @@ def _validate_m1_receipt(
         if isinstance(m0_receipt, dict)
         else None
     )
-    if str(root) not in sys.path:
-        sys.path.insert(0, str(root))
-    from network.validation.qualification_identity import (  # noqa: PLC0415
-        qualification_prefixes_equal,
-    )
     expected_m0_path = m0_receipt.get("receipt_path") if isinstance(m0_receipt, dict) else None
     if (
         not isinstance(m0_status, dict)
@@ -4906,12 +4908,6 @@ def _validate_component_main_container(
         or environment.get("GZ_VERSION") != "harmonic"
     ):
         failures.append("component producer environment is not exact")
-
-    if str(root) not in sys.path:
-        sys.path.insert(0, str(root))
-    from network.validation.component_profiles import (  # noqa: PLC0415
-        expected_gpu_device_requests,
-    )
 
     expected_cap_add = [f"CAP_{value}" for value in profile["main_cap_add"]] or None
     expected_devices = (
@@ -5290,10 +5286,6 @@ def _validate_component_prerequisite_authority(
         ):
             failures.append(f"{profile_name} copied milestone receipt differs: {name}")
 
-    if str(root) not in sys.path:
-        sys.path.insert(0, str(root))
-    from network.validation.component_profiles import load_profiles  # noqa: PLC0415
-
     try:
         profiles = load_profiles(
             root / "network/config/component_acceptance_profiles.json"
@@ -5435,12 +5427,6 @@ def _validate_component_receipt(
         or validation_id == receipt.get("container_id")
     ):
         failures.append(f"{profile_name} host-final identity/result is invalid")
-
-    if str(root) not in sys.path:
-        sys.path.insert(0, str(root))
-    from network.validation.qualification_identity import (  # noqa: PLC0415
-        qualification_consumption,
-    )
 
     consumption = receipt.get("qualification_consumption")
     try:
@@ -5737,12 +5723,6 @@ def _validate_live_v2(
     except ValueError as exc:
         failures.append(str(exc))
 
-    if str(root) not in sys.path:
-        sys.path.insert(0, str(root))
-    from network.validation.qualification_identity import (  # noqa: PLC0415
-        qualification_content_vector,
-    )
-
     try:
         m0_vector = qualification_content_vector(root, m0_execution)
         m1_vector = qualification_content_vector(root, m1_execution)
@@ -5853,14 +5833,6 @@ def _validate_live_component_version(
     failures: list[str] = []
     if version not in {3, 4, 5}:
         return ["unsupported cumulative component status version"], [], None
-    if str(root) not in sys.path:
-        sys.path.insert(0, str(root))
-    from network.validation.component_profiles import load_profiles  # noqa: PLC0415
-    from network.validation.qualification_identity import (  # noqa: PLC0415
-        qualification_content_vector,
-        qualification_prefixes_equal,
-    )
-
     try:
         profiles = load_profiles(
             root / "network/config/component_acceptance_profiles.json"
@@ -6203,12 +6175,6 @@ def validate_live_status(root: Path = ROOT_DIR) -> dict[str, Any]:
             if evidence.get("receipt_sha256") != _sha256(receipt_payload):
                 raise ValueError("metadata receipt hash does not match canonical receipt bytes")
             receipt_records = [(str(receipt_path), receipt_payload)]
-
-            if str(root) not in sys.path:
-                sys.path.insert(0, str(root))
-            from network.validation.qualification_identity import (  # noqa: PLC0415
-                qualification_content_vector,
-            )
 
             expected_vector = qualification_content_vector(root, execution_commit)
             current_vector = qualification_content_vector(root, report_commit)
