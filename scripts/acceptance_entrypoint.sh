@@ -5,8 +5,14 @@ set -euo pipefail
 # command.  Host-final validation compares Config.Cmd to this path and the
 # exact M0 argv instead of accepting a runner token hidden in arbitrary shell
 # arguments.
+# ROS 2 generated setup files intentionally read optional variables without
+# default expansion (for example AMENT_TRACE_SETUP_FILES). Keep nounset for
+# the acceptance boundary itself, but suspend it only while sourcing those
+# generated files.
+set +u
 source /opt/ros/humble/setup.bash
 source /workspace/ardu_ws/install/setup.bash
+set -u
 
 if [[ "${AMS_M0_SOURCE_MODE:-}" == "clean_git_clone_ro" ]]; then
   M0_RUN_ID=""
@@ -444,7 +450,9 @@ elif [[ "${AMS_M1_SOURCE_MODE:-}" == "clean_git_clone_ro" ]]; then
   export PYTHONNOUSERSITE=1
 else
   if [[ -f install/setup.bash ]]; then
+    set +u
     source install/setup.bash
+    set -u
   fi
 fi
 

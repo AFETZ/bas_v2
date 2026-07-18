@@ -142,7 +142,9 @@ printf '\n' >> "$RUN_DIR/logs/m4_causal_overlay_build.command"
 "${BUILD_COMMAND[@]}" > "$RUN_DIR/logs/m4_causal_overlay_build.log" 2>&1
 [[ -f "$OVERLAY_INSTALL/setup.bash" ]] || { printf 'FAIL M4 causal overlay build absent\n' >&2; exit 2; }
 # shellcheck disable=SC1090
+set +u
 source "$OVERLAY_INSTALL/setup.bash"
+set -u
 RESOLVED_SHARE="$(python3 -c 'from ament_index_python.packages import get_package_share_directory; print(get_package_share_directory("multiagent_simulation"))')"
 [[ "$RESOLVED_SHARE" == "$EXPECTED_SHARE" ]] || { printf 'FAIL M4 causal overlay resolution differs\n' >&2; exit 2; }
 export ROS_DOMAIN_ID GZ_PARTITION

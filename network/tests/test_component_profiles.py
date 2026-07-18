@@ -17,6 +17,25 @@ from network.validation.component_profiles import (
 
 
 class ComponentProfileTests(unittest.TestCase):
+    def test_acceptance_entrypoint_suspends_nounset_only_for_ros_setup(self) -> None:
+        entrypoint = (
+            Path(__file__).resolve().parents[2]
+            / "scripts/acceptance_entrypoint.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "set +u\n"
+            "source /opt/ros/humble/setup.bash\n"
+            "source /workspace/ardu_ws/install/setup.bash\n"
+            "set -u\n",
+            entrypoint,
+        )
+        self.assertIn(
+            "set +u\n"
+            "    source install/setup.bash\n"
+            "    set -u\n",
+            entrypoint,
+        )
+
     def test_root_component_git_checks_use_only_exact_checkout_safe_directory(self) -> None:
         entrypoint = (
             Path(__file__).resolve().parents[2]

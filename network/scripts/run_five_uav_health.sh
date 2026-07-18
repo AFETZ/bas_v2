@@ -70,7 +70,9 @@ if ((OVERLAY_BUILD_RC != 0)) || [[ ! -f "$OVERLAY_INSTALL/setup.bash" ]]; then
   exit 1
 fi
 # shellcheck disable=SC1090
+set +u
 source "$OVERLAY_INSTALL/setup.bash"
+set -u
 RESOLVED_SHARE="$(/usr/bin/python3.10 -c 'from ament_index_python.packages import get_package_share_directory; print(get_package_share_directory("multiagent_simulation"))')"
 if [[ "$RESOLVED_SHARE" != "$EXPECTED_SHARE" ]] || [[ ! -d "$EXPECTED_SHARE" ]]; then
   printf 'FAIL M1 resolved package share is not the fresh run overlay: %s\n' \

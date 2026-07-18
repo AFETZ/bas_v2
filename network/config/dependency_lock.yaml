@@ -16,8 +16,8 @@ runtime_manifest_sha256:
 # qualify a suite.
 m0_test_manifest:
   path: network/config/m0_test_manifest.json
-  sha256: 70a933a03ca49ee706e6b8a537d7110e703e4a3b6c9ab816f12c1480d034afe0
-  ordered_test_count: 178
+  sha256: da9e44b776fbe7e127fa3688e34c1eb4c9eed6f0625abbd37add23f7c4945698
+  ordered_test_count: 179
 
 # Exact command-resolution and Python import boundary used by both M0 suite
 # executions. Source scripts are content-bound by Q0; immutable image and host

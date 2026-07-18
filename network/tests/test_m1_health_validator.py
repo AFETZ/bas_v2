@@ -457,6 +457,10 @@ class M1SceneValidatorTests(unittest.TestCase):
         self.assertEqual(runner.count(cache_prefix), 1)
         self.assertLess(runner.index(dont_write), runner.index(build))
         self.assertLess(runner.index(cache_prefix), runner.index(build))
+        self.assertIn(
+            'set +u\nsource "$OVERLAY_INSTALL/setup.bash"\nset -u\n',
+            runner,
+        )
 
     def test_mutated_installed_runtime_config_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

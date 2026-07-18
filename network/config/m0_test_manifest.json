@@ -33,6 +33,7 @@
     "test_component_prerequisites.ComponentPrerequisiteTests.test_missing_m1_evidence_is_rejected",
     "test_component_prerequisites.ComponentPrerequisiteTests.test_stale_lint_commit_is_rejected",
     "test_component_prerequisites.ComponentPrerequisiteTests.test_writable_receipt_is_rejected",
+    "test_component_profiles.ComponentProfileTests.test_acceptance_entrypoint_suspends_nounset_only_for_ros_setup",
     "test_component_profiles.ComponentProfileTests.test_direct_receipt_edges_never_cross_status_commit_epochs",
     "test_component_profiles.ComponentProfileTests.test_duplicate_json_key_is_rejected",
     "test_component_profiles.ComponentProfileTests.test_duplicate_runner_is_rejected",
