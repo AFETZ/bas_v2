@@ -1,6 +1,6 @@
 # Network/Radio Decisions
 
-Updated: 2026-07-14 UTC.
+Updated: 2026-07-17 UTC.
 
 ## Current Authoritative Decisions
 
@@ -9,12 +9,25 @@ Updated: 2026-07-14 UTC.
   plans are historical context only.
 - Current customer-ready status is false and no historical run is accepted P0
   evidence.
-- M0 passed under v3 on clean source
-  `95746e37014cce5a974d2dbb7d7e4c8e18b48929`, exact image
-  `sha256:2aad1f25789fc1e5c23c3a4b05c91927198ad42ff6e97cde2c26cb2f18979afb`,
-  and qualification run `m0_v3_baseline_20260713T130710Z`; the retained
-  container exited `0` and independent host revalidation passed. The older v2
-  M0 result is historical only.
+- Strict sequential closure is currently zero. The earlier v3 M0 run
+  `m0_v3_baseline_20260713T130710Z` is diagnostic history because it predates
+  the current stronger qualification boundary; it cannot be grandfathered.
+  M0 closes again only from a new atomic host-final receipt plus the separate
+  exact-three-file live-status descendant.
+- M0 suite production and independent re-execution are unprivileged with an
+  empty capability bounding set, `no-new-privileges` and `network=none`.
+  Required TUN/netns/sudo target capability is proved in a separate exact-image
+  probe that receives no candidate source, artifacts, control or receipt mount.
+- The conservative `q0_conservative_bootstrap/v1` assigns every tracked
+  technical input to Q0 and excludes only `PROGRESS.md`,
+  `VALIDATION_REPORT.md` and `NEXT_TASK.md`. Selective descendant reuse is
+  forbidden; current profile consumption is diagnostic `[]`, M0 `[Q0]`, and
+  M1 component `[Q0,Q1]`.
+- M0 Python uses a locked explicit-path/no-site policy. Exact ordered
+  `sys.path`, `.pth` inventory, customization/plugin state and every loaded
+  module origin/hash are retained and must match in a second exact-image run.
+  Critical image/source/host-final executable paths, hashes and command
+  resolution are also locked and recomputed live.
 - M1 run `m1_v3_candidate_20260714T072723Z` is not accepted for closure even
   though the existing three-gate validator passed. Independent raw inspection
   found two undeclared extra MAVProxy processes during the first three samples,

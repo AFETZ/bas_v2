@@ -74,6 +74,7 @@ ALLOWED_PROCESS_STATES = {"R", "S", "D", "I"}
 READINESS_HEARTBEAT_MAX_AGE_S = 3.0
 READINESS_POSITION_MAX_AGE_S = 3.0
 READINESS_PROCESS_SAMPLE_INTERVAL_S = 1.0
+M1_PROCESS_SAMPLE_MAX_GAP_S = 1.5
 _EXECUTABLE_HASH_CACHE: dict[tuple[int, int, int, int], str] = {}
 
 
@@ -208,6 +209,19 @@ def classify_process_role(process: dict[str, Any]) -> str | None:
     return None
 
 
+def _mavproxy_invoked_path(argv: list[str]) -> str | None:
+    names = [Path(value).name.lower() for value in argv]
+    if names and names[0] == "mavproxy.py":
+        return argv[0]
+    if (
+        len(names) >= 2
+        and re.fullmatch(r"python(?:3(?:\.[0-9]+)?)?", names[0]) is not None
+        and names[1] == "mavproxy.py"
+    ):
+        return argv[1]
+    return None
+
+
 def _read_process_identity(
     pid: int,
     process_group: int,
@@ -303,9 +317,21 @@ def _read_process_identity(
         "uid": uid,
         "namespaces": namespaces,
         "capabilities": capabilities,
+        "invoked_files": {},
         "identity_errors": errors,
     }
     process["role"] = classify_process_role(process)
+    if process["role"] == "mavproxy":
+        invoked_path = _mavproxy_invoked_path(cmdline)
+        if not isinstance(invoked_path, str) or not Path(invoked_path).is_absolute():
+            errors.append("MAVProxy invoked script path is unavailable or non-absolute")
+        else:
+            try:
+                process["invoked_files"][invoked_path] = _cached_executable_sha256(
+                    Path(invoked_path)
+                )
+            except OSError as exc:
+                errors.append(f"MAVProxy invoked script: {exc}")
     return process
 
 
@@ -324,6 +350,7 @@ def process_identity_digest(process: dict[str, Any]) -> str:
             "uid",
             "namespaces",
             "capabilities",
+            "invoked_files",
         )
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -569,6 +596,38 @@ def readiness_status(
 def selected_measurement_duration(ready: bool, requested_duration_s: float) -> float:
     """Avoid a long observation after readiness has already failed."""
     return requested_duration_s if ready else 0.0
+
+
+def process_window_metrics(
+    samples: list[dict[str, Any]], observed_duration_s: float
+) -> dict[str, float | bool | None]:
+    """Derive producer-side measurement coverage under the M1 continuity bound."""
+
+    offsets = [
+        float(sample["offset_s"])
+        for sample in samples
+        if finite_number(sample.get("offset_s"))
+    ]
+    maximum_gap_s = max(
+        (current - previous for previous, current in zip(offsets, offsets[1:])),
+        default=0.0,
+    )
+    first_delay_s = offsets[0] if offsets else None
+    last_age_s = observed_duration_s - offsets[-1] if offsets else None
+    covered = (
+        len(offsets) == len(samples)
+        and first_delay_s is not None
+        and 0.0 <= first_delay_s <= M1_PROCESS_SAMPLE_MAX_GAP_S
+        and last_age_s is not None
+        and 0.0 <= last_age_s <= M1_PROCESS_SAMPLE_MAX_GAP_S
+        and maximum_gap_s <= M1_PROCESS_SAMPLE_MAX_GAP_S
+    )
+    return {
+        "first_sample_delay_s": first_delay_s,
+        "last_sample_age_s": last_age_s,
+        "maximum_sample_gap_s": maximum_gap_s,
+        "covered": covered,
+    }
 
 
 def run_process_monitor(
@@ -1830,29 +1889,14 @@ def main(argv: list[str] | None = None) -> int:
         process_samples[0].get("processes", []) if process_samples else []
     )
     all_failures.extend(endpoint_failures)
-    process_offsets = [
-        float(sample["offset_s"])
-        for sample in process_samples
-        if finite_number(sample.get("offset_s"))
-    ]
-    process_max_gap_s = max(
-        (current - previous for previous, current in zip(process_offsets, process_offsets[1:])),
-        default=0.0,
-    )
-    process_start_delay_s = process_offsets[0] if process_offsets else None
-    process_end_age_s = (
-        observed_duration - process_offsets[-1] if process_offsets else None
-    )
-    if (
-        len(process_offsets) != len(process_samples)
-        or process_start_delay_s is None
-        or not 0.0 <= process_start_delay_s <= 2.0
-        or process_end_age_s is None
-        or not 0.0 <= process_end_age_s <= 2.0
-        or process_max_gap_s > 2.0
-    ):
+    process_window = process_window_metrics(process_samples, observed_duration)
+    process_start_delay_s = process_window["first_sample_delay_s"]
+    process_end_age_s = process_window["last_sample_age_s"]
+    process_max_gap_s = process_window["maximum_sample_gap_s"]
+    if process_window["covered"] is not True:
         all_failures.append(
-            "process-health samples do not cover the complete measurement window"
+            "process-health samples exceed the "
+            f"{M1_PROCESS_SAMPLE_MAX_GAP_S:g}-second measurement continuity bound"
         )
 
     summary = {

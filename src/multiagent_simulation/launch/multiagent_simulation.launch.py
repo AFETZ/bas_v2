@@ -94,21 +94,25 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
     
     lidar_model_node = ExecuteProcess(
         cmd=["ros2", "run", "xacro", "xacro", "-o", lidar_file.replace(".xacro", ".sdf"), lidar_file],
+        condition=IfCondition(LaunchConfiguration("generate_sensor_models")),
         output="screen"
     )
 
     camera_model_node = ExecuteProcess(
         cmd=["ros2", "run", "xacro", "xacro", "-o", camera_file.replace(".xacro", ".sdf"), camera_file],
+        condition=IfCondition(LaunchConfiguration("generate_sensor_models")),
         output="screen"
     )
     
     depth_model_node = ExecuteProcess(
         cmd=["ros2", "run", "xacro", "xacro", "-o", depth_camera_file.replace(".xacro", ".sdf"), depth_camera_file],
+        condition=IfCondition(LaunchConfiguration("generate_sensor_models")),
         output="screen"
     )
     
     rgbd_model_node = ExecuteProcess(
         cmd=["ros2", "run", "xacro", "xacro", "-o", rgbd_camera_file.replace(".xacro", ".sdf"), rgbd_camera_file],
+        condition=IfCondition(LaunchConfiguration("generate_sensor_models")),
         output="screen"
     )
 
@@ -477,6 +481,14 @@ def generate_launch_description():
                 description=(
                     "Attach ArduPilot SERIAL2 to a pre-created ttyROS PTY. "
                     "Keep disabled unless the launch also owns that PTY."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "generate_sensor_models",
+                default_value="true",
+                description=(
+                    "Generate mutable sensor SDF files from xacro before launch. "
+                    "Formal M1 disables this and uses the freshly installed files."
                 ),
             ),
             DeclareLaunchArgument(

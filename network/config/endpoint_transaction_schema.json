@@ -1,0 +1,375 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ams.local/schemas/endpoint-transaction-v1.json",
+  "title": "AMS endpoint_transaction_schema=1 resolved matrix",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "contract",
+    "matrix_id",
+    "source_configs",
+    "traffic_classes",
+    "directions",
+    "profiles",
+    "resolved_cells_sha256",
+    "cells"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "contract": {"const": "endpoint_transaction_schema=1"},
+    "matrix_id": {"const": "ams.endpoint_matrix.5uav/v1"},
+    "source_configs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "endpoints", "scenario", "radio"],
+      "properties": {
+        "schema": {"$ref": "#/$defs/source_config"},
+        "endpoints": {"$ref": "#/$defs/source_config"},
+        "scenario": {"$ref": "#/$defs/source_config"},
+        "radio": {"$ref": "#/$defs/source_config"}
+      }
+    },
+    "traffic_classes": {
+      "type": "array",
+      "prefixItems": [
+        {"const": "control"},
+        {"const": "payload"},
+        {"const": "additional_data"}
+      ],
+      "items": false,
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "directions": {
+      "type": "array",
+      "prefixItems": [
+        {"const": "downlink"},
+        {"const": "uplink"}
+      ],
+      "items": false,
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "profiles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["m2_one_uav_control", "m3_full"],
+      "properties": {
+        "m2_one_uav_control": {"$ref": "#/$defs/profile"},
+        "m3_full": {"$ref": "#/$defs/profile"}
+      }
+    },
+    "resolved_cells_sha256": {"$ref": "#/$defs/sha256"},
+    "cells": {
+      "type": "array",
+      "minItems": 30,
+      "maxItems": 30,
+      "items": {"$ref": "#/$defs/cell"}
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_.>/=-]*$"
+    },
+    "port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "nullable_mavlink_id": {
+      "oneOf": [
+        {"type": "integer", "minimum": 1, "maximum": 255},
+        {"type": "null"}
+      ]
+    },
+    "source_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile_id", "expected_cell_count", "cell_ids", "phase_contract"],
+      "properties": {
+        "profile_id": {"type": "string", "enum": ["m2_one_uav_control", "m3_full"]},
+        "expected_cell_count": {"type": "integer", "enum": [2, 30]},
+        "cell_ids": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 30,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/identifier"}
+        },
+        "phase_contract": {
+          "type": "object",
+          "minProperties": 3
+        }
+      }
+    },
+    "uav": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "instance", "system_id"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^uav[1-5]$"},
+        "instance": {"type": "integer", "minimum": 0, "maximum": 4},
+        "system_id": {"type": "integer", "minimum": 1, "maximum": 5}
+      }
+    },
+    "protocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "channel", "message_family", "classification_source"],
+      "properties": {
+        "kind": {"type": "string", "enum": ["mavlink_v2", "udp_framed"]},
+        "channel": {"$ref": "#/$defs/identifier"},
+        "message_family": {"type": "string", "minLength": 1},
+        "classification_source": {"const": "decoded_bytes_port_nonce"}
+      }
+    },
+    "endpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "namespace",
+        "interface",
+        "ip",
+        "udp_port",
+        "mavlink_system_id",
+        "mavlink_component_id"
+      ],
+      "properties": {
+        "role": {"$ref": "#/$defs/identifier"},
+        "namespace": {"$ref": "#/$defs/identifier"},
+        "interface": {"$ref": "#/$defs/identifier"},
+        "ip": {"type": "string", "minLength": 7},
+        "udp_port": {"$ref": "#/$defs/port"},
+        "mavlink_system_id": {"$ref": "#/$defs/nullable_mavlink_id"},
+        "mavlink_component_id": {"$ref": "#/$defs/nullable_mavlink_id"}
+      }
+    },
+    "transport_ports": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command_post_udp",
+        "uav_udp",
+        "ns3_ground_handoff_udp",
+        "ns3_uav_handoff_udp"
+      ],
+      "properties": {
+        "command_post_udp": {"$ref": "#/$defs/port"},
+        "uav_udp": {"$ref": "#/$defs/port"},
+        "ns3_ground_handoff_udp": {"$ref": "#/$defs/port"},
+        "ns3_uav_handoff_udp": {"$ref": "#/$defs/port"}
+      }
+    },
+    "ns3_path": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "directed_link_id",
+        "ingress_device_id",
+        "egress_device_id",
+        "queue_id",
+        "priority",
+        "dscp_tos",
+        "ingress_udp_port",
+        "egress_udp_port"
+      ],
+      "properties": {
+        "directed_link_id": {"$ref": "#/$defs/identifier"},
+        "ingress_device_id": {"$ref": "#/$defs/identifier"},
+        "egress_device_id": {"$ref": "#/$defs/identifier"},
+        "queue_id": {"$ref": "#/$defs/identifier"},
+        "priority": {"type": "integer", "minimum": 0, "maximum": 2},
+        "dscp_tos": {"type": "integer", "minimum": 0, "maximum": 255},
+        "ingress_udp_port": {"$ref": "#/$defs/port"},
+        "egress_udp_port": {"$ref": "#/$defs/port"}
+      }
+    },
+    "capture_points": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_before_adapter",
+        "ns3_external_ingress",
+        "ns3_external_egress",
+        "remote_after_adapter"
+      ],
+      "properties": {
+        "source_before_adapter": {"$ref": "#/$defs/identifier"},
+        "ns3_external_ingress": {"$ref": "#/$defs/identifier"},
+        "ns3_external_egress": {"$ref": "#/$defs/identifier"},
+        "remote_after_adapter": {"$ref": "#/$defs/identifier"}
+      }
+    },
+    "hash_domains": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mavlink_frame_sha256",
+        "application_unit_sha256",
+        "transport_payload_sha256",
+        "wire_frame_sha256"
+      ],
+      "properties": {
+        "mavlink_frame_sha256": {"type": "boolean"},
+        "application_unit_sha256": {"const": true},
+        "transport_payload_sha256": {"const": true},
+        "wire_frame_sha256": {"const": true}
+      }
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nonce_domain", "flow_id", "sequence_policy", "hash_domains"],
+      "properties": {
+        "nonce_domain": {"type": "string", "minLength": 1},
+        "flow_id": {"$ref": "#/$defs/identifier"},
+        "sequence_policy": {"const": "strictly_monotonic_per_flow"},
+        "hash_domains": {"$ref": "#/$defs/hash_domains"}
+      }
+    },
+    "outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["response_kind", "timeout_ms", "correlation"],
+      "properties": {
+        "response_kind": {"$ref": "#/$defs/identifier"},
+        "timeout_ms": {"const": 3000},
+        "correlation": {"$ref": "#/$defs/identifier"}
+      }
+    },
+    "cell": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cell_id",
+        "uav",
+        "traffic_class",
+        "direction",
+        "protocol",
+        "source",
+        "destination",
+        "transport_ports",
+        "ns3_path",
+        "capture_points",
+        "identity",
+        "outcome"
+      ],
+      "properties": {
+        "cell_id": {"$ref": "#/$defs/identifier"},
+        "uav": {"$ref": "#/$defs/uav"},
+        "traffic_class": {"type": "string", "enum": ["control", "payload", "additional_data"]},
+        "direction": {"type": "string", "enum": ["downlink", "uplink"]},
+        "protocol": {"$ref": "#/$defs/protocol"},
+        "source": {"$ref": "#/$defs/endpoint"},
+        "destination": {"$ref": "#/$defs/endpoint"},
+        "transport_ports": {"$ref": "#/$defs/transport_ports"},
+        "ns3_path": {"$ref": "#/$defs/ns3_path"},
+        "capture_points": {"$ref": "#/$defs/capture_points"},
+        "identity": {"$ref": "#/$defs/identity"},
+        "outcome": {"$ref": "#/$defs/outcome"}
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["traffic_class", "direction"],
+            "properties": {
+              "traffic_class": {"const": "control"},
+              "direction": {"const": "downlink"}
+            }
+          },
+          "then": {
+            "properties": {
+              "capture_points": {
+                "properties": {
+                  "remote_after_adapter": {
+                    "type": "string",
+                    "pattern": "^uav[1-5]\\.mavproxy\\.tail$"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["traffic_class", "direction"],
+            "properties": {
+              "traffic_class": {"const": "control"},
+              "direction": {"const": "uplink"}
+            }
+          },
+          "then": {
+            "properties": {
+              "capture_points": {
+                "properties": {
+                  "source_before_adapter": {
+                    "type": "string",
+                    "pattern": "^uav[1-5]\\.mavproxy\\.tail$"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["traffic_class", "direction"],
+            "properties": {
+              "traffic_class": {"enum": ["payload", "additional_data"]},
+              "direction": {"const": "downlink"}
+            }
+          },
+          "then": {
+            "properties": {
+              "capture_points": {
+                "properties": {
+                  "remote_after_adapter": {
+                    "type": "string",
+                    "pattern": "^uav[1-5]\\.sink\\.eth0$"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["traffic_class", "direction"],
+            "properties": {
+              "traffic_class": {"enum": ["payload", "additional_data"]},
+              "direction": {"const": "uplink"}
+            }
+          },
+          "then": {
+            "properties": {
+              "capture_points": {
+                "properties": {
+                  "source_before_adapter": {
+                    "type": "string",
+                    "pattern": "^uav[1-5]\\.source\\.eth0$"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

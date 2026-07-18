@@ -35,6 +35,14 @@ DEFAULT_JAMMERS = ROOT_DIR / "network/config/jammers.yaml"
 DEFAULT_SERVICE_TIERS = ROOT_DIR / "network/config/service_tiers.yaml"
 FLOOR_W = 1e-30
 FLOOR_GAIN = 1e-30
+PATH_TYPE_NAMES = (
+    "los",
+    "specular",
+    "diffuse",
+    "refracted",
+    "diffracted",
+    "mixed",
+)
 
 
 class ProviderError(RuntimeError):
@@ -76,6 +84,28 @@ class ProviderSettings:
     @property
     def sensitivity_dbm(self) -> float:
         return float(self.radio.get("receiver_sensitivity_dbm", -105.0))
+
+
+@dataclass(frozen=True)
+class PathEvidence:
+    """Exact path-solver evidence for one directed radio pair."""
+
+    propagation_delay_ns: float
+    path_count: int
+    path_type_counts: dict[str, int]
+    geometry_state: str
+
+
+@dataclass(frozen=True)
+class PairComputation:
+    """Linear gains and their per-pair propagation lineage."""
+
+    gains: dict[tuple[str, str], float]
+    evidence: dict[tuple[str, str], PathEvidence]
+
+
+def empty_path_type_counts() -> dict[str, int]:
+    return {name: 0 for name in PATH_TYPE_NAMES}
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
@@ -334,7 +364,7 @@ class SionnaRadioProvider:
             import numpy as np  # type: ignore
             import mitsuba as mi  # type: ignore
 
-            mitsuba_variant = os.environ.get("SIONNA_MITSUBA_VARIANT", "llvm_ad_mono_polarized")
+            mitsuba_variant = os.environ.get("SIONNA_MITSUBA_VARIANT", "cuda_ad_mono_polarized")
             if mitsuba_variant and mi.variant() is None:
                 if mitsuba_variant not in mi.variants():
                     raise ProviderError(
@@ -398,7 +428,8 @@ class SionnaRadioProvider:
 
         node_map = {str(node["id"]): node for node in nodes}
         emitter_map = {str(emitter["id"]): emitter for emitter in emitters}
-        gains = self._pair_gains(node_map, emitter_map, links, radio)
+        pair_computation = self._pair_gains(node_map, emitter_map, links, radio)
+        gains = pair_computation.gains
 
         response_links: list[dict[str, Any]] = []
         latency_ms = 0.0
@@ -412,6 +443,9 @@ class SionnaRadioProvider:
                 raise ProviderError(f"Unknown link receiver: {rx}")
 
             signal_gain = max(gains.get((tx, rx), 0.0), 0.0)
+            path_evidence = pair_computation.evidence.get((tx, rx))
+            if path_evidence is None:
+                raise ProviderError(f"Missing path evidence for directed pair: {tx}>{rx}")
             pathloss_db = path_gain_to_loss_db(signal_gain)
             rssi_dbm = radio["tx_power_dbm"] + 10.0 * math.log10(max(signal_gain, FLOOR_GAIN))
 
@@ -432,6 +466,12 @@ class SionnaRadioProvider:
                     "rx": rx,
                     "traffic_class": traffic_class,
                     "pathloss_db": finite_round(pathloss_db),
+                    "propagation_delay_ns": finite_round(
+                        path_evidence.propagation_delay_ns, 6
+                    ),
+                    "path_count": path_evidence.path_count,
+                    "path_type_counts": dict(path_evidence.path_type_counts),
+                    "geometry_state": path_evidence.geometry_state,
                     "rssi_dbm": finite_round(rssi_dbm),
                     "sinr_db": finite_round(sinr_db),
                     "js_db": finite_round(js_db),
@@ -466,7 +506,7 @@ class SionnaRadioProvider:
         emitter_map: dict[str, dict[str, Any]],
         links: list[dict[str, Any]],
         radio: dict[str, float],
-    ) -> dict[tuple[str, str], float]:
+    ) -> PairComputation:
         if self.settings.mode == "test_free_space":
             return self._free_space_pair_gains(node_map, emitter_map, links, radio)
         return self._sionna_pair_gains(node_map, emitter_map, links, radio)
@@ -477,15 +517,25 @@ class SionnaRadioProvider:
         emitter_map: dict[str, dict[str, Any]],
         links: list[dict[str, Any]],
         radio: dict[str, float],
-    ) -> dict[tuple[str, str], float]:
+    ) -> PairComputation:
         pairs = self._required_pairs(links, emitter_map)
         gains: dict[tuple[str, str], float] = {}
+        evidence: dict[tuple[str, str], PathEvidence] = {}
         for tx, rx in pairs:
             tx_pos = self._entity_position(tx, node_map, emitter_map)
             rx_pos = self._entity_position(rx, node_map, emitter_map)
-            loss_db = free_space_pathloss_db(distance_m(tx_pos, rx_pos), radio["carrier_hz"])
+            pair_distance_m = distance_m(tx_pos, rx_pos)
+            loss_db = free_space_pathloss_db(pair_distance_m, radio["carrier_hz"])
             gains[(tx, rx)] = 10.0 ** (-loss_db / 10.0)
-        return gains
+            counts = empty_path_type_counts()
+            counts["los"] = 1
+            evidence[(tx, rx)] = PathEvidence(
+                propagation_delay_ns=pair_distance_m / 299_792_458.0 * 1e9,
+                path_count=1,
+                path_type_counts=counts,
+                geometry_state="los",
+            )
+        return PairComputation(gains=gains, evidence=evidence)
 
     def _sionna_pair_gains(
         self,
@@ -493,7 +543,7 @@ class SionnaRadioProvider:
         emitter_map: dict[str, dict[str, Any]],
         links: list[dict[str, Any]],
         radio: dict[str, float],
-    ) -> dict[tuple[str, str], float]:
+    ) -> PairComputation:
         assert self._rt is not None
         assert self._scene is not None
         assert self._path_solver is not None
@@ -536,19 +586,110 @@ class SionnaRadioProvider:
                     seed=int(solver_cfg.get("seed", 42)),
                 )
                 amplitudes = self._np.asarray(paths.a)
+                valid = self._np.asarray(paths.valid, dtype=bool)
+                delays_s = self._np.asarray(paths.tau)
+                interactions = self._np.asarray(paths.interactions)
                 tx_index = {tx_id: idx for idx, tx_id in enumerate(tx_ids)}
                 rx_index = {rx_id: idx for idx, rx_id in enumerate(rx_ids)}
                 gains: dict[tuple[str, str], float] = {}
+                evidence: dict[tuple[str, str], PathEvidence] = {}
                 for tx_id, rx_id in pairs:
+                    rx_idx = rx_index[rx_id]
+                    tx_idx = tx_index[tx_id]
                     gain = float(
                         self._np.sum(
-                            self._np.abs(amplitudes[:, rx_index[rx_id], :, tx_index[tx_id], :, :]) ** 2
+                            self._np.abs(amplitudes[:, rx_idx, :, tx_idx, :, :])
+                            ** 2
                         )
                     )
                     gains[(tx_id, rx_id)] = max(gain, 0.0)
-                return gains
+                    evidence[(tx_id, rx_id)] = self._path_evidence(
+                        valid,
+                        delays_s,
+                        interactions,
+                        rx_idx,
+                        tx_idx,
+                    )
+                return PairComputation(gains=gains, evidence=evidence)
             except Exception as exc:
                 raise ProviderError(f"Sionna RT link query failed: {exc}") from exc
+
+    def _path_evidence(
+        self,
+        valid: Any,
+        delays_s: Any,
+        interactions: Any,
+        rx_index: int,
+        tx_index: int,
+    ) -> PathEvidence:
+        """Classify each valid Sionna path exactly once and retain its delay."""
+
+        assert self._np is not None
+        if valid.ndim == 3:
+            pair_valid = valid[rx_index, tx_index, :]
+            pair_delays = delays_s[rx_index, tx_index, :]
+            pair_interactions = interactions[:, rx_index, tx_index, :]
+        elif valid.ndim == 5:
+            pair_valid = valid[rx_index, :, tx_index, :, :]
+            pair_delays = delays_s[rx_index, :, tx_index, :, :]
+            pair_interactions = interactions[:, rx_index, :, tx_index, :, :]
+        else:
+            raise ProviderError(f"Unexpected Sionna valid-path tensor rank: {valid.ndim}")
+
+        flat_valid = self._np.asarray(pair_valid, dtype=bool).reshape(-1)
+        flat_delays = self._np.asarray(pair_delays, dtype=float).reshape(-1)
+        depth = int(pair_interactions.shape[0])
+        flat_interactions = self._np.asarray(pair_interactions).reshape(
+            depth, -1
+        )
+        if flat_valid.size != flat_delays.size or flat_interactions.shape[1] != flat_valid.size:
+            raise ProviderError("Sionna path evidence tensor shapes do not align")
+
+        counts = empty_path_type_counts()
+        valid_indices = self._np.flatnonzero(flat_valid)
+        for path_index in valid_indices:
+            active_types = {
+                int(value)
+                for value in flat_interactions[:, path_index]
+                if int(value) != 0
+            }
+            if not active_types:
+                path_type = "los"
+            elif active_types == {1}:
+                path_type = "specular"
+            elif active_types == {2}:
+                path_type = "diffuse"
+            elif active_types == {4}:
+                path_type = "refracted"
+            elif active_types == {8}:
+                path_type = "diffracted"
+            else:
+                path_type = "mixed"
+            counts[path_type] += 1
+
+        path_count = int(valid_indices.size)
+        if sum(counts.values()) != path_count:
+            raise ProviderError("Sionna path type counts do not equal valid path count")
+        if path_count == 0:
+            return PathEvidence(
+                propagation_delay_ns=0.0,
+                path_count=0,
+                path_type_counts=counts,
+                geometry_state="blocked_no_path",
+            )
+
+        valid_delays = flat_delays[flat_valid]
+        if not bool(self._np.all(self._np.isfinite(valid_delays))) or bool(
+            self._np.any(valid_delays < 0.0)
+        ):
+            raise ProviderError("Sionna returned invalid delay for a resolved path")
+        geometry_state = "los" if counts["los"] > 0 else "nlos"
+        return PathEvidence(
+            propagation_delay_ns=float(self._np.min(valid_delays)) * 1e9,
+            path_count=path_count,
+            path_type_counts=counts,
+            geometry_state=geometry_state,
+        )
 
     def _required_pairs(
         self, links: list[dict[str, Any]], emitter_map: dict[str, dict[str, Any]]

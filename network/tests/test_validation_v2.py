@@ -579,15 +579,33 @@ class ValidationV2Tests(unittest.TestCase):
             self.assertTrue(original_summary["p0_passed"])
 
     def test_historical_false_positive_run_is_rejected_when_available(self) -> None:
-        run_dir = ROOT_DIR / "runs/real_packet_loop_20260702T113341Z"
-        if not run_dir.is_dir():
-            self.skipTest("historical regression run is not present in this checkout")
-        result = evaluate_run(run_dir)
-        self.assertFalse(result["p0_passed"])
-        self.assertEqual(result["gates"]["p0"]["three_traffic_classes"]["status"], "failed")
-        self.assertNotEqual(result["gates"]["p0"]["no_bypass"]["status"], "passed")
-        stats = pcap_stats(run_dir / "pcap/control.pcap")
-        self.assertEqual(stats["udp_packets"], 0)
+        # The old test depended on one ignored runs/ directory.  Recreate the
+        # exact false-positive shape from tracked test code so M0 has no hidden
+        # artifact prerequisite that can be substituted outside source binding.
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp) / "historical_false_positive"
+            (run_dir / "metrics").mkdir(parents=True)
+            (run_dir / "logs").mkdir()
+            (run_dir / "metrics/summary.json").write_text(
+                json.dumps(invalid_false_positive_summary()), encoding="utf-8"
+            )
+            (run_dir / "logs/no_bypass.log").write_text(
+                "NOTE full P0 no-bypass proof still requires active endpoints\n",
+                encoding="utf-8",
+            )
+            write_pcap(run_dir / "pcap/control.pcap", [arp_frame()])
+
+            result = evaluate_run(run_dir)
+            self.assertFalse(result["p0_passed"])
+            self.assertEqual(
+                result["gates"]["p0"]["three_traffic_classes"]["status"],
+                "failed",
+            )
+            self.assertNotEqual(
+                result["gates"]["p0"]["no_bypass"]["status"], "passed"
+            )
+            stats = pcap_stats(run_dir / "pcap/control.pcap")
+            self.assertEqual(stats["udp_packets"], 0)
 
 
 if __name__ == "__main__":

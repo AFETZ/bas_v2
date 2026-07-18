@@ -1,8 +1,33 @@
-#!/usr/bin/env bash
+#!/usr/bin/bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-RUN_ID="${RUN_ID:-m1_five_uav_health_$(date -u +%Y%m%dT%H%M%SZ)}"
+SCRIPT_DIR="${BASH_SOURCE[0]%/*}"
+if [[ "$SCRIPT_DIR" == "${BASH_SOURCE[0]}" ]]; then
+  SCRIPT_DIR=.
+fi
+cd -- "$SCRIPT_DIR/../.."
+ROOT_DIR="$PWD"
+# The installed ROS 2 launch module is imported directly from the fresh
+# run-local overlay.  Never let that import mutate the evidence tree with a
+# launch/__pycache__ entry: source/install equality is an acceptance gate.
+export PYTHONDONTWRITEBYTECODE=1
+export PYTHONPYCACHEPREFIX=/tmp/ams-m1-pycache
+RUN_PROFILE="${AMS_FLIGHT_RUN_PROFILE:-m1_component}"
+case "$RUN_PROFILE" in
+  m1_component)
+    CAPACITY_MODE=0
+    DEFAULT_RUN_PREFIX=m1_five_uav_health
+    ;;
+  flight_capacity_prerequisite)
+    CAPACITY_MODE=1
+    DEFAULT_RUN_PREFIX=flight_capacity
+    ;;
+  *)
+    printf 'FAIL unsupported five-UAV flight profile: %s\n' "$RUN_PROFILE" >&2
+    exit 2
+    ;;
+esac
+RUN_ID="${RUN_ID:-${DEFAULT_RUN_PREFIX}_$(date -u +%Y%m%dT%H%M%SZ)}"
 RUN_DIR="${RUN_DIR:-$ROOT_DIR/runs/$RUN_ID}"
 RUNTIME_DIR="$RUN_DIR/runtime"
 SCENARIO="${SCENARIO:-$ROOT_DIR/network/config/scenario_5uav.yaml}"
@@ -12,7 +37,7 @@ WARMUP_S="${WARMUP_S:-30}"
 READINESS_TIMEOUT_S="${READINESS_TIMEOUT_S:-90}"
 READINESS_STABILITY_S="${READINESS_STABILITY_S:-5}"
 ROBOT_MODEL="${ROBOT_MODEL:-iris_radio_headless}"
-RUNTIME_ID="${AMS_RUNTIME_ID:-m1-$(python3 -c 'import uuid; print(uuid.uuid4())')}"
+RUNTIME_ID="${AMS_RUNTIME_ID:-${RUN_PROFILE//_/-}-$(/usr/bin/python3.10 -c 'import uuid; print(uuid.uuid4())')}"
 ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-$((20 + $(printf '%s' "$RUN_ID" | cksum | awk '{print $1}') % 180))}"
 GZ_PARTITION="${GZ_PARTITION:-ams_${RUN_ID//[^a-zA-Z0-9_]/_}}"
 
@@ -21,6 +46,39 @@ if [[ -e "$RUN_DIR" ]]; then
   exit 1
 fi
 mkdir -p "$RUN_DIR/logs" "$RUN_DIR/metrics" "$RUNTIME_DIR"
+
+OVERLAY_ROOT="$RUN_DIR/runtime_overlay"
+OVERLAY_BUILD="$OVERLAY_ROOT/build"
+OVERLAY_INSTALL="$OVERLAY_ROOT/install"
+OVERLAY_LOG="$OVERLAY_ROOT/log"
+EXPECTED_SHARE="$OVERLAY_INSTALL/multiagent_simulation/share/multiagent_simulation"
+BUILD_COMMAND=(
+  /usr/bin/colcon --log-base "$OVERLAY_LOG" build
+  --base-paths "$ROOT_DIR/src/multiagent_simulation"
+  --build-base "$OVERLAY_BUILD"
+  --install-base "$OVERLAY_INSTALL"
+)
+printf '%q ' "${BUILD_COMMAND[@]}" > "$RUN_DIR/logs/m1_runtime_overlay_build.command"
+printf '\n' >> "$RUN_DIR/logs/m1_runtime_overlay_build.command"
+set +e
+"${BUILD_COMMAND[@]}" > "$RUN_DIR/logs/m1_runtime_overlay_build.log" 2>&1
+OVERLAY_BUILD_RC=$?
+set -e
+printf '%s\n' "$OVERLAY_BUILD_RC" > "$RUN_DIR/logs/m1_runtime_overlay_build.exit_code"
+if ((OVERLAY_BUILD_RC != 0)) || [[ ! -f "$OVERLAY_INSTALL/setup.bash" ]]; then
+  printf 'FAIL fresh M1 runtime overlay build failed\n' >&2
+  exit 1
+fi
+# shellcheck disable=SC1090
+source "$OVERLAY_INSTALL/setup.bash"
+RESOLVED_SHARE="$(/usr/bin/python3.10 -c 'from ament_index_python.packages import get_package_share_directory; print(get_package_share_directory("multiagent_simulation"))')"
+if [[ "$RESOLVED_SHARE" != "$EXPECTED_SHARE" ]] || [[ ! -d "$EXPECTED_SHARE" ]]; then
+  printf 'FAIL M1 resolved package share is not the fresh run overlay: %s\n' \
+    "$RESOLVED_SHARE" >&2
+  exit 1
+fi
+export AMS_M1_INSTALLED_SHARE="$EXPECTED_SHARE"
+export GZ_SIM_RESOURCE_PATH="$EXPECTED_SHARE/models:$EXPECTED_SHARE/worlds:$EXPECTED_SHARE"
 
 port_is_bindable() {
   local protocol="$1"
@@ -68,16 +126,32 @@ printf '\n' >> "$RUN_DIR/command.txt"
   printf 'robot_model=%s\n' "$ROBOT_MODEL"
   printf 'enable_serial2=false\n'
   printf 'runtime_id=%s\n' "$RUNTIME_ID"
-  printf 'profile=m1_component\n'
+  printf 'profile=%s\n' "$RUN_PROFILE"
   printf 'scenario_id=scenario_5uav\n'
-  printf 'phase_manifest=readiness,measurement,finalization\n'
+  if ((CAPACITY_MODE == 1)); then
+    printf 'phase_manifest=readiness,warmup_30s,measurement_300s,finalization\n'
+  else
+    printf 'phase_manifest=readiness,measurement,finalization\n'
+  fi
   printf 'ros_domain_id=%s\n' "$ROS_DOMAIN_ID"
   printf 'gz_partition=%s\n' "$GZ_PARTITION"
   printf 'component_only=true\n'
   printf 'packet_path_eligible=false\n'
+  printf 'source_mode=%s\n' "${AMS_M1_SOURCE_MODE:-diagnostic_live_checkout}"
+  printf 'source_commit=%s\n' "${AMS_M1_SOURCE_COMMIT:-unknown}"
+  printf 'runtime_overlay=%s\n' "$OVERLAY_ROOT"
+  printf 'installed_package_share=%s\n' "$EXPECTED_SHARE"
+  printf 'gz_sim_resource_path=%s\n' "$GZ_SIM_RESOURCE_PATH"
+  printf 'generate_sensor_models=false\n'
+  printf 'python_dont_write_bytecode=%s\n' "$PYTHONDONTWRITEBYTECODE"
+  printf 'python_pycache_prefix=%s\n' "$PYTHONPYCACHEPREFIX"
 } > "$RUN_DIR/environment.txt"
 
 cleanup() {
+  if [[ -n "${HEALTH_COLLECTOR_PID:-}" ]]; then
+    kill -TERM "$HEALTH_COLLECTOR_PID" >/dev/null 2>&1 || true
+    wait "$HEALTH_COLLECTOR_PID" >/dev/null 2>&1 || true
+  fi
   if [[ -n "${LAUNCH_PID:-}" ]]; then
     kill -TERM -- "-$LAUNCH_PID" >/dev/null 2>&1 || kill -TERM "$LAUNCH_PID" >/dev/null 2>&1 || true
     for _ in {1..25}; do
@@ -97,6 +171,7 @@ export ROS_DOMAIN_ID
 export GZ_PARTITION
 
 python3 "$ROOT_DIR/network/scripts/write_run_provenance.py" --run-dir "$RUN_DIR" \
+  --qualification-profile "$RUN_PROFILE" --consumed-node Q0 --consumed-node Q1 \
   > "$RUN_DIR/logs/provenance.log" 2>&1
 if ! WORLD_FILE="$(
   python3 "$ROOT_DIR/network/scripts/write_m1_scene_provenance.py" \
@@ -104,6 +179,7 @@ if ! WORLD_FILE="$(
     --scenario "$SCENARIO" \
     --robot-model "$ROBOT_MODEL" \
     --runtime-id "$RUNTIME_ID" \
+    --installed-package-share "$EXPECTED_SHARE" \
     2> "$RUN_DIR/logs/m1_scene_provenance.log"
 )"; then
   cat "$RUN_DIR/logs/m1_scene_provenance.log" >&2
@@ -126,11 +202,12 @@ fi
 
 (
   cd "$RUNTIME_DIR"
-  exec setsid ros2 launch multiagent_simulation multiagent_simulation.launch.py \
+  exec setsid /opt/ros/humble/bin/ros2 launch multiagent_simulation multiagent_simulation.launch.py \
     robots_config_file:="$SCENARIO" \
     world_file:="$WORLD_FILE" \
     robot_model:="$ROBOT_MODEL" \
     enable_serial2:=false \
+    generate_sensor_models:=false \
     gui:=false rviz:=false headless_rendering:=false \
     use_mapping_camera:=false \
     use_navigation_camera:=false \
@@ -139,45 +216,88 @@ fi
 LAUNCH_PID=$!
 printf '%s\n' "$LAUNCH_PID" > "$RUN_DIR/logs/five_uav_launch.pid"
 
-sleep "$WARMUP_S"
-if ! kill -0 "$LAUNCH_PID" >/dev/null 2>&1; then
-  printf 'FAIL five-UAV launch exited during warmup; see %s\n' "$RUN_DIR/logs/five_uav_launch.log" >&2
-  exit 1
+if ((CAPACITY_MODE == 1)); then
+  set +e
+  python3 "$ROOT_DIR/network/tests/collect_five_uav_health.py" \
+    --scenario "$SCENARIO" \
+    --run-dir "$RUN_DIR" \
+    --runtime-id "$RUNTIME_ID" \
+    --launch-process-group "$LAUNCH_PID" \
+    --duration-s 300 \
+    --minimum-duration-s 300 \
+    --readiness-timeout-s "$READINESS_TIMEOUT_S" \
+    --readiness-stability-s "$READINESS_STABILITY_S" \
+    --heartbeat-endpoint "udpin:127.0.0.1:14550" \
+    --launch-log "$RUN_DIR/logs/five_uav_launch.log" \
+    --world "$WORLD_NAME" \
+    > "$RUN_DIR/logs/flight_capacity_health_collector.stdout.log" \
+    2> "$RUN_DIR/logs/flight_capacity_health_collector.stderr.log" &
+  HEALTH_COLLECTOR_PID=$!
+  set -e
+  set +e
+  python3 "$ROOT_DIR/network/scripts/collect_flight_capacity.py" \
+    --run-dir "$RUN_DIR" \
+    --runtime-id "$RUNTIME_ID" \
+    --launch-process-group "$LAUNCH_PID"
+  CAPACITY_COLLECTOR_RC=$?
+  wait "$HEALTH_COLLECTOR_PID"
+  HEALTH_COLLECTOR_RC=$?
+  HEALTH_COLLECTOR_PID=""
+  set -e
+  if ((CAPACITY_COLLECTOR_RC != 0 || HEALTH_COLLECTOR_RC != 0)); then
+    printf 'FAIL capacity collectors failed: capacity=%s health=%s\n' \
+      "$CAPACITY_COLLECTOR_RC" "$HEALTH_COLLECTOR_RC" >&2
+    exit 1
+  fi
+else
+  sleep "$WARMUP_S"
+  if ! kill -0 "$LAUNCH_PID" >/dev/null 2>&1; then
+    printf 'FAIL five-UAV launch exited during warmup; see %s\n' "$RUN_DIR/logs/five_uav_launch.log" >&2
+    exit 1
+  fi
+  set +e
+  python3 "$ROOT_DIR/network/tests/collect_five_uav_health.py" \
+    --scenario "$SCENARIO" \
+    --run-dir "$RUN_DIR" \
+    --runtime-id "$RUNTIME_ID" \
+    --launch-process-group "$LAUNCH_PID" \
+    --duration-s "$DURATION_S" \
+    --minimum-duration-s "$MINIMUM_DURATION_S" \
+    --readiness-timeout-s "$READINESS_TIMEOUT_S" \
+    --readiness-stability-s "$READINESS_STABILITY_S" \
+    --heartbeat-endpoint "udpin:127.0.0.1:14550" \
+    --launch-log "$RUN_DIR/logs/five_uav_launch.log" \
+    --world "$WORLD_NAME"
+  COLLECTOR_RC=$?
+  set -e
+  if ((COLLECTOR_RC != 0)); then
+    exit "$COLLECTOR_RC"
+  fi
 fi
+
 if grep -Eiq \
   'bind error|bind failed|failed to bind|address already in use|segmentation fault|core dumped|process has died|error while starting ipvx agent|failed to open \(.*ttyros|traceback \(most recent call last\)|failed to download /srtm3?' \
   "$RUN_DIR/logs/five_uav_launch.log"; then
-  printf 'FAIL five-UAV launch log contains a fatal startup marker; see %s\n' \
+  printf 'FAIL five-UAV launch log contains a fatal marker; see %s\n' \
     "$RUN_DIR/logs/five_uav_launch.log" >&2
   exit 1
 fi
-set +e
-python3 "$ROOT_DIR/network/tests/collect_five_uav_health.py" \
-  --scenario "$SCENARIO" \
-  --run-dir "$RUN_DIR" \
-  --runtime-id "$RUNTIME_ID" \
-  --launch-process-group "$LAUNCH_PID" \
-  --duration-s "$DURATION_S" \
-  --minimum-duration-s "$MINIMUM_DURATION_S" \
-  --readiness-timeout-s "$READINESS_TIMEOUT_S" \
-  --readiness-stability-s "$READINESS_STABILITY_S" \
-  --heartbeat-endpoint "udpin:127.0.0.1:14550" \
-  --launch-log "$RUN_DIR/logs/five_uav_launch.log" \
-  --world "$WORLD_NAME"
-COLLECTOR_RC=$?
-set -e
 
 if ! kill -0 "$LAUNCH_PID" >/dev/null 2>&1; then
   printf 'FAIL five-UAV launch exited during health observation\n' >&2
   exit 1
 fi
-if (( COLLECTOR_RC != 0 )); then
-  exit "$COLLECTOR_RC"
-fi
-
 # Freeze every launch-owned writer before independently reading bounded evidence.
 cleanup
 LAUNCH_PID=""
-python3 "$ROOT_DIR/network/scripts/validate_m1_health.py" --run-dir "$RUN_DIR"
-
-printf 'Five-UAV M1 health run complete: %s\n' "$RUN_DIR"
+# Build intermediates are not runtime inputs and can contain absolute CMake
+# links back to the temporary checkout.  Preserve the raw build command/log,
+# but publish only the relocatable install tree used by the launch.
+/usr/bin/rm -rf -- "$OVERLAY_BUILD" "$OVERLAY_LOG"
+if ((CAPACITY_MODE == 1)); then
+  python3 "$ROOT_DIR/network/scripts/validate_flight_capacity.py" --run-dir "$RUN_DIR"
+  printf 'Five-UAV flight capacity run complete: %s\n' "$RUN_DIR"
+else
+  python3 "$ROOT_DIR/network/scripts/validate_m1_health.py" --run-dir "$RUN_DIR"
+  printf 'Five-UAV M1 health run complete: %s\n' "$RUN_DIR"
+fi

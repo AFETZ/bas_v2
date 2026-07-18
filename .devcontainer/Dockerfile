@@ -141,6 +141,8 @@ RUN sudo apt-get update && \
       pkg-config \
       python3-dev \
       iproute2 \
+      iptables \
+      nftables \
       tcpdump \
       util-linux \
       netcat-openbsd \

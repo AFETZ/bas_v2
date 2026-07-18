@@ -1,0 +1,11 @@
+{
+  "contract": "ams.qualification-test-manifest/v1",
+  "discovery": {
+    "pattern": "test_*.py",
+    "start_directory": "network/tests"
+  },
+  "node": "Q8",
+  "ordered_test_ids": [],
+  "schema_version": 1,
+  "test_modules": []
+}

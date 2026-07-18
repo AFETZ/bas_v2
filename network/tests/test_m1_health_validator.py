@@ -91,25 +91,53 @@ class M1SceneValidatorTests(unittest.TestCase):
         launch = root / producer.LAUNCH_SOURCE_RELATIVE
         launch.parent.mkdir(parents=True)
         launch.write_text("# fixture launch\n", encoding="utf-8")
-
-        installed_share = (
-            root / "install/multiagent_simulation/share/multiagent_simulation"
+        package_root = root / "src/multiagent_simulation"
+        (package_root / "config").mkdir()
+        (package_root / "rviz").mkdir()
+        (package_root / "config/gazebo-iris.parm").write_text(
+            "FRAME_CLASS 1\n", encoding="utf-8"
         )
-        shutil.copytree(source_bundle, installed_share / "worlds/fixture")
-        shutil.copytree(source_models, installed_share / "models")
+        (package_root / "config/multiagent_lidar_camera_bridge.yaml").write_text(
+            "- ros_topic_name: /<robot_name>/tf\n", encoding="utf-8"
+        )
+        (package_root / "rviz/fixture.rviz").write_text(
+            "Panels: []\n", encoding="utf-8"
+        )
+        (package_root / "package.xml").write_text(
+            "<package format='3'><name>multiagent_simulation</name>"
+            "<version>0.0.0</version><description>fixture</description>"
+            "<maintainer email='fixture@example.test'>Fixture</maintainer>"
+            "<license>GPL-3.0</license></package>\n",
+            encoding="utf-8",
+        )
 
         run_dir = root / "runs/m1_fixture"
         (run_dir / "metrics").mkdir(parents=True)
         (run_dir / "logs").mkdir()
+        installed_share = (
+            run_dir
+            / "runtime_overlay/install/multiagent_simulation/share/multiagent_simulation"
+        )
+        shutil.copytree(source_bundle, installed_share / "worlds/fixture")
+        shutil.copytree(source_models, installed_share / "models")
+        (installed_share / "launch").mkdir()
+        shutil.copy2(launch, installed_share / "launch/multiagent_simulation.launch.py")
+        shutil.copytree(package_root / "config", installed_share / "config")
+        shutil.copytree(package_root / "rviz", installed_share / "rviz")
+        shutil.copy2(package_root / "package.xml", installed_share / "package.xml")
         source_hash = "a" * 64
         source_inputs = [
             scenario,
             launch,
+            package_root / "package.xml",
+            *sorted(path for path in (package_root / "config").rglob("*") if path.is_file()),
+            *sorted(path for path in (package_root / "rviz").rglob("*") if path.is_file()),
             *sorted(path for path in source_bundle.rglob("*") if path.is_file()),
             *sorted(path for path in source_models.rglob("*") if path.is_file()),
         ]
         provenance = {
             "source_hash": source_hash,
+            "git_commit": "a" * 40,
             "config_hashes": {producer.M1_PLAN_PATH: producer.sha256_file(plan)},
             "dependency_versions": {"gazebo": "8.14.0"},
             "source_manifest": {
@@ -131,6 +159,42 @@ class M1SceneValidatorTests(unittest.TestCase):
         )
         producer.write_scene_record(run_dir / producer.M1_SCENE_RECORD, record)
         self.write_raw(run_dir, runtime_id, source_hash, record["installed"]["runtime_active_world_path"])
+        overlay = run_dir / "runtime_overlay"
+        command = [
+            "/usr/bin/colcon",
+            "--log-base",
+            str(overlay / "log"),
+            "build",
+            "--base-paths",
+            str(root / "src/multiagent_simulation"),
+            "--build-base",
+            str(overlay / "build"),
+            "--install-base",
+            str(overlay / "install"),
+        ]
+        (run_dir / "logs/m1_runtime_overlay_build.command").write_text(
+            " ".join(command) + "\n", encoding="utf-8"
+        )
+        (run_dir / "logs/m1_runtime_overlay_build.log").write_text(
+            "fixture build passed\n", encoding="utf-8"
+        )
+        (run_dir / "logs/m1_runtime_overlay_build.exit_code").write_text(
+            "0\n", encoding="utf-8"
+        )
+        resource_path = (
+            f"{installed_share}/models:{installed_share}/worlds:{installed_share}"
+        )
+        (run_dir / "environment.txt").write_text(
+            "source_mode=clean_git_clone_ro\n"
+            f"source_commit={'a' * 40}\n"
+            f"runtime_overlay={overlay}\n"
+            f"installed_package_share={installed_share}\n"
+            f"gz_sim_resource_path={resource_path}\n"
+            "generate_sensor_models=false\n"
+            "python_dont_write_bytecode=1\n"
+            "python_pycache_prefix=/tmp/ams-m1-pycache\n",
+            encoding="utf-8",
+        )
         return run_dir
 
     def write_raw(
@@ -143,6 +207,8 @@ class M1SceneValidatorTests(unittest.TestCase):
         raw_robot_model: str = "iris_radio_headless",
         forged_human_launch_arguments: str | None = None,
         robot_description_port_override: int | None = None,
+        launch_assignment_overrides: dict[str, str] | None = None,
+        gazebo_response_override: bytes | None = None,
     ) -> None:
         contract_hash = producer.sha256_file(run_dir.parents[1] / producer.M1_PLAN_PATH)
         provenance_hash = producer.sha256_file(run_dir / "metrics/provenance.json")
@@ -157,15 +223,32 @@ class M1SceneValidatorTests(unittest.TestCase):
                 "exe_path": exe or argv[0],
             }
 
+        launch_assignments = {
+            "robots_config_file": str(
+                run_dir.parents[1] / "network/config/scenario.yaml"
+            ),
+            "world_file": "fixture/model.sdf",
+            "robot_model": raw_robot_model,
+            "enable_serial2": "false",
+            "generate_sensor_models": "false",
+            "gui": "false",
+            "rviz": "false",
+            "headless_rendering": "false",
+            "use_mapping_camera": "false",
+            "use_navigation_camera": "false",
+            "use_zed_camera": "false",
+        }
+        launch_assignments.update(launch_assignment_overrides or {})
         launch_argv = [
             "/usr/bin/python3",
             "/opt/ros/humble/bin/ros2",
             "launch",
             "multiagent_simulation",
             "multiagent_simulation.launch.py",
-            "robots_config_file:=/fixture/network/config/scenario.yaml",
-            "world_file:=fixture/model.sdf",
-            f"robot_model:={raw_robot_model}",
+            *[
+                f"{name}:={value}"
+                for name, value in launch_assignments.items()
+            ],
         ]
         gazebo_argv = [f"gz sim -v4 -s -r {world_path}"]
         process_rows = [
@@ -215,7 +298,7 @@ class M1SceneValidatorTests(unittest.TestCase):
                     "processes": process_rows,
                 }
             )
-        gazebo_response = "\n".join(
+        gazebo_response = gazebo_response_override or "\n".join(
             f'model {{ name: "uav{index}" }}' for index in range(1, 6)
         ).encode("utf-8")
         records.append(
@@ -262,10 +345,9 @@ class M1SceneValidatorTests(unittest.TestCase):
                 "stderr_sha256": hashlib.sha256(b"").hexdigest(),
             }
         )
-        root = run_dir.parents[1]
         template = (
-            root
-            / "install/multiagent_simulation/share/multiagent_simulation/models/iris_radio_headless/model.sdf"
+            run_dir
+            / "runtime_overlay/install/multiagent_simulation/share/multiagent_simulation/models/iris_radio_headless/model.sdf"
         ).read_text(encoding="utf-8")
         probed_robots = []
         for index in range(5):
@@ -334,6 +416,66 @@ class M1SceneValidatorTests(unittest.TestCase):
                 result = validator.scene_status(run_dir)
         self.assertEqual(result["status"], "passed", result)
 
+    def test_fresh_run_local_runtime_inputs_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            run_dir = self.make_fixture(root)
+            with mock.patch.object(validator, "ROOT_DIR", root):
+                result = validator.runtime_inputs_status(run_dir)
+        self.assertEqual(result["status"], "passed", result)
+
+    def test_launch_import_bytecode_cannot_pollute_installed_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            run_dir = self.make_fixture(root)
+            cache = (
+                run_dir
+                / "runtime_overlay/install/multiagent_simulation/share/"
+                "multiagent_simulation/launch/__pycache__"
+            )
+            cache.mkdir()
+            (cache / "multiagent_simulation.launch.cpython-310.pyc").write_bytes(
+                b"runtime-generated-bytecode"
+            )
+            with mock.patch.object(validator, "ROOT_DIR", root):
+                result = validator.runtime_inputs_status(run_dir)
+        self.assertEqual(result["status"], "failed")
+        self.assertIn(
+            "installed package inputs differ",
+            "\n".join(result["details"]["failures"]),
+        )
+
+    def test_runner_disables_installed_launch_bytecode_before_overlay_build(self) -> None:
+        runner = (
+            Path(__file__).resolve().parents[1]
+            / "scripts/run_five_uav_health.sh"
+        ).read_text(encoding="utf-8")
+        dont_write = "export PYTHONDONTWRITEBYTECODE=1"
+        cache_prefix = "export PYTHONPYCACHEPREFIX=/tmp/ams-m1-pycache"
+        build = "BUILD_COMMAND=("
+        self.assertEqual(runner.count(dont_write), 1)
+        self.assertEqual(runner.count(cache_prefix), 1)
+        self.assertLess(runner.index(dont_write), runner.index(build))
+        self.assertLess(runner.index(cache_prefix), runner.index(build))
+
+    def test_mutated_installed_runtime_config_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            run_dir = self.make_fixture(root)
+            installed = (
+                run_dir
+                / "runtime_overlay/install/multiagent_simulation/share/"
+                "multiagent_simulation/config/gazebo-iris.parm"
+            )
+            installed.write_text("FRAME_CLASS 99\n", encoding="utf-8")
+            with mock.patch.object(validator, "ROOT_DIR", root):
+                result = validator.runtime_inputs_status(run_dir)
+        self.assertEqual(result["status"], "failed")
+        self.assertIn(
+            "installed package inputs differ",
+            "\n".join(result["details"]["failures"]),
+        )
+
     def test_forged_summary_cannot_hide_wrong_raw_gazebo_world(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -377,13 +519,112 @@ class M1SceneValidatorTests(unittest.TestCase):
             "\n".join(result["details"]["failures"]),
         )
 
+    def test_raw_launch_must_use_canonical_robots_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            run_dir = self.make_fixture(root)
+            provenance = json.loads((run_dir / "metrics/provenance.json").read_text())
+            health = json.loads((run_dir / "metrics/five_uav_health.json").read_text())
+            record = json.loads((run_dir / producer.M1_SCENE_RECORD).read_text())
+            self.write_raw(
+                run_dir,
+                health["runtime_id"],
+                provenance["source_hash"],
+                record["installed"]["runtime_active_world_path"],
+                launch_assignment_overrides={
+                    "robots_config_file": "/tmp/forged_robots.yaml"
+                },
+            )
+            with mock.patch.object(validator, "ROOT_DIR", root):
+                result = validator.scene_status(run_dir)
+        self.assertEqual(result["status"], "failed")
+        self.assertIn(
+            "raw launch robots_config_file assignment differs",
+            "\n".join(result["details"]["failures"]),
+        )
+
+    def test_raw_launch_feature_flags_and_serial2_must_be_false(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            run_dir = self.make_fixture(root)
+            provenance = json.loads((run_dir / "metrics/provenance.json").read_text())
+            health = json.loads((run_dir / "metrics/five_uav_health.json").read_text())
+            record = json.loads((run_dir / producer.M1_SCENE_RECORD).read_text())
+            self.write_raw(
+                run_dir,
+                health["runtime_id"],
+                provenance["source_hash"],
+                record["installed"]["runtime_active_world_path"],
+                launch_assignment_overrides={"enable_serial2": "true", "gui": "true"},
+            )
+            with mock.patch.object(validator, "ROOT_DIR", root):
+                result = validator.scene_status(run_dir)
+        self.assertEqual(result["status"], "failed")
+        failures = "\n".join(result["details"]["failures"])
+        self.assertIn("raw launch enable_serial2 assignment differs", failures)
+        self.assertIn("raw launch gui assignment differs", failures)
+
+    def test_nested_entity_names_cannot_impersonate_top_level_models(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            run_dir = self.make_fixture(root)
+            provenance = json.loads((run_dir / "metrics/provenance.json").read_text())
+            health = json.loads((run_dir / "metrics/five_uav_health.json").read_text())
+            record = json.loads((run_dir / producer.M1_SCENE_RECORD).read_text())
+            forged_scene = (
+                "model { name: \"carrier\" "
+                + " ".join(
+                    f'link {{ name: "uav{index}" }}' for index in range(1, 6)
+                )
+                + " }"
+            ).encode("utf-8")
+            self.write_raw(
+                run_dir,
+                health["runtime_id"],
+                provenance["source_hash"],
+                record["installed"]["runtime_active_world_path"],
+                gazebo_response_override=forged_scene,
+            )
+            with mock.patch.object(validator, "ROOT_DIR", root):
+                result = validator.scene_status(run_dir)
+        self.assertEqual(result["status"], "failed")
+        self.assertIn(
+            "raw Gazebo entity response is not exactly uav1..uav5",
+            "\n".join(result["details"]["failures"]),
+        )
+
+    def test_commented_model_names_cannot_impersonate_top_level_models(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            run_dir = self.make_fixture(root)
+            provenance = json.loads((run_dir / "metrics/provenance.json").read_text())
+            health = json.loads((run_dir / "metrics/five_uav_health.json").read_text())
+            record = json.loads((run_dir / producer.M1_SCENE_RECORD).read_text())
+            forged_scene = "\n".join(
+                f'# model {{ name: "uav{index}" }}' for index in range(1, 6)
+            ).encode("utf-8")
+            self.write_raw(
+                run_dir,
+                health["runtime_id"],
+                provenance["source_hash"],
+                record["installed"]["runtime_active_world_path"],
+                gazebo_response_override=forged_scene,
+            )
+            with mock.patch.object(validator, "ROOT_DIR", root):
+                result = validator.scene_status(run_dir)
+        self.assertEqual(result["status"], "failed")
+        self.assertIn(
+            "raw Gazebo entity response is not exactly uav1..uav5",
+            "\n".join(result["details"]["failures"]),
+        )
+
     def test_installed_bundle_mutation_fails_after_producer_pass(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             run_dir = self.make_fixture(root)
             installed_asset = (
-                root
-                / "install/multiagent_simulation/share/multiagent_simulation/worlds/fixture/terrain.bin"
+                run_dir
+                / "runtime_overlay/install/multiagent_simulation/share/multiagent_simulation/worlds/fixture/terrain.bin"
             )
             installed_asset.write_bytes(b"mutated-after-producer")
             with mock.patch.object(validator, "ROOT_DIR", root):
@@ -399,8 +640,8 @@ class M1SceneValidatorTests(unittest.TestCase):
             root = Path(temp)
             run_dir = self.make_fixture(root)
             installed_mesh = (
-                root
-                / "install/multiagent_simulation/share/multiagent_simulation/models/iris/meshes/iris.dae"
+                run_dir
+                / "runtime_overlay/install/multiagent_simulation/share/multiagent_simulation/models/iris/meshes/iris.dae"
             )
             installed_mesh.write_text("<COLLADA>mutated</COLLADA>\n", encoding="utf-8")
             with mock.patch.object(validator, "ROOT_DIR", root):
@@ -470,7 +711,11 @@ class M1SceneValidatorTests(unittest.TestCase):
                 validator, "provenance_status", return_value=passed
             ), mock.patch.object(
                 validator, "five_uav_health_status", return_value=passed
-            ), mock.patch.object(validator, "scene_status", return_value=passed):
+            ), mock.patch.object(
+                validator, "scene_status", return_value=passed
+            ), mock.patch.object(
+                validator, "runtime_inputs_status", return_value=passed
+            ):
                 result = validator.evaluate_m1(run_dir)
         self.assertTrue(result["passed"])
         self.assertEqual(result["contract"], "ams.m1.health/v3")

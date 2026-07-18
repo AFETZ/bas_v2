@@ -1,0 +1,181 @@
+{
+  "contract": "ams.component-acceptance-profiles/v1",
+  "profiles": {
+    "flight_capacity_prerequisite": {
+      "consumed_nodes": [
+        "Q0",
+        "Q1"
+      ],
+      "main_cap_add": [],
+      "main_devices": [],
+      "main_network": "host",
+      "nvidia_driver_capabilities": "compute,utility",
+      "python_runtime": "base",
+      "prerequisite_status_contract": "ams.live-status/v2",
+      "prerequisite_status_count": 2,
+      "required_component_profiles": [],
+      "receipt_contract": "ams.flight-capacity-host-final-receipt/v1",
+      "receipt_name": "flight_capacity_host_final_receipt.json",
+      "result_contract": "ams.flight-capacity-validation/v1",
+      "result_path": "metrics/flight_capacity_validation.json",
+      "runner": "network/scripts/run_five_uav_capacity.sh",
+      "timeout_s": 600,
+      "validator": "network/scripts/validate_flight_capacity.py",
+      "validator_arguments": [
+        "--run-dir",
+        "{run_dir}",
+        "--no-write"
+      ]
+    },
+    "m2_component": {
+      "consumed_nodes": [
+        "Q0",
+        "Q1",
+        "Q2"
+      ],
+      "main_cap_add": [
+        "CHOWN",
+        "DAC_READ_SEARCH",
+        "NET_ADMIN",
+        "NET_RAW",
+        "SYS_ADMIN"
+      ],
+      "main_devices": [
+        "/dev/net/tun"
+      ],
+      "main_network": "none",
+      "nvidia_driver_capabilities": "compute,utility",
+      "python_runtime": "base",
+      "prerequisite_status_contract": "ams.live-status/v2",
+      "prerequisite_status_count": 2,
+      "required_component_profiles": [
+        "flight_capacity_prerequisite"
+      ],
+      "receipt_contract": "ams.m2.host-final-receipt/v1",
+      "receipt_name": "m2_host_final_receipt.json",
+      "result_contract": "ams.m2.vertical-slice-validation/v2",
+      "result_path": "metrics/m2_validation_results.json",
+      "runner": "network/scripts/run_one_uav_vertical_slice.sh",
+      "timeout_s": 600,
+      "validator": "network/validation/validate_m2_vertical_slice.py",
+      "validator_arguments": [
+        "--run-dir",
+        "{run_dir}",
+        "--no-write"
+      ]
+    },
+    "m3_component": {
+      "consumed_nodes": [
+        "Q0",
+        "Q1",
+        "Q2",
+        "Q3"
+      ],
+      "main_cap_add": [
+        "CHOWN",
+        "DAC_READ_SEARCH",
+        "NET_ADMIN",
+        "NET_RAW",
+        "SYS_ADMIN"
+      ],
+      "main_devices": [
+        "/dev/net/tun"
+      ],
+      "main_network": "none",
+      "nvidia_driver_capabilities": "compute,utility",
+      "python_runtime": "base",
+      "prerequisite_status_contract": "ams.live-status/v3",
+      "prerequisite_status_count": 3,
+      "required_component_profiles": [],
+      "receipt_contract": "ams.m3.host-final-receipt/v1",
+      "receipt_name": "m3_host_final_receipt.json",
+      "result_contract": "ams.m3.external-matrix-validation/v1",
+      "result_path": "metrics/m3_validation_results.json",
+      "runner": "network/scripts/run_m3_external_matrix.sh",
+      "timeout_s": 900,
+      "validator": "network/scripts/validate_m3_external_matrix.py",
+      "validator_arguments": [
+        "--run-dir",
+        "{run_dir}",
+        "--no-write"
+      ]
+    },
+    "m4_capacity_prerequisite": {
+      "consumed_nodes": [
+        "Q0",
+        "Q1",
+        "Q2",
+        "Q3",
+        "Q4"
+      ],
+      "main_cap_add": [
+        "CHOWN",
+        "DAC_READ_SEARCH",
+        "NET_ADMIN",
+        "NET_RAW",
+        "SYS_ADMIN"
+      ],
+      "main_devices": [
+        "/dev/net/tun"
+      ],
+      "main_network": "none",
+      "nvidia_driver_capabilities": "compute,utility,graphics",
+      "python_runtime": "sionna_rt_cuda",
+      "prerequisite_status_contract": "ams.live-status/v4",
+      "prerequisite_status_count": 4,
+      "required_component_profiles": [],
+      "receipt_contract": "ams.m4-capacity.host-final-receipt/v1",
+      "receipt_name": "m4_capacity_host_final_receipt.json",
+      "result_contract": "ams.m4-capacity.validation/v1",
+      "result_path": "metrics/m4_capacity_validation.json",
+      "runner": "network/scripts/run_m4_capacity.sh",
+      "timeout_s": 900,
+      "validator": "network/scripts/validate_m4_capacity.py",
+      "validator_arguments": [
+        "--run-dir",
+        "{run_dir}",
+        "--no-write"
+      ]
+    },
+    "m4_component": {
+      "consumed_nodes": [
+        "Q0",
+        "Q1",
+        "Q2",
+        "Q3",
+        "Q4"
+      ],
+      "main_cap_add": [
+        "CHOWN",
+        "DAC_READ_SEARCH",
+        "NET_ADMIN",
+        "NET_RAW",
+        "SYS_ADMIN"
+      ],
+      "main_devices": [
+        "/dev/net/tun"
+      ],
+      "main_network": "none",
+      "nvidia_driver_capabilities": "compute,utility,graphics",
+      "python_runtime": "sionna_rt_cuda",
+      "prerequisite_status_contract": "ams.live-status/v4",
+      "prerequisite_status_count": 4,
+      "required_component_profiles": [
+        "m4_capacity_prerequisite"
+      ],
+      "receipt_contract": "ams.m4.host-final-receipt/v1",
+      "receipt_name": "m4_host_final_receipt.json",
+      "result_contract": "ams.m4.causality-validation/v1",
+      "result_path": "metrics/m4_validation_results.json",
+      "runner": "network/scripts/run_m4_causality.sh",
+      "timeout_s": 1200,
+      "validator": "network/scripts/validate_m4_causality.py",
+      "validator_arguments": [
+        "--run-dir",
+        "{run_dir}",
+        "--no-write"
+      ]
+    }
+  },
+  "schema_version": 1
+}

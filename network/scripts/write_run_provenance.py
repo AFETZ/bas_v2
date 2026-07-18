@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
 import json
 import os
 import platform
 import re
+import stat
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -20,7 +22,39 @@ import yaml
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIGS = (
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from network.validation.qualification_identity import (  # noqa: E402
+    BOUNDED_ROOT_CAPABILITY_MASK,
+    BOUNDED_ROOT_GID,
+    BOUNDED_ROOT_IN_RUNTIME_MODE,
+    BOUNDED_ROOT_IN_RUNTIME_PROFILES,
+    BOUNDED_ROOT_NO_NEW_PRIVS,
+    BOUNDED_ROOT_UID,
+    DEFERRED_M0_CAPABILITY_MODE,
+    MUTABLE_STATUS_OUTPUTS,
+    PROFILE_CONSUMED_NODES,
+    QUALIFICATION_CONSUMPTION_CONTRACT,
+    QUALIFICATION_POLICY_ID,
+    QUALIFICATION_VECTOR_CONTRACT,
+    expected_consumed_nodes,
+    is_exact_bounded_root_capability_mode,
+    is_exact_deferred_m0_capability_mode,
+    qualification_checkout_identity,
+    qualification_consumption,
+    qualification_content_vector,
+    qualification_prefixes_equal,
+)
+from network.validation.component_profiles import (  # noqa: E402
+    COMPONENT_PYTHON_MODULES,
+    COMPONENT_PYTHON_RUNTIME_CONTRACT,
+    expected_radio_provider_runtime,
+    load_profiles,
+    validate_component_python_runtime,
+)
+
+UNQUALIFIED_CONFIG_FALLBACK = (
     "doc/network_radio_integration_plan_v3.md",
     "network/config/scenario_5uav.yaml",
     "network/config/endpoints.yaml",
@@ -29,8 +63,13 @@ DEFAULT_CONFIGS = (
     "network/config/jammers.yaml",
     "network/config/service_tiers.yaml",
     "network/config/validation_matrix.yaml",
+    "network/config/flight_capacity_profile.json",
+    "network/config/endpoint_transaction_schema.json",
+    "network/config/endpoint_matrix_5uav.json",
     "network/config/dependency_lock.yaml",
 )
+DEFAULT_CONFIG_PATH_PREFIX = "network/config/"
+DEFAULT_PLAN_CONFIG = "doc/network_radio_integration_plan_v3.md"
 SOURCE_ROOTS = (
     "network",
     "src/multiagent_simulation",
@@ -38,18 +77,9 @@ SOURCE_ROOTS = (
     ".devcontainer",
 )
 EXCLUDED_PARTS = {"__pycache__", ".pytest_cache", ".mypy_cache"}
-EXCLUDED_RELATIVE = {
-    "network/swarm/.last_run",
-    # These are durable human-readable status/report files.  They necessarily
-    # change after validation and therefore are not runtime implementation
-    # inputs.  The immutable execution contract itself is hashed separately in
-    # DEFAULT_CONFIGS.
-    "network/PROGRESS.md",
-    "network/VALIDATION_REPORT.md",
-    "network/NEXT_TASK.md",
-    "network/DECISIONS.md",
-    "network/README.md",
-}
+# These three durable reports are the complete status-only exclusion set.
+# Every other tracked source/config/test byte remains a technical input.
+EXCLUDED_RELATIVE = set(MUTABLE_STATUS_OUTPUTS)
 CANONICAL_RUNTIME_SOURCE_PATHS = {
     "ardupilot_standalone": "/workspace/ardupilot",
     "ardupilot_ros2": "/workspace/ardu_ws/src/ardupilot",
@@ -72,12 +102,27 @@ RUNTIME_SOURCE_ENV = {
     "sdformat_urdf": "AMS_SDFORMAT_URDF_ROOT",
     "micro_xrce_dds_gen": "AMS_MICRO_XRCE_DDS_GEN_ROOT",
 }
+INHERITED_M0_CAPABILITY_MODE = "inherited_m0_host_final"
+M1_M0_RECEIPT_CONTRACT = "ams.m1.inherited-m0-qualification/v1"
+MAX_INHERITED_RECEIPT_BYTES = 64 * 1024 * 1024
+INHERITED_M0_RECEIPT_MOUNTS = {
+    "m1_component": "/run/ams/m0-receipt.json",
+    "flight_capacity_prerequisite": "/run/ams/prerequisites/m0.json",
+}
 
 
 def run_command(args: list[str], cwd: Path = ROOT_DIR) -> str | None:
     try:
+        command = list(args)
+        if command and Path(command[0]).name == "git":
+            command = [
+                command[0],
+                "-c",
+                f"safe.directory={cwd.resolve(strict=True)}",
+                *command[1:],
+            ]
         result = subprocess.run(
-            args,
+            command,
             cwd=cwd,
             check=False,
             capture_output=True,
@@ -97,6 +142,132 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def inherited_m0_qualification(
+    *,
+    profile: str,
+    current_commit: str,
+    current_vector: dict,
+    current_plan_sha256: str,
+    image_digest: str,
+) -> tuple[dict | None, str | None]:
+    """Bind a Q0/Q1 flight profile to the accepted exact-image M0 receipt."""
+
+    if profile not in {"m1_component", "flight_capacity_prerequisite"}:
+        return None, None
+    mounted_path = os.environ.get("AMS_M1_M0_RECEIPT_PATH")
+    expected_sha256 = os.environ.get("AMS_M1_M0_RECEIPT_SHA256")
+    canonical_path = os.environ.get("AMS_M1_M0_RECEIPT_CANONICAL_PATH")
+    status_commit = os.environ.get("AMS_M1_M0_STATUS_COMMIT")
+    required_mount = INHERITED_M0_RECEIPT_MOUNTS[profile]
+    if mounted_path != required_mount:
+        return None, "formal M1 inherited M0 receipt mount is not canonical"
+    if status_commit != current_commit:
+        return None, "formal M1 M0-status authority is not the current source commit"
+    if not isinstance(canonical_path, str) or re.fullmatch(
+        r"runs/[A-Za-z0-9][A-Za-z0-9_.-]{0,127}/metrics/m0_host_final_receipt\.json",
+        canonical_path,
+    ) is None:
+        return None, "formal M1 canonical M0 receipt path is invalid"
+    if not isinstance(expected_sha256, str) or re.fullmatch(
+        r"[0-9a-f]{64}", expected_sha256
+    ) is None:
+        return None, "formal M1 inherited M0 receipt hash is invalid"
+    path = Path(mounted_path)
+    try:
+        info = path.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or info.st_size < 2
+            or info.st_size > MAX_INHERITED_RECEIPT_BYTES
+            or info.st_mode & 0o222
+        ):
+            raise ValueError("receipt is not one bounded read-only regular file")
+        payload = path.read_bytes()
+        after = path.lstat()
+        if (
+            len(payload) != info.st_size
+            or (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns)
+            != (after.st_dev, after.st_ino, after.st_mode, after.st_size, after.st_mtime_ns)
+        ):
+            raise ValueError("receipt changed while read")
+        if hashlib.sha256(payload).hexdigest() != expected_sha256:
+            raise ValueError("receipt bytes differ from host-validated hash")
+        receipt = json.loads(
+            payload.decode("utf-8"),
+            parse_constant=lambda value: (_ for _ in ()).throw(
+                ValueError(f"non-finite receipt JSON: {value}")
+            ),
+        )
+        if not isinstance(receipt, dict):
+            raise ValueError("receipt JSON root is not an object")
+        canonical = (
+            json.dumps(receipt, allow_nan=False, indent=2, sort_keys=True) + "\n"
+        ).encode("utf-8")
+        if payload != canonical:
+            raise ValueError("receipt bytes are not canonical JSON")
+        vector = receipt.get("qualification_content_vector")
+        host_final = receipt.get("gates", {}).get("host_final", {})
+        details = host_final.get("details", {}) if isinstance(host_final, dict) else {}
+        capability = (
+            details.get("isolated_target_runtime_capability")
+            if isinstance(details, dict)
+            else None
+        )
+        plan = receipt.get("plan_contract")
+        if (
+            receipt.get("schema_version") != 3
+            or receipt.get("contract") != "ams.m0.host-final-receipt/v1"
+            or receipt.get("milestone") != "M0"
+            or receipt.get("formal_accepted") is not True
+            or receipt.get("passed") is not True
+            or receipt.get("failures") != []
+            or receipt.get("consumed_nodes") != ["Q0"]
+            or receipt.get("receipt_path") != canonical_path
+            or not qualification_prefixes_equal(vector, current_vector, ["Q0"])
+            or not isinstance(plan, dict)
+            or plan.get("path") != "doc/network_radio_integration_plan_v3.md"
+            or plan.get("contract_sha256") != current_plan_sha256
+            or not isinstance(capability, dict)
+            or capability.get("contract") != "ams.m0.isolated-capability-probe/v1"
+            or capability.get("image_digest") != image_digest
+            or capability.get("exit_code") != 0
+            or capability.get("no_candidate_mounts") is not True
+            or capability.get("tun_device") is not True
+            or capability.get("passwordless_sudo") is not True
+            or capability.get("unshare_network_namespace") is not True
+        ):
+            raise ValueError("receipt does not prove the current exact-image M0/Q0 boundary")
+        return {
+            "schema_version": 1,
+            "contract": M1_M0_RECEIPT_CONTRACT,
+            "status_report_commit": status_commit,
+            "canonical_receipt_path": canonical_path,
+            "mounted_receipt_path": mounted_path,
+            "receipt_sha256": expected_sha256,
+            "receipt_contract": receipt["contract"],
+            "receipt_run_id": receipt.get("run_id"),
+            "qualification_contract_sha256": receipt.get(
+                "qualification_contract_sha256"
+            ),
+            "qualification_vector_sha256": vector.get("vector_sha256"),
+            "qualification_vector_commit": vector.get("git_commit"),
+            "image_digest": image_digest,
+            "consumed_nodes": ["Q0"],
+            "capabilities": {
+                name: capability[name]
+                for name in (
+                    "tun_device",
+                    "passwordless_sudo",
+                    "unshare_network_namespace",
+                )
+            },
+            "available": True,
+        }, None
+    except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        return None, f"formal M1 inherited M0 qualification is invalid: {exc}"
 
 
 def source_files(root: Path = ROOT_DIR) -> list[Path]:
@@ -122,6 +293,105 @@ def source_files(root: Path = ROOT_DIR) -> list[Path]:
                 continue
             files.append(candidate)
     return sorted(set(files), key=lambda item: item.relative_to(root).as_posix())
+
+
+def source_files_for_profile(
+    vector: dict[str, object], profile: str, root: Path = ROOT_DIR
+) -> list[Path]:
+    """Resolve only regular source files owned by one consumed Q-prefix."""
+
+    expected_consumed_nodes(profile)
+    manifest = vector.get("entry_manifest") if isinstance(vector, dict) else None
+    if not isinstance(manifest, list):
+        raise ValueError("qualification vector lacks an entry manifest")
+    allowed_owners = (
+        {f"Q{index}" for index in range(9)}
+        if profile == "diagnostic"
+        else set(expected_consumed_nodes(profile))
+    )
+    selected: list[Path] = []
+    for entry in manifest:
+        if not isinstance(entry, dict):
+            raise ValueError("qualification entry manifest is malformed")
+        relative = entry.get("path")
+        owner = entry.get("owner")
+        if not isinstance(relative, str) or not isinstance(owner, str):
+            raise ValueError("qualification source ownership is malformed")
+        in_source_root = any(
+            relative == source_root or relative.startswith(f"{source_root}/")
+            for source_root in SOURCE_ROOTS
+        )
+        if not in_source_root or owner not in allowed_owners:
+            continue
+        if entry.get("kind") != "regular":
+            continue
+        path = root / relative
+        try:
+            info = path.lstat()
+        except OSError as exc:
+            raise ValueError(f"profile source file is unavailable: {relative}") from exc
+        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            raise ValueError(f"profile source path is not regular: {relative}")
+        selected.append(path)
+    result = sorted(set(selected), key=lambda item: item.relative_to(root).as_posix())
+    if not result:
+        raise ValueError("profile source set is empty")
+    return result
+
+
+def default_configs_for_profile(
+    vector: dict[str, object], profile: str
+) -> tuple[str, ...]:
+    """Derive the exact tracked config set owned by a profile's Q-prefix."""
+
+    expected_consumed_nodes(profile)
+    manifest = vector.get("entry_manifest") if isinstance(vector, dict) else None
+    if not isinstance(manifest, list):
+        raise ValueError("qualification vector lacks an entry manifest")
+    allowed_owners = (
+        {f"Q{index}" for index in range(9)}
+        if profile == "diagnostic"
+        else set(expected_consumed_nodes(profile))
+    )
+    configs: list[str] = []
+    for entry in manifest:
+        if not isinstance(entry, dict):
+            raise ValueError("qualification entry manifest is malformed")
+        path = entry.get("path")
+        owner = entry.get("owner")
+        if not isinstance(path, str) or not isinstance(owner, str):
+            raise ValueError("qualification config ownership is malformed")
+        if (
+            (path == DEFAULT_PLAN_CONFIG or path.startswith(DEFAULT_CONFIG_PATH_PREFIX))
+            and owner in allowed_owners
+        ):
+            if entry.get("kind") != "regular":
+                raise ValueError(f"default config is not a regular file: {path}")
+            configs.append(path)
+    result = tuple(sorted(configs))
+    if not result or DEFAULT_PLAN_CONFIG not in result:
+        raise ValueError("profile default config set is incomplete")
+    return result
+
+
+def _normalized_config_paths(values: Iterable[str | Path]) -> tuple[str, ...]:
+    normalized: list[str] = []
+    for value in values:
+        path = Path(value)
+        if not path.is_absolute():
+            path = ROOT_DIR / path
+        try:
+            resolved = path.resolve(strict=True)
+            relative = resolved.relative_to(ROOT_DIR).as_posix()
+            info = path.lstat()
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"required config is unavailable or outside the repository: {path}") from exc
+        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            raise ValueError(f"required config is not a regular repository file: {path}")
+        normalized.append(relative)
+    if len(normalized) != len(set(normalized)):
+        raise ValueError("required config list contains duplicate repository paths")
+    return tuple(normalized)
 
 
 def deterministic_source_hash(files: list[Path], root: Path = ROOT_DIR) -> str:
@@ -163,6 +433,34 @@ def _runtime_identity_file_sha256(path: Path) -> str | None:
     return hashlib.sha256(value.encode("utf-8")).hexdigest() if value else None
 
 
+def _process_security_status() -> dict[str, object]:
+    required = ("CapPrm", "CapEff", "CapBnd", "NoNewPrivs")
+    parsed: dict[str, str] = {}
+    try:
+        lines = Path("/proc/self/status").read_text(
+            encoding="ascii", errors="strict"
+        ).splitlines()
+    except (OSError, UnicodeError):
+        lines = []
+    for line in lines:
+        key, separator, value = line.partition(":")
+        if separator and key in required and key not in parsed:
+            parsed[key] = value.strip()
+    no_new_privs = parsed.get("NoNewPrivs")
+    return {
+        "uid": os.getuid(),
+        "gid": os.getgid(),
+        "CapPrm": parsed.get("CapPrm"),
+        "CapEff": parsed.get("CapEff"),
+        "CapBnd": parsed.get("CapBnd"),
+        "NoNewPrivs": (
+            int(no_new_privs)
+            if isinstance(no_new_privs, str) and no_new_privs in {"0", "1"}
+            else None
+        ),
+    }
+
+
 def runtime_capabilities() -> dict[str, object]:
     """Record the concrete host/container capabilities used by network runners."""
 
@@ -188,7 +486,7 @@ def runtime_capabilities() -> dict[str, object]:
             "machine_id_sha256": _runtime_identity_file_sha256(Path("/etc/machine-id")),
         },
         "mitsuba_variant": os.environ.get(
-            "SIONNA_MITSUBA_VARIANT", "llvm_ad_mono_polarized"
+            "SIONNA_MITSUBA_VARIANT", "cuda_ad_mono_polarized"
         ),
         "gpu": {
             "available": bool(gpu_devices),
@@ -196,11 +494,82 @@ def runtime_capabilities() -> dict[str, object]:
         },
         "network": {
             "dev_net_tun": Path("/dev/net/tun").is_char_device(),
-            "unshare_network_namespace": run_command(["unshare", "-rn", "true"])
+            "unshare_network_namespace": run_command(
+                ["/usr/bin/unshare", "-rn", "true"]
+            )
             is not None,
-            "passwordless_sudo": run_command(["sudo", "-n", "true"]) is not None,
+            "passwordless_sudo": run_command(["/usr/bin/sudo", "-n", "true"])
+            is not None,
+            "qualification_mode": os.environ.get(
+                "AMS_M0_CAPABILITY_PROBE_MODE", "in_runtime"
+            ),
+            **_process_security_status(),
         },
     }
+
+
+def component_python_runtime(
+    qualification_profile: str,
+) -> tuple[dict[str, object] | None, str | None]:
+    """Observe the exact Sionna Python runtime selected by a component profile."""
+
+    profile = load_profiles().get(qualification_profile)
+    if profile is None or profile["python_runtime"] == "base":
+        return None, None
+    runtime_profile = profile["python_runtime"]
+    try:
+        pythonpath = os.environ.get("PYTHONPATH")
+        if not isinstance(pythonpath, str) or not pythonpath:
+            raise ValueError("PYTHONPATH is absent")
+        pythonpath_entries = pythonpath.split(os.pathsep)
+        executable_path = Path(sys.executable)
+        executable_realpath = executable_path.resolve(strict=True)
+        if not executable_realpath.is_file():
+            raise ValueError("Python executable realpath is not a regular file")
+        modules: dict[str, dict[str, object]] = {}
+        for module_name, distribution in COMPONENT_PYTHON_MODULES.items():
+            module = importlib.import_module(module_name)
+            module_file = getattr(module, "__file__", None)
+            if not isinstance(module_file, str) or not module_file:
+                raise ValueError(f"module origin is unavailable: {module_name}")
+            origin = Path(module_file).resolve(strict=True)
+            if not origin.is_file():
+                raise ValueError(f"module origin is not regular: {module_name}")
+            modules[module_name] = {
+                "distribution": distribution,
+                "origin": str(origin),
+                "sha256": sha256_file(origin),
+                "size_bytes": origin.stat().st_size,
+                "version": metadata.version(distribution),
+            }
+        record: dict[str, object] = {
+            "contract": COMPONENT_PYTHON_RUNTIME_CONTRACT,
+            "profile": runtime_profile,
+            "status": "passed",
+            "python_no_user_site": os.environ.get("PYTHONNOUSERSITE"),
+            "pythonpath": pythonpath,
+            "pythonpath_entries": pythonpath_entries,
+            "executable": {
+                "configured_path": str(executable_path),
+                "realpath": str(executable_realpath),
+                "sha256": sha256_file(executable_realpath),
+                "size_bytes": executable_realpath.stat().st_size,
+            },
+            "modules": modules,
+        }
+        failures = validate_component_python_runtime(profile, record, {
+            module["distribution"]: module["version"] for module in modules.values()
+        })
+        if failures:
+            raise ValueError("; ".join(failures))
+        return record, None
+    except Exception as exc:
+        return {
+            "contract": COMPONENT_PYTHON_RUNTIME_CONTRACT,
+            "profile": runtime_profile,
+            "status": "failed",
+            "error": str(exc),
+        }, str(exc)
 
 
 def command_manifest(args: list[str]) -> dict[str, object]:
@@ -307,21 +676,106 @@ def build_provenance(args: argparse.Namespace) -> dict:
     commit = run_command(["git", "rev-parse", "HEAD"]) or "unknown"
     status_text = run_command(["git", "status", "--porcelain", "--untracked-files=all"])
     status_lines = status_text.splitlines() if status_text else []
-    files = source_files()
+    expected_nodes = list(expected_consumed_nodes(args.qualification_profile))
+    if args.consumed_node != expected_nodes:
+        raise ValueError(
+            f"qualification profile {args.qualification_profile!r} must consume "
+            f"exactly {expected_nodes!r}"
+        )
+    qualification_vector_error: str | None = None
+    qualification_checkout_error: str | None = None
+    try:
+        qualification_vector = qualification_content_vector(ROOT_DIR, commit)
+        qualification_consumption_record = qualification_consumption(
+            qualification_vector, args.qualification_profile
+        )
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        qualification_vector_error = str(exc)
+        qualification_vector = {
+            "schema_version": 1,
+            "contract": QUALIFICATION_VECTOR_CONTRACT,
+            "policy_id": QUALIFICATION_POLICY_ID,
+            "git_commit": commit,
+            "available": False,
+            "failure": qualification_vector_error,
+            "vector_sha256": None,
+        }
+        qualification_consumption_record = {
+            "schema_version": 1,
+            "contract": QUALIFICATION_CONSUMPTION_CONTRACT,
+            "profile": args.qualification_profile,
+            "consumed_nodes": expected_nodes,
+            "consumed_node_sha256": {},
+            "vector_sha256": None,
+            "policy_sha256": None,
+            "git_commit": commit,
+            "available": False,
+        }
+    try:
+        qualification_checkout = qualification_checkout_identity(ROOT_DIR, commit)
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        qualification_checkout_error = str(exc)
+        qualification_checkout = {
+            "schema_version": 1,
+            "expected_commit": commit,
+            "available": False,
+            "failure": qualification_checkout_error,
+            "checkout_equal": False,
+        }
+    if qualification_vector_error is None:
+        files = source_files_for_profile(
+            qualification_vector, args.qualification_profile
+        )
+    elif args.qualification_profile == "diagnostic":
+        files = source_files()
+    else:
+        raise ValueError(
+            "acceptance profile source ownership cannot be derived without its "
+            "committed qualification vector"
+        )
+    plan_relative = "doc/network_radio_integration_plan_v3.md"
+    plan_contract = {
+        "plan_version": 3,
+        "path": plan_relative,
+        "contract_sha256": sha256_file(ROOT_DIR / plan_relative),
+    }
 
-    config_hashes = {}
-    for value in args.config:
-        path = Path(value)
-        if not path.is_absolute():
-            path = ROOT_DIR / path
-        if not path.is_file():
-            raise FileNotFoundError(f"required config is missing: {path}")
-        config_hashes[path.relative_to(ROOT_DIR).as_posix()] = sha256_file(path)
+    if qualification_vector_error is None:
+        profile_defaults = default_configs_for_profile(
+            qualification_vector, args.qualification_profile
+        )
+    else:
+        if args.qualification_profile != "diagnostic":
+            raise ValueError(
+                "acceptance profile config ownership cannot be derived without "
+                "its committed qualification vector"
+            )
+        # Unqualified diagnostic/error provenance remains writable.
+        profile_defaults = UNQUALIFIED_CONFIG_FALLBACK
+    if args.config:
+        selected_configs = _normalized_config_paths(args.config)
+        if (
+            args.qualification_profile != "diagnostic"
+            and selected_configs != profile_defaults
+        ):
+            raise ValueError(
+                f"qualification profile {args.qualification_profile!r} must hash "
+                f"exactly its default configs {list(profile_defaults)!r}"
+            )
+    else:
+        selected_configs = profile_defaults
+
+    config_hashes = {
+        relative: sha256_file(ROOT_DIR / relative) for relative in selected_configs
+    }
 
     runtime_source_paths = {
         name: Path(os.environ.get(RUNTIME_SOURCE_ENV[name], canonical))
         for name, canonical in CANONICAL_RUNTIME_SOURCE_PATHS.items()
     }
+    python_runtime_record, python_runtime_error = component_python_runtime(
+        args.qualification_profile
+    )
     dependency_versions = {
         "python": platform.python_version(),
         "platform": platform.platform(),
@@ -348,6 +802,8 @@ def build_provenance(args: argparse.Namespace) -> dict:
             for name, command in runtime_manifest_commands().items()
         },
     }
+    if python_runtime_record is not None:
+        dependency_versions["python_runtime"] = python_runtime_record
 
     container_reference = args.container_image or os.environ.get("AMS_CONTAINER_IMAGE", "unknown")
     container_digest = args.container_digest or os.environ.get("AMS_CONTAINER_IMAGE_DIGEST", "unknown")
@@ -355,10 +811,35 @@ def build_provenance(args: argparse.Namespace) -> dict:
         "AMS_CONTAINER_IMAGE_DIGEST_SOURCE", "unknown"
     )
     runtime_container_id, runtime_container_id_source = runtime_container_identity()
+    inherited_m0, inherited_m0_error = inherited_m0_qualification(
+        profile=args.qualification_profile,
+        current_commit=commit,
+        current_vector=qualification_vector,
+        current_plan_sha256=plan_contract["contract_sha256"],
+        image_digest=container_digest,
+    )
+    default_provider_runtime = expected_radio_provider_runtime(
+        args.qualification_profile, args.radio_provider_id
+    )
     implementation = {
         "packet_ingress_mode": args.packet_ingress_mode,
         "medium_model": args.medium_model,
         "radio_provider_id": args.radio_provider_id,
+        "radio_provider_runtime_consumed": (
+            default_provider_runtime["radio_provider_runtime_consumed"]
+            if args.radio_provider_runtime_consumed is None
+            else args.radio_provider_runtime_consumed == "true"
+        ),
+        "runtime_provider_id": (
+            args.runtime_provider_id
+            if args.runtime_provider_id is not None
+            else default_provider_runtime["runtime_provider_id"]
+        ),
+        "reason": (
+            args.radio_provider_runtime_reason
+            if args.radio_provider_runtime_reason is not None
+            else default_provider_runtime["reason"]
+        ),
     }
 
     lock_path = ROOT_DIR / "network/config/dependency_lock.yaml"
@@ -382,6 +863,33 @@ def build_provenance(args: argparse.Namespace) -> dict:
         return {}
 
     blockers = lock_structure_errors
+    if python_runtime_error is not None:
+        blockers.append(
+            "required component Python runtime is unavailable: "
+            + python_runtime_error
+        )
+    profile_record = load_profiles().get(args.qualification_profile)
+    if profile_record is not None:
+        for failure in validate_component_python_runtime(
+            profile_record,
+            dependency_versions.get("python_runtime"),
+            dependency_versions,
+        ):
+            blockers.append("component Python runtime: " + failure)
+    if qualification_vector_error is not None:
+        blockers.append(
+            "qualification content vector is unavailable: "
+            + qualification_vector_error
+        )
+    if qualification_checkout_error is not None:
+        blockers.append(
+            "qualification checkout could not be inspected: "
+            + qualification_checkout_error
+        )
+    elif qualification_checkout.get("checkout_equal") is not True:
+        blockers.append("qualification checkout does not exactly equal its Git commit")
+    if inherited_m0_error is not None:
+        blockers.append(inherited_m0_error)
     if status_text is None:
         blockers.append("git status could not be inspected")
     if status_lines:
@@ -405,6 +913,9 @@ def build_provenance(args: argparse.Namespace) -> dict:
         "packet_ingress_mode": accepted_path.get("packet_ingress"),
         "medium_model": accepted_path.get("medium_model"),
         "radio_provider_id": accepted_path.get("radio_provider"),
+        **expected_radio_provider_runtime(
+            args.qualification_profile, accepted_path.get("radio_provider")
+        ),
     }
     if implementation != expected_implementation:
         blockers.append("runtime implementation does not match dependency lock")
@@ -496,8 +1007,79 @@ def build_provenance(args: argparse.Namespace) -> dict:
         if isinstance(capabilities.get("network"), dict)
         else {}
     )
+    qualification_mode = observed_network.get("qualification_mode")
+    deferred_m0_capabilities = is_exact_deferred_m0_capability_mode(
+        qualification_consumption_record, qualification_mode
+    )
+    bounded_root_capabilities = is_exact_bounded_root_capability_mode(
+        qualification_consumption_record, qualification_mode
+    )
+    bounded_root_facts = (
+        observed_network.get("uid") == BOUNDED_ROOT_UID
+        and observed_network.get("gid") == BOUNDED_ROOT_GID
+        and observed_network.get("CapPrm") == BOUNDED_ROOT_CAPABILITY_MASK
+        and observed_network.get("CapEff") == BOUNDED_ROOT_CAPABILITY_MASK
+        and observed_network.get("CapBnd") == BOUNDED_ROOT_CAPABILITY_MASK
+        and observed_network.get("NoNewPrivs") == BOUNDED_ROOT_NO_NEW_PRIVS
+        and observed_network.get("dev_net_tun") is True
+        and observed_network.get("unshare_network_namespace") is True
+        and observed_network.get("passwordless_sudo") is False
+    )
+    inherited_flight_capabilities = (
+        args.qualification_profile
+        in {"m1_component", "flight_capacity_prerequisite"}
+        and qualification_mode == INHERITED_M0_CAPABILITY_MODE
+        and isinstance(inherited_m0, dict)
+        and inherited_m0.get("available") is True
+    )
+    if qualification_mode not in {
+        "in_runtime",
+        DEFERRED_M0_CAPABILITY_MODE,
+        INHERITED_M0_CAPABILITY_MODE,
+        BOUNDED_ROOT_IN_RUNTIME_MODE,
+    }:
+        blockers.append("network capability qualification mode is invalid")
+    elif (
+        qualification_mode == DEFERRED_M0_CAPABILITY_MODE
+        and not deferred_m0_capabilities
+    ):
+        blockers.append(
+            "isolated host-final capability qualification is allowed only for M0/Q0"
+        )
+    elif (
+        qualification_mode == INHERITED_M0_CAPABILITY_MODE
+        and not inherited_flight_capabilities
+    ):
+        blockers.append(
+            "inherited host-final capability qualification is allowed only for "
+            "a Q0/Q1 flight profile with a valid current M0 receipt"
+        )
+    elif qualification_mode == BOUNDED_ROOT_IN_RUNTIME_MODE and (
+        not bounded_root_capabilities or not bounded_root_facts
+    ):
+        blockers.append(
+            "bounded-root in-runtime capability qualification is not the exact "
+            "M2--M4 uid/gid/capability/no-new-privileges contract"
+        )
+    elif (
+        args.qualification_profile in BOUNDED_ROOT_IN_RUNTIME_PROFILES
+        and qualification_mode != BOUNDED_ROOT_IN_RUNTIME_MODE
+    ):
+        blockers.append(
+            "M2--M4 TUN qualification requires bounded_root_in_runtime mode"
+        )
     for capability, required in required_network.items():
-        if required is True and observed_network.get(capability) is not True:
+        if (
+            required is True
+            and observed_network.get(capability) is not True
+            and not deferred_m0_capabilities
+            and not inherited_flight_capabilities
+            and not (
+                bounded_root_capabilities
+                and bounded_root_facts
+                and capability == "passwordless_sudo"
+            )
+        ):
             blockers.append(f"required network capability is unavailable: {capability}")
     gazebo_lock = lock_mapping(lock_dependencies.get("gazebo"), "dependencies.gazebo")
     if dependency_versions["gazebo"] != str(gazebo_lock.get("version")):
@@ -555,6 +1137,11 @@ def build_provenance(args: argparse.Namespace) -> dict:
         "source_manifest": {
             path.relative_to(ROOT_DIR).as_posix(): sha256_file(path) for path in files
         },
+        "qualification_content_vector": qualification_vector,
+        "qualification_consumption": qualification_consumption_record,
+        "qualification_checkout": qualification_checkout,
+        "inherited_m0_qualification": inherited_m0,
+        "plan_contract": plan_contract,
         "config_hashes": config_hashes,
         "dependency_versions": dependency_versions,
         "container_image": {
@@ -581,13 +1168,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--packet-ingress-mode", default="tap_bridge_external")
     parser.add_argument("--medium-model", default="csma_surrogate")
     parser.add_argument("--radio-provider-id", default="tcp_jsonl_real_sionna")
+    parser.add_argument(
+        "--radio-provider-runtime-consumed", choices=("true", "false")
+    )
+    parser.add_argument("--runtime-provider-id")
+    parser.add_argument("--radio-provider-runtime-reason")
+    parser.add_argument(
+        "--qualification-profile",
+        default="diagnostic",
+        choices=sorted(PROFILE_CONSUMED_NODES),
+    )
+    parser.add_argument(
+        "--consumed-node",
+        action="append",
+        default=[],
+        choices=[f"Q{index}" for index in range(9)],
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    if not args.config:
-        args.config = list(DEFAULT_CONFIGS)
     try:
         data = build_provenance(args)
     except Exception as exc:

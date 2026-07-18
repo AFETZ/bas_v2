@@ -252,13 +252,19 @@ def run_checks(
     packages = _mapping(dependencies.get("python_packages"))
     runtime_policy = _mapping(loaded.get("runtime_policy"))
     mitsuba_variant = runtime_policy.get("mitsuba_variant")
-    valid_variant = isinstance(mitsuba_variant, str) and bool(mitsuba_variant.strip())
+    gpu_required = runtime_policy.get("gpu_required")
+    valid_variant = (
+        isinstance(mitsuba_variant, str)
+        and bool(mitsuba_variant.strip())
+        and isinstance(gpu_required, bool)
+        and gpu_required is mitsuba_variant.startswith("cuda_")
+    )
     results.add(
         "lock.mitsuba_variant",
         valid_variant,
-        "accepted Mitsuba variant is explicitly locked"
+        "accepted Mitsuba variant and GPU requirement are explicitly consistent"
         if valid_variant
-        else "runtime_policy.mitsuba_variant must be a non-empty string",
+        else "runtime_policy must bind one non-empty variant and a matching gpu_required boolean",
         actual=str(mitsuba_variant),
     )
     forbidden = sorted(
@@ -334,14 +340,38 @@ def run_checks(
         )
     else:
         variant_available = valid_variant and mitsuba_variant in available_variants
+        smoke_error: str | None = None
+        active_variant: Any = None
+        smoke_value: float | None = None
+        if variant_available:
+            try:
+                mitsuba_module.set_variant(mitsuba_variant)
+                active_variant = mitsuba_module.variant()
+                values = mitsuba_module.Float([1.0, 2.0, 3.0])
+                smoke_value = float((values * values)[1])
+            except BaseException as exc:
+                smoke_error = f"{type(exc).__name__}: {exc}"
+        variant_operational = (
+            variant_available
+            and smoke_error is None
+            and active_variant == mitsuba_variant
+            and smoke_value == 4.0
+        )
         results.add(
             "runtime.mitsuba_variant",
-            variant_available,
-            "locked Mitsuba variant is available"
-            if variant_available
-            else "locked Mitsuba variant is unavailable",
+            variant_operational,
+            "locked Mitsuba variant executed a finite backend computation"
+            if variant_operational
+            else (
+                f"locked Mitsuba variant failed its backend computation: {smoke_error}"
+                if smoke_error is not None
+                else "locked Mitsuba variant is unavailable or did not become active"
+            ),
             expected=str(mitsuba_variant),
-            actual=", ".join(sorted(str(item) for item in available_variants)),
+            actual=(
+                f"active={active_variant}; smoke={smoke_value}; available="
+                + ", ".join(sorted(str(item) for item in available_variants))
+            ),
         )
 
     tensorflow_loaded = sorted(

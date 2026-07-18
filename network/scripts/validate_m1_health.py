@@ -13,25 +13,27 @@ import shlex
 import stat
 import sys
 import xml.etree.ElementTree as ET
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 SAFE_RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+SHA1 = re.compile(r"[0-9a-f]{40}")
 SCENE_RECORD = "metrics/m1_scene_provenance.json"
 RAW_HEALTH_LOG = "logs/five_uav_health_events.jsonl"
-INSTALLED_SHARE = "install/multiagent_simulation/share/multiagent_simulation"
 SOURCE_WORLDS = "src/multiagent_simulation/worlds"
 M1_CONTRACT_ID = "ams.m1.health/v3"
 M1_PLAN_PATH = "doc/network_radio_integration_plan_v3.md"
 MAX_SCENE_RECORD_BYTES = 16 * 1024 * 1024
+MAX_RUNTIME_TEXT_BYTES = 64 * 1024 * 1024
 
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from network.scripts.write_m1_scene_provenance import (  # noqa: E402
     LAUNCH_SOURCE_RELATIVE,
+    RUNTIME_OVERLAY_PACKAGE_SUFFIX,
     ROBOT_DESCRIPTION_PORT_TOKEN,
     SOURCE_PACKAGE_RELATIVE,
     SOURCE_WORLDS_RELATIVE,
@@ -49,6 +51,7 @@ from network.scripts.write_m1_scene_provenance import (  # noqa: E402
 )
 from network.validation.evidence import (  # noqa: E402
     five_uav_health_status,
+    gazebo_top_level_model_names,
     load_json,
     load_jsonl,
     provenance_status,
@@ -159,6 +162,11 @@ def _gazebo_server_argv(argv: list[str]) -> list[str]:
 
 def scene_status(run_dir: Path) -> dict[str, Any]:
     failures: list[str] = []
+    installed_share = (
+        PurePosixPath("runs")
+        / run_dir.name
+        / RUNTIME_OVERLAY_PACKAGE_SUFFIX
+    ).as_posix()
     record, record_error = _immutable_json(run_dir / SCENE_RECORD)
     if record_error:
         return gate("failed", "immutable M1 scene provenance is unavailable", {"failures": [record_error]})
@@ -272,8 +280,8 @@ def scene_status(run_dir: Path) -> dict[str, Any]:
     except (TypeError, ValueError) as exc:
         failures.append(f"runtime checkout path is invalid: {exc}")
         runtime_root = ROOT_DIR
-    expected_installed_world = f"{INSTALLED_SHARE}/worlds/{world_file}"
-    if installed.get("package_share_path") != INSTALLED_SHARE:
+    expected_installed_world = f"{installed_share}/worlds/{world_file}"
+    if installed.get("package_share_path") != installed_share:
         failures.append("installed package-share path is not canonical")
     if installed.get("active_world_path") != expected_installed_world:
         failures.append("installed active-world path is not canonical")
@@ -284,7 +292,7 @@ def scene_status(run_dir: Path) -> dict[str, Any]:
         current_installed, resolved_paths = installed_bundle_manifest(
             world_file,
             set(current_source),
-            installed_worlds=ROOT_DIR / INSTALLED_SHARE / "worlds",
+            installed_worlds=ROOT_DIR / installed_share / "worlds",
             local_root=ROOT_DIR,
             runtime_root=runtime_root,
         )
@@ -301,6 +309,34 @@ def scene_status(run_dir: Path) -> dict[str, Any]:
         failures.append("recorded installed active-world hash is invalid")
     if installed.get("resolved_bundle_paths") != resolved_paths:
         failures.append("recorded installed world resolution differs from active install")
+    expected_launch_relative = (
+        PurePosixPath(installed_share)
+        / "launch"
+        / "multiagent_simulation.launch.py"
+    ).as_posix()
+    try:
+        installed_launch = resolve_runtime_leaf(
+            ROOT_DIR / expected_launch_relative,
+            local_root=ROOT_DIR,
+            runtime_root=runtime_root,
+            label="installed multiagent launch file",
+        )
+        installed_launch_sha256 = sha256_file(installed_launch)
+    except Exception as exc:
+        failures.append(f"installed multiagent launch resolution failed: {exc}")
+        installed_launch = ROOT_DIR / "invalid"
+        installed_launch_sha256 = None
+    source_launch = ROOT_DIR / LAUNCH_SOURCE_RELATIVE
+    source_launch_sha256 = sha256_file(source_launch) if source_launch.is_file() else None
+    if (
+        installed.get("launch_file_path") != expected_launch_relative
+        or installed.get("runtime_launch_file_path")
+        != str(runtime_root / expected_launch_relative)
+        or installed.get("resolved_launch_file_path") != str(installed_launch)
+        or installed.get("launch_file_sha256") != installed_launch_sha256
+        or installed_launch_sha256 != source_launch_sha256
+    ):
+        failures.append("installed launch file is not exactly bound to committed source")
 
     resources = record.get("resources") if isinstance(record.get("resources"), dict) else {}
     expected_resource_roots = sorted(
@@ -324,7 +360,7 @@ def scene_status(run_dir: Path) -> dict[str, Any]:
         ) = installed_scene_resource_manifest(
             world_file,
             robot_model,
-            installed_package_share=ROOT_DIR / INSTALLED_SHARE,
+            installed_package_share=ROOT_DIR / installed_share,
             local_root=ROOT_DIR,
             runtime_root=runtime_root,
         )
@@ -340,7 +376,7 @@ def scene_status(run_dir: Path) -> dict[str, Any]:
         failures.append("recorded transitive scene roots are not canonical")
     if resources.get("source_package_root") != SOURCE_PACKAGE_RELATIVE.as_posix():
         failures.append("recorded source package root is not canonical")
-    if resources.get("installed_package_share_path") != INSTALLED_SHARE:
+    if resources.get("installed_package_share_path") != installed_share:
         failures.append("recorded installed resource root is not canonical")
     if resources.get("source_files") != current_source_resources:
         failures.append("recorded transitive source resource manifest differs from checkout")
@@ -397,7 +433,7 @@ def scene_status(run_dir: Path) -> dict[str, Any]:
     template_logical = f"models/{robot_model}/model.sdf"
     try:
         template_path = resolve_runtime_leaf(
-            ROOT_DIR / INSTALLED_SHARE / template_logical,
+            ROOT_DIR / installed_share / template_logical,
             local_root=ROOT_DIR,
             runtime_root=runtime_root,
             label="installed robot SDF template",
@@ -458,8 +494,19 @@ def scene_status(run_dir: Path) -> dict[str, Any]:
     if not process_samples:
         failures.append("raw health log contains no process samples")
     expected_launch_assignments = {
+        "robots_config_file": (
+            f"robots_config_file:={runtime_root / scenario_relative}"
+        ),
         "world_file": f"world_file:={world_file}",
         "robot_model": f"robot_model:={robot_model}",
+        "enable_serial2": "enable_serial2:=false",
+        "generate_sensor_models": "generate_sensor_models:=false",
+        "gui": "gui:=false",
+        "rviz": "rviz:=false",
+        "headless_rendering": "headless_rendering:=false",
+        "use_mapping_camera": "use_mapping_camera:=false",
+        "use_navigation_camera": "use_navigation_camera:=false",
+        "use_zed_camera": "use_zed_camera:=false",
     }
     expected_gazebo_argv = ["gz", "sim", "-v4", "-s", "-r", expected_runtime_world]
     expected_robot_names = [f"uav{index}" for index in range(1, 6)]
@@ -582,11 +629,9 @@ def scene_status(run_dir: Path) -> dict[str, Any]:
                 raise ValueError("raw Gazebo response hash does not match")
             response_text = response.decode("utf-8", errors="strict")
             derived_models = sorted(
-                {
-                    name
-                    for name in re.findall(r'\bname:\s*"([^"]+)"', response_text)
-                    if re.fullmatch(r"uav[1-5]", name)
-                }
+                name
+                for name in gazebo_top_level_model_names(response_text)
+                if name.startswith("uav")
             )
         except (ValueError, TypeError, UnicodeDecodeError) as exc:
             failures.append(f"raw Gazebo scene response is invalid: {exc}")
@@ -686,13 +731,200 @@ def scene_status(run_dir: Path) -> dict[str, Any]:
     )
 
 
+def _bounded_runtime_text(path: Path, *, allow_empty: bool = False) -> str:
+    info = path.lstat()
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_nlink != 1
+        or info.st_size > MAX_RUNTIME_TEXT_BYTES
+        or (not allow_empty and info.st_size < 1)
+    ):
+        raise ValueError(f"{path.name} is not one bounded regular file")
+    payload = path.read_bytes()
+    after = path.lstat()
+    if (
+        len(payload) != info.st_size
+        or (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns)
+        != (after.st_dev, after.st_ino, after.st_mode, after.st_size, after.st_mtime_ns)
+    ):
+        raise ValueError(f"{path.name} changed while it was read")
+    try:
+        return payload.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"{path.name} is not UTF-8: {exc}") from exc
+
+
+def _unique_environment(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in _bounded_runtime_text(path).splitlines():
+        name, separator, value = line.partition("=")
+        if not separator or not name or name in values:
+            raise ValueError("environment.txt contains a malformed or duplicate assignment")
+        values[name] = value
+    return values
+
+
+def _package_runtime_inputs(package_root: Path) -> dict[str, str]:
+    candidates: list[Path] = [package_root / "package.xml"]
+    for directory in ("config", "launch", "models", "worlds", "rviz"):
+        root = package_root / directory
+        if root.is_symlink() or not root.is_dir():
+            raise ValueError(f"package runtime-input directory is unavailable: {directory}")
+        candidates.extend(path for path in root.rglob("*") if path.is_file())
+    result: dict[str, str] = {}
+    for path in sorted(candidates, key=lambda item: item.relative_to(package_root).as_posix()):
+        relative = path.relative_to(package_root).as_posix()
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ValueError(f"package runtime input is linked or special: {relative}")
+        if relative in result:
+            raise ValueError(f"duplicate package runtime input: {relative}")
+        result[relative] = sha256_file(path)
+    return result
+
+
+def runtime_inputs_status(run_dir: Path) -> dict[str, Any]:
+    """Prove that M1 used a fresh, run-local install from the accepted source."""
+
+    failures: list[str] = []
+    overlay = run_dir / "runtime_overlay"
+    installed_share = (
+        overlay / "install/multiagent_simulation/share/multiagent_simulation"
+    )
+    expected_command = [
+        "/usr/bin/colcon",
+        "--log-base",
+        str(overlay / "log"),
+        "build",
+        "--base-paths",
+        str(ROOT_DIR / "src/multiagent_simulation"),
+        "--build-base",
+        str(overlay / "build"),
+        "--install-base",
+        str(overlay / "install"),
+    ]
+    command_path = run_dir / "logs/m1_runtime_overlay_build.command"
+    log_path = run_dir / "logs/m1_runtime_overlay_build.log"
+    exit_path = run_dir / "logs/m1_runtime_overlay_build.exit_code"
+    try:
+        command_text = _bounded_runtime_text(command_path)
+        command = shlex.split(command_text, posix=True)
+        if command != expected_command:
+            failures.append("runtime-overlay build command is not canonical")
+    except (OSError, ValueError) as exc:
+        command = []
+        failures.append(f"runtime-overlay build command is unavailable: {exc}")
+    try:
+        build_log = _bounded_runtime_text(log_path, allow_empty=True)
+    except (OSError, ValueError) as exc:
+        build_log = ""
+        failures.append(f"runtime-overlay build log is unavailable: {exc}")
+    try:
+        if _bounded_runtime_text(exit_path) != "0\n":
+            failures.append("runtime-overlay build exit code is not exact zero")
+    except (OSError, ValueError) as exc:
+        failures.append(f"runtime-overlay build exit code is unavailable: {exc}")
+
+    try:
+        environment = _unique_environment(run_dir / "environment.txt")
+    except (OSError, ValueError) as exc:
+        environment = {}
+        failures.append(f"M1 environment record is invalid: {exc}")
+    source_commit = environment.get("source_commit")
+    provenance = load_json(run_dir / "metrics/provenance.json")
+    if environment.get("source_mode") != "clean_git_clone_ro":
+        failures.append("M1 source mode is not the formal clean read-only checkout")
+    if not isinstance(source_commit, str) or SHA1.fullmatch(source_commit) is None:
+        failures.append("M1 source commit is not one exact Git commit")
+    elif provenance.get("git_commit") != source_commit:
+        failures.append("M1 source commit differs from accepted provenance")
+    if environment.get("runtime_overlay") != str(overlay):
+        failures.append("M1 environment does not bind the run-local runtime overlay")
+    if environment.get("installed_package_share") != str(installed_share):
+        failures.append("M1 environment does not bind the run-local package share")
+    expected_resource_path = (
+        f"{installed_share}/models:{installed_share}/worlds:{installed_share}"
+    )
+    if environment.get("gz_sim_resource_path") != expected_resource_path:
+        failures.append("Gazebo resources are not restricted to the run-local install")
+    if environment.get("generate_sensor_models") != "false":
+        failures.append("M1 launch did not disable source-tree sensor generation")
+    if environment.get("python_dont_write_bytecode") != "1":
+        failures.append("M1 launch did not disable runtime bytecode writes")
+    if environment.get("python_pycache_prefix") != "/tmp/ams-m1-pycache":
+        failures.append("M1 launch did not redirect any runtime bytecode cache to tmpfs")
+
+    if overlay.is_symlink() or not overlay.is_dir():
+        failures.append("run-local runtime overlay is missing or symbolic")
+    if (overlay / "build").exists() or (overlay / "log").exists():
+        failures.append("runtime-overlay build intermediates were not removed before validation")
+    if installed_share.is_symlink() or not installed_share.is_dir():
+        failures.append("run-local installed package share is missing or symbolic")
+    installed_launch = installed_share / "launch/multiagent_simulation.launch.py"
+    source_launch = ROOT_DIR / LAUNCH_SOURCE_RELATIVE
+    try:
+        if (
+            installed_launch.is_symlink()
+            or not installed_launch.is_file()
+            or sha256_file(installed_launch) != sha256_file(source_launch)
+        ):
+            failures.append("run-local installed launch differs from committed source")
+    except OSError as exc:
+        failures.append(f"run-local installed launch cannot be hashed: {exc}")
+    try:
+        source_package = ROOT_DIR / "src/multiagent_simulation"
+        source_inputs = _package_runtime_inputs(source_package)
+        installed_inputs = _package_runtime_inputs(installed_share)
+        if installed_inputs != source_inputs:
+            failures.append("run-local installed package inputs differ from committed source")
+        source_manifest = (
+            provenance.get("source_manifest")
+            if isinstance(provenance.get("source_manifest"), dict)
+            else {}
+        )
+        for relative, expected_hash in source_inputs.items():
+            tracked = f"src/multiagent_simulation/{relative}"
+            if source_manifest.get(tracked) != expected_hash:
+                failures.append(f"accepted provenance does not bind package input {tracked}")
+    except (OSError, ValueError) as exc:
+        source_inputs = {}
+        installed_inputs = {}
+        failures.append(f"complete run-local package input comparison failed: {exc}")
+
+    return gate(
+        "passed" if not failures else "failed",
+        "fresh run-local M1 build and installed launch were independently evaluated",
+        {
+            "failures": failures,
+            "source_commit": source_commit,
+            "runtime_overlay": f"runs/{run_dir.name}/runtime_overlay",
+            "installed_package_share": (
+                f"runs/{run_dir.name}/{RUNTIME_OVERLAY_PACKAGE_SUFFIX.as_posix()}"
+            ),
+            "build_command": command,
+            "build_log_bytes": len(build_log.encode("utf-8")),
+            "source_package_input_count": len(source_inputs),
+            "installed_package_input_count": len(installed_inputs),
+            "python_dont_write_bytecode": environment.get(
+                "python_dont_write_bytecode"
+            ),
+            "python_pycache_prefix": environment.get("python_pycache_prefix"),
+            "package_inputs_sha256": hashlib.sha256(
+                json.dumps(source_inputs, sort_keys=True, separators=(",", ":")).encode(
+                    "utf-8"
+                )
+            ).hexdigest(),
+        },
+    )
+
+
 def evaluate_m1(run_dir: Path) -> dict[str, Any]:
     safe_run, input_error = _safe_run_directory(run_dir)
     if safe_run is None:
         failure = input_error or "run directory validation failed"
         gates = {
             name: gate("failed", "unsafe M1 input", {"failures": [failure]})
-            for name in ("provenance", "five_uav_health", "scene")
+            for name in ("provenance", "five_uav_health", "scene", "runtime_inputs")
         }
         run_id, run_path = run_dir.name, str(run_dir)
     else:
@@ -702,6 +934,9 @@ def evaluate_m1(run_dir: Path) -> dict[str, Any]:
                 "five_uav_health_status", five_uav_health_status, safe_run
             ),
             "scene": _call_gate("scene_status", scene_status, safe_run),
+            "runtime_inputs": _call_gate(
+                "runtime_inputs_status", runtime_inputs_status, safe_run
+            ),
         }
         run_id, run_path = safe_run.name, str(safe_run)
     failures = [
@@ -710,7 +945,7 @@ def evaluate_m1(run_dir: Path) -> dict[str, Any]:
         if value.get("status") != "passed"
     ]
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "contract": M1_CONTRACT_ID,
         "plan_version": 3,
         "contract_path": M1_PLAN_PATH,
@@ -722,13 +957,16 @@ def evaluate_m1(run_dir: Path) -> dict[str, Any]:
         "validator": "m1_five_uav_component_health",
         "milestone": "M1",
         "run_id": run_id,
-        "run_dir": run_path,
+        "run_dir": f"runs/{run_id}",
+        "component_qualified": not failures,
+        "formal_accepted": False,
         "component_only": True,
         "p0_eligible": False,
         "scope": {
             "provenance": True,
             "five_uav_health": True,
             "scene_binding": True,
+            "runtime_inputs": True,
             "packet_path": False,
             "sealing": False,
             "attestation": False,

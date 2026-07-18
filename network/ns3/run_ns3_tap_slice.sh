@@ -15,7 +15,11 @@ test -x "$BINARY"
 rm -f "$READY_FILE" "$STOP_FILE"
 mkdir -p "$RUN_DIR/logs" "$RUN_DIR/pcap"
 
-exec sudo ip netns exec "$NS3_NS" sudo -u "$(id -un)" env \
+if ((EUID != 0)); then
+  printf 'FAIL live M2 ns-3 runner requires an already capability-bounded root process\n' >&2
+  exit 2
+fi
+exec ip netns exec "$NS3_NS" env \
   LD_LIBRARY_PATH="$NS3_DIR/build/lib:${LD_LIBRARY_PATH:-}" \
   PATH="$NS3_DIR/build/src/tap-bridge:$PATH" \
   "$BINARY" \

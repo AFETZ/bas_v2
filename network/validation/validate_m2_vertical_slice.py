@@ -14,10 +14,14 @@ raw files (all JSON records use ``schema_version: 2``):
   telemetry, and heartbeat events;
 * ``logs/uav_adapter.jsonl`` contains the adapter's ordered frame hashes;
 * ``logs/m2_process_events.jsonl`` contains Linux PID/start-tick snapshots;
+* ``logs/ns3_{good,recovery}_config.json`` and packet-event JSONL bind both
+  live epochs to the shared ``ams-tap-packet-engine`` with ``uavCount=1``;
 * classic PCAP files contain exact UDP payloads at the four packet-path capture
   points;
 * ``metrics/ns3_tap_build_receipt.json`` binds the TapBridge executable to the
   pinned ns-3 source, scratch input, module set, and build identity;
+* ``metrics/m2_endpoint_contract.json`` binds endpoint transaction schema v1
+  and the exact ordered six-cell ``uav1`` matrix subset;
 * ``metrics/m2_evidence_manifest.json`` seals every raw file by size and SHA256.
 
 Probe nonces are exactly ``<run_nonce>:<phase>:<attempt>``.  Every attempt has
@@ -68,24 +72,61 @@ import re
 import struct
 import sys
 from collections import Counter, defaultdict
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
+
+import yaml
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from network.validation.evidence import ns3_build_receipt_evidence_status  # noqa: E402
-
-
 SCHEMA_VERSION = 2
 EVIDENCE_CONTRACT = "ams.m2.vertical_slice/v1"
+RESULT_CONTRACT = "ams.m2.vertical-slice-validation/v2"
 MANIFEST_CONTRACT = "ams.m2.vertical_slice.manifest/v1"
+ENDPOINT_SUBSET_CONTRACT = "ams.m2.endpoint_subset/v1"
+ENDPOINT_TRANSACTION_CONTRACT = "endpoint_transaction_schema=1"
+ENDPOINT_MATRIX_ID = "ams.endpoint_matrix.5uav/v1"
+ENGINE_CONTRACT = "ams.tap_packet_engine/v1"
+ENGINE_EVENT_SCHEMA = "ams.ns3.packet_event/v1"
+ENGINE_PROGRAM = "ams-tap-packet-engine"
+ENGINE_PHASES = {"good": 1, "recovery": 2}
+ENDPOINT_SCHEMA_RELATIVE = "network/config/endpoint_transaction_schema.json"
+ENDPOINT_MATRIX_RELATIVE = "network/config/endpoint_matrix_5uav.json"
+ENGINE_CONFIG_TOOL_RELATIVE = "network/ns3/tap_packet_engine_config.py"
+ENGINE_RUNNER_RELATIVE = "network/ns3/run_ns3_tap_packet_engine.sh"
+ENGINE_SOURCE_RELATIVE = "network/ns3/scratch/ams-tap-packet-engine.cc"
+REQUIRED_NS3_MODULES = (
+    "applications",
+    "bridge",
+    "core",
+    "csma",
+    "flow-monitor",
+    "internet",
+    "mobility",
+    "network",
+    "stats",
+    "tap-bridge",
+    "traffic-control",
+)
+UAV1_CELL_IDS = tuple(
+    f"uav1.{traffic_class}.{direction}"
+    for traffic_class in ("control", "payload", "additional_data")
+    for direction in ("downlink", "uplink")
+)
 PHASES = ("good", "down", "recovery")
 EXPECTED_ATTEMPTS = {"good": 10, "down": 5, "recovery": 10}
-CAPTURE_POINTS = ("gcs_ingress", "ns3_ingress", "ns3_egress", "uav_egress")
+CAPTURE_POINTS = (
+    "gcs_ingress",
+    "ns3_external_ingress",
+    "ns3_ingress",
+    "ns3_egress",
+    "uav_egress",
+)
 STABLE_PROCESS_ROLES = ("uav_adapter", "mavproxy", "sitl")
 PHASE_PROCESS_ROLES = (*STABLE_PROCESS_ROLES, "gcs_probe", "ns3")
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -106,6 +147,50 @@ CRITICAL_LOG_PATTERNS = (
     "fatal error",
 )
 CRITICAL_EVENT_TOKENS = ("failed", "failure", "crash", "fatal", "segfault")
+ENGINE_EVENT_KEYS = {
+    "schema",
+    "event_epoch",
+    "event_sequence",
+    "sim_time_ns",
+    "event",
+    "packet_wire_hash_algorithm",
+    "packet_wire_hash",
+    "packet_wire_size",
+    "packet_uid",
+    "tos",
+    "dscp",
+    "traffic_class",
+    "directed_link",
+    "queue_id",
+    "device_id",
+    "source_mac",
+    "destination_mac",
+    "source_ip",
+    "destination_ip",
+    "transport_protocol",
+    "source_udp_port",
+    "destination_udp_port",
+    "transport_payload_sha256",
+    "transport_payload_size",
+    "p2mp",
+    "root_transmission",
+    "queue_depth_packets",
+    "queue_limit_packets",
+    "drop_reason",
+    "config_sha256",
+    "seed",
+    "run",
+}
+ENGINE_EVENTS = {
+    "ingress",
+    "enqueue",
+    "dequeue",
+    "channel",
+    "drop",
+    "egress",
+    "phy_tx_drop",
+    "phy_rx_drop",
+}
 
 
 def _is_int(value: Any) -> bool:
@@ -124,7 +209,19 @@ def _strict_json_loads(text: str) -> Any:
     def reject_constant(value: str) -> None:
         raise ValueError(f"non-standard JSON numeric constant {value!r}")
 
-    return json.loads(text, parse_constant=reject_constant)
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON key {key!r}")
+            result[key] = value
+        return result
+
+    return json.loads(
+        text,
+        parse_constant=reject_constant,
+        object_pairs_hook=reject_duplicates,
+    )
 
 
 def _load_object(path: Path) -> tuple[dict[str, Any], list[str]]:
@@ -189,6 +286,587 @@ def _metadata_gate(run_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         if not _parse_utc(data.get("started_utc")):
             failures.append("m2_run.started_utc must be an ISO-8601 UTC timestamp")
     return data, _result(failures, path=str(path))
+
+
+def _repository_source_record(relative: str) -> dict[str, Any]:
+    path = ROOT_DIR / relative
+    if not path.is_file() or path.is_symlink() or path.stat().st_size <= 0:
+        raise ValueError(f"repository source is missing/nonregular: {relative}")
+    return {"path": relative, "sha256": _sha256_file(path)}
+
+
+def _raw_file_record(run_dir: Path, relative: str) -> dict[str, Any]:
+    path = run_dir / relative
+    if not path.is_file() or path.is_symlink() or path.stat().st_size <= 0:
+        raise ValueError(f"raw packet-engine file is missing/nonregular: {relative}")
+    return {
+        "path": relative,
+        "sha256": _sha256_file(path),
+        "size_bytes": path.stat().st_size,
+    }
+
+
+def derive_endpoint_subset_contract() -> dict[str, Any]:
+    """Derive the exact six-cell uav1 schema-v1 identity from tracked inputs."""
+
+    from network.validation.endpoint_transaction import (
+        CONTRACT,
+        MATRIX_ID,
+        canonical_json,
+        load_strict_json,
+        sha256_bytes,
+        validate_matrix_file,
+    )
+
+    schema_path = ROOT_DIR / ENDPOINT_SCHEMA_RELATIVE
+    matrix_path = ROOT_DIR / ENDPOINT_MATRIX_RELATIVE
+    schema = load_strict_json(schema_path)
+    matrix = validate_matrix_file(matrix_path, schema_path=schema_path)
+    cells = [
+        cell
+        for cell in matrix["cells"]
+        if cell.get("uav", {}).get("name") == "uav1"
+    ]
+    if [cell.get("cell_id") for cell in cells] != list(UAV1_CELL_IDS):
+        raise ValueError("endpoint matrix lacks the exact ordered six-cell uav1 subset")
+    if (
+        cells[0].get("capture_points", {}).get("remote_after_adapter")
+        != "uav1.mavproxy.tail"
+        or cells[1].get("capture_points", {}).get("source_before_adapter")
+        != "uav1.mavproxy.tail"
+        or cells[2].get("capture_points", {}).get("remote_after_adapter")
+        != "uav1.sink.eth0"
+        or cells[3].get("capture_points", {}).get("source_before_adapter")
+        != "uav1.source.eth0"
+        or cells[4].get("capture_points", {}).get("remote_after_adapter")
+        != "uav1.sink.eth0"
+        or cells[5].get("capture_points", {}).get("source_before_adapter")
+        != "uav1.source.eth0"
+    ):
+        raise ValueError("endpoint matrix control/companion capture-point sides are not exact")
+    if (
+        matrix.get("schema_version") != 1
+        or matrix.get("contract") != CONTRACT
+        or CONTRACT != ENDPOINT_TRANSACTION_CONTRACT
+        or matrix.get("matrix_id") != MATRIX_ID
+        or MATRIX_ID != ENDPOINT_MATRIX_ID
+        or schema.get("$id")
+        != "https://ams.local/schemas/endpoint-transaction-v1.json"
+        or schema.get("properties", {}).get("schema_version") != {"const": 1}
+    ):
+        raise ValueError("endpoint transaction schema-v1 identity is not exact")
+    return {
+        "contract": ENDPOINT_SUBSET_CONTRACT,
+        "schema_version": 1,
+        "endpoint_transaction_contract": ENDPOINT_TRANSACTION_CONTRACT,
+        "matrix_id": ENDPOINT_MATRIX_ID,
+        "schema": _repository_source_record(ENDPOINT_SCHEMA_RELATIVE),
+        "matrix": _repository_source_record(ENDPOINT_MATRIX_RELATIVE),
+        "subset": {
+            "subset_id": "uav1_all_traffic_classes",
+            "uav": "uav1",
+            "cell_count": 6,
+            "cell_ids": list(UAV1_CELL_IDS),
+            "resolved_cells_sha256": sha256_bytes(canonical_json(cells)),
+            "actual_control_tail_capture": {
+                "capture_role": "tail",
+                "interface": "ams-tail0",
+                "pcap_path": "pcap/uav_tail.pcap",
+                "downlink": {
+                    "cell_id": "uav1.control.downlink",
+                    "capture_point_role": "remote_after_adapter",
+                    "capture_point_id": "uav1.mavproxy.tail",
+                },
+                "uplink": {
+                    "cell_id": "uav1.control.uplink",
+                    "capture_point_role": "source_before_adapter",
+                    "capture_point_id": "uav1.mavproxy.tail",
+                },
+            },
+        },
+    }
+
+
+def _endpoint_contract_gate(run_dir: Path, metadata: dict[str, Any]) -> dict[str, Any]:
+    path = run_dir / "metrics/m2_endpoint_contract.json"
+    observed, failures = _load_object(path)
+    try:
+        expected = derive_endpoint_subset_contract()
+    except Exception as exc:
+        expected = {}
+        failures.append(f"cannot independently derive endpoint subset: {exc}")
+    if observed and observed != expected:
+        failures.append(
+            "m2_endpoint_contract is not the exact schema-v1 uav1 six-cell subset"
+        )
+    if metadata.get("endpoint_transaction") != observed:
+        failures.append("m2_run endpoint_transaction does not equal the sealed raw contract")
+    tail_contract = ((expected.get("subset") or {}).get("actual_control_tail_capture") or {})
+    tail_stats, tail_stats_failures = _load_object(run_dir / "logs/capture_tail_stats.json")
+    failures.extend(tail_stats_failures)
+    if (
+        tail_contract.get("capture_role") != "tail"
+        or tail_contract.get("interface") != "ams-tail0"
+        or tail_contract.get("pcap_path") != "pcap/uav_tail.pcap"
+        or tail_stats.get("interface") != tail_contract.get("interface")
+        or tail_stats.get("pcap_path") != "uav_tail.pcap"
+    ):
+        failures.append("M2 control capture contract is not bound to the actual MAVProxy tail PCAP")
+    return _result(
+        failures,
+        path=str(path),
+        cell_ids=list(UAV1_CELL_IDS),
+        resolved_cells_sha256=(expected.get("subset") or {}).get(
+            "resolved_cells_sha256"
+        ),
+        actual_control_tail_capture=tail_contract,
+    )
+
+
+def _packet_engine_receipt_gate(
+    run_dir: Path, metadata: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    path = run_dir / "metrics/ns3_tap_build_receipt.json"
+    receipt, failures = _load_object(path)
+    expected_top = {
+        "schema_version",
+        "contract",
+        "created_utc",
+        "subject_sha256",
+        "subject",
+    }
+    if receipt and set(receipt) != expected_top:
+        failures.append("ns-3 receipt fields differ from the exact v1 contract")
+    if (
+        receipt.get("schema_version") != 1
+        or receipt.get("contract") != "ams.ns3.build-receipt/v1"
+    ):
+        failures.append("ns-3 packet-engine receipt schema/contract is invalid")
+    if not _parse_utc(receipt.get("created_utc")):
+        failures.append("ns-3 packet-engine receipt created_utc is invalid")
+    subject = receipt.get("subject") if isinstance(receipt.get("subject"), dict) else {}
+    try:
+        from network.ns3.ns3_build_receipt import subject_digest
+
+        if receipt.get("subject_sha256") != subject_digest(subject):
+            failures.append("ns-3 packet-engine receipt subject digest is invalid")
+    except Exception as exc:
+        failures.append(f"ns-3 packet-engine receipt subject hashing failed: {exc}")
+    if subject.get("program") != ENGINE_PROGRAM:
+        failures.append("ns-3 receipt is not for ams-tap-packet-engine")
+    official = (
+        subject.get("official_source")
+        if isinstance(subject.get("official_source"), dict)
+        else {}
+    )
+    if official != {
+        "root": "/workspace/multiagent_simulation/.external/ns-3",
+        "version": "3.40",
+        "core_tree_files": 3764,
+        "core_tree_sha256": (
+            "0119836a7c79f7470f0c2c866de9c14ddc4f22349bbd194112ff2952713b64e8"
+        ),
+    }:
+        failures.append("ns-3 receipt does not bind the canonical official 3.40 tree")
+    scratch = (
+        subject.get("scratch_source")
+        if isinstance(subject.get("scratch_source"), dict)
+        else {}
+    )
+    project = scratch.get("project") if isinstance(scratch.get("project"), dict) else {}
+    copied = scratch.get("copied") if isinstance(scratch.get("copied"), dict) else {}
+    current_hash = _sha256_file(ROOT_DIR / ENGINE_SOURCE_RELATIVE)
+    if (
+        project.get("path")
+        != "/workspace/multiagent_simulation/network/ns3/scratch/ams-tap-packet-engine.cc"
+        or copied.get("path")
+        != "/workspace/multiagent_simulation/.external/ns-3/scratch/ams-tap-packet-engine.cc"
+        or project.get("sha256") != current_hash
+        or copied.get("sha256") != current_hash
+        or scratch.get("byte_identical") is not True
+    ):
+        failures.append("ns-3 receipt does not bind the current shared packet-engine source")
+    build = subject.get("build") if isinstance(subject.get("build"), dict) else {}
+    if (
+        build.get("enabled_modules") != list(REQUIRED_NS3_MODULES)
+        or build.get("required_modules") != list(REQUIRED_NS3_MODULES)
+    ):
+        failures.append("ns-3 packet-engine receipt module union is not exact")
+    executable = (
+        subject.get("executable")
+        if isinstance(subject.get("executable"), dict)
+        else {}
+    )
+    if (
+        executable.get("path")
+        != "/workspace/multiagent_simulation/.external/ns-3/build/scratch/"
+        "ns3.40-ams-tap-packet-engine-default"
+        or not _is_sha256(executable.get("sha256"))
+        or not _is_int(executable.get("size_bytes"))
+        or executable.get("size_bytes", 0) <= 0
+        or not _is_int(executable.get("mode"))
+        or executable.get("mode", 0) & 0o111 == 0
+    ):
+        failures.append("ns-3 packet-engine executable identity is invalid")
+    try:
+        lock = yaml.safe_load(
+            (ROOT_DIR / "network/config/dependency_lock.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        locked_modules = sorted(lock["dependencies"]["ns3"]["required_modules"])
+        if locked_modules != list(REQUIRED_NS3_MODULES):
+            failures.append("validator module union differs from dependency lock")
+    except Exception as exc:
+        failures.append(f"cannot independently read locked ns-3 modules: {exc}")
+    engine_identity = (
+        metadata.get("packet_engine")
+        if isinstance(metadata.get("packet_engine"), dict)
+        else {}
+    )
+    try:
+        if engine_identity.get("build_receipt") != _raw_file_record(
+            run_dir, "metrics/ns3_tap_build_receipt.json"
+        ):
+            failures.append("m2_run packet-engine receipt file identity is stale")
+    except ValueError as exc:
+        failures.append(str(exc))
+    if engine_identity.get("executable") != executable:
+        failures.append("m2_run executable identity differs from the build receipt")
+    return _result(failures, path=str(path), program=subject.get("program")), executable
+
+
+def _engine_config_expected(run_dir: Path, phase: str, epoch: int) -> tuple[Any, dict[str, Any]]:
+    from network.ns3.tap_packet_engine_config import from_repository
+
+    config = from_repository(
+        uav_count=1,
+        duration_ms=3_600_000,
+        seed=42,
+        run=1,
+        event_epoch=epoch,
+        self_test=False,
+        self_test_burst=1,
+        self_test_unknown_tos=False,
+        tap_gcs="tap-gcs",
+        tap_uavs=("tap-uav",),
+    )
+    payload = {
+        "contract": ENGINE_CONTRACT,
+        "config_sha256": config.sha256(),
+        "canonical_config": config.canonical_text(),
+        "resolved": {**asdict(config), "tap_uavs": list(config.tap_uavs)},
+        "engine_argv": config.engine_argv(
+            events_file=str(run_dir / f"logs/ns3_{phase}_packet_events.jsonl"),
+            pcap_prefix=str(run_dir / f"pcap/ns3_{phase}"),
+        ),
+        "source_sha256": {
+            str(ROOT_DIR / "network/config/endpoints.yaml"): _sha256_file(
+                ROOT_DIR / "network/config/endpoints.yaml"
+            ),
+            str(ROOT_DIR / "network/config/radio_24ghz.yaml"): _sha256_file(
+                ROOT_DIR / "network/config/radio_24ghz.yaml"
+            ),
+        },
+    }
+    return config, payload
+
+
+def _load_engine_events(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
+    records: list[dict[str, Any]] = []
+    failures: list[str] = []
+    if not path.is_file() or path.is_symlink():
+        return records, [f"packet-engine event log is missing/nonregular: {path}"]
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        return records, [f"cannot read packet-engine event log {path}: {exc}"]
+    if not lines:
+        return records, [f"packet-engine event log is empty: {path}"]
+    for line_number, line in enumerate(lines, start=1):
+        if not line:
+            failures.append(f"{path}:{line_number}: blank event record")
+            continue
+        try:
+            record = _strict_json_loads(line)
+        except (ValueError, json.JSONDecodeError) as exc:
+            failures.append(f"{path}:{line_number}: invalid strict JSON: {exc}")
+            continue
+        if not isinstance(record, dict):
+            failures.append(f"{path}:{line_number}: event is not an object")
+            continue
+        records.append(record)
+    return records, failures
+
+
+def _engine_required_directions(evidence: dict[str, Any]) -> dict[str, str]:
+    directions: dict[str, str] = {}
+
+    def add(value: Any, direction: str) -> None:
+        if not _is_sha256(value):
+            return
+        previous = directions.get(value)
+        if previous is not None and previous != direction:
+            raise ValueError(f"payload hash {value} appears in both packet directions")
+        directions[value] = direction
+
+    for attempt in evidence.get("attempts", {}).values():
+        add(attempt.get("marker_sha256"), "downlink")
+        add(attempt.get("command_sha256"), "downlink")
+    for ack in evidence.get("acks", {}).values():
+        add(ack.get("packet_sha256"), "uplink")
+    for rows in evidence.get("telemetry", {}).values():
+        for telemetry in rows:
+            add(telemetry.get("packet_sha256"), "uplink")
+    for heartbeat in evidence.get("heartbeats", []):
+        add(heartbeat.get("packet_sha256"), "uplink")
+    return directions
+
+
+def _packet_engine_event_failures(
+    records: list[dict[str, Any]],
+    *,
+    phase: str,
+    epoch: int,
+    config_sha256: str,
+    phase_evidence: dict[str, Any],
+) -> tuple[list[str], dict[str, Any]]:
+    failures: list[str] = []
+    stages: Counter[str] = Counter()
+    previous_sim_time = -1
+    for index, record in enumerate(records, start=1):
+        label = f"{phase}/engine event {index}"
+        if set(record) != ENGINE_EVENT_KEYS:
+            failures.append(f"{label}: fields differ from exact non-Sionna v1 schema")
+        if record.get("schema") != ENGINE_EVENT_SCHEMA:
+            failures.append(f"{label}: schema identity mismatch")
+        if record.get("event_epoch") != epoch or not _is_int(
+            record.get("event_epoch")
+        ):
+            failures.append(f"{label}: event_epoch mismatch")
+        if record.get("event_sequence") != index or not _is_int(
+            record.get("event_sequence")
+        ):
+            failures.append(f"{label}: event_sequence is not contiguous")
+        sim_time = record.get("sim_time_ns")
+        if not _is_int(sim_time) or sim_time < 0 or sim_time < previous_sim_time:
+            failures.append(f"{label}: sim_time_ns is invalid/nonmonotonic")
+        elif _is_int(sim_time):
+            previous_sim_time = sim_time
+        event = record.get("event")
+        if event not in ENGINE_EVENTS:
+            failures.append(f"{label}: unknown packet-engine event {event!r}")
+        elif isinstance(event, str):
+            stages[event] += 1
+        if record.get("config_sha256") != config_sha256:
+            failures.append(f"{label}: config_sha256 crosses phase identity")
+        if record.get("seed") != 42 or record.get("run") != 1:
+            failures.append(f"{label}: RNG seed/run identity mismatch")
+        if (
+            record.get("packet_wire_hash_algorithm") != "sha256"
+            or not _is_sha256(record.get("packet_wire_hash"))
+            or not _is_int(record.get("packet_wire_size"))
+            or record.get("packet_wire_size", 0) <= 0
+            or not _is_int(record.get("packet_uid"))
+            or record.get("packet_uid", -1) < 0
+        ):
+            failures.append(f"{label}: wire packet identity is invalid")
+        payload_hash = record.get("transport_payload_sha256")
+        payload_size = record.get("transport_payload_size")
+        if payload_hash is None:
+            if payload_size is not None:
+                failures.append(f"{label}: null payload hash has nonnull size")
+        elif (
+            not _is_sha256(payload_hash)
+            or not _is_int(payload_size)
+            or payload_size <= 0
+        ):
+            failures.append(f"{label}: transport payload identity is invalid")
+        if type(record.get("p2mp")) is not bool or type(
+            record.get("root_transmission")
+        ) is not bool:
+            failures.append(f"{label}: multicast flags are not booleans")
+        elif record.get("p2mp") or record.get("root_transmission"):
+            failures.append(f"{label}: one-UAV unicast run contains P2MP identity")
+
+    for stage in ("ingress", "enqueue", "dequeue", "channel", "egress"):
+        if stages[stage] <= 0:
+            failures.append(f"{phase}: packet-engine has no {stage} event")
+
+    try:
+        required = _engine_required_directions(phase_evidence)
+    except ValueError as exc:
+        failures.append(f"{phase}: {exc}")
+        required = {}
+    if not required:
+        failures.append(f"{phase}: no decoded probe payloads are available for engine binding")
+    for payload_hash, direction in required.items():
+        matching = [
+            record
+            for record in records
+            if record.get("transport_payload_sha256") == payload_hash
+        ]
+        ingress = [record for record in matching if record.get("event") == "ingress"]
+        egress = [record for record in matching if record.get("event") == "egress"]
+        if not ingress or not egress:
+            failures.append(
+                f"{phase}: payload {payload_hash} lacks exact engine ingress/egress"
+            )
+            continue
+        link = "cp>uav1" if direction == "downlink" else "uav1>cp"
+        expected_ports = (14600, 14601) if direction == "downlink" else (14601, 14600)
+        expected_ips = (
+            ("10.71.0.10", "10.71.1.10")
+            if direction == "downlink"
+            else ("10.71.1.10", "10.71.0.10")
+        )
+        for record in ingress + egress:
+            event = record["event"]
+            expected_device = (
+                ("cp.tap.ingress" if direction == "downlink" else "uav1.tap.ingress")
+                if event == "ingress"
+                else ("uav1.tap.egress" if direction == "downlink" else "cp.tap.egress")
+            )
+            if (
+                record.get("tos") != 184
+                or record.get("dscp") != 46
+                or record.get("traffic_class") != "control"
+                or record.get("directed_link") != link
+                or record.get("queue_id") != f"{link}.control.q0"
+                or record.get("device_id") != expected_device
+                or record.get("transport_protocol") != 17
+                or (record.get("source_udp_port"), record.get("destination_udp_port"))
+                != expected_ports
+                or (record.get("source_ip"), record.get("destination_ip"))
+                != expected_ips
+            ):
+                failures.append(
+                    f"{phase}: payload {payload_hash} has wrong engine path/class identity"
+                )
+        if any(record.get("event") in {"drop", "phy_tx_drop", "phy_rx_drop"} for record in matching):
+            failures.append(f"{phase}: required payload {payload_hash} has a drop event")
+    return failures, {"records": len(records), "stages": dict(sorted(stages.items()))}
+
+
+def _packet_engine_gate(
+    run_dir: Path,
+    metadata: dict[str, Any],
+    phase_evidence: dict[str, Any],
+    executable: dict[str, Any],
+) -> dict[str, Any]:
+    failures: list[str] = []
+    details: dict[str, Any] = {"phases": {}}
+    engine_identity = (
+        metadata.get("packet_engine")
+        if isinstance(metadata.get("packet_engine"), dict)
+        else {}
+    )
+    phase_identities: dict[str, Any] = {}
+    config_hashes: dict[str, str] = {}
+    for phase, epoch in ENGINE_PHASES.items():
+        config_relative = f"logs/ns3_{phase}_config.json"
+        config_path = run_dir / config_relative
+        observed_config, config_failures = _load_object(config_path)
+        failures.extend(config_failures)
+        try:
+            config, expected_config = _engine_config_expected(run_dir, phase, epoch)
+        except Exception as exc:
+            config, expected_config = None, {}
+            failures.append(f"{phase}: cannot independently derive engine config: {exc}")
+        if observed_config and observed_config != expected_config:
+            failures.append(f"{phase}: resolved packet-engine config/hash is not exact")
+        config_sha256 = expected_config.get("config_sha256", "")
+        config_hashes[phase] = config_sha256
+
+        argv_relative = f"logs/ns3_{phase}.argv"
+        argv_path = run_dir / argv_relative
+        try:
+            expected_argv_text = "".join(
+                f"{argument}\n" for argument in expected_config["engine_argv"]
+            )
+            if argv_path.is_symlink() or argv_path.read_text(encoding="utf-8") != expected_argv_text:
+                failures.append(f"{phase}: packet-engine argv file is not exact")
+        except (OSError, UnicodeError, KeyError) as exc:
+            failures.append(f"{phase}: cannot verify packet-engine argv: {exc}")
+
+        ready_relative = f"logs/ns3_{phase}.ready"
+        ready, ready_failures = _load_object(run_dir / ready_relative)
+        failures.extend(ready_failures)
+        expected_ready = {
+            "status": "ready",
+            "contract": ENGINE_CONTRACT,
+            "config_sha256": config_sha256,
+            "event_epoch": epoch,
+            "uav_count": 1,
+        }
+        if ready and ready != expected_ready:
+            failures.append(f"{phase}: packet-engine readiness identity is not exact")
+        stop_relative = f"logs/ns3_{phase}.stop"
+        try:
+            stop_path = run_dir / stop_relative
+            if stop_path.is_symlink() or stop_path.read_bytes() != b"stop\n":
+                failures.append(f"{phase}: packet-engine stop marker is not exact")
+        except OSError as exc:
+            failures.append(f"{phase}: packet-engine stop marker is missing: {exc}")
+
+        events_relative = f"logs/ns3_{phase}_packet_events.jsonl"
+        records, event_load_failures = _load_engine_events(run_dir / events_relative)
+        failures.extend(event_load_failures)
+        event_failures, event_details = _packet_engine_event_failures(
+            records,
+            phase=phase,
+            epoch=epoch,
+            config_sha256=config_sha256,
+            phase_evidence=phase_evidence.get(phase, {}),
+        )
+        failures.extend(event_failures)
+        details["phases"][phase] = event_details
+        try:
+            phase_identities[phase] = {
+                "event_epoch": epoch,
+                "config_sha256": config_sha256,
+                "config": _raw_file_record(run_dir, config_relative),
+                "events": _raw_file_record(run_dir, events_relative),
+                "argv": _raw_file_record(run_dir, argv_relative),
+                "ready": _raw_file_record(run_dir, ready_relative),
+                "stop": _raw_file_record(run_dir, stop_relative),
+            }
+        except ValueError as exc:
+            failures.append(str(exc))
+
+    if len(set(config_hashes.values())) != len(ENGINE_PHASES):
+        failures.append("good/recovery packet-engine config hashes are not epoch-distinct")
+    try:
+        receipt_record = _raw_file_record(
+            run_dir, "metrics/ns3_tap_build_receipt.json"
+        )
+        expected_identity = {
+            "contract": ENGINE_CONTRACT,
+            "program": ENGINE_PROGRAM,
+            "uav_count": 1,
+            "source_sha256": _sha256_file(ROOT_DIR / ENGINE_SOURCE_RELATIVE),
+            "binary_sha256": executable.get("sha256"),
+            "build_receipt_sha256": receipt_record["sha256"],
+            "config_contract": ENGINE_CONTRACT,
+            "config_sha256": config_hashes,
+            "config_tool_sha256": _sha256_file(
+                ROOT_DIR / ENGINE_CONFIG_TOOL_RELATIVE
+            ),
+            "runner_sha256": _sha256_file(ROOT_DIR / ENGINE_RUNNER_RELATIVE),
+            "event_schema": ENGINE_EVENT_SCHEMA,
+            "config_tool": _repository_source_record(ENGINE_CONFIG_TOOL_RELATIVE),
+            "runner": _repository_source_record(ENGINE_RUNNER_RELATIVE),
+            "build_receipt": receipt_record,
+            "executable": executable,
+            "phases": phase_identities,
+        }
+        if engine_identity != expected_identity:
+            failures.append("m2_run packet_engine identity is not the exact shared core contract")
+    except ValueError as exc:
+        failures.append(str(exc))
+    details["config_sha256"] = config_hashes
+    details["event_schema"] = ENGINE_EVENT_SCHEMA
+    return _result(failures, **details)
 
 
 def _common_record_failures(
@@ -731,7 +1409,7 @@ def _pcap_gate(run_dir: Path, phase_evidence: dict[str, Any]) -> dict[str, Any]:
     down_required, down_markers = _required_payloads(phase_evidence.get("down", {}))
     # Down has no ACK/telemetry/heartbeat records, so this counter contains only
     # the nonce marker and command frame for each attempted transaction.
-    for point in ("gcs_ingress", "uav_egress"):
+    for point in ("gcs_ingress", "ns3_external_ingress", "uav_egress"):
         relative = f"pcap/{point}_down.pcap"
         parsed, parse_failures = _parse_pcap(run_dir / relative)
         failures.extend(parse_failures)
@@ -739,7 +1417,7 @@ def _pcap_gate(run_dir: Path, phase_evidence: dict[str, Any]) -> dict[str, Any]:
             key: value for key, value in parsed.items() if key not in {"payload_hashes", "payload_by_hash"}
         }
         observed: Counter[str] = parsed.get("payload_hashes", Counter())
-        if point == "gcs_ingress":
+        if point in {"gcs_ingress", "ns3_external_ingress"}:
             for payload_hash, count in down_required.items():
                 if observed[payload_hash] < count:
                     failures.append(
@@ -754,6 +1432,111 @@ def _pcap_gate(run_dir: Path, phase_evidence: dict[str, Any]) -> dict[str, Any]:
             if leaked:
                 failures.append(f"{relative}: down-attempt payloads reached the UAV side: {leaked}")
     return _result(failures, pcaps=stats)
+
+
+def _capture_stats_gate(run_dir: Path) -> dict[str, Any]:
+    failures: list[str] = []
+    expected = {
+        "tail": ("ams-tail0", "pcap/uav_tail.pcap"),
+        "gcs_good": ("eth0", "pcap/gcs_ingress_good.pcap"),
+        "ns3_external_good": (
+            "v-gcs-ns3",
+            "pcap/ns3_external_ingress_good.pcap",
+        ),
+        "uav_good": ("eth0", "pcap/uav_egress_good.pcap"),
+        "gcs_down": ("eth0", "pcap/gcs_ingress_down.pcap"),
+        "ns3_external_down": (
+            "v-gcs-ns3",
+            "pcap/ns3_external_ingress_down.pcap",
+        ),
+        "uav_down": ("eth0", "pcap/uav_egress_down.pcap"),
+        "gcs_recovery": ("eth0", "pcap/gcs_ingress_recovery.pcap"),
+        "ns3_external_recovery": (
+            "v-gcs-ns3",
+            "pcap/ns3_external_ingress_recovery.pcap",
+        ),
+        "uav_recovery": ("eth0", "pcap/uav_egress_recovery.pcap"),
+    }
+    exact_keys = {
+        "contract",
+        "interface",
+        "pcap_path",
+        "pcap_bytes",
+        "linktype",
+        "snaplen",
+        "started_monotonic_ns",
+        "stopped_monotonic_ns",
+        "stop_signal",
+        "packets_written",
+        "packets_received_kernel",
+        "packets_dropped_kernel",
+    }
+    details: dict[str, Any] = {}
+    for key, (interface, pcap_relative) in expected.items():
+        stats_relative = f"logs/capture_{key}_stats.json"
+        stats, load_failures = _load_object(run_dir / stats_relative)
+        failures.extend(load_failures)
+        pcap_path = run_dir / pcap_relative
+        parsed, parse_failures = _parse_pcap(pcap_path)
+        failures.extend(parse_failures)
+        packet_count = parsed.get("packet_count")
+        if stats:
+            if set(stats) != exact_keys:
+                failures.append(f"{stats_relative}: fields differ from exact stats v1")
+            if (
+                stats.get("contract") != "ams.raw-packet-capture-stats/v1"
+                or stats.get("interface") != interface
+                or stats.get("pcap_path") != pcap_path.name
+                or stats.get("linktype") != 1
+                or stats.get("snaplen") != 65_535
+                or stats.get("stop_signal") != "SIGINT"
+            ):
+                failures.append(f"{stats_relative}: capture identity is not exact")
+            if (
+                not _is_int(stats.get("pcap_bytes"))
+                or not pcap_path.is_file()
+                or stats.get("pcap_bytes") != pcap_path.stat().st_size
+            ):
+                failures.append(f"{stats_relative}: PCAP byte identity mismatch")
+            started = stats.get("started_monotonic_ns")
+            stopped = stats.get("stopped_monotonic_ns")
+            if (
+                not _is_int(started)
+                or not _is_int(stopped)
+                or started <= 0
+                or stopped <= started
+            ):
+                failures.append(f"{stats_relative}: capture interval is invalid")
+            written = stats.get("packets_written")
+            received = stats.get("packets_received_kernel")
+            dropped = stats.get("packets_dropped_kernel")
+            if (
+                not _is_int(written)
+                or written < 0
+                or written != packet_count
+                or not _is_int(received)
+                or received < written
+                or dropped != 0
+                or not _is_int(dropped)
+            ):
+                failures.append(
+                    f"{stats_relative}: packet/drop accounting is not exact"
+                )
+            details[key] = {
+                "packets_written": written,
+                "packets_received_kernel": received,
+                "packets_dropped_kernel": dropped,
+            }
+        for suffix in ("stdout", "stderr"):
+            stream = run_dir / f"logs/capture_{key}.{suffix}"
+            try:
+                if stream.is_symlink() or not stream.is_file() or stream.stat().st_size != 0:
+                    failures.append(
+                        f"capture_{key}.{suffix} is absent, symlinked, or nonempty"
+                    )
+            except OSError as exc:
+                failures.append(f"cannot inspect capture_{key}.{suffix}: {exc}")
+    return _result(failures, captures=details)
 
 
 def _adapter_gate(
@@ -896,7 +1679,6 @@ def _process_gate(
         if phase not in PHASES or role not in PHASE_PROCESS_ROLES:
             failures.append(f"process_snapshot has unknown phase/role: {phase!r}/{role!r}")
             continue
-        monotonic_ns = record.get("monotonic_ns")
         # The probe samples /proc before and after the transaction window, then
         # appends the consolidated snapshot immediately after phase_end.  Event
         # ordering and cross-phase identity are authoritative here; requiring
@@ -1035,25 +1817,48 @@ def _provenance_gate(run_dir: Path, metadata: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(digest, str) or digest in ("", "unknown", "UNPINNED_BLOCKER") or len(digest) < 12:
         failures.append("provenance container image digest is not pinned")
     implementation = data.get("implementation") if isinstance(data.get("implementation"), dict) else {}
-    if implementation.get("packet_ingress_mode") != "tap_bridge_external":
-        failures.append("provenance packet_ingress_mode is not tap_bridge_external")
+    expected_implementation = {
+        "packet_ingress_mode": "tap_bridge_external",
+        "medium_model": "csma_surrogate",
+        "radio_provider_id": "tcp_jsonl_real_sionna",
+        "radio_provider_runtime_consumed": False,
+        "runtime_provider_id": "not_applicable_pre_m4",
+        "reason": "profile_pre_m4",
+    }
+    if implementation != expected_implementation:
+        failures.append(
+            "provenance implementation/provider-consumption contract is not exact for M2"
+        )
 
-    scenario_relative = "network/config/scenario_1uav_vertical_slice.yaml"
-    scenario_path = ROOT_DIR / scenario_relative
     config_hashes = data.get("config_hashes") if isinstance(data.get("config_hashes"), dict) else {}
-    expected_scenario_hash = _sha256_file(scenario_path) if scenario_path.is_file() else None
-    if config_hashes.get(scenario_relative) != expected_scenario_hash:
-        failures.append("provenance scenario config hash does not match the current checkout")
+    current_configs = (
+        "network/config/scenario_1uav_vertical_slice.yaml",
+        "network/config/endpoints.yaml",
+        "network/config/radio_24ghz.yaml",
+        ENDPOINT_SCHEMA_RELATIVE,
+        ENDPOINT_MATRIX_RELATIVE,
+    )
+    for relative in current_configs:
+        current = ROOT_DIR / relative
+        expected = _sha256_file(current) if current.is_file() else None
+        if config_hashes.get(relative) != expected:
+            failures.append(f"provenance config hash is absent/stale for {relative}")
 
     source_manifest = data.get("source_manifest") if isinstance(data.get("source_manifest"), dict) else {}
     current_sources = (
         "network/validation/validate_m2_vertical_slice.py",
+        "network/validation/endpoint_transaction.py",
+        "network/bridge/opaque_udp_relay.py",
         "network/bridge/uav_mavlink_endpoint.py",
-        "network/ns3/scratch/ams-tap-vertical-slice.cc",
+        ENGINE_SOURCE_RELATIVE,
+        ENGINE_CONFIG_TOOL_RELATIVE,
         "network/scripts/setup_one_uav_netns.sh",
-        "network/ns3/run_ns3_tap_slice.sh",
+        "network/scripts/raw_packet_capture.py",
+        ENGINE_RUNNER_RELATIVE,
         "network/scripts/run_one_uav_vertical_slice.sh",
         "network/tests/mavlink_vertical_slice_probe.py",
+        ENDPOINT_SCHEMA_RELATIVE,
+        ENDPOINT_MATRIX_RELATIVE,
     )
     for relative in current_sources:
         current = ROOT_DIR / relative
@@ -1083,16 +1888,42 @@ def _manifest_gate(run_dir: Path, metadata: dict[str, Any]) -> dict[str, Any]:
 
     required = {
         "metrics/m2_run.json",
+        "metrics/m2_endpoint_contract.json",
         "metrics/provenance.json",
         "metrics/ns3_tap_build_receipt.json",
         "logs/m2_probe_events.jsonl",
         "logs/uav_adapter.jsonl",
         "logs/m2_process_events.jsonl",
         "logs/m2_runner.log",
+        *(f"logs/ns3_{phase}_config.json" for phase in ENGINE_PHASES),
+        *(f"logs/ns3_{phase}_packet_events.jsonl" for phase in ENGINE_PHASES),
+        *(f"logs/ns3_{phase}.argv" for phase in ENGINE_PHASES),
+        *(f"logs/ns3_{phase}.ready" for phase in ENGINE_PHASES),
+        *(f"logs/ns3_{phase}.stop" for phase in ENGINE_PHASES),
         *(f"pcap/{point}_{phase}.pcap" for phase in ("good", "recovery") for point in CAPTURE_POINTS),
         "pcap/gcs_ingress_down.pcap",
+        "pcap/ns3_external_ingress_down.pcap",
         "pcap/uav_egress_down.pcap",
     }
+    for key in (
+        "tail",
+        "gcs_good",
+        "ns3_external_good",
+        "uav_good",
+        "gcs_down",
+        "ns3_external_down",
+        "uav_down",
+        "gcs_recovery",
+        "ns3_external_recovery",
+        "uav_recovery",
+    ):
+        required.update(
+            {
+                f"logs/capture_{key}_stats.json",
+                f"logs/capture_{key}.stdout",
+                f"logs/capture_{key}.stderr",
+            }
+        )
     missing = sorted(required - set(files))
     if missing:
         failures.append(f"M2 manifest lacks required raw files: {missing}")
@@ -1143,7 +1974,8 @@ def _manifest_gate(run_dir: Path, metadata: dict[str, Any]) -> dict[str, Any]:
         expected_size = entry.get("size_bytes")
         expected_hash = entry.get("sha256")
         actual_size = candidate.stat().st_size
-        minimum_size = 1 if relative in required else 0
+        empty_allowed = relative.endswith((".stdout", ".stderr"))
+        minimum_size = 1 if relative in required and not empty_allowed else 0
         if (
             not _is_int(expected_size)
             or expected_size < minimum_size
@@ -1181,9 +2013,39 @@ def evaluate_m2_vertical_slice(run_dir: Path) -> dict[str, Any]:
         pass
 
     try:
+        gates["endpoint_contract"] = _endpoint_contract_gate(run_dir, metadata)
+    except Exception as exc:
+        gates["endpoint_contract"] = _result(
+            [f"endpoint-contract parser failed closed: {exc}"]
+        )
+
+    try:
+        receipt_result, executable = _packet_engine_receipt_gate(run_dir, metadata)
+    except Exception as exc:
+        receipt_result, executable = (
+            _result([f"ns-3 packet-engine receipt parser failed closed: {exc}"]),
+            {},
+        )
+    gates["ns3_build_receipt"] = receipt_result
+    try:
+        gates["packet_engine"] = _packet_engine_gate(
+            run_dir, metadata, phase_evidence, executable
+        )
+    except Exception as exc:
+        gates["packet_engine"] = _result(
+            [f"packet-engine evidence parser failed closed: {exc}"]
+        )
+
+    try:
         gates["packet_captures"] = _pcap_gate(run_dir, phase_evidence)
     except Exception as exc:
         gates["packet_captures"] = _result([f"PCAP parser failed closed: {exc}"])
+    try:
+        gates["capture_accounting"] = _capture_stats_gate(run_dir)
+    except Exception as exc:
+        gates["capture_accounting"] = _result(
+            [f"raw-capture accounting parser failed closed: {exc}"]
+        )
 
     try:
         adapter_result, adapter_pid = _adapter_gate(run_dir, metadata, windows, phase_evidence)
@@ -1213,12 +2075,6 @@ def evaluate_m2_vertical_slice(run_dir: Path) -> dict[str, Any]:
     except Exception as exc:
         gates["critical_logs"] = _result([f"critical-log parser failed closed: {exc}"])
     try:
-        gates["ns3_build_receipt"] = ns3_build_receipt_evidence_status(run_dir)
-    except Exception as exc:
-        gates["ns3_build_receipt"] = _result(
-            [f"ns-3 build-receipt parser failed closed: {exc}"]
-        )
-    try:
         gates["provenance"] = _provenance_gate(run_dir, metadata)
     except Exception as exc:
         gates["provenance"] = _result([f"provenance parser failed closed: {exc}"])
@@ -1228,12 +2084,65 @@ def evaluate_m2_vertical_slice(run_dir: Path) -> dict[str, Any]:
         gates["manifest"] = _result([f"manifest parser failed closed: {exc}"])
 
     passed = all(value.get("status") == "passed" for value in gates.values())
+    engine_identity = (
+        metadata.get("packet_engine")
+        if isinstance(metadata.get("packet_engine"), dict)
+        else {}
+    )
+    endpoint_identity = (
+        metadata.get("endpoint_transaction")
+        if isinstance(metadata.get("endpoint_transaction"), dict)
+        else {}
+    )
+    endpoint_subset = (
+        endpoint_identity.get("subset")
+        if isinstance(endpoint_identity.get("subset"), dict)
+        else {}
+    )
+    endpoint_schema = (
+        endpoint_identity.get("schema")
+        if isinstance(endpoint_identity.get("schema"), dict)
+        else {}
+    )
+    endpoint_matrix = (
+        endpoint_identity.get("matrix")
+        if isinstance(endpoint_identity.get("matrix"), dict)
+        else {}
+    )
     return {
         "schema_version": 2,
+        "contract": RESULT_CONTRACT,
         "validation_contract": EVIDENCE_CONTRACT,
         "run_id": run_dir.name,
         "runtime_id": metadata.get("runtime_id"),
+        "packet_engine": {
+            "contract": engine_identity.get("contract"),
+            "program": engine_identity.get("program"),
+            "uav_count": engine_identity.get("uav_count"),
+            "source_sha256": engine_identity.get("source_sha256"),
+            "binary_sha256": engine_identity.get("binary_sha256"),
+            "build_receipt_sha256": engine_identity.get(
+                "build_receipt_sha256"
+            ),
+            "config_contract": engine_identity.get("config_contract"),
+            "config_sha256": engine_identity.get("config_sha256"),
+            "config_tool_sha256": engine_identity.get("config_tool_sha256"),
+            "runner_sha256": engine_identity.get("runner_sha256"),
+            "event_schema": engine_identity.get("event_schema"),
+        },
+        "endpoint_transaction": {
+            "schema_version": endpoint_identity.get("schema_version"),
+            "schema_sha256": endpoint_schema.get("sha256"),
+            "matrix_sha256": endpoint_matrix.get("sha256"),
+            "subset_cell_ids": endpoint_subset.get("cell_ids"),
+            "subset_cells_sha256": endpoint_subset.get("resolved_cells_sha256"),
+        },
         "passed": passed,
+        "failures": [
+            f"{gate_name}: {failure}"
+            for gate_name, gate in gates.items()
+            for failure in gate.get("failures", [])
+        ],
         "gates": gates,
     }
 
@@ -1249,12 +2158,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--json-output", type=Path)
+    parser.add_argument("--no-write", action="store_true")
     args = parser.parse_args(argv)
     run_dir = args.run_dir.resolve()
     if not run_dir.is_dir():
         print(f"FAIL M2 run directory does not exist: {run_dir}", file=sys.stderr)
         return 2
     result = evaluate_m2_vertical_slice(run_dir)
+    if args.json_output and args.no_write:
+        print("FAIL --json-output and --no-write are mutually exclusive", file=sys.stderr)
+        return 2
+    encoded = json.dumps(result, allow_nan=False, indent=2, sort_keys=True) + "\n"
+    if args.no_write:
+        sys.stdout.write(encoded)
+        return 0 if result["passed"] else 1
     if args.json_output:
         output = args.json_output.resolve()
         fixed_output = run_dir / "metrics/m2_validation_results.json"

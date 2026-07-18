@@ -23,11 +23,27 @@ compat = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(compat)
 
 
+class FakeFloat:
+    def __init__(self, values):
+        self.values = [float(value) for value in values]
+
+    def __mul__(self, other):
+        return FakeFloat(
+            left * right for left, right in zip(self.values, other.values, strict=True)
+        )
+
+    def __getitem__(self, index):
+        return self.values[index]
+
+
 def accepted_lock(numpy_version: str = "1.26.4") -> dict:
     return {
         "schema_version": 2,
         "status": "complete",
-        "runtime_policy": {"mitsuba_variant": "llvm_ad_mono_polarized"},
+        "runtime_policy": {
+            "mitsuba_variant": "cuda_ad_mono_polarized",
+            "gpu_required": True,
+        },
         "dependencies": {
             "ros": {"distribution": "humble"},
             "numpy": {"version": numpy_version},
@@ -45,6 +61,7 @@ def accepted_lock(numpy_version: str = "1.26.4") -> dict:
 class FakeRuntime:
     def __init__(self, numpy_version: str = "1.26.4") -> None:
         self.import_calls: list[str] = []
+        self.mitsuba_variant: str | None = None
         self.modules = {
             "numpy": SimpleNamespace(__file__="/opt/python/numpy/__init__.py", __version__=numpy_version),
             "cv2": SimpleNamespace(__file__="/opt/python/cv2.abi3.so", __version__="4.5.4"),
@@ -52,7 +69,14 @@ class FakeRuntime:
             "sionna.rt": SimpleNamespace(__file__="/opt/python/sionna/rt/__init__.py"),
             "mitsuba": SimpleNamespace(
                 __file__="/opt/python/mitsuba/__init__.py",
-                variants=lambda: ["llvm_ad_mono_polarized", "scalar_rgb"],
+                variants=lambda: [
+                    "cuda_ad_mono_polarized",
+                    "llvm_ad_mono_polarized",
+                    "scalar_rgb",
+                ],
+                set_variant=self.set_mitsuba_variant,
+                variant=lambda: self.mitsuba_variant,
+                Float=FakeFloat,
             ),
             "mpl_toolkits.mplot3d": SimpleNamespace(
                 __file__="/opt/python/mpl_toolkits/mplot3d/__init__.py"
@@ -63,6 +87,9 @@ class FakeRuntime:
             "sionna-rt": "1.2.2",
             "mitsuba": "3.8.0",
         }
+
+    def set_mitsuba_variant(self, value: str) -> None:
+        self.mitsuba_variant = value
 
     def importer(self, name: str):
         self.import_calls.append(name)
@@ -150,10 +177,14 @@ class PythonRuntimeCompatibilityTests(unittest.TestCase):
 
     def test_rejects_unavailable_locked_mitsuba_variant(self) -> None:
         lock = accepted_lock()
-        lock["runtime_policy"]["mitsuba_variant"] = "cuda_ad_mono_polarized"
         self.write_lock(lock)
+        runtime = FakeRuntime()
+        runtime.modules["mitsuba"].variants = lambda: [
+            "llvm_ad_mono_polarized",
+            "scalar_rgb",
+        ]
 
-        results = self.run_fixture(FakeRuntime())
+        results = self.run_fixture(runtime)
 
         failed = {row["name"] for row in results.checks if not row["passed"]}
         self.assertIn("runtime.mitsuba_variant", failed)

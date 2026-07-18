@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import csv
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -19,8 +20,10 @@ import shlex
 import stat
 import struct
 import subprocess
+import sys
 import xml.etree.ElementTree as ET
 from datetime import datetime
+from importlib import metadata
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -70,9 +73,14 @@ NO_BYPASS_EVENT_LOG = "logs/no_bypass_events.jsonl"
 MAVLINK_TRANSACTION_LOG = "logs/mavlink_transactions.jsonl"
 M1_CONTRACT_ID = "ams.m1.health/v3"
 M1_PLAN_PATH = "doc/network_radio_integration_plan_v3.md"
+M1_DEPENDENCY_LOCK_PATH = "network/config/dependency_lock.yaml"
 M1_PROFILE = "m1_component"
 M1_SCENARIO_ID = "scenario_5uav"
 M1_PHASES = ("readiness", "measurement", "finalization")
+INHERITED_M0_RECEIPT_MOUNTS = {
+    "m1_component": Path("/run/ams/m0-receipt.json"),
+    "flight_capacity_prerequisite": Path("/run/ams/prerequisites/m0.json"),
+}
 M1_REQUIRED_PROCESS_COUNTS = {
     "arducopter": 5,
     "mavproxy": 5,
@@ -86,6 +94,7 @@ M1_MAVPROXY_OFFLINE_DEFAULT_MODULES = (
 M1_PROCESS_NAMESPACES = ("cgroup", "ipc", "mnt", "net", "pid", "user", "uts")
 M1_CAPABILITIES = ("inheritable", "permitted", "effective", "bounding", "ambient")
 M1_ALLOWED_PROCESS_STATES = {"R", "S", "D", "I"}
+M1_PROCESS_SAMPLE_MAX_GAP_S = 1.5
 
 
 class _BoundedFailureList(list[str]):
@@ -132,6 +141,91 @@ def read_exit_code(path: Path) -> int | None:
         return None
 
 
+def _runtime_security_observation() -> dict[str, object]:
+    """Independently observe the validator process capability boundary."""
+
+    required = ("CapPrm", "CapEff", "CapBnd", "NoNewPrivs")
+    parsed: dict[str, str] = {}
+    try:
+        lines = Path("/proc/self/status").read_text(
+            encoding="ascii", errors="strict"
+        ).splitlines()
+    except (OSError, UnicodeError):
+        lines = []
+    for line in lines:
+        key, separator, value = line.partition(":")
+        if separator and key in required and key not in parsed:
+            parsed[key] = value.strip()
+
+    def succeeds(command: list[str]) -> bool:
+        try:
+            result = subprocess.run(
+                command,
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return result.returncode == 0
+
+    no_new_privs = parsed.get("NoNewPrivs")
+    return {
+        "uid": os.getuid(),
+        "gid": os.getgid(),
+        "CapPrm": parsed.get("CapPrm"),
+        "CapEff": parsed.get("CapEff"),
+        "CapBnd": parsed.get("CapBnd"),
+        "NoNewPrivs": (
+            int(no_new_privs)
+            if isinstance(no_new_privs, str) and no_new_privs in {"0", "1"}
+            else None
+        ),
+        "dev_net_tun": Path("/dev/net/tun").is_char_device(),
+        "unshare_network_namespace": succeeds(["/usr/bin/unshare", "-rn", "true"]),
+        "passwordless_sudo": succeeds(["/usr/bin/sudo", "-n", "true"]),
+    }
+
+
+def _bounded_root_runtime_evidence(
+    consumption: Any, observed_network: Any
+) -> tuple[bool, bool, bool, dict[str, object]]:
+    """Validate producer facts and independently re-observe the same boundary."""
+
+    from network.validation.qualification_identity import (  # noqa: PLC0415
+        BOUNDED_ROOT_CAPABILITY_MASK,
+        BOUNDED_ROOT_GID,
+        BOUNDED_ROOT_NO_NEW_PRIVS,
+        BOUNDED_ROOT_UID,
+        is_exact_bounded_root_capability_mode,
+    )
+
+    network = observed_network if isinstance(observed_network, dict) else {}
+    exact_mode = is_exact_bounded_root_capability_mode(
+        consumption, network.get("qualification_mode")
+    )
+    expected = {
+        "uid": BOUNDED_ROOT_UID,
+        "gid": BOUNDED_ROOT_GID,
+        "CapPrm": BOUNDED_ROOT_CAPABILITY_MASK,
+        "CapEff": BOUNDED_ROOT_CAPABILITY_MASK,
+        "CapBnd": BOUNDED_ROOT_CAPABILITY_MASK,
+        "NoNewPrivs": BOUNDED_ROOT_NO_NEW_PRIVS,
+        "dev_net_tun": True,
+        "unshare_network_namespace": True,
+        "passwordless_sudo": False,
+    }
+    recorded_exact = exact_mode and all(
+        network.get(key) == value for key, value in expected.items()
+    )
+    independently_observed_exact = (
+        exact_mode and _runtime_security_observation() == expected
+    )
+    return exact_mode, recorded_exact, independently_observed_exact, expected
+
+
 def sha256_file(path: Path) -> str | None:
     if not path.is_file():
         return None
@@ -143,6 +237,76 @@ def sha256_file(path: Path) -> str | None:
     except OSError:
         return None
     return digest.hexdigest()
+
+
+def component_python_runtime_failures(
+    qualification_profile: Any, dependency_versions: Any
+) -> list[str]:
+    """Validate and independently re-observe a component Python runtime."""
+
+    from network.validation.component_profiles import (  # noqa: PLC0415
+        COMPONENT_PYTHON_MODULES,
+        load_profiles,
+        validate_component_python_runtime,
+    )
+
+    dependencies = dependency_versions if isinstance(dependency_versions, dict) else {}
+    record = dependencies.get("python_runtime")
+    profile = load_profiles().get(qualification_profile)
+    if profile is None:
+        return (
+            []
+            if record is None
+            else ["non-component provenance recorded an undeclared Python runtime"]
+        )
+    failures = validate_component_python_runtime(profile, record, dependencies)
+    if failures or profile["python_runtime"] != "sionna_rt_cuda":
+        return failures
+
+    # The independent validator runs in the same immutable image as the
+    # producer.  Re-hash every recorded origin and resolve the actual modules
+    # here so producer-authored provenance cannot substitute another file.
+    executable = record["executable"]
+    executable_path = Path(executable["realpath"])
+    try:
+        current_executable = Path(sys.executable).resolve(strict=True)
+        executable_stat = executable_path.stat()
+    except OSError as exc:
+        failures.append(f"component Python executable could not be re-observed: {exc}")
+    else:
+        if (
+            current_executable != executable_path
+            or not executable_path.is_file()
+            or executable_stat.st_size != executable["size_bytes"]
+            or sha256_file(executable_path) != executable["sha256"]
+        ):
+            failures.append("component Python executable differs in the exact image")
+    for module_name, distribution in COMPONENT_PYTHON_MODULES.items():
+        module = record["modules"][module_name]
+        try:
+            spec = importlib.util.find_spec(module_name)
+            if spec is None or not isinstance(spec.origin, str):
+                raise ValueError("module spec/origin is unavailable")
+            actual_origin = Path(spec.origin).resolve(strict=True)
+            recorded_origin = Path(module["origin"])
+            origin_stat = actual_origin.stat()
+            actual_version = metadata.version(distribution)
+        except (OSError, ValueError, ImportError, metadata.PackageNotFoundError) as exc:
+            failures.append(
+                f"component Python module could not be re-observed: {module_name}: {exc}"
+            )
+            continue
+        if (
+            actual_origin != recorded_origin
+            or not actual_origin.is_file()
+            or origin_stat.st_size != module["size_bytes"]
+            or sha256_file(actual_origin) != module["sha256"]
+            or actual_version != module["version"]
+        ):
+            failures.append(
+                f"component Python module differs in the exact image: {module_name}"
+            )
+    return failures
 
 
 def finite_number(value: Any) -> bool:
@@ -642,6 +806,19 @@ def provenance_status(run_dir: Path) -> dict[str, Any]:
     failures: list[str] = []
     if data.get("schema_version") != 2:
         failures.append("provenance schema_version is not 2")
+    try:
+        expected_plan_contract = {
+            "plan_version": 3,
+            "path": "doc/network_radio_integration_plan_v3.md",
+            "contract_sha256": sha256_file(
+                ROOT_DIR / "doc/network_radio_integration_plan_v3.md"
+            ),
+        }
+    except (OSError, RuntimeError, ValueError) as exc:
+        expected_plan_contract = None
+        failures.append(f"authoritative v3 plan could not be hashed: {exc}")
+    if expected_plan_contract is None or data.get("plan_contract") != expected_plan_contract:
+        failures.append("provenance plan_version/contract hash is not exact")
     if not isinstance(data.get("generated_utc"), str):
         failures.append("generated_utc is missing")
     else:
@@ -680,7 +857,11 @@ def provenance_status(run_dir: Path) -> dict[str, Any]:
         except (OSError, RuntimeError, ValueError) as exc:
             failures.append(f"config hash path is invalid or escapes source root: {relative!r}: {exc}")
             continue
-        actual_hash = sha256_file(config_path)
+        try:
+            actual_hash = sha256_file(config_path)
+        except (OSError, RuntimeError, ValueError) as exc:
+            failures.append(f"config hash path is unreadable: {relative!r}: {exc}")
+            continue
         if not isinstance(expected_hash, str) or expected_hash != actual_hash:
             failures.append(f"config hash mismatch: {relative}")
     container = data.get("container_image") if isinstance(data.get("container_image"), dict) else {}
@@ -716,6 +897,13 @@ def provenance_status(run_dir: Path) -> dict[str, Any]:
     ):
         if name not in dependencies:
             failures.append(f"dependency version is missing: {name}")
+    qualification = data.get("qualification_consumption")
+    qualification_profile = (
+        qualification.get("profile") if isinstance(qualification, dict) else None
+    )
+    failures.extend(
+        component_python_runtime_failures(qualification_profile, dependencies)
+    )
     ns3 = dependencies.get("ns3") if isinstance(dependencies.get("ns3"), dict) else {}
     if (
         ns3.get("source_kind") != "official_release_archive"
@@ -861,8 +1049,171 @@ def provenance_status(run_dir: Path) -> dict[str, Any]:
         if isinstance(capabilities.get("network"), dict)
         else {}
     )
+    from network.validation.qualification_identity import (
+        BOUNDED_ROOT_IN_RUNTIME_MODE,
+        BOUNDED_ROOT_IN_RUNTIME_PROFILES,
+        DEFERRED_M0_CAPABILITY_MODE,
+        is_exact_deferred_m0_capability_mode,
+        qualification_prefixes_equal,
+    )
+
+    qualification_mode = observed_network.get("qualification_mode")
+    deferred_m0_capabilities = is_exact_deferred_m0_capability_mode(
+        data.get("qualification_consumption"), qualification_mode
+    )
+    (
+        bounded_root_capabilities,
+        recorded_bounded_root_exact,
+        independently_observed_bounded_root_exact,
+        _,
+    ) = _bounded_root_runtime_evidence(
+        data.get("qualification_consumption"), observed_network
+    )
+    inherited_m1_capabilities = False
+    if qualification_mode == "inherited_m0_host_final":
+        inherited = data.get("inherited_m0_qualification")
+        try:
+            consumption = data.get("qualification_consumption")
+            inherited_profile = (
+                consumption.get("profile") if isinstance(consumption, dict) else None
+            )
+            receipt_path = INHERITED_M0_RECEIPT_MOUNTS.get(inherited_profile)
+            if receipt_path is None:
+                raise ValueError("inherited M0 receipt profile has no canonical mount")
+            info = receipt_path.lstat()
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_nlink != 1
+                or info.st_size < 2
+                or info.st_size > 64 * 1024 * 1024
+                or info.st_mode & 0o222
+            ):
+                raise ValueError("mounted M0 receipt is not bounded/read-only")
+            receipt_raw = receipt_path.read_bytes()
+            after = receipt_path.lstat()
+            if (
+                len(receipt_raw) != info.st_size
+                or (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns)
+                != (after.st_dev, after.st_ino, after.st_mode, after.st_size, after.st_mtime_ns)
+            ):
+                raise ValueError("mounted M0 receipt changed while read")
+            receipt = json.loads(
+                receipt_raw.decode("utf-8"),
+                parse_constant=lambda value: (_ for _ in ()).throw(
+                    ValueError(f"non-finite M0 receipt JSON: {value}")
+                ),
+            )
+            if receipt_raw != (
+                json.dumps(receipt, allow_nan=False, indent=2, sort_keys=True) + "\n"
+            ).encode("utf-8"):
+                raise ValueError("mounted M0 receipt is not canonical JSON")
+            m0_vector = receipt.get("qualification_content_vector")
+            current_vector = data.get("qualification_content_vector")
+            host_final = receipt.get("gates", {}).get("host_final", {})
+            capability = (
+                host_final.get("details", {}).get("isolated_target_runtime_capability")
+                if isinstance(host_final, dict)
+                else None
+            )
+            receipt_hash = hashlib.sha256(receipt_raw).hexdigest()
+            if (
+                not isinstance(inherited, dict)
+                or inherited.get("schema_version") != 1
+                or inherited.get("contract")
+                != "ams.m1.inherited-m0-qualification/v1"
+                or inherited.get("status_report_commit") != data.get("git_commit")
+                or inherited.get("mounted_receipt_path") != str(receipt_path)
+                or inherited.get("receipt_sha256") != receipt_hash
+                or inherited.get("receipt_contract")
+                != "ams.m0.host-final-receipt/v1"
+                or inherited.get("receipt_run_id") != receipt.get("run_id")
+                or inherited.get("qualification_contract_sha256")
+                != receipt.get("qualification_contract_sha256")
+                or inherited.get("qualification_vector_sha256")
+                != m0_vector.get("vector_sha256")
+                or inherited.get("qualification_vector_commit")
+                != m0_vector.get("git_commit")
+                or inherited.get("image_digest") != container.get("digest")
+                or inherited.get("consumed_nodes") != ["Q0"]
+                or inherited.get("available") is not True
+                or receipt.get("schema_version") != 3
+                or receipt.get("contract") != "ams.m0.host-final-receipt/v1"
+                or receipt.get("milestone") != "M0"
+                or receipt.get("receipt_path")
+                != inherited.get("canonical_receipt_path")
+                or receipt.get("formal_accepted") is not True
+                or receipt.get("passed") is not True
+                or receipt.get("failures") != []
+                or receipt.get("consumed_nodes") != ["Q0"]
+                or not qualification_prefixes_equal(
+                    m0_vector, current_vector, ["Q0"]
+                )
+                or not isinstance(capability, dict)
+                or capability.get("contract")
+                != "ams.m0.isolated-capability-probe/v1"
+                or capability.get("image_digest") != container.get("digest")
+                or capability.get("exit_code") != 0
+                or capability.get("no_candidate_mounts") is not True
+                or capability.get("tun_device") is not True
+                or capability.get("passwordless_sudo") is not True
+                or capability.get("unshare_network_namespace") is not True
+            ):
+                raise ValueError("inherited M0/Q0 receipt binding is not exact")
+            inherited_m1_capabilities = True
+        except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            failures.append(f"inherited M0 capability qualification is invalid: {exc}")
+    if qualification_mode not in {
+        "in_runtime",
+        DEFERRED_M0_CAPABILITY_MODE,
+        "inherited_m0_host_final",
+        BOUNDED_ROOT_IN_RUNTIME_MODE,
+    }:
+        failures.append("network capability qualification mode is invalid")
+    elif (
+        qualification_mode == DEFERRED_M0_CAPABILITY_MODE
+        and not deferred_m0_capabilities
+    ):
+        failures.append(
+            "isolated host-final capability qualification is allowed only for M0/Q0"
+        )
+    elif qualification_mode == "inherited_m0_host_final" and not inherited_m1_capabilities:
+        failures.append(
+            "inherited host-final capability qualification is allowed only for exact M1/M0"
+        )
+    elif qualification_mode == BOUNDED_ROOT_IN_RUNTIME_MODE and (
+        not bounded_root_capabilities
+        or not recorded_bounded_root_exact
+        or not independently_observed_bounded_root_exact
+    ):
+        failures.append(
+            "bounded-root capability record/current validator runtime is not the exact "
+            "M2--M4 uid/gid/capability/no-new-privileges contract"
+        )
+    else:
+        consumption = data.get("qualification_consumption")
+        capability_profile = (
+            consumption.get("profile") if isinstance(consumption, dict) else None
+        )
+        if (
+            capability_profile in BOUNDED_ROOT_IN_RUNTIME_PROFILES
+            and qualification_mode != BOUNDED_ROOT_IN_RUNTIME_MODE
+        ):
+            failures.append(
+                "M2--M4 TUN qualification requires bounded_root_in_runtime mode"
+            )
     for capability, required in expected_network.items():
-        if required is True and observed_network.get(capability) is not True:
+        if (
+            required is True
+            and observed_network.get(capability) is not True
+            and not deferred_m0_capabilities
+            and not inherited_m1_capabilities
+            and not (
+                bounded_root_capabilities
+                and recorded_bounded_root_exact
+                and independently_observed_bounded_root_exact
+                and capability == "passwordless_sudo"
+            )
+        ):
             failures.append(f"required network capability is unavailable: {capability}")
     runtime_manifests = (
         dependencies.get("runtime_manifests")
@@ -911,10 +1262,17 @@ def provenance_status(run_dir: Path) -> dict[str, Any]:
         else {}
     )
     implementation = data.get("implementation") if isinstance(data.get("implementation"), dict) else {}
+    from network.validation.component_profiles import (  # noqa: PLC0415
+        expected_radio_provider_runtime,
+    )
+
     expected_implementation = {
         "packet_ingress_mode": accepted_path.get("packet_ingress"),
         "medium_model": accepted_path.get("medium_model"),
         "radio_provider_id": accepted_path.get("radio_provider"),
+        **expected_radio_provider_runtime(
+            qualification_profile, accepted_path.get("radio_provider")
+        ),
     }
     if implementation != expected_implementation:
         failures.append("runtime implementation does not match the accepted dependency-lock path")
@@ -925,12 +1283,32 @@ def provenance_status(run_dir: Path) -> dict[str, Any]:
         failures.append("container image digest does not match dependency lock")
     try:
         from network.scripts.write_run_provenance import (
-            DEFAULT_CONFIGS,
+            default_configs_for_profile,
             deterministic_source_hash,
-            source_files,
+            source_files_for_profile,
+        )
+        from network.validation.qualification_identity import (
+            validate_recorded_checkout_identity,
+            verify_recorded_qualification,
         )
 
-        current_files = source_files()
+        qualification_relationship = verify_recorded_qualification(
+            ROOT_DIR,
+            data.get("qualification_content_vector"),
+            data.get("qualification_consumption"),
+        )
+        validate_recorded_checkout_identity(
+            data.get("qualification_checkout"),
+            data.get("qualification_content_vector"),
+        )
+        if qualification_relationship.get("recorded_commit") != commit:
+            failures.append("qualification vector commit differs from provenance commit")
+
+        consumption = data.get("qualification_consumption")
+        profile = consumption.get("profile") if isinstance(consumption, dict) else None
+        current_files = source_files_for_profile(
+            data.get("qualification_content_vector"), profile
+        )
         if data.get("source_files") != len(current_files):
             failures.append("source file count does not match current checkout")
         if source_hash != deterministic_source_hash(current_files):
@@ -940,56 +1318,15 @@ def provenance_status(run_dir: Path) -> dict[str, Any]:
         }
         if data.get("source_manifest") != expected_manifest:
             failures.append("source manifest does not match current checkout")
-        missing_configs = sorted(set(DEFAULT_CONFIGS) - set(config_hashes))
-        if missing_configs:
-            failures.append("required config hashes are missing: " + ", ".join(missing_configs))
+        expected_configs = default_configs_for_profile(
+            data.get("qualification_content_vector"), profile
+        )
+        if tuple(sorted(config_hashes)) != expected_configs:
+            failures.append(
+                "config hashes do not exactly match the qualification profile defaults"
+            )
     except Exception as exc:
         failures.append(f"could not recompute source provenance: {exc}")
-    try:
-        current_commit = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=ROOT_DIR,
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=10,
-        ).stdout.strip()
-        subprocess.run(
-            ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
-            cwd=ROOT_DIR,
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=10,
-        )
-        if commit != current_commit:
-            ancestor = subprocess.run(
-                ["git", "merge-base", "--is-ancestor", commit, current_commit],
-                cwd=ROOT_DIR,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=10,
-            )
-            if ancestor.returncode != 0:
-                failures.append("recorded run commit is not an ancestor of the validator checkout")
-        current_status = subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=all"],
-            cwd=ROOT_DIR,
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=10,
-        ).stdout.strip()
-        # A later clean descendant commit may update only durable reports after
-        # the run.
-        # Exact executable/config identity is enforced above by the complete
-        # source manifest and config hashes; requiring the same Git commit here
-        # would make honest post-run status documentation invalidate evidence.
-        if current_status:
-            failures.append("validator checkout is dirty")
-    except (OSError, subprocess.SubprocessError) as exc:
-        failures.append(f"could not verify validator checkout: {exc}")
     if data.get("acceptance_eligible") is not True:
         failures.append("provenance generator marked the run ineligible")
     if failures:
@@ -1133,6 +1470,251 @@ def _m1_decode_cmdline(raw: bytes) -> list[str]:
     return [part.decode("utf-8", errors="replace") for part in raw.rstrip(b"\0").split(b"\0")]
 
 
+_PROTO_TEXT_TOKEN = re.compile(
+    r'"(?:\\.|[^"\\])*"'
+    r"|'(?:\\.|[^'\\])*'"
+    r"|[A-Za-z_][A-Za-z0-9_.]*"
+    r"|[+-]?(?:0[xX][0-9A-Fa-f]+|(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)"
+    r"|[{}:\[\],;<>]"
+)
+
+
+def _protobuf_text_tokens(text: str) -> list[str]:
+    """Tokenize protobuf text without treating comments as message content."""
+
+    tokens: list[str] = []
+    offset = 0
+    while offset < len(text):
+        if text[offset].isspace():
+            offset += 1
+            continue
+        if text.startswith("//", offset) or text[offset] == "#":
+            newline = text.find("\n", offset)
+            offset = len(text) if newline < 0 else newline + 1
+            continue
+        if text.startswith("/*", offset):
+            closing = text.find("*/", offset + 2)
+            if closing < 0:
+                raise ValueError("Gazebo Scene protobuf text has an unterminated comment")
+            offset = closing + 2
+            continue
+        match = _PROTO_TEXT_TOKEN.match(text, offset)
+        if match is None:
+            excerpt = text[offset : offset + 16].splitlines()[0]
+            raise ValueError(
+                f"Gazebo Scene protobuf text has invalid syntax near {excerpt!r}"
+            )
+        tokens.append(match.group(0))
+        offset = match.end()
+    return tokens
+
+
+def gazebo_top_level_model_names(text: str) -> list[str]:
+    """Parse direct ``Scene.model`` names from Gazebo protobuf text output.
+
+    A flat search for ``name:`` is unsafe because links, visuals and sensors use
+    the same field spelling.  This small protobuf-text scanner intentionally
+    recognizes only model blocks at brace depth zero and only their direct name
+    field.  It raises on malformed or ambiguous input so callers fail closed.
+    """
+
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("Gazebo Scene protobuf text is empty")
+    tokens = _protobuf_text_tokens(text)
+    names: list[str] = []
+    depth = 0
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if depth == 0 and token == "model":
+            if index + 1 >= len(tokens) or tokens[index + 1] != "{":
+                raise ValueError("top-level Scene.model is not a message block")
+            index += 2
+            block_depth = 1
+            model_name: str | None = None
+            while index < len(tokens) and block_depth:
+                token = tokens[index]
+                if token == "{":
+                    block_depth += 1
+                    index += 1
+                    continue
+                if token == "}":
+                    block_depth -= 1
+                    index += 1
+                    continue
+                if (
+                    block_depth == 1
+                    and token == "name"
+                    and index + 2 < len(tokens)
+                    and tokens[index + 1] == ":"
+                    and tokens[index + 2].startswith('"')
+                ):
+                    if model_name is not None:
+                        raise ValueError("top-level Scene.model has duplicate name fields")
+                    try:
+                        decoded_name = json.loads(tokens[index + 2])
+                    except json.JSONDecodeError as exc:
+                        raise ValueError(f"Scene.model name is not a valid quoted string: {exc}") from exc
+                    if not isinstance(decoded_name, str) or not decoded_name:
+                        raise ValueError("top-level Scene.model name is empty")
+                    model_name = decoded_name
+                    index += 3
+                    continue
+                index += 1
+            if block_depth != 0:
+                raise ValueError("top-level Scene.model block is unterminated")
+            if model_name is None:
+                raise ValueError("top-level Scene.model has no direct name field")
+            names.append(model_name)
+            continue
+        if token == "{":
+            depth += 1
+        elif token == "}":
+            depth -= 1
+            if depth < 0:
+                raise ValueError("Gazebo Scene protobuf text has an unmatched closing brace")
+        index += 1
+    if depth != 0:
+        raise ValueError("Gazebo Scene protobuf text has unterminated message blocks")
+    return names
+
+
+def _m1_locked_runtime_identity(
+    provenance: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    """Load the exact-image M1 process manifest bound by run provenance."""
+
+    failures: list[str] = []
+    lock_path = ROOT_DIR / M1_DEPENDENCY_LOCK_PATH
+    try:
+        loaded = yaml.safe_load(lock_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        return {}, [f"M1 runtime identity lock is unavailable: {exc}"]
+    lock = loaded if isinstance(loaded, dict) else {}
+    identity = lock.get("m1_runtime_identity")
+    if not isinstance(identity, dict) or identity.get("schema_version") != 1:
+        return {}, ["dependency lock lacks m1_runtime_identity schema 1"]
+
+    config_hashes = (
+        provenance.get("config_hashes")
+        if isinstance(provenance.get("config_hashes"), dict)
+        else {}
+    )
+    if config_hashes.get(M1_DEPENDENCY_LOCK_PATH) != sha256_file(lock_path):
+        failures.append("run provenance does not bind the current M1 runtime identity lock")
+    container = (
+        provenance.get("container_image")
+        if isinstance(provenance.get("container_image"), dict)
+        else {}
+    )
+    if identity.get("container_image_digest") != container.get("digest"):
+        failures.append("M1 runtime identity lock does not match the accepted run image")
+
+    executable_sha256 = identity.get("executable_sha256")
+    role_paths = identity.get("role_executable_path")
+    invoked_sha256 = identity.get("invoked_file_sha256")
+    role_invoked_paths = identity.get("role_invoked_file_path")
+    for label, mapping in (
+        ("executable_sha256", executable_sha256),
+        ("role_executable_path", role_paths),
+        ("invoked_file_sha256", invoked_sha256),
+        ("role_invoked_file_path", role_invoked_paths),
+    ):
+        if not isinstance(mapping, dict) or not mapping:
+            failures.append(f"M1 runtime identity {label} is missing")
+    if failures:
+        return identity, failures
+
+    for path, digest in {**executable_sha256, **invoked_sha256}.items():
+        if (
+            not isinstance(path, str)
+            or not Path(path).is_absolute()
+            or str(Path(path)) != path
+            or re.fullmatch(r"[0-9a-f]{64}", str(digest or "")) is None
+        ):
+            failures.append(f"M1 runtime identity has invalid canonical path/hash: {path!r}")
+    if set(role_paths) != set(M1_REQUIRED_PROCESS_COUNTS):
+        failures.append("M1 role executable-path manifest is not exact")
+    for role, path in role_paths.items():
+        if path not in executable_sha256:
+            failures.append(f"M1 role {role} names an unlocked executable path")
+    if set(role_invoked_paths) != {"mavproxy"}:
+        failures.append("M1 role invoked-file manifest is not exact")
+    elif role_invoked_paths.get("mavproxy") not in invoked_sha256:
+        failures.append("M1 MAVProxy invoked file is not hash locked")
+    return identity, failures
+
+
+def _m1_mavproxy_invoked_path(argv: list[str]) -> str | None:
+    names = [Path(value).name.lower() for value in argv]
+    if names and names[0] == "mavproxy.py":
+        return argv[0]
+    if len(names) >= 2 and re.fullmatch(r"python(?:3(?:\.[0-9]+)?)?", names[0]):
+        if names[1] == "mavproxy.py":
+            return argv[1]
+    return None
+
+
+def _m1_locked_process_identity_failures(
+    process: dict[str, Any],
+    argv: list[str],
+    role: str | None,
+    identity: dict[str, Any],
+    context: str,
+) -> list[str]:
+    """Compare one raw /proc identity to the exact accepted-image manifest."""
+
+    failures: list[str] = []
+    executable_sha256 = (
+        identity.get("executable_sha256")
+        if isinstance(identity.get("executable_sha256"), dict)
+        else {}
+    )
+    role_paths = (
+        identity.get("role_executable_path")
+        if isinstance(identity.get("role_executable_path"), dict)
+        else {}
+    )
+    exe_path = process.get("exe_path")
+    expected_hash = executable_sha256.get(exe_path)
+    if expected_hash is None:
+        failures.append(f"{context}.exe_path is absent from the accepted-image manifest")
+    elif process.get("exe_sha256") != expected_hash:
+        failures.append(f"{context}.exe_sha256 differs from the accepted executable bytes")
+    if role in role_paths and exe_path != role_paths[role]:
+        failures.append(f"{context} uses the wrong canonical executable for role {role}")
+
+    invoked_files = process.get("invoked_files")
+    if not isinstance(invoked_files, dict):
+        failures.append(f"{context}.invoked_files is missing")
+        invoked_files = {}
+    if role == "mavproxy":
+        role_invoked_paths = (
+            identity.get("role_invoked_file_path")
+            if isinstance(identity.get("role_invoked_file_path"), dict)
+            else {}
+        )
+        invoked_sha256 = (
+            identity.get("invoked_file_sha256")
+            if isinstance(identity.get("invoked_file_sha256"), dict)
+            else {}
+        )
+        expected_path = role_invoked_paths.get("mavproxy")
+        actual_path = _m1_mavproxy_invoked_path(argv)
+        if actual_path != expected_path:
+            failures.append(f"{context} MAVProxy script path is not canonical")
+        expected_invoked = (
+            {expected_path: invoked_sha256.get(expected_path)}
+            if isinstance(expected_path, str)
+            else {}
+        )
+        if invoked_files != expected_invoked:
+            failures.append(f"{context} MAVProxy script bytes differ from the accepted manifest")
+    elif invoked_files != {}:
+        failures.append(f"{context} reports an undeclared invoked executable file")
+    return failures
+
+
 def _m1_process_role(process: dict[str, Any], argv: list[str]) -> str | None:
     exe_name = Path(str(process.get("exe_path") or "")).name.lower()
     argv_names = [Path(value).name.lower() for value in argv]
@@ -1189,6 +1771,7 @@ def _m1_process_identity_digest(process: dict[str, Any]) -> str:
             "uid",
             "namespaces",
             "capabilities",
+            "invoked_files",
         )
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -1403,7 +1986,7 @@ def _m1_parse_robot_description(
 
 
 def _m1_readiness_process_snapshot(
-    sample: dict[str, Any], process_group: int
+    sample: dict[str, Any], process_group: int, runtime_identity: dict[str, Any]
 ) -> tuple[dict[str, int], dict[str, set[str]], set[str], list[str]]:
     """Independently verify one raw readiness process snapshot."""
     failures: list[str] = []
@@ -1436,6 +2019,11 @@ def _m1_readiness_process_snapshot(
         role = _m1_process_role(process, argv)
         if process.get("role") != role:
             failures.append(f"{context}.role differs from actual executable+argv")
+        failures.extend(
+            _m1_locked_process_identity_failures(
+                process, argv, role, runtime_identity, context
+            )
+        )
         if role in counts:
             counts[role] += 1
         if process.get("state") not in M1_ALLOWED_PROCESS_STATES:
@@ -1489,6 +2077,8 @@ def five_uav_health_status(run_dir: Path) -> dict[str, Any]:
     provenance_path = run_dir / "metrics/provenance.json"
     provenance = load_json(provenance_path)
     provenance_sha256 = sha256_file(provenance_path)
+    runtime_identity, runtime_identity_failures = _m1_locked_runtime_identity(provenance)
+    failures.extend(runtime_identity_failures)
     if data.get("source_hash") != provenance.get("source_hash"):
         failures.append("five-UAV source_hash does not match provenance")
     current_contract_sha256 = sha256_file(ROOT_DIR / M1_PLAN_PATH)
@@ -1508,6 +2098,21 @@ def five_uav_health_status(run_dir: Path) -> dict[str, Any]:
         failures.append("five-UAV health evidence does not hash-bind current provenance")
     if data.get("profile") != M1_PROFILE:
         failures.append("five-UAV health profile is not m1_component")
+    provenance_consumption = (
+        provenance.get("qualification_consumption")
+        if isinstance(provenance.get("qualification_consumption"), dict)
+        else {}
+    )
+    provenance_consumed_hashes = provenance_consumption.get(
+        "consumed_node_sha256"
+    )
+    if (
+        provenance_consumption.get("profile") != M1_PROFILE
+        or provenance_consumption.get("consumed_nodes") != ["Q0", "Q1"]
+        or not isinstance(provenance_consumed_hashes, dict)
+        or set(provenance_consumed_hashes) != {"Q0", "Q1"}
+    ):
+        failures.append("M1 provenance does not consume exactly Q0 and Q1")
     if data.get("scenario_id") != M1_SCENARIO_ID:
         failures.append("five-UAV health scenario_id is not scenario_5uav")
     if data.get("phases") != list(M1_PHASES):
@@ -1748,6 +2353,9 @@ def five_uav_health_status(run_dir: Path) -> dict[str, Any]:
         if start.get("runtime_identity") != expected_runtime_identity:
             failures.append("raw M1 runtime host/container/kernel/GPU identity does not match provenance")
 
+    final_readiness_role_digests: dict[str, set[str]] | None = None
+    final_readiness_all_digests: set[str] | None = None
+    readiness_completed_ns: int | None = None
     readiness_events = [record for record in records if record.get("event") == "readiness"]
     readiness_summary = (
         data.get("readiness") if isinstance(data.get("readiness"), dict) else {}
@@ -1797,6 +2405,8 @@ def five_uav_health_status(run_dir: Path) -> dict[str, Any]:
         stability_s = readiness.get("stability_s")
         stability_started_ns = readiness.get("stability_started_monotonic_ns")
         stability_completed_ns = readiness.get("stability_completed_monotonic_ns")
+        if nonnegative_integer(stability_completed_ns):
+            readiness_completed_ns = int(stability_completed_ns)
         if (
             len(starts) != 1
             or stability_s != starts[0].get("readiness_stability_s")
@@ -1975,9 +2585,12 @@ def five_uav_health_status(run_dir: Path) -> dict[str, Any]:
             or not nonnegative_integer(stability_completed_ns)
             or stable_sample_ns[0] != stability_started_ns
             or stable_sample_ns[-1] != stability_completed_ns
-            or stable_timing["max_gap_s"] > 1.5
+            or stable_timing["max_gap_s"] > M1_PROCESS_SAMPLE_MAX_GAP_S
         ):
-            failures.append("stable readiness process samples do not continuously cover the dwell")
+            failures.append(
+                "stable readiness process samples exceed the "
+                f"{M1_PROCESS_SAMPLE_MAX_GAP_S:g}-second continuity bound"
+            )
 
         baseline_role_digests: dict[str, set[str]] | None = None
         baseline_all_digests: set[str] | None = None
@@ -2014,6 +2627,7 @@ def five_uav_health_status(run_dir: Path) -> dict[str, Any]:
                 int(readiness_process_group)
                 if nonnegative_integer(readiness_process_group)
                 else -1,
+                runtime_identity,
             )
             failures.extend(f"{context}: {failure}" for failure in sample_failures)
             if baseline_role_digests is None:
@@ -2021,6 +2635,12 @@ def five_uav_health_status(run_dir: Path) -> dict[str, Any]:
                 baseline_all_digests = all_digests
             elif role_digests != baseline_role_digests or all_digests != baseline_all_digests:
                 failures.append(f"{context} changed process identity during the dwell")
+
+            if sample_index == len(stable_process_events) - 1:
+                final_readiness_role_digests = {
+                    role: set(digests) for role, digests in role_digests.items()
+                }
+                final_readiness_all_digests = set(all_digests)
 
             sample_ns = sample.get("sampled_monotonic_ns")
             details = sample.get("stream_details")
@@ -2192,16 +2812,17 @@ def five_uav_health_status(run_dir: Path) -> dict[str, Any]:
             ):
                 failures.append(f"raw Gazebo {stream} hash differs from exact bytes")
             decoded_gazebo[stream] = raw_stream
-        gazebo_text = (
-            decoded_gazebo.get("stdout", b"") + b"\n" + decoded_gazebo.get("stderr", b"")
-        ).decode(errors="replace")
-        raw_gazebo_names = sorted(
-            {
-                name
-                for name in re.findall(r'\bname:\s*"([^"]+)"', gazebo_text)
-                if name.startswith("uav")
-            }
-        )
+        try:
+            gazebo_text = decoded_gazebo.get("stdout", b"").decode(
+                "utf-8", errors="strict"
+            )
+            top_level_models = gazebo_top_level_model_names(gazebo_text)
+            raw_gazebo_names = sorted(
+                name for name in top_level_models if name.startswith("uav")
+            )
+        except (UnicodeDecodeError, ValueError) as exc:
+            failures.append(f"raw Gazebo Scene.model inventory is invalid: {exc}")
+            raw_gazebo_names = []
         expected_gazebo_names = [f"uav{index}" for index in range(1, 6)]
         if (
             raw_gazebo_names != expected_gazebo_names
@@ -2671,11 +3292,28 @@ def five_uav_health_status(run_dir: Path) -> dict[str, Any]:
             measurement_end_ns - process_timing["last_ns"]
         ) / 1_000_000_000
         if (
-            not 0.0 <= derived_first_delay <= 2.0
-            or not 0.0 <= derived_last_age <= 2.0
-            or process_timing["max_gap_s"] > 2.0
+            not 0.0 <= derived_first_delay <= M1_PROCESS_SAMPLE_MAX_GAP_S
+            or not 0.0 <= derived_last_age <= M1_PROCESS_SAMPLE_MAX_GAP_S
+            or process_timing["max_gap_s"] > M1_PROCESS_SAMPLE_MAX_GAP_S
         ):
-            failures.append("process-health samples do not cover the complete measurement window")
+            failures.append(
+                "process-health samples exceed the "
+                f"{M1_PROCESS_SAMPLE_MAX_GAP_S:g}-second measurement continuity bound"
+            )
+        if (
+            readiness_completed_ns is None
+            or measurement_start_ns < readiness_completed_ns
+            or process_timing["first_ns"] < measurement_start_ns
+            or (
+                process_timing["first_ns"] - readiness_completed_ns
+            )
+            / 1_000_000_000
+            > M1_PROCESS_SAMPLE_MAX_GAP_S
+        ):
+            failures.append(
+                "readiness completion to first measurement process sample exceeds the "
+                f"{M1_PROCESS_SAMPLE_MAX_GAP_S:g}-second continuity bound"
+            )
         for key, derived in (
             ("first_sample_delay_s", derived_first_delay),
             ("last_sample_age_s", derived_last_age),
@@ -2734,6 +3372,11 @@ def five_uav_health_status(run_dir: Path) -> dict[str, Any]:
             role = _m1_process_role(process, argv)
             if process.get("role") != role:
                 failures.append(f"{context}.role does not match independently decoded argv")
+            failures.extend(
+                _m1_locked_process_identity_failures(
+                    process, argv, role, runtime_identity, context
+                )
+            )
             if role in derived_counts:
                 derived_counts[role] += 1
             state = process.get("state")
@@ -2797,6 +3440,22 @@ def five_uav_health_status(run_dir: Path) -> dict[str, Any]:
             if observed != required:
                 failures.append(
                     f"process_sample[{sample_index}] has {observed} {role}; expected exactly {required}"
+                )
+        if final_readiness_role_digests is None or final_readiness_all_digests is None:
+            failures.append(
+                f"process_sample[{sample_index}] cannot bind to final stable readiness identities"
+            )
+        else:
+            for role in M1_REQUIRED_PROCESS_COUNTS:
+                if role_digests[role] != final_readiness_role_digests[role]:
+                    failures.append(
+                        f"process_sample[{sample_index}] {role} identity set differs from "
+                        "final stable readiness"
+                    )
+            if all_digests != final_readiness_all_digests:
+                failures.append(
+                    f"process_sample[{sample_index}] full identity set differs from "
+                    "final stable readiness"
                 )
         if baseline_by_role is None:
             baseline_by_role = role_digests

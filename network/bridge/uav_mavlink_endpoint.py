@@ -17,6 +17,13 @@ from pathlib import Path
 from typing import Any
 
 
+ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from network.bridge.opaque_udp_relay import ByteOpaqueUdpRelay, RelayError  # noqa: E402
+
+
 def parse_endpoint(value: str) -> tuple[str, int]:
     host, separator, port_text = value.rpartition(":")
     if not separator or not host:
@@ -107,7 +114,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"FAIL adapter bind: {exc}", file=sys.stderr)
         return 2
 
-    mavproxy_peer: tuple[str, int] | None = None
+    relay = ByteOpaqueUdpRelay(
+        radio,
+        tail,
+        args.gcs,
+        tail_peer_host=args.tail_peer_host,
+        strict_tail_peer=False,
+        forwarding_enabled=True,
+    )
     counters = {
         "gcs_to_tail": 0,
         "tail_to_gcs": 0,
@@ -140,19 +154,18 @@ def main(argv: list[str] | None = None) -> int:
                     continue
                 digest = hashlib.sha256(payload).hexdigest()
                 if key.data == "tail":
-                    if peer[0] != args.tail_peer_host:
+                    decision = relay.relay_tail(payload, peer)
+                    if decision.action != "forwarded":
                         counters["dropped_unexpected_peer"] += 1
                         event_log.emit(
                             "drop",
                             direction="tail_to_gcs",
-                            reason="unexpected_tail_peer",
+                            reason=decision.reason,
                             source=peer,
                             bytes=len(payload),
                             sha256=digest,
                         )
                         continue
-                    mavproxy_peer = peer
-                    radio.sendto(payload, args.gcs)
                     counters["tail_to_gcs"] += 1
                     event_log.emit(
                         "forward",
@@ -162,37 +175,50 @@ def main(argv: list[str] | None = None) -> int:
                         bytes=len(payload),
                         sha256=digest,
                     )
-                elif peer != args.gcs:
-                    counters["dropped_unexpected_peer"] += 1
-                    event_log.emit(
-                        "drop",
-                        direction="gcs_to_tail",
-                        reason="unexpected_gcs_peer",
-                        source=peer,
-                        bytes=len(payload),
-                        sha256=digest,
-                    )
-                elif mavproxy_peer is None:
-                    counters["dropped_no_peer"] += 1
-                    event_log.emit(
-                        "drop",
-                        direction="gcs_to_tail",
-                        reason="mavproxy_peer_unknown",
-                        source=peer,
-                        bytes=len(payload),
-                        sha256=digest,
-                    )
                 else:
-                    tail.sendto(payload, mavproxy_peer)
-                    counters["gcs_to_tail"] += 1
-                    event_log.emit(
-                        "forward",
-                        direction="gcs_to_tail",
-                        source=peer,
-                        destination=mavproxy_peer,
-                        bytes=len(payload),
-                        sha256=digest,
-                    )
+                    decision = relay.relay_radio(payload, peer)
+                    if decision.reason == "unexpected_gcs_peer":
+                        counters["dropped_unexpected_peer"] += 1
+                        event_log.emit(
+                            "drop",
+                            direction="gcs_to_tail",
+                            reason=decision.reason,
+                            source=peer,
+                            bytes=len(payload),
+                            sha256=digest,
+                        )
+                    elif decision.reason == "mavproxy_peer_unknown":
+                        counters["dropped_no_peer"] += 1
+                        event_log.emit(
+                            "drop",
+                            direction="gcs_to_tail",
+                            reason=decision.reason,
+                            source=peer,
+                            bytes=len(payload),
+                            sha256=digest,
+                        )
+                    elif decision.action == "forwarded":
+                        counters["gcs_to_tail"] += 1
+                        event_log.emit(
+                            "forward",
+                            direction="gcs_to_tail",
+                            source=peer,
+                            destination=decision.destination,
+                            bytes=len(payload),
+                            sha256=digest,
+                        )
+                    else:
+                        raise RelayError(
+                            f"unexpected shared relay decision: {decision}"
+                        )
+    except (RelayError, OSError) as exc:
+        event_log.emit(
+            "adapter_failed_closed",
+            reason=str(exc),
+            counters=counters,
+        )
+        print(f"FAIL adapter relay: {exc}", file=sys.stderr)
+        return 2
     finally:
         event_log.emit("adapter_stop", counters=counters)
         selector.close()

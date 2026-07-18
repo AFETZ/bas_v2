@@ -1,0 +1,38 @@
+{
+  "acceptance_provider_modes": [
+    "real_sionna"
+  ],
+  "failure_policy": {
+    "disconnect": "owned_links_unavailable",
+    "expired_state": "directed_link_unavailable",
+    "hold_last_beyond_expiry": false,
+    "invalid_unidentified_result": "all_owned_links_unavailable",
+    "queue_overflow": "directed_link_unavailable"
+  },
+  "protocol_name": "sionna_async",
+  "schema_version": 1,
+  "selection": {
+    "max_links": 64,
+    "max_pending_results_per_link": 8,
+    "max_query_history": 100000,
+    "newest_key": [
+      "node_state_seq",
+      "provider_completed_monotonic_ns",
+      "wire_sequence"
+    ],
+    "require_generation_supersedes_applied": true
+  },
+  "transport": {
+    "encoding": "utf-8",
+    "framing": "json_lines",
+    "max_message_bytes": 1048576
+  },
+  "wire_schema": "network/config/sionna_async_schema_v1.json",
+  "worker": {
+    "completion_queue_capacity": 64,
+    "max_pose_age_ns": 1500000000,
+    "max_poll_batch": 64,
+    "request_queue_capacity": 64,
+    "validity_ttl_ns": 2000000000
+  }
+}

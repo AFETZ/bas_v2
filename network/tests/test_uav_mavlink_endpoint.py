@@ -10,6 +10,8 @@ import time
 import unittest
 from pathlib import Path
 
+from network.bridge.opaque_udp_relay import ByteOpaqueUdpRelay, RelayError
+
 
 ROOT = Path(__file__).resolve().parents[2]
 ADAPTER = ROOT / "network" / "bridge" / "uav_mavlink_endpoint.py"
@@ -25,6 +27,70 @@ def reserve_udp_port() -> int:
 
 
 class UavMavlinkEndpointTests(unittest.TestCase):
+    def test_shared_core_rejects_short_send_without_retry_or_mutation(self) -> None:
+        class ShortSocket:
+            def __init__(self) -> None:
+                self.calls: list[tuple[bytes, tuple[str, int]]] = []
+
+            def sendto(self, payload: bytes, peer: tuple[str, int]) -> int:
+                self.calls.append((payload, peer))
+                return len(payload) - 1
+
+        radio = ShortSocket()
+        tail = ShortSocket()
+        relay = ByteOpaqueUdpRelay(
+            radio,
+            tail,
+            ("127.0.0.1", 14600),
+            tail_peer_host="127.0.0.1",
+            strict_tail_peer=False,
+            forwarding_enabled=True,
+        )
+        payload = b"exact-wire-payload-\x00\xff"
+        with self.assertRaisesRegex(RelayError, "byte count differs"):
+            relay.relay_tail(payload, ("127.0.0.1", 41000))
+        self.assertEqual(radio.calls, [(payload, ("127.0.0.1", 14600))])
+        with self.assertRaisesRegex(RelayError, "immutable built-in bytes"):
+            relay.relay_tail(bytearray(payload), ("127.0.0.1", 41000))  # type: ignore[arg-type]
+        self.assertEqual(len(radio.calls), 1)
+
+    def test_shared_core_preserves_m2_dynamic_tail_peer_semantics(self) -> None:
+        class ExactSocket:
+            def __init__(self) -> None:
+                self.calls: list[tuple[bytes, tuple[str, int]]] = []
+
+            def sendto(self, payload: bytes, peer: tuple[str, int]) -> int:
+                self.calls.append((payload, peer))
+                return len(payload)
+
+        radio = ExactSocket()
+        tail = ExactSocket()
+        relay = ByteOpaqueUdpRelay(
+            radio,
+            tail,
+            ("127.0.0.1", 14600),
+            tail_peer_host="127.0.0.1",
+            strict_tail_peer=False,
+            forwarding_enabled=True,
+        )
+        first = b"first"
+        second = b"second"
+        self.assertEqual(
+            relay.relay_tail(first, ("127.0.0.1", 41000)).action,
+            "forwarded",
+        )
+        self.assertEqual(
+            relay.relay_tail(second, ("127.0.0.1", 41001)).action,
+            "forwarded",
+        )
+        self.assertEqual(radio.calls, [(first, ("127.0.0.1", 14600)), (second, ("127.0.0.1", 14600))])
+        command = b"command"
+        self.assertEqual(
+            relay.relay_radio(command, ("127.0.0.1", 14600)).action,
+            "forwarded",
+        )
+        self.assertEqual(tail.calls, [(command, ("127.0.0.1", 41001))])
+
     def test_bidirectional_forwarding_and_exact_pid_shutdown(self) -> None:
         radio_port = reserve_udp_port()
         tail_port = reserve_udp_port()

@@ -4,6 +4,86 @@ set -uo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 REQUIRED_FAILURES=0
 WARNINGS=0
+QUALIFICATION_PROFILE="diagnostic"
+
+if (($# == 2)) && [[ "$1" == "--qualification-profile" ]] && [[ "$2" == "m0" ]]; then
+  QUALIFICATION_PROFILE="m0"
+elif (($# != 0)); then
+  printf 'Usage: %s [--qualification-profile m0]\n' "$0" >&2
+  exit 2
+fi
+
+declare -A QUALIFICATION_PATH_OWNERS=()
+if [[ "$QUALIFICATION_PROFILE" == "m0" ]]; then
+  if ! QUALIFICATION_OWNER_LINES="$(
+    /usr/bin/python3.10 - "$ROOT_DIR/network/config/qualification_path_ownership.json" <<'PY'
+import json
+import re
+import sys
+from pathlib import PurePosixPath
+
+
+def unique_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate policy key: {key}")
+        result[key] = value
+    return result
+
+
+with open(sys.argv[1], "rb") as source:
+    policy = json.loads(
+        source.read().decode("utf-8", errors="strict"),
+        object_pairs_hook=unique_pairs,
+        parse_constant=lambda value: (_ for _ in ()).throw(
+            ValueError(f"non-finite policy value: {value}")
+        ),
+    )
+nodes = [f"Q{index}" for index in range(9)]
+explicit = policy.get("explicit_owners") if isinstance(policy, dict) else None
+if (
+    policy.get("schema_version") != 2
+    or policy.get("contract") != "q0_q1_q2_granular/v1"
+    or policy.get("policy_id") != "q0_q1_q2_granular/v1"
+    or policy.get("default_owner") != "Q0"
+    or not isinstance(explicit, dict)
+    or set(explicit) != set(nodes)
+    or explicit.get("Q0") != []
+):
+    raise SystemExit("qualification ownership policy is not exact")
+seen = set()
+for node in nodes[1:]:
+    paths = explicit[node]
+    if (
+        not isinstance(paths, list)
+        or paths != sorted(paths)
+        or len(paths) != len(set(paths))
+        or not all(isinstance(path, str) for path in paths)
+    ):
+        raise SystemExit(f"qualification owner list is not exact: {node}")
+    for path in paths:
+        pure = PurePosixPath(path)
+        if (
+            pure.is_absolute()
+            or any(part in {"", ".", ".."} for part in pure.parts)
+            or re.fullmatch(r"[A-Za-z0-9_./+@-]+", path) is None
+            or path in seen
+        ):
+            raise SystemExit(f"unsafe or duplicate qualification path: {path!r}")
+        seen.add(path)
+        print(f"{node}\t{path}")
+PY
+  )"; then
+    printf 'FAIL qualification ownership policy could not be resolved\n' >&2
+    exit 2
+  fi
+  while IFS=$'\t' read -r owner relative; do
+    if [[ -n "$owner" && -n "$relative" ]]; then
+      QUALIFICATION_PATH_OWNERS["$relative"]="$owner"
+    fi
+  done <<< "$QUALIFICATION_OWNER_LINES"
+fi
 
 pass() {
   printf 'PASS %-28s %s\n' "$1" "$2"
@@ -104,6 +184,18 @@ check_path() {
   fi
 }
 
+check_project_path() {
+  local label="$1"
+  local relative="$2"
+  local required="$3"
+  local hint="$4"
+  if [[ "$QUALIFICATION_PROFILE" == "m0" ]] && \
+    [[ "${QUALIFICATION_PATH_OWNERS[$relative]:-Q0}" != "Q0" ]]; then
+    return
+  fi
+  check_path "$label" "$ROOT_DIR/$relative" "$required" "$hint"
+}
+
 check_ns3() {
   if [[ -x "$ROOT_DIR/.external/ns-3/ns3" ]]; then
     pass "ns3:launcher" "$ROOT_DIR/.external/ns-3/ns3"
@@ -139,6 +231,12 @@ check_docker() {
 }
 
 check_network_privilege() {
+  if [[ "${AMS_M0_CAPABILITY_PROBE_MODE:-}" == \
+      "host_final_isolated_exact_image" ]]; then
+    pass "netns:privilege" \
+      "deferred to isolated host-final exact-image capability probe without source/artifact mounts"
+    return
+  fi
   if ! command -v unshare >/dev/null 2>&1; then
     fail "netns:unshare" "Install util-linux for unshare; namespace checks require it."
     return
@@ -182,32 +280,37 @@ PY
 printf 'Network/radio dependency check\n'
 printf 'Repository: %s\n\n' "$ROOT_DIR"
 
-check_path "config:scenario" "$ROOT_DIR/network/config/scenario_5uav.yaml" required "Missing network/config/scenario_5uav.yaml."
-check_path "config:endpoints" "$ROOT_DIR/network/config/endpoints.yaml" required "Missing network/config/endpoints.yaml."
-check_path "config:service_tiers" "$ROOT_DIR/network/config/service_tiers.yaml" required "Missing network/config/service_tiers.yaml."
-check_path "config:radio_backend" "$ROOT_DIR/network/config/radio_backend.yaml" required "Missing network/config/radio_backend.yaml."
-check_path "config:radio_24ghz" "$ROOT_DIR/network/config/radio_24ghz.yaml" required "Missing network/config/radio_24ghz.yaml."
-check_path "config:jammers" "$ROOT_DIR/network/config/jammers.yaml" required "Missing network/config/jammers.yaml."
-check_path "config:hitl_loopback" "$ROOT_DIR/network/config/hitl_loopback.yaml" required "Missing network/config/hitl_loopback.yaml."
-check_path "config:validation_matrix" "$ROOT_DIR/network/config/validation_matrix.yaml" required "Missing network/config/validation_matrix.yaml."
-check_path "config:metrics_schema" "$ROOT_DIR/network/config/metrics_summary_schema.json" required "Missing network/config/metrics_summary_schema.json."
-check_path "component:sionna_provider" "$ROOT_DIR/network/radio_provider/provider.py" required "Missing network/radio_provider/provider.py."
-check_path "component:live_sinr_monitor" "$ROOT_DIR/network/radio_provider/live_sinr_monitor.py" required "Missing network/radio_provider/live_sinr_monitor.py."
-check_path "component:position_tracker" "$ROOT_DIR/network/position_tracker/tracker.py" required "Missing network/position_tracker/tracker.py."
-check_path "component:ns3_core" "$ROOT_DIR/network/ns3/scratch/ams-radio-core.cc" required "Missing network/ns3/scratch/ams-radio-core.cc."
-check_path "component:bridge" "$ROOT_DIR/network/bridge/bridge_config.py" required "Missing network/bridge/bridge_config.py."
-check_path "component:hitl" "$ROOT_DIR/network/hitl/hitl_loopback.py" required "Missing network/hitl/hitl_loopback.py."
-check_path "cmd:sionna_provider" "$ROOT_DIR/network/scripts/run_sionna_provider.sh" required "Missing network/scripts/run_sionna_provider.sh."
-check_path "cmd:live_sinr_demo" "$ROOT_DIR/network/scripts/run_live_sinr_demo.sh" required "Missing network/scripts/run_live_sinr_demo.sh."
-check_path "cmd:radio_heatmaps" "$ROOT_DIR/network/scripts/generate_radio_heatmaps.sh" required "Missing network/scripts/generate_radio_heatmaps.sh."
-check_path "cmd:position_tracker" "$ROOT_DIR/network/scripts/run_position_tracker.sh" required "Missing network/scripts/run_position_tracker.sh."
-check_path "cmd:hitl_loopback" "$ROOT_DIR/network/scripts/run_hitl_loopback.sh" required "Missing network/scripts/run_hitl_loopback.sh."
-check_path "cmd:validation" "$ROOT_DIR/network/scripts/run_validation.sh" required "Missing network/scripts/run_validation.sh."
-check_path "cmd:artifact_collection" "$ROOT_DIR/network/scripts/collect_artifacts.sh" required "Missing network/scripts/collect_artifacts.sh."
+check_project_path "config:scenario" "network/config/scenario_5uav.yaml" required "Missing network/config/scenario_5uav.yaml."
+check_project_path "config:endpoints" "network/config/endpoints.yaml" required "Missing network/config/endpoints.yaml."
+check_project_path "config:service_tiers" "network/config/service_tiers.yaml" required "Missing network/config/service_tiers.yaml."
+check_project_path "config:radio_backend" "network/config/radio_backend.yaml" required "Missing network/config/radio_backend.yaml."
+check_project_path "config:radio_24ghz" "network/config/radio_24ghz.yaml" required "Missing network/config/radio_24ghz.yaml."
+check_project_path "config:jammers" "network/config/jammers.yaml" required "Missing network/config/jammers.yaml."
+check_project_path "config:hitl_loopback" "network/config/hitl_loopback.yaml" required "Missing network/config/hitl_loopback.yaml."
+check_project_path "config:validation_matrix" "network/config/validation_matrix.yaml" required "Missing network/config/validation_matrix.yaml."
+check_project_path "config:metrics_schema" "network/config/metrics_summary_schema.json" required "Missing network/config/metrics_summary_schema.json."
+check_project_path "component:sionna_provider" "network/radio_provider/provider.py" required "Missing network/radio_provider/provider.py."
+check_project_path "component:live_sinr_monitor" "network/radio_provider/live_sinr_monitor.py" required "Missing network/radio_provider/live_sinr_monitor.py."
+check_project_path "component:position_tracker" "network/position_tracker/tracker.py" required "Missing network/position_tracker/tracker.py."
+check_project_path "component:ns3_core" "network/ns3/scratch/ams-radio-core.cc" required "Missing network/ns3/scratch/ams-radio-core.cc."
+check_project_path "component:bridge" "network/bridge/bridge_config.py" required "Missing network/bridge/bridge_config.py."
+check_project_path "component:hitl" "network/hitl/hitl_loopback.py" required "Missing network/hitl/hitl_loopback.py."
+check_project_path "cmd:sionna_provider" "network/scripts/run_sionna_provider.sh" required "Missing network/scripts/run_sionna_provider.sh."
+check_project_path "cmd:live_sinr_demo" "network/scripts/run_live_sinr_demo.sh" required "Missing network/scripts/run_live_sinr_demo.sh."
+check_project_path "cmd:radio_heatmaps" "network/scripts/generate_radio_heatmaps.sh" required "Missing network/scripts/generate_radio_heatmaps.sh."
+check_project_path "cmd:position_tracker" "network/scripts/run_position_tracker.sh" required "Missing network/scripts/run_position_tracker.sh."
+check_project_path "cmd:hitl_loopback" "network/scripts/run_hitl_loopback.sh" required "Missing network/scripts/run_hitl_loopback.sh."
+check_project_path "cmd:validation" "network/scripts/run_validation.sh" required "Missing network/scripts/run_validation.sh."
+check_project_path "cmd:artifact_collection" "network/scripts/collect_artifacts.sh" required "Missing network/scripts/collect_artifacts.sh."
 
 check_command bash required "Install bash."
 check_command python3 required "Install python3."
 check_command ip required "Install iproute2 for namespaces/veth/TAP diagnostics."
+check_command bridge required "Install iproute2 for bridge membership diagnostics."
+check_command ss required "Install iproute2 for socket inventory diagnostics."
+check_command nft required "Install nftables for fail-closed firewall/NAT evidence."
+check_command iptables-save required "Install iptables for IPv4 firewall/NAT evidence."
+check_command ip6tables-save required "Install iptables for IPv6 firewall/NAT evidence."
 check_command unshare required "Install util-linux for network namespace diagnostics."
 check_command tc required "Install iproute2 traffic-control tools."
 check_command tcpdump required "Install tcpdump for PCAP capture."
@@ -233,7 +336,9 @@ else
   fail "python:runtime_compat" "Python ABI/package compatibility gate failed; rebuild the pinned runtime image."
 fi
 
-check_ros_package multiagent_simulation
+if [[ "$QUALIFICATION_PROFILE" == "diagnostic" ]]; then
+  check_ros_package multiagent_simulation
+fi
 check_ros_package ardupilot_sitl
 check_ros_package ros_gz_sim
 check_ros_package ros_gz_bridge

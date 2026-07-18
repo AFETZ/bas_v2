@@ -281,13 +281,14 @@ esac
         with self.assertRaises(receipt.ReceiptError):
             receipt.verify(self.fixture.args("verify"))
 
-    def test_runtime_scripts_verify_even_when_build_is_skipped(self) -> None:
+    def test_runtime_scripts_never_treat_an_in_run_build_as_evidence(self) -> None:
         m2 = (ROOT_DIR / "network/scripts/run_one_uav_vertical_slice.sh").read_text(
             encoding="utf-8"
         )
-        skip_block_end = m2.index("fi\n", m2.index('M2_SKIP_BUILDS'))
         initial_verify = m2.index('python3 "$NS3_RECEIPT_TOOL" verify')
-        self.assertGreater(initial_verify, skip_block_end)
+        self.assertNotIn("M2_SKIP_BUILDS", m2)
+        self.assertNotIn('"$ROOT_DIR/network/ns3/build_ns3_tap.sh"', m2)
+        self.assertLess(initial_verify, m2.index('setup_one_uav_netns.sh" up'))
         self.assertIn('"metrics/ns3_tap_build_receipt.json",', m2)
         self.assertGreaterEqual(m2.count('python3 "$NS3_RECEIPT_TOOL" verify'), 2)
 

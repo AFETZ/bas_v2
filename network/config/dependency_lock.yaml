@@ -7,9 +7,178 @@ status: complete
 # are excluded from pip_freeze because their source/commit identity is bound by
 # the independent Git, source-manifest, and external-source records.
 runtime_manifest_sha256:
-  pip_freeze: 36941db39413d66f80191197d8df8d771221dce3a440cbe98f9078cca012b70e
-  dpkg: bdd042c1249d3aa238997d3c5222af6eed56e56701ab64f623fb74439ecc39aa
-  ros_packages: 274b14bf4ad003e7fded28bf3e068715c13068252bd84ecb7b61abc0cd44916f
+  pip_freeze: 32dc50a7ee822df78700f55cd55f7a3b73ea8161df3a9ca8c8be8ee4d5e75b0f
+  dpkg: a15632deb743e50e6ca7f5807382db896a2f69cf854bedc9dbc8a9d47067ae88
+  ros_packages: 182e8d89ec14795d131d2f1d25c35b1b3f1d430505ee4b74c74f5bc10a71dffb
+
+# The complete ordered M0 unittest identity is a tracked, hash-locked
+# acceptance input. Discovery must match it byte-for-byte; counts alone never
+# qualify a suite.
+m0_test_manifest:
+  path: network/config/m0_test_manifest.json
+  sha256: 70a933a03ca49ee706e6b8a537d7110e703e4a3b6c9ab816f12c1480d034afe0
+  ordered_test_count: 178
+
+# Exact command-resolution and Python import boundary used by both M0 suite
+# executions. Source scripts are content-bound by Q0; immutable image and host
+# executables are additionally locked here because they are outside Git.
+m0_execution_policy:
+  schema_version: 1
+  container_path: /opt/ros/humble/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  host_final_path: /usr/bin:/bin
+  allowed_container_executable_roots:
+    - /usr/local/sbin
+    - /usr/local/bin
+    - /usr/sbin
+    - /usr/bin
+    - /sbin
+    - /bin
+    - /opt/ros/humble/bin
+    - /workspace/multiagent_simulation
+  critical_command_resolution:
+    awk: /usr/bin/gawk
+    bash: /usr/bin/bash
+    colcon: /usr/bin/colcon
+    date: /usr/bin/date
+    env: /usr/bin/env
+    find: /usr/bin/find
+    findmnt: /usr/bin/findmnt
+    git: /usr/bin/git
+    mkdir: /usr/bin/mkdir
+    python3: /usr/bin/python3.10
+    sudo: /usr/bin/sudo
+    unshare: /usr/bin/unshare
+  critical_image_executable_sha256:
+    /ros_entrypoint.sh: 32c3f27954ff2cf727598ed74c2b5dbfe2ebed40bd9e44a2e7113a527999a6ec
+    /usr/bin/bash: 59474588a312b6b6e73e5a42a59bf71e62b55416b6c9d5e4a6e1c630c2a9ecd4
+    /usr/bin/colcon: 5dd3c92f3a593114a03bbfc844651c7d2f101fc605ebf051d451c382f5813f44
+    /usr/bin/date: e32b49f1a2e4335ea7742a9cf0cf8832fd4b25af30f2c066ac5cdbe2eb9a1319
+    /usr/bin/env: 854a8d7f147ff1bf3562edd1aa0b2f2ac28ef432811533f03c43dc9162fe3af3
+    /usr/bin/find: 791b89c8bffb8101fd7d4d212b80af66a2332834b05a42721104eb47e8fa2eb1
+    /usr/bin/findmnt: 0218be2029f3a4378b60262c346d080418e91640f9381ec8358f3fba54119ceb
+    /usr/bin/git: 587ef21868c948b883993e23209b86a72a6ddc06aab1545c697ffc31075acd4a
+    /usr/bin/gawk: b78fdf4db4aea83cc644ef1b3a1bab43600d3f5acec16fe7b529dcc309d4f5b2
+    /usr/bin/mkdir: 1bf979d8d0ec5a3b64f24806668b738940c8735790098c96e0bb2a16d81fe516
+    /usr/bin/python3.10: d6bca2b84e73c7775a0dd5e6a76899cfe4ee62863d7c8f88513811d1fda23f49
+    /usr/bin/sudo: 1e000f41739201f030cdc588fbe50d5438570f5386104c9521543824827fb985
+    /usr/bin/unshare: 72a34e6ba98a59f1da0c7b4d8c9722b746b5ade54e4d7e8de8e519c2993858ad
+  critical_source_executables:
+    - scripts/run_acceptance_container.sh
+    - scripts/acceptance_entrypoint.sh
+    - network/scripts/run_m0_baseline.sh
+    - network/scripts/run_m0_host_final.sh
+    - network/scripts/run_m0_host_reexecution.sh
+    - network/scripts/run_status_validation.sh
+    - network/scripts/finalize_m1_host.py
+    - network/scripts/m0_bin/python3
+    - network/scripts/check_deps.sh
+    - network/scripts/verify_m0_runtime_lock.py
+    - network/scripts/run_m0_validation_suite.py
+    - network/scripts/validate_m0_baseline.py
+    - network/scripts/write_run_provenance.py
+  host_final_executable_sha256:
+    /usr/bin/bash: 59474588a312b6b6e73e5a42a59bf71e62b55416b6c9d5e4a6e1c630c2a9ecd4
+    /usr/bin/docker: 87bb910f051879cdf2a4a38e01748cbebeb27f3de962122dfdcbd0a4fbeea4ff
+    /usr/bin/env: 85036540673319c6c2f54233fd2b9e45a8a71246b51cc96c4e6ab8ee6c419eb0
+    /usr/bin/git: 587ef21868c948b883993e23209b86a72a6ddc06aab1545c697ffc31075acd4a
+    /usr/bin/python3.10: 7d51cd6b48b521277f5caa4610a82126e315fa2be4df069823a8b1eeb5bd4a86
+  host_final_python_sys_path:
+    - <repository_root>/network/scripts
+    - <repository_root>
+    - /usr/local/lib/python3.10/dist-packages
+    - /usr/lib/python3/dist-packages
+    - /usr/lib/python310.zip
+    - /usr/lib/python3.10
+    - /usr/lib/python3.10/lib-dynload
+  host_final_python_imports:
+    yaml: {path: /usr/lib/python3/dist-packages/yaml/__init__.py, bytes: 13170, sha256: 81fa7609b4558739278219228890f697a674a48fa6bff8991cf489e1a8f4fa76}
+    yaml._yaml: {path: /usr/lib/python3/dist-packages/yaml/_yaml.cpython-310-x86_64-linux-gnu.so, bytes: 246624, sha256: 20132734995d829a8831c79b786c87c52aafbc9b62bf2e7e4d721f2a912d2988}
+    yaml.composer: {path: /usr/lib/python3/dist-packages/yaml/composer.py, bytes: 4883, sha256: fcaa37d16afa783594794a5ab94193dcb720f503c19ce3d59539c8311189f453}
+    yaml.constructor: {path: /usr/lib/python3/dist-packages/yaml/constructor.py, bytes: 28639, sha256: 90d8247da78b524c10618fd0e857f54f3d97570fe91b5c5513d024ef3faf88b0}
+    yaml.cyaml: {path: /usr/lib/python3/dist-packages/yaml/cyaml.py, bytes: 3851, sha256: e99ac01bd7c062f7557b614aff0d21997a06ed962ca185306a91bc0a20bbd87d}
+    yaml.dumper: {path: /usr/lib/python3/dist-packages/yaml/dumper.py, bytes: 2837, sha256: 3cb72d66563064ba7b5e679477046ebf89d8399d940670c8532f3e94a7cb17ea}
+    yaml.emitter: {path: /usr/lib/python3/dist-packages/yaml/emitter.py, bytes: 43006, sha256: 8e086d694ede170837d5b1b407b45979aff6f40762f422a65eafd08e04290a44}
+    yaml.error: {path: /usr/lib/python3/dist-packages/yaml/error.py, bytes: 2533, sha256: 021f73fada072546c4f63f8cf18a7181244ce4280b09cc15cc980b2d1176171a}
+    yaml.events: {path: /usr/lib/python3/dist-packages/yaml/events.py, bytes: 2445, sha256: e74fd392c810884e2ea7e94aa3f57e9c1cbeb402319083d0c58e6a0e1282787c}
+    yaml.loader: {path: /usr/lib/python3/dist-packages/yaml/loader.py, bytes: 2061, sha256: 5156becc8aa6905482218abf3e04869b835226db4763645fff3438fdbd5f1cdd}
+    yaml.nodes: {path: /usr/lib/python3/dist-packages/yaml/nodes.py, bytes: 1440, sha256: 80f28d8fca4a09d87677882bde021820d9cf39a3b11a12405226211919cf13ce}
+    yaml.parser: {path: /usr/lib/python3/dist-packages/yaml/parser.py, bytes: 25495, sha256: 8a55a9e6fbe0a07146cef3990c8b45a068c3e83e369e1959ad9ca30306b4a09a}
+    yaml.reader: {path: /usr/lib/python3/dist-packages/yaml/reader.py, bytes: 6794, sha256: d1d9b38ab3a20c6e17a38d519ee412ecaf6b918df18c78956ac7c330d4ea08dc}
+    yaml.representer: {path: /usr/lib/python3/dist-packages/yaml/representer.py, bytes: 14184, sha256: f3650cdd9c5440aaac28017896d58ec424ba8c63c816d5e91acee6beacafe17b}
+    yaml.resolver: {path: /usr/lib/python3/dist-packages/yaml/resolver.py, bytes: 8999, sha256: 6755bc00e300e8fae8cb88083b63a150ee083d2fdb14d025d026b7af00a1a4f8}
+    yaml.scanner: {path: /usr/lib/python3/dist-packages/yaml/scanner.py, bytes: 51277, sha256: 29e4082863654b23c4f100f08a89c7c72f4281ba84e6d789133d39151f7e9c08}
+    yaml.serializer: {path: /usr/lib/python3/dist-packages/yaml/serializer.py, bytes: 4165, sha256: 0a1b85826854d35863e31808f0668abfabdf33606e8f06bd8bb7761401e3edc0}
+    yaml.tokens: {path: /usr/lib/python3/dist-packages/yaml/tokens.py, bytes: 2573, sha256: 953408cd2570f0c83dc2fe39f7e4e388e41eeb05738aa69196a5f6ffcf6ba79e}
+  incidental_transitive_policy:
+    require_immutable_allowed_root: true
+    require_dpkg_or_pip_manifest_owner: true
+    forbid_host_or_run_writable_resolution: true
+
+m0_python_import_policy:
+  schema_version: 1
+  mode: isolated_explicit_path
+  interpreter: /usr/bin/python3.10
+  interpreter_sha256: d6bca2b84e73c7775a0dd5e6a76899cfe4ee62863d7c8f88513811d1fda23f49
+  parent_flags: [-S]
+  exact_base_pythonpath:
+    - /workspace/multiagent_simulation/network/scripts/m0_python_guard
+    - /workspace/multiagent_simulation
+    - /workspace/ardu_ws/install/ros_gz_interfaces/local/lib/python3.10/dist-packages
+    - /workspace/ardu_ws/build/ardupilot_dds_tests
+    - /workspace/ardu_ws/install/ardupilot_dds_tests/lib/python3.10/site-packages
+    - /workspace/ardu_ws/install/ardupilot_sitl/local/lib/python3.10/dist-packages
+    - /workspace/ardu_ws/install/ardupilot_msgs/local/lib/python3.10/dist-packages
+    - /opt/ros/humble/lib/python3.10/site-packages
+    - /opt/ros/humble/local/lib/python3.10/dist-packages
+    - /home/ubuntu/.local/lib/python3.10/site-packages
+    - /usr/local/lib/python3.10/dist-packages
+    - /usr/lib/python3/dist-packages
+  overlay_pythonpath_template: /tmp/ams-m0-overlay-{run_id}/install/multiagent_simulation/lib/python3.10/site-packages
+  interpreter_suffix:
+    - /usr/lib/python310.zip
+    - /usr/lib/python3.10
+    - /usr/lib/python3.10/lib-dynload
+  customization:
+    parent_sitecustomize_loaded: false
+    parent_usercustomize_loaded: false
+    child_guard_path: /workspace/multiagent_simulation/network/scripts/m0_python_guard/sitecustomize.py
+    child_guard_sha256: 9875bea48966264bdfb0a3b6eebda45b48166b55099601ebc963686fb2bf1213
+  pth_policy: inventory_only_not_processed_under_no_site
+  cleared_environment:
+    - PYTHONHOME
+    - PYTHONSTARTUP
+    - PYTHONINSPECT
+    - PYTHONUSERBASE
+    - PYTEST_ADDOPTS
+    - PYTEST_PLUGINS
+    - PYTEST_DISABLE_PLUGIN_AUTOLOAD
+  python_no_user_site: true
+  bytecode_root_template: /tmp/ams-m0-pycache-{run_id}
+
+# Canonical process bytes for the accepted M1 launch in the exact project
+# image.  Raw /proc identities must match this manifest; a basename or a
+# producer-supplied hash is not an executable identity proof.
+m1_runtime_identity:
+  schema_version: 1
+  container_image_digest: sha256:b2c4f715ba3dabb07624e962b9b56f3255bddfc4cc31c26dfb1001bb400035f5
+  executable_sha256:
+    /opt/ros/humble/lib/robot_state_publisher/robot_state_publisher: 0d8f699b5266e4b68f5cb4c8d26d970506e4ffb6ae10e41fb5d1f567c993dcb2
+    /opt/ros/humble/lib/topic_tools/relay: d649ae85f7331e7b02898ceff4bdfd78a8660b5da24bcf9bb132eff2b9176f38
+    /usr/bin/dash: 4f291296e89b784cd35479fca606f228126e3641f5bcaee68dee36583d7c9483
+    /usr/bin/python3.10: d6bca2b84e73c7775a0dd5e6a76899cfe4ee62863d7c8f88513811d1fda23f49
+    /usr/bin/ruby3.0: 4bacb7cc7f4a345bf2cd0cea3d9e087899c17185700da54021b941eed11d172d
+    /workspace/ardu_ws/build/micro_ros_agent/micro_ros_agent: 7d1b59803f419fd15fc1b79ae9b5386a5b70216e1d4170229cb7aa8dc88d465b
+    /workspace/ardu_ws/build/ros_gz_bridge/parameter_bridge: bef8821f5a437cc8252c90b4d62755a90d5556d5623831d74bbcc0874c7073bf
+    /workspace/ardu_ws/src/ardupilot/build/sitl/bin/arducopter: 80081862d5e9be8064abb17b66eff4ac7c93de9dbd1835eb920723067ac24772
+  role_executable_path:
+    arducopter: /workspace/ardu_ws/src/ardupilot/build/sitl/bin/arducopter
+    gazebo_server: /usr/bin/ruby3.0
+    mavproxy: /usr/bin/python3.10
+    micro_ros_agent: /workspace/ardu_ws/build/micro_ros_agent/micro_ros_agent
+  invoked_file_sha256:
+    /home/ubuntu/.local/bin/mavproxy.py: 428174c55331f4565df2bcb7821a3404630b4b62f262443e6ed6617f871ce6de
+  role_invoked_file_path:
+    mavproxy: /home/ubuntu/.local/bin/mavproxy.py
 
 python_lock:
   input: .devcontainer/requirements-radio.in
@@ -68,11 +237,11 @@ dependencies:
     distribution: humble
     container_base: osrf/ros:humble-desktop@sha256:46efd5ebec72c5da478027890ac534cbcb0c2cf93482559e0f35a9fc3c05d47a
     project_image_reference: multiagent_simulation:latest
-    project_image_digest: sha256:2aad1f25789fc1e5c23c3a4b05c91927198ad42ff6e97cde2c26cb2f18979afb
+    project_image_digest: sha256:b2c4f715ba3dabb07624e962b9b56f3255bddfc4cc31c26dfb1001bb400035f5
     project_image_platform: linux/amd64
     project_image_user: ubuntu
-    project_image_size_bytes: 6373951440
-    project_image_rootfs_layers: 34
+    project_image_size_bytes: 6403038378
+    project_image_rootfs_layers: 37
     historical_pre_rebuild_digest: sha256:ff0a0b3b3171e51bf328ac58806afc6c1127f9aad83fee8a0727b8136bea0011
     acceptance_note: Exact local image ID was host-inspected and matched the locked runtime manifests on 2026-07-13.
   gazebo:
@@ -136,8 +305,15 @@ dependencies:
 runtime_policy:
   system: Linux
   machine: x86_64
-  mitsuba_variant: llvm_ad_mono_polarized
-  gpu_required: false
+  mitsuba_variant: cuda_ad_mono_polarized
+  gpu_required: true
+  required_network_commands:
+    bridge: iproute2
+    ip: iproute2
+    ip6tables-save: iptables
+    iptables-save: iptables
+    nft: nftables
+    ss: iproute2
   required_network_capabilities:
     dev_net_tun: true
     unshare_network_namespace: true

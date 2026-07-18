@@ -1,0 +1,8 @@
+<scene version="2.1.0">
+  <bsdf type="itu-radio-material" id="terrain-ground"><string name="type" value="concrete"/><float name="thickness" value="1.0"/></bsdf>
+  <bsdf type="itu-radio-material" id="settlement-concrete"><string name="type" value="concrete"/><float name="thickness" value="2.0"/></bsdf>
+  <bsdf type="itu-radio-material" id="landmark-concrete"><string name="type" value="concrete"/><float name="thickness" value="0.5"/></bsdf>
+  <shape type="obj" id="mesh-canonical-terrain"><string name="filename" value="terrain.obj"/><boolean name="face_normals" value="true"/><ref id="terrain-ground" name="bsdf"/></shape>
+  <shape type="obj" id="mesh-canonical-buildings"><string name="filename" value="buildings.obj"/><boolean name="face_normals" value="true"/><ref id="settlement-concrete" name="bsdf"/></shape>
+  <shape type="obj" id="mesh-canonical-landmarks"><string name="filename" value="landmarks.obj"/><boolean name="face_normals" value="true"/><ref id="landmark-concrete" name="bsdf"/></shape>
+</scene>

@@ -15,22 +15,29 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
+import yaml
+
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from network.tests.collect_five_uav_health import (  # noqa: E402
+    M1_PROCESS_SAMPLE_MAX_GAP_S as COLLECTOR_PROCESS_SAMPLE_MAX_GAP_S,
     derive_runtime_endpoints,
     identity_set_sha256,
     launch_log_findings,
     process_identity_digest,
+    process_window_metrics,
     rate_hz,
     readiness_status,
     run_process_monitor,
     selected_measurement_duration,
 )
-from network.validation.evidence import five_uav_health_status  # noqa: E402
+from network.validation.evidence import (  # noqa: E402
+    M1_PROCESS_SAMPLE_MAX_GAP_S,
+    five_uav_health_status,
+)
 
 
 M1_CONTRACT_ID = "ams.m1.health/v3"
@@ -38,6 +45,11 @@ M1_PROFILE = "m1_component"
 M1_SCENARIO_ID = "scenario_5uav"
 M1_PLAN = ROOT_DIR / "doc/network_radio_integration_plan_v3.md"
 M1_CONTRACT_SHA256 = hashlib.sha256(M1_PLAN.read_bytes()).hexdigest()
+M1_LOCK_PATH = ROOT_DIR / "network/config/dependency_lock.yaml"
+M1_LOCK_SHA256 = hashlib.sha256(M1_LOCK_PATH.read_bytes()).hexdigest()
+M1_RUNTIME_IDENTITY = yaml.safe_load(M1_LOCK_PATH.read_text(encoding="utf-8"))[
+    "m1_runtime_identity"
+]
 REQUIRED_PROCESS_COUNTS = {
     "arducopter": 5,
     "mavproxy": 5,
@@ -56,7 +68,7 @@ def process_identity(role: str, ordinal: int) -> dict:
     role_index = tuple(REQUIRED_PROCESS_COUNTS).index(role) + 1
     pid = 1_000 + role_index * 100 + ordinal
     if role == "arducopter":
-        executable = "/opt/ardupilot/arducopter"
+        executable = M1_RUNTIME_IDENTITY["role_executable_path"][role]
         argv = [
             executable,
             "--instance",
@@ -69,10 +81,10 @@ def process_identity(role: str, ordinal: int) -> dict:
         ]
         command = "arducopter"
     elif role == "mavproxy":
-        executable = "/usr/bin/python3"
+        executable = M1_RUNTIME_IDENTITY["role_executable_path"][role]
         argv = [
-            executable,
-            "/home/ubuntu/.local/bin/mavproxy.py",
+            "/usr/bin/python3",
+            M1_RUNTIME_IDENTITY["role_invoked_file_path"]["mavproxy"],
             "--master",
             f"tcp:127.0.0.1:{5750 + ordinal * 10}",
             "--sitl",
@@ -84,7 +96,7 @@ def process_identity(role: str, ordinal: int) -> dict:
         ]
         command = "mavproxy.py"
     elif role == "micro_ros_agent":
-        executable = "/opt/ros/humble/lib/micro_ros_agent/micro_ros_agent"
+        executable = M1_RUNTIME_IDENTITY["role_executable_path"][role]
         argv = [
             executable,
             "udp4",
@@ -96,7 +108,7 @@ def process_identity(role: str, ordinal: int) -> dict:
         ]
         command = "micro_ros_agent"
     elif role == "gazebo_server":
-        executable = "/usr/bin/ruby"
+        executable = M1_RUNTIME_IDENTITY["role_executable_path"][role]
         argv = [
             "gz",
             "sim",
@@ -122,12 +134,22 @@ def process_identity(role: str, ordinal: int) -> dict:
         "cmdline_b64": base64.b64encode(cmdline).decode("ascii"),
         "cmdline_sha256": hashlib.sha256(cmdline).hexdigest(),
         "exe_path": executable,
-        "exe_sha256": hashlib.sha256(executable.encode()).hexdigest(),
+        "exe_sha256": M1_RUNTIME_IDENTITY["executable_sha256"][executable],
         "uid": 1000,
         "namespaces": {
             name: f"{name}:[4026532{role_index:02d}]" for name in NAMESPACE_NAMES
         },
         "capabilities": {name: "0000000000000000" for name in CAPABILITY_NAMES},
+        "invoked_files": (
+            {
+                M1_RUNTIME_IDENTITY["role_invoked_file_path"]["mavproxy"]:
+                M1_RUNTIME_IDENTITY["invoked_file_sha256"][
+                    M1_RUNTIME_IDENTITY["role_invoked_file_path"]["mavproxy"]
+                ]
+            }
+            if role == "mavproxy"
+            else {}
+        ),
         "identity_errors": [],
         "role": role,
     }
@@ -152,6 +174,69 @@ def rewrite_raw_and_rehash(run_dir: Path, mutator) -> list[dict]:
     summary["raw_event_sha256"] = hashlib.sha256(raw.encode()).hexdigest()
     summary_path.write_text(json.dumps(summary), encoding="utf-8")
     return records
+
+
+def rebind_process_health_identity_summary(
+    run_dir: Path, records: list[dict]
+) -> None:
+    """Rebind producer summaries after an adversarial but internally stable edit."""
+
+    samples = [record for record in records if record.get("event") == "process_sample"]
+    if not samples:  # pragma: no cover - fixture programming error
+        raise AssertionError("fixture has no measurement process samples")
+    processes = samples[0]["processes"]
+    summary_path = run_dir / "metrics/five_uav_health.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    health = summary["process_health"]
+    health["samples"] = len(samples)
+    health["stable_identity_set_sha256"] = {
+        role: identity_set_sha256(
+            process_identity_digest(process)
+            for process in processes
+            if process.get("role") == role
+        )
+        for role in REQUIRED_PROCESS_COUNTS
+    }
+    health["all_process_identity_set_sha256"] = identity_set_sha256(
+        process_identity_digest(process) for process in processes
+    )
+    timestamps = [sample["monotonic_ns"] for sample in samples]
+    measurement_start = next(
+        record for record in records if record.get("event") == "measurement_start"
+    )["measurement_started_monotonic_ns"]
+    measurement_end = next(
+        record for record in records if record.get("event") == "health_probe_complete"
+    )["measurement_ended_monotonic_ns"]
+    health["first_sample_delay_s"] = (timestamps[0] - measurement_start) / 1_000_000_000
+    health["last_sample_age_s"] = (measurement_end - timestamps[-1]) / 1_000_000_000
+    health["maximum_sample_gap_s"] = max(
+        (current - previous) / 1_000_000_000
+        for previous, current in zip(timestamps, timestamps[1:])
+    )
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+
+def launch_helper_identity(pid: int, start_ticks: int) -> dict:
+    helper = process_identity("arducopter", 1)
+    executable = "/opt/ros/humble/lib/robot_state_publisher/robot_state_publisher"
+    argv = [executable, "--ros-args", "-r", "__ns:=/uav1"]
+    raw = b"\0".join(value.encode() for value in argv) + b"\0"
+    helper.update(
+        {
+            "pid": pid,
+            "start_ticks": start_ticks,
+            "command": "robot_state_publisher",
+            "arguments": " ".join(argv),
+            "cmdline": argv,
+            "cmdline_b64": base64.b64encode(raw).decode("ascii"),
+            "cmdline_sha256": hashlib.sha256(raw).hexdigest(),
+            "exe_path": executable,
+            "exe_sha256": M1_RUNTIME_IDENTITY["executable_sha256"][executable],
+            "invoked_files": {},
+            "role": None,
+        }
+    )
+    return helper
 
 
 def rewrite_launch_and_rebind(run_dir: Path, text: str, observation_offset: int) -> None:
@@ -233,13 +318,19 @@ def write_complete_health_evidence(run_dir: Path) -> None:
     }
     container_image = {
         "runtime_container_id": "f" * 64,
-        "digest": "sha256:" + "1" * 64,
+        "digest": M1_RUNTIME_IDENTITY["container_image_digest"],
     }
     provenance = {
         "source_hash": source_hash,
         "git_commit": "c" * 40,
+        "qualification_consumption": {
+            "profile": "m1_component",
+            "consumed_nodes": ["Q0", "Q1"],
+            "consumed_node_sha256": {"Q0": "8" * 64, "Q1": "9" * 64},
+        },
         "config_hashes": {
             "doc/network_radio_integration_plan_v3.md": M1_CONTRACT_SHA256,
+            "network/config/dependency_lock.yaml": M1_LOCK_SHA256,
         },
         "dependency_versions": {"runtime_capabilities": runtime_capabilities},
         "container_image": container_image,
@@ -890,6 +981,25 @@ class FiveUavHealthV2Tests(unittest.TestCase):
             self.assertEqual(result["status"], "failed")
             self.assertIn("raw evidence", "\n".join(result["details"]["failures"]))
 
+    def test_malformed_m1_consumption_fails_without_validator_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp) / "malformed_consumption"
+            write_complete_health_evidence(run_dir)
+            provenance_path = run_dir / "metrics/provenance.json"
+            provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+            provenance["qualification_consumption"]["consumed_node_sha256"] = 7
+            provenance_path.write_text(
+                json.dumps(provenance, sort_keys=True) + "\n", encoding="utf-8"
+            )
+
+            result = five_uav_health_status(run_dir)
+
+        self.assertEqual(result["status"], "failed")
+        self.assertIn(
+            "M1 provenance does not consume exactly Q0 and Q1",
+            result["details"]["failures"],
+        )
+
     def test_mixed_identity_and_broken_event_sequence_fail(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             run_dir = Path(temp) / "mixed_raw"
@@ -1010,6 +1120,127 @@ class FiveUavHealthV2Tests(unittest.TestCase):
             self.assertEqual(result["status"], "failed")
             self.assertIn("identity", "\n".join(result["details"]["failures"]))
 
+    def test_two_second_measurement_process_hole_exceeds_continuity_bound(self) -> None:
+        self.assertEqual(M1_PROCESS_SAMPLE_MAX_GAP_S, 1.5)
+        self.assertEqual(COLLECTOR_PROCESS_SAMPLE_MAX_GAP_S, 1.5)
+        self.assertTrue(
+            process_window_metrics(
+                [{"offset_s": 0.0}, {"offset_s": 1.5}], 1.5
+            )["covered"]
+        )
+        self.assertFalse(
+            process_window_metrics(
+                [{"offset_s": 0.0}, {"offset_s": 1.500001}], 1.500001
+            )["covered"]
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp) / "measurement_process_hole"
+            write_complete_health_evidence(run_dir)
+
+            def mutate(records: list[dict]) -> None:
+                samples = [
+                    record for record in records if record.get("event") == "process_sample"
+                ]
+                records.remove(samples[len(samples) // 2])
+                for event_seq, record in enumerate(records, start=1):
+                    record["event_seq"] = event_seq
+
+            records = rewrite_raw_and_rehash(run_dir, mutate)
+            rebind_process_health_identity_summary(run_dir, records)
+            result = five_uav_health_status(run_dir)
+            self.assertEqual(result["status"], "failed")
+            self.assertIn(
+                "1.5-second measurement continuity bound",
+                "\n".join(result["details"]["failures"]),
+            )
+
+    def test_readiness_to_first_measurement_sample_gap_is_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp) / "readiness_measurement_gap"
+            write_complete_health_evidence(run_dir)
+            shift_ns = int((M1_PROCESS_SAMPLE_MAX_GAP_S + 0.1) * 1_000_000_000)
+
+            def mutate(records: list[dict]) -> None:
+                for record in records:
+                    if record.get("phase") != "readiness":
+                        continue
+                    record["monotonic_ns"] -= shift_ns
+                    record["wall_time_ns"] -= shift_ns
+                    record["wall_utc"] = datetime.fromtimestamp(
+                        record["wall_time_ns"] / 1_000_000_000, timezone.utc
+                    ).isoformat()
+                    if record.get("event") == "readiness_process_sample":
+                        record["sampled_monotonic_ns"] -= shift_ns
+                    if record.get("event") == "readiness":
+                        record["stability_started_monotonic_ns"] -= shift_ns
+                        record["stability_completed_monotonic_ns"] -= shift_ns
+
+            rewrite_raw_and_rehash(run_dir, mutate)
+            summary_path = run_dir / "metrics/five_uav_health.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary["readiness"]["stability_started_monotonic_ns"] -= shift_ns
+            summary["readiness"]["stability_completed_monotonic_ns"] -= shift_ns
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+            result = five_uav_health_status(run_dir)
+            self.assertEqual(result["status"], "failed")
+            self.assertIn(
+                "readiness completion to first measurement process sample exceeds",
+                "\n".join(result["details"]["failures"]),
+            )
+
+    def test_critical_process_replacement_at_phase_boundary_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp) / "critical_boundary_replacement"
+            write_complete_health_evidence(run_dir)
+
+            def mutate(records: list[dict]) -> None:
+                for sample in (
+                    record for record in records if record.get("event") == "process_sample"
+                ):
+                    process = next(
+                        item
+                        for item in sample["processes"]
+                        if item.get("role") == "arducopter"
+                    )
+                    process["pid"] = 9_101
+                    process["start_ticks"] = 90_101
+
+            records = rewrite_raw_and_rehash(run_dir, mutate)
+            rebind_process_health_identity_summary(run_dir, records)
+            result = five_uav_health_status(run_dir)
+            self.assertEqual(result["status"], "failed")
+            failures = "\n".join(result["details"]["failures"])
+            self.assertIn(
+                "arducopter identity set differs from final stable readiness", failures
+            )
+            self.assertIn("full identity set differs from final stable readiness", failures)
+
+    def test_launch_helper_replacement_at_phase_boundary_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp) / "helper_boundary_replacement"
+            write_complete_health_evidence(run_dir)
+            readiness_helper = launch_helper_identity(8_001, 80_001)
+            measurement_helper = launch_helper_identity(8_002, 80_002)
+
+            def mutate(records: list[dict]) -> None:
+                for sample in records:
+                    if sample.get("event") == "readiness_process_sample":
+                        sample["processes"].append(copy.deepcopy(readiness_helper))
+                    elif sample.get("event") == "process_sample":
+                        sample["processes"].append(copy.deepcopy(measurement_helper))
+
+            records = rewrite_raw_and_rehash(run_dir, mutate)
+            rebind_process_health_identity_summary(run_dir, records)
+            result = five_uav_health_status(run_dir)
+            self.assertEqual(result["status"], "failed")
+            failures = "\n".join(result["details"]["failures"])
+            self.assertIn("full identity set differs from final stable readiness", failures)
+            for role in REQUIRED_PROCESS_COUNTS:
+                self.assertNotIn(
+                    f"{role} identity set differs from final stable readiness", failures
+                )
+
     def test_missing_executable_hash_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             run_dir = Path(temp) / "missing_executable_hash"
@@ -1026,6 +1257,67 @@ class FiveUavHealthV2Tests(unittest.TestCase):
             self.assertEqual(result["status"], "failed")
             failures = "\n".join(result["details"]["failures"])
             self.assertTrue("exe_sha256" in failures or "executable" in failures, failures)
+
+    def test_fake_tmp_executable_with_valid_role_argv_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp) / "fake_tmp_executable"
+            write_complete_health_evidence(run_dir)
+
+            def mutate(records: list[dict]) -> None:
+                for sample in records:
+                    if sample.get("event") not in {
+                        "readiness_process_sample",
+                        "process_sample",
+                    }:
+                        continue
+                    process = next(
+                        item
+                        for item in sample["processes"]
+                        if item.get("role") == "arducopter"
+                    )
+                    process["exe_path"] = "/tmp/arducopter"
+                    process["exe_sha256"] = hashlib.sha256(b"fake-arducopter").hexdigest()
+
+            rewrite_raw_and_rehash(run_dir, mutate)
+            result = five_uav_health_status(run_dir)
+            self.assertEqual(result["status"], "failed")
+            failures = "\n".join(result["details"]["failures"])
+            self.assertIn("absent from the accepted-image manifest", failures)
+
+    def test_fake_mavproxy_script_at_tmp_path_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp) / "fake_mavproxy_script"
+            write_complete_health_evidence(run_dir)
+
+            def mutate(records: list[dict]) -> None:
+                for sample in records:
+                    if sample.get("event") not in {
+                        "readiness_process_sample",
+                        "process_sample",
+                    }:
+                        continue
+                    process = next(
+                        item
+                        for item in sample["processes"]
+                        if item.get("role") == "mavproxy"
+                    )
+                    argv = list(process["cmdline"])
+                    argv[1] = "/tmp/mavproxy.py"
+                    raw = b"\0".join(value.encode() for value in argv) + b"\0"
+                    process["cmdline"] = argv
+                    process["cmdline_b64"] = base64.b64encode(raw).decode("ascii")
+                    process["cmdline_sha256"] = hashlib.sha256(raw).hexdigest()
+                    process["arguments"] = " ".join(argv)
+                    process["invoked_files"] = {
+                        "/tmp/mavproxy.py": hashlib.sha256(b"fake-mavproxy").hexdigest()
+                    }
+
+            rewrite_raw_and_rehash(run_dir, mutate)
+            result = five_uav_health_status(run_dir)
+            self.assertEqual(result["status"], "failed")
+            failures = "\n".join(result["details"]["failures"])
+            self.assertIn("MAVProxy script path is not canonical", failures)
+            self.assertIn("MAVProxy script bytes differ", failures)
 
     def test_sleep_decoy_named_mavproxy_does_not_satisfy_required_role(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

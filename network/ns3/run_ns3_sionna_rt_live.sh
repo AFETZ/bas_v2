@@ -156,7 +156,7 @@ print(site.getusersitepackages())
 PY
 )"
 export PYTHONPATH="$PY_SITE:${PYTHONPATH:-}"
-export SIONNA_MITSUBA_VARIANT="${SIONNA_MITSUBA_VARIANT:-llvm_ad_mono_polarized}"
+export SIONNA_MITSUBA_VARIANT="${SIONNA_MITSUBA_VARIANT:-cuda_ad_mono_polarized}"
 
 (
   cd "$NS3_SIONNA_DIR"

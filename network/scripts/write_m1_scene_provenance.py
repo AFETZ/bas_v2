@@ -19,8 +19,8 @@ import yaml
 ROOT_DIR = Path(__file__).resolve().parents[2]
 SOURCE_WORLDS_RELATIVE = PurePosixPath("src/multiagent_simulation/worlds")
 SOURCE_PACKAGE_RELATIVE = PurePosixPath("src/multiagent_simulation")
-INSTALLED_PACKAGE_RELATIVE = PurePosixPath(
-    "install/multiagent_simulation/share/multiagent_simulation"
+RUNTIME_OVERLAY_PACKAGE_SUFFIX = PurePosixPath(
+    "runtime_overlay/install/multiagent_simulation/share/multiagent_simulation"
 )
 LAUNCH_SOURCE_RELATIVE = PurePosixPath(
     "src/multiagent_simulation/launch/multiagent_simulation.launch.py"
@@ -597,7 +597,9 @@ def build_scene_record(
     installed_share = _lexical_under(
         installed_package_share, root, label="installed package share"
     )
-    expected_share = Path("install/multiagent_simulation/share/multiagent_simulation")
+    expected_share = Path(run_dir.relative_to(root)) / Path(
+        RUNTIME_OVERLAY_PACKAGE_SUFFIX.as_posix()
+    )
     if installed_share.relative_to(root) != expected_share:
         raise ValueError("installed package share is not the canonical project install path")
     installed_worlds = installed_share / "worlds"
@@ -676,6 +678,21 @@ def build_scene_record(
         template_path=template_path,
         root=root,
     )
+    installed_launch_relative = (
+        PurePosixPath(expected_share.as_posix())
+        / "launch"
+        / "multiagent_simulation.launch.py"
+    ).as_posix()
+    installed_launch_path = resolve_runtime_leaf(
+        root / installed_launch_relative,
+        local_root=root,
+        runtime_root=root,
+        label="installed multiagent launch file",
+    )
+    launch_source_sha256 = bound_source_files[LAUNCH_SOURCE_RELATIVE.as_posix()]
+    installed_launch_sha256 = sha256_file(installed_launch_path)
+    if installed_launch_sha256 != launch_source_sha256:
+        raise ValueError("installed launch file differs from committed launch source")
 
     world_name = sdf_world_name(root / SOURCE_WORLDS_RELATIVE / world_file)
     dependency_versions = (
@@ -760,6 +777,10 @@ def build_scene_record(
             "bundle_files": installed_manifest,
             "bundle_sha256": manifest_sha256(installed_manifest),
             "resolved_bundle_paths": resolved_paths,
+            "launch_file_path": installed_launch_relative,
+            "runtime_launch_file_path": str(root / installed_launch_relative),
+            "resolved_launch_file_path": str(installed_launch_path),
+            "launch_file_sha256": installed_launch_sha256,
         },
     }
 

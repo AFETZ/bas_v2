@@ -1,0 +1,25 @@
+{
+  "contract": "ams.m4.scene-material-manifest/v1",
+  "frequency_hz": 2400000000,
+  "materials": [
+    {
+      "id": "terrain-ground",
+      "itu_type": "concrete",
+      "mesh": "terrain.obj",
+      "thickness_m": 1.0
+    },
+    {
+      "id": "settlement-concrete",
+      "itu_type": "concrete",
+      "mesh": "buildings.obj",
+      "thickness_m": 2.0
+    },
+    {
+      "id": "landmark-concrete",
+      "itu_type": "concrete",
+      "mesh": "landmarks.obj",
+      "thickness_m": 0.5
+    }
+  ],
+  "schema_version": 1
+}

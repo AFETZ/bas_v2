@@ -1,5 +1,11 @@
 # Network and Radio Integration Execution Plan
 
+> **Superseded for all current implementation and acceptance work.**
+> The authoritative executable contract is
+> [`network_radio_integration_plan_v3.md`](network_radio_integration_plan_v3.md).
+> This file is retained only as the original historical plan and must not be
+> used to close a milestone, weaken a v3 gate, or supply missing v3 evidence.
+
 This document is the execution contract for turning the existing
 ArduPilot/Gazebo/ROS 2 multi-agent simulation into a packet-in-the-loop radio
 and network simulation that can be demonstrated to a customer.
