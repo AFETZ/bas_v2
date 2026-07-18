@@ -516,9 +516,13 @@ def validate_m0_import_trace_record(
                 or not path_text.startswith(str(root_text).rstrip("/") + "/")
                 or isinstance(module.get("bytes"), bool)
                 or not isinstance(module.get("bytes"), int)
-                or module.get("bytes", -1) < 1
+                or module.get("bytes", -1) < 0
                 or re.fullmatch(r"[0-9a-f]{64}", str(module.get("sha256") or ""))
                 is None
+                or (
+                    module.get("bytes") == 0
+                    and module.get("sha256") != hashlib.sha256(b"").hexdigest()
+                )
                 or not isinstance(module.get("distributions"), list)
                 or module.get("distributions") != sorted(module.get("distributions"))
             ):

@@ -440,9 +440,14 @@ def _discover_validation_test_ids() -> list[str]:
     return test_ids
 
 
-def _sha256_path(path: Path) -> tuple[int, str]:
+def _sha256_path(
+    path: Path, *, additional_root: Path | None = None
+) -> tuple[int, str]:
     payload, info, error = _read_bytes_fd(
-        path, maximum_bytes=MAX_PROVENANCE_BYTES, allow_empty=False
+        path,
+        maximum_bytes=MAX_PROVENANCE_BYTES,
+        allow_empty=False,
+        additional_root=additional_root,
     )
     if error or info is None or payload is None:
         raise ValueError(error or f"not a regular file: {path}")
@@ -519,7 +524,9 @@ def _runtime_executable_identity(
                             None,
                             "active-container Python path differs from recorded path",
                         )
-                    size, digest = _sha256_path(current)
+                    size, digest = _sha256_path(
+                        current, additional_root=Path("/usr/bin")
+                    )
                     return size, digest, None
 
         inspection = subprocess.run(
@@ -933,6 +940,14 @@ def validation_suite_gate(run_dir: Path) -> dict[str, Any]:
             failures.append("validation-suite source bytes changed during execution")
         try:
             import_policy, import_policy_sha256 = load_m0_import_policy(ROOT_DIR)
+            if (
+                recorded_executable_path != import_policy.get("interpreter")
+                or recorded_executable_hash
+                != import_policy.get("interpreter_sha256")
+            ):
+                failures.append(
+                    "validation-suite Python executable differs from locked import policy"
+                )
             failures.extend(
                 validate_m0_import_trace_record(
                     document.get("python_import_trace"),

@@ -352,7 +352,18 @@ class M0BaselineProbeTests(unittest.TestCase):
                     "network/scripts/run_m0_validation_suite.py"
                 ],
                 "distributions": [],
-            }
+            },
+            {
+                "name": "urllib",
+                "kind": "file",
+                "origin": "/usr/lib/python3.10/urllib/__init__.py",
+                "resolved_path": "/usr/lib/python3.10/urllib/__init__.py",
+                "allowed_root": "/usr/lib/python3.10",
+                "source_kind": "immutable_image",
+                "bytes": 0,
+                "sha256": hashlib.sha256(b"").hexdigest(),
+                "distributions": [],
+            },
         ]
         import_trace = {
             "schema_version": 1,
@@ -730,6 +741,28 @@ class M0BaselineProbeTests(unittest.TestCase):
         self.assertIn("validation-suite monotonic interval is invalid", failures)
 
     def test_python_executable_hash_is_independently_checked(self) -> None:
+        executable = Path(sys.executable).resolve(strict=True)
+        expected_payload = executable.read_bytes()
+        with tempfile.TemporaryDirectory() as identity_temp:
+            identity_file = Path(identity_temp) / "container_id"
+            identity_file.write_text("b" * 64 + "\n", encoding="ascii")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "AMS_RUNTIME_CONTAINER_ID_FILE": str(identity_file),
+                    "AMS_CONTAINER_IMAGE_DIGEST": "sha256:" + "a" * 64,
+                    "AMS_CONTAINER_IMAGE_DIGEST_SOURCE": "docker_image_inspect_host",
+                },
+            ):
+                size, digest, error = validator._runtime_executable_identity(
+                    container_id="b" * 64,
+                    image_digest="sha256:" + "a" * 64,
+                    executable_path=str(executable),
+                )
+        self.assertIsNone(error)
+        self.assertEqual(size, len(expected_payload))
+        self.assertEqual(digest, hashlib.sha256(expected_payload).hexdigest())
+
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             run_dir = self.make_run(root)
@@ -745,6 +778,25 @@ class M0BaselineProbeTests(unittest.TestCase):
         self.assertFalse(result["passed"])
         self.assertIn(
             "recorded Python executable differs from the exact qualified image",
+            failures,
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            run_dir = self.make_run(root)
+            result_path = run_dir / "metrics/m0_validation_suite.json"
+            document = json.loads(result_path.read_text(encoding="utf-8"))
+            document["python_executable"]["resolved_path"] = "/usr/bin/python3.11"
+            document["invocation"]["producer_command"][0] = "/usr/bin/python3.11"
+            result_path.write_text(json.dumps(document) + "\n", encoding="utf-8")
+            result = self.evaluate(root, run_dir)
+
+        failures = result["gates"]["validation_adversarial_suite"]["details"][
+            "failures"
+        ]
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "validation-suite Python executable differs from locked import policy",
             failures,
         )
 
