@@ -21,7 +21,6 @@ if str(CODE_ROOT) not in sys.path:
 
 from network.scripts.host_finalization_common import (  # noqa: E402
     exact_mounts,
-    immutable_container_configuration,
     one_inspect,
     read_regular,
     rename_noreplace,
@@ -60,6 +59,37 @@ def canonical(value: Any) -> bytes:
 
 def sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def immutable_container_configuration(
+    initial: dict[str, Any], final: dict[str, Any]
+) -> None:
+    """Compare immutable fields while treating Docker Mounts as an unordered set."""
+
+    for field in ("Config", "Path", "Args", "Image"):
+        if initial.get(field) != final.get(field):
+            raise ValueError(f"Docker container immutable field changed: {field}")
+    initial_host = initial.get("HostConfig")
+    final_host = final.get("HostConfig")
+    if not isinstance(initial_host, dict) or not isinstance(final_host, dict):
+        raise ValueError("Docker container immutable field changed: HostConfig")
+    normalized_initial_host = dict(initial_host)
+    normalized_final_host = dict(final_host)
+    for host in (normalized_initial_host, normalized_final_host):
+        if host.get("OomKillDisable") in (None, False):
+            host["OomKillDisable"] = False
+    if normalized_initial_host != normalized_final_host:
+        raise ValueError("Docker container immutable field changed: HostConfig")
+    initial_mounts = initial.get("Mounts")
+    final_mounts = final.get("Mounts")
+    if (
+        not isinstance(initial_mounts, list)
+        or not isinstance(final_mounts, list)
+        or not all(isinstance(item, dict) for item in [*initial_mounts, *final_mounts])
+        or sorted(canonical(item) for item in initial_mounts)
+        != sorted(canonical(item) for item in final_mounts)
+    ):
+        raise ValueError("Docker container immutable field changed: Mounts")
 
 
 def environment_map(values: Any) -> dict[str, str]:

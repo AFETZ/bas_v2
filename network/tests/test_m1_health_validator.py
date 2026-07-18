@@ -192,7 +192,11 @@ class M1SceneValidatorTests(unittest.TestCase):
             f"gz_sim_resource_path={resource_path}\n"
             "generate_sensor_models=false\n"
             "python_dont_write_bytecode=1\n"
-            "python_pycache_prefix=/tmp/ams-m1-pycache\n",
+            "python_pycache_prefix=/tmp/ams-m1-pycache\n"
+            "python_executable=/usr/bin/python3.10\n"
+            "python_no_user_site=1\n"
+            "pymavlink_origin=/home/ubuntu/.local/lib/python3.10/site-packages/"
+            "pymavlink/__init__.py\n",
             encoding="utf-8",
         )
         return run_dir
@@ -461,6 +465,20 @@ class M1SceneValidatorTests(unittest.TestCase):
             'set +u\nsource "$OVERLAY_INSTALL/setup.bash"\nset -u\n',
             runner,
         )
+        provenance = (
+            '"$M1_PYTHON" "$ROOT_DIR/network/scripts/write_run_provenance.py"'
+        )
+        self.assertEqual(runner.count(provenance), 1)
+        self.assertLess(
+            runner.index(provenance),
+            runner.index('source "$OVERLAY_INSTALL/setup.bash"'),
+        )
+        self.assertIn("M1_PYTHON=/usr/bin/python3.10", runner)
+        self.assertIn(
+            "M1_PYTHON_SITE=/home/ubuntu/.local/lib/python3.10/site-packages",
+            runner,
+        )
+        self.assertIn('"$M1_PYTHON" "$ROOT_DIR/network/tests/collect_five_uav_health.py"', runner)
 
     def test_mutated_installed_runtime_config_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

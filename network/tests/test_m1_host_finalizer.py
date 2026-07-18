@@ -133,6 +133,15 @@ class M1HostFinalizerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             paths = self.make_paths(Path(temp))
             initial, final = self.main_documents(paths)
+            initial["HostConfig"] = {
+                **initial["HostConfig"],
+                "OomKillDisable": False,
+            }
+            final["HostConfig"] = {
+                **final["HostConfig"],
+                "OomKillDisable": None,
+            }
+            final["Mounts"].reverse()
             finalizer.validate_main_container(
                 initial,
                 final,

@@ -12,6 +12,12 @@ ROOT_DIR="$PWD"
 # launch/__pycache__ entry: source/install equality is an acceptance gate.
 export PYTHONDONTWRITEBYTECODE=1
 export PYTHONPYCACHEPREFIX=/tmp/ams-m1-pycache
+M1_PYTHON=/usr/bin/python3.10
+M1_PYTHON_SITE=/home/ubuntu/.local/lib/python3.10/site-packages
+case ":${PYTHONPATH:-}:" in
+  *":$M1_PYTHON_SITE:"*) ;;
+  *) export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}$M1_PYTHON_SITE" ;;
+esac
 RUN_PROFILE="${AMS_FLIGHT_RUN_PROFILE:-m1_component}"
 case "$RUN_PROFILE" in
   m1_component)
@@ -69,14 +75,40 @@ if ((OVERLAY_BUILD_RC != 0)) || [[ ! -f "$OVERLAY_INSTALL/setup.bash" ]]; then
   printf 'FAIL fresh M1 runtime overlay build failed\n' >&2
   exit 1
 fi
+# Provenance must observe the locked base image/ROS inventory.  The fresh
+# run-local overlay is a runtime input proved separately below; sourcing it
+# first would add the project package to the dependency inventory itself.
+"$M1_PYTHON" "$ROOT_DIR/network/scripts/write_run_provenance.py" --run-dir "$RUN_DIR" \
+  --qualification-profile "$RUN_PROFILE" --consumed-node Q0 --consumed-node Q1 \
+  > "$RUN_DIR/logs/provenance.log" 2>&1
 # shellcheck disable=SC1090
 set +u
 source "$OVERLAY_INSTALL/setup.bash"
 set -u
-RESOLVED_SHARE="$(/usr/bin/python3.10 -c 'from ament_index_python.packages import get_package_share_directory; print(get_package_share_directory("multiagent_simulation"))')"
+RESOLVED_SHARE="$("$M1_PYTHON" -c 'from ament_index_python.packages import get_package_share_directory; print(get_package_share_directory("multiagent_simulation"))')"
 if [[ "$RESOLVED_SHARE" != "$EXPECTED_SHARE" ]] || [[ ! -d "$EXPECTED_SHARE" ]]; then
   printf 'FAIL M1 resolved package share is not the fresh run overlay: %s\n' \
     "$RESOLVED_SHARE" >&2
+  exit 1
+fi
+mapfile -t M1_PYTHON_RUNTIME < <(
+  "$M1_PYTHON" - <<'PY'
+import pathlib
+import sys
+
+import pymavlink
+
+print(pathlib.Path(sys.executable).resolve())
+print(int(sys.flags.no_user_site))
+print(pathlib.Path(pymavlink.__file__).resolve())
+PY
+)
+EXPECTED_PYMAVLINK_ORIGIN="$M1_PYTHON_SITE/pymavlink/__init__.py"
+if ((${#M1_PYTHON_RUNTIME[@]} != 3)) || \
+  [[ "${M1_PYTHON_RUNTIME[0]}" != "$M1_PYTHON" ]] || \
+  [[ "${M1_PYTHON_RUNTIME[1]}" != "1" ]] || \
+  [[ "${M1_PYTHON_RUNTIME[2]}" != "$EXPECTED_PYMAVLINK_ORIGIN" ]]; then
+  printf 'FAIL controlled M1 Python/pymavlink runtime is unavailable\n' >&2
   exit 1
 fi
 export AMS_M1_INSTALLED_SHARE="$EXPECTED_SHARE"
@@ -85,7 +117,7 @@ export GZ_SIM_RESOURCE_PATH="$EXPECTED_SHARE/models:$EXPECTED_SHARE/worlds:$EXPE
 port_is_bindable() {
   local protocol="$1"
   local port="$2"
-  python3 - "$protocol" "$port" <<'PY'
+  "$M1_PYTHON" - "$protocol" "$port" <<'PY'
 import socket
 import sys
 
@@ -147,6 +179,9 @@ printf '\n' >> "$RUN_DIR/command.txt"
   printf 'generate_sensor_models=false\n'
   printf 'python_dont_write_bytecode=%s\n' "$PYTHONDONTWRITEBYTECODE"
   printf 'python_pycache_prefix=%s\n' "$PYTHONPYCACHEPREFIX"
+  printf 'python_executable=%s\n' "${M1_PYTHON_RUNTIME[0]}"
+  printf 'python_no_user_site=%s\n' "${M1_PYTHON_RUNTIME[1]}"
+  printf 'pymavlink_origin=%s\n' "${M1_PYTHON_RUNTIME[2]}"
 } > "$RUN_DIR/environment.txt"
 
 cleanup() {
@@ -172,11 +207,8 @@ export AMS_RUNTIME_ID="$RUNTIME_ID"
 export ROS_DOMAIN_ID
 export GZ_PARTITION
 
-python3 "$ROOT_DIR/network/scripts/write_run_provenance.py" --run-dir "$RUN_DIR" \
-  --qualification-profile "$RUN_PROFILE" --consumed-node Q0 --consumed-node Q1 \
-  > "$RUN_DIR/logs/provenance.log" 2>&1
 if ! WORLD_FILE="$(
-  python3 "$ROOT_DIR/network/scripts/write_m1_scene_provenance.py" \
+  "$M1_PYTHON" "$ROOT_DIR/network/scripts/write_m1_scene_provenance.py" \
     --run-dir "$RUN_DIR" \
     --scenario "$SCENARIO" \
     --robot-model "$ROBOT_MODEL" \
@@ -188,7 +220,7 @@ if ! WORLD_FILE="$(
   exit 1
 fi
 if ! WORLD_NAME="$(
-  python3 -c \
+  "$M1_PYTHON" -c \
     'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["gazebo"]["world_name"])' \
     "$RUN_DIR/metrics/m1_scene_provenance.json"
 )"; then
@@ -220,7 +252,7 @@ printf '%s\n' "$LAUNCH_PID" > "$RUN_DIR/logs/five_uav_launch.pid"
 
 if ((CAPACITY_MODE == 1)); then
   set +e
-  python3 "$ROOT_DIR/network/tests/collect_five_uav_health.py" \
+  "$M1_PYTHON" "$ROOT_DIR/network/tests/collect_five_uav_health.py" \
     --scenario "$SCENARIO" \
     --run-dir "$RUN_DIR" \
     --runtime-id "$RUNTIME_ID" \
@@ -237,7 +269,7 @@ if ((CAPACITY_MODE == 1)); then
   HEALTH_COLLECTOR_PID=$!
   set -e
   set +e
-  python3 "$ROOT_DIR/network/scripts/collect_flight_capacity.py" \
+  "$M1_PYTHON" "$ROOT_DIR/network/scripts/collect_flight_capacity.py" \
     --run-dir "$RUN_DIR" \
     --runtime-id "$RUNTIME_ID" \
     --launch-process-group "$LAUNCH_PID"
@@ -258,7 +290,7 @@ else
     exit 1
   fi
   set +e
-  python3 "$ROOT_DIR/network/tests/collect_five_uav_health.py" \
+  "$M1_PYTHON" "$ROOT_DIR/network/tests/collect_five_uav_health.py" \
     --scenario "$SCENARIO" \
     --run-dir "$RUN_DIR" \
     --runtime-id "$RUNTIME_ID" \
@@ -297,9 +329,9 @@ LAUNCH_PID=""
 # but publish only the relocatable install tree used by the launch.
 /usr/bin/rm -rf -- "$OVERLAY_BUILD" "$OVERLAY_LOG"
 if ((CAPACITY_MODE == 1)); then
-  python3 "$ROOT_DIR/network/scripts/validate_flight_capacity.py" --run-dir "$RUN_DIR"
+  "$M1_PYTHON" "$ROOT_DIR/network/scripts/validate_flight_capacity.py" --run-dir "$RUN_DIR"
   printf 'Five-UAV flight capacity run complete: %s\n' "$RUN_DIR"
 else
-  python3 "$ROOT_DIR/network/scripts/validate_m1_health.py" --run-dir "$RUN_DIR"
+  "$M1_PYTHON" "$ROOT_DIR/network/scripts/validate_m1_health.py" --run-dir "$RUN_DIR"
   printf 'Five-UAV M1 health run complete: %s\n' "$RUN_DIR"
 fi

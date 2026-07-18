@@ -853,6 +853,14 @@ def runtime_inputs_status(run_dir: Path) -> dict[str, Any]:
         failures.append("M1 launch did not disable runtime bytecode writes")
     if environment.get("python_pycache_prefix") != "/tmp/ams-m1-pycache":
         failures.append("M1 launch did not redirect any runtime bytecode cache to tmpfs")
+    if environment.get("python_executable") != "/usr/bin/python3.10":
+        failures.append("M1 collector did not use the locked Python interpreter")
+    if environment.get("python_no_user_site") != "1":
+        failures.append("M1 collector did not disable implicit user-site loading")
+    if environment.get("pymavlink_origin") != (
+        "/home/ubuntu/.local/lib/python3.10/site-packages/pymavlink/__init__.py"
+    ):
+        failures.append("M1 collector pymavlink origin is not the controlled image path")
 
     if overlay.is_symlink() or not overlay.is_dir():
         failures.append("run-local runtime overlay is missing or symbolic")
@@ -909,6 +917,9 @@ def runtime_inputs_status(run_dir: Path) -> dict[str, Any]:
                 "python_dont_write_bytecode"
             ),
             "python_pycache_prefix": environment.get("python_pycache_prefix"),
+            "python_executable": environment.get("python_executable"),
+            "python_no_user_site": environment.get("python_no_user_site"),
+            "pymavlink_origin": environment.get("pymavlink_origin"),
             "package_inputs_sha256": hashlib.sha256(
                 json.dumps(source_inputs, sort_keys=True, separators=(",", ":")).encode(
                     "utf-8"
