@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +15,7 @@ from unittest import mock
 from network.scripts.resolve_component_prerequisites import resolve
 
 
+ROOT_DIR = Path(__file__).resolve().parents[2]
 COMMIT = "4" * 40
 STATUS_PATHS = (
     "network/PROGRESS.md",
@@ -136,6 +138,43 @@ class ComponentPrerequisiteTests(unittest.TestCase):
         self.assertEqual(result["profile"], "flight_capacity_prerequisite")
         self.assertEqual(set(result["receipts"]), {"m0", "m1"})
         self.assertEqual(result["status"]["closed_count"], 2)
+
+    def test_acceptance_wrapper_uses_repository_module_without_pythonpath(self) -> None:
+        wrapper = (ROOT_DIR / "scripts/run_acceptance_container.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "/usr/bin/python3.10 -S -m "
+            "network.scripts.resolve_component_prerequisites",
+            wrapper,
+        )
+        self.assertNotIn(
+            "/usr/bin/python3.10 network/scripts/resolve_component_prerequisites.py",
+            wrapper,
+        )
+        result = subprocess.run(
+            [
+                "/usr/bin/python3.10",
+                "-S",
+                "-m",
+                "network.scripts.resolve_component_prerequisites",
+                "--help",
+            ],
+            cwd=ROOT_DIR,
+            env={
+                "PATH": "/usr/bin:/bin",
+                "LANG": "C.UTF-8",
+                "LC_ALL": "C",
+                "HOME": "/nonexistent",
+                "PYTHONNOUSERSITE": "1",
+                "PYTHONDONTWRITEBYTECODE": "1",
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
 
     def test_writable_receipt_is_rejected(self) -> None:
         path = self.root / "runs/m1_fixture/metrics/m1_host_final_receipt.json"

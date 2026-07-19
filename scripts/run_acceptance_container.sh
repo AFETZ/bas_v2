@@ -332,8 +332,12 @@ if ((COMPONENT_MODE == 1)); then
     printf 'FAIL component acceptance requires a currently valid status authority\n' >&2
     exit 2
   fi
+  # Invoke the resolver as a repository module under -S.  A file-path
+  # invocation makes Python place network/scripts (not ROOT_DIR) on sys.path
+  # and therefore cannot import the sibling network.validation package in a
+  # clean shell.
   if ! AMS_COMPONENT_SOURCE_COMMIT="$COMPONENT_SOURCE_COMMIT" \
-    /usr/bin/python3.10 network/scripts/resolve_component_prerequisites.py \
+    /usr/bin/python3.10 -S -m network.scripts.resolve_component_prerequisites \
       --root "$ROOT_DIR" --profile "$COMPONENT_PROFILE" \
       --status-result "$COMPONENT_STATUS_VALIDATION" \
       > "$COMPONENT_PREREQUISITES"; then
