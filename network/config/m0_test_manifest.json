@@ -28,6 +28,7 @@
     "test_component_finalizer.ComponentFinalizerTests.test_privileged_or_extra_mount_fails",
     "test_component_finalizer.ComponentFinalizerTests.test_result_requires_independent_equality_and_all_gates",
     "test_component_finalizer.ComponentFinalizerTests.test_tun_profile_requires_exact_root_capability_boundary",
+    "test_component_prerequisites.ComponentPrerequisiteTests.test_acceptance_wrapper_uses_repository_module_without_pythonpath",
     "test_component_prerequisites.ComponentPrerequisiteTests.test_exact_two_receipt_status_authority_resolves",
     "test_component_prerequisites.ComponentPrerequisiteTests.test_m2_requires_one_current_capacity_receipt",
     "test_component_prerequisites.ComponentPrerequisiteTests.test_missing_m1_evidence_is_rejected",
