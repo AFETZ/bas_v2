@@ -261,10 +261,12 @@ class SchedulingAndStateTests(unittest.TestCase):
         return message
 
     @staticmethod
-    def response_message(uav: int, message_type: str) -> mock.Mock:
+    def response_message(
+        uav: int, message_type: str, *, command: int = 512
+    ) -> mock.Mock:
         message = mock.Mock()
         message_id = 77 if message_type == "COMMAND_ACK" else 148
-        payload = probe.struct.pack("<HB", 512, 0) if message_id == 77 else b""
+        payload = probe.struct.pack("<HB", command, 0) if message_id == 77 else b""
         message.get_msgbuf.return_value = probe.mavlink_v2_frame(
             message_id,
             payload,
@@ -277,7 +279,7 @@ class SchedulingAndStateTests(unittest.TestCase):
         message.get_srcSystem.return_value = uav
         message.get_srcComponent.return_value = 1
         if message_id == 77:
-            message.command = 512
+            message.command = command
             message.result = 0
         return message
 
@@ -581,27 +583,31 @@ class SchedulingAndStateTests(unittest.TestCase):
         instance = self.correlated_instance()
         instance.args.profile = "m3"
         instance.processed_commands = set()
-        for message_type in ("COMMAND_ACK", "AUTOPILOT_VERSION"):
+        for active_phase in (None, "positive"):
+            instance.active_phase = active_phase
             instance._handle_message(
-                self.response_message(1, message_type),
+                self.response_message(1, "COMMAND_ACK", command=410),
                 peer=("10.71.1.10", 14601),
                 received_ns=1_000_000_000,
                 datagram_sha256="7" * 64,
             )
         instance.writer.emit.assert_not_called()
 
-        instance.processed_commands.add("first-window-command")
-        with self.assertRaises(probe.ControlProbeError):
-            instance._handle_message(
-                self.response_message(1, "COMMAND_ACK"),
-                peer=("10.71.1.10", 14601),
-                received_ns=1_000_000_001,
-                datagram_sha256="8" * 64,
+        for message_type in ("COMMAND_ACK", "AUTOPILOT_VERSION"):
+            candidate = self.correlated_instance()
+            candidate.args.profile = "m3"
+            candidate.processed_commands = set()
+            with self.assertRaises(probe.ControlProbeError):
+                candidate._handle_message(
+                    self.response_message(1, message_type),
+                    peer=("10.71.1.10", 14601),
+                    received_ns=1_000_000_001,
+                    datagram_sha256="8" * 64,
+                )
+            self.assertEqual(
+                candidate.writer.emit.call_args.args[0],
+                "uncorrelated_control_response",
             )
-        self.assertEqual(
-            instance.writer.emit.call_args.args[0],
-            "uncorrelated_control_response",
-        )
 
     def test_five_uav_hundred_slots_allow_exact_five_percent_echo_loss(self) -> None:
         instance = self.correlated_instance()

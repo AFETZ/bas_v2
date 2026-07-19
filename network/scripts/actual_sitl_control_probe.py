@@ -1030,6 +1030,22 @@ class ActualSitlControlProbe:
                 common=common,
             )
             return
+        if message_type == "COMMAND_ACK":
+            command = getattr(message, "command", None)
+            # MAVProxy performs its own ArduPilot discovery throughout startup
+            # (for example MAV_CMD_GET_HOME_POSITION).  An ACK for any command
+            # other than our frozen MAV_CMD_REQUEST_MESSAGE(512) cannot be an
+            # acceptance response.  Its enclosing UDP datagram is still
+            # preserved byte-for-byte in ``control_datagram_receive``.  Filter
+            # it before stopped/uncorrelated response handling so background
+            # MAVProxy traffic cannot create a false causal failure, while an
+            # unbound ACK for command 512 remains fail-closed.
+            if (
+                isinstance(command, int)
+                and not isinstance(command, bool)
+                and command != 512
+            ):
+                return
         pending = self.pending.get(system_id)
         active_policy = getattr(self, "active_policy", None)
         active_response_policy = (
@@ -1112,17 +1128,6 @@ class ActualSitlControlProbe:
                 )
             return
         if pending is None and message_type in {"COMMAND_ACK", "AUTOPILOT_VERSION"}:
-            # MAVProxy performs its own ArduPilot startup discovery before the
-            # first acceptance window (for example MAV_CMD_GET_HOME_POSITION).
-            # Those responses are already preserved byte-for-byte by the
-            # enclosing ``control_datagram_receive`` record, but they cannot
-            # correlate with an acceptance request because no control command
-            # has been consumed yet.  Treat them like other ambient MAVLink
-            # traffic only in that strictly bounded pre-window state.  Once a
-            # window has ever been consumed, an unbound response remains a
-            # fail-closed condition, including between later windows.
-            if self.active_phase is None and not self.processed_commands:
-                return
             if (
                 getattr(getattr(self, "args", None), "profile", None)
                 == "m4_causality"

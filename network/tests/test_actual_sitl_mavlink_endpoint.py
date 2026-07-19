@@ -7,8 +7,10 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
+from network.bridge import actual_sitl_mavlink_endpoint as endpoint
 from network.bridge.actual_sitl_mavlink_endpoint import (
     AUTHORIZATION_CONTRACT,
     CONTROL_TOS,
@@ -258,6 +260,50 @@ class OpaqueForwardingTests(unittest.TestCase):
 
 
 class ProtocolAndEvidenceTests(unittest.TestCase):
+    def test_tcp_master_multiplicity_retry_is_bounded_and_exact(self) -> None:
+        candidates = [
+            {"inode": 101, "local": {"host": "127.0.0.1", "port": 40001}},
+            {"inode": 102, "local": {"host": "127.0.0.1", "port": 40002}},
+        ]
+        ambiguous = endpoint.TransientSocketMultiplicity(
+            "uav1 MAVProxy-to-SITL established TCP master",
+            candidates,
+        )
+        accepted = {"stable": True}
+        with (
+            mock.patch.object(
+                endpoint,
+                "_verify_channel_lineage_once",
+                side_effect=[ambiguous, accepted],
+            ) as snapshot,
+            mock.patch.object(endpoint.time, "sleep") as pause,
+        ):
+            self.assertEqual(
+                endpoint.verify_channel_lineage({}, ("10.72.1.1", 40000)),
+                accepted,
+            )
+        self.assertEqual(snapshot.call_count, 2)
+        pause.assert_called_once_with(endpoint.LINEAGE_MULTIPLICITY_RETRY_S)
+
+        with (
+            mock.patch.object(
+                endpoint,
+                "_verify_channel_lineage_once",
+                side_effect=[ambiguous] * endpoint.LINEAGE_MULTIPLICITY_ATTEMPTS,
+            ) as snapshot,
+            mock.patch.object(endpoint.time, "sleep") as pause,
+            self.assertRaisesRegex(
+                LineageError,
+                "multiplicity remained ambiguous across 4 bounded snapshots",
+            ),
+        ):
+            endpoint.verify_channel_lineage({}, ("10.72.1.1", 40000))
+        self.assertEqual(snapshot.call_count, endpoint.LINEAGE_MULTIPLICITY_ATTEMPTS)
+        self.assertEqual(
+            pause.call_count,
+            endpoint.LINEAGE_MULTIPLICITY_ATTEMPTS - 1,
+        )
+
     def test_radio_receive_requires_exact_control_tos_ancillary(self) -> None:
         valid = FakeRecvmsgSocket(
             ancillary=[

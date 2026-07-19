@@ -52,6 +52,8 @@ EXPECTED_UAVS = tuple(f"uav{index}" for index in range(1, 6))
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 MAX_JSON_BYTES = 4 * 1024 * 1024
+LINEAGE_MULTIPLICITY_ATTEMPTS = 4
+LINEAGE_MULTIPLICITY_RETRY_S = 0.05
 _EXECUTABLE_HASH_CACHE: dict[tuple[int, int, int, int, int], str] = {}
 
 
@@ -61,6 +63,18 @@ class EndpointError(RuntimeError):
 
 class LineageError(EndpointError):
     """A live PID/socket endpoint is absent, ambiguous, or replaced."""
+
+
+class TransientSocketMultiplicity(LineageError):
+    """An exact process pair briefly exposes more than one matching socket."""
+
+    def __init__(self, context: str, records: list[dict[str, Any]]) -> None:
+        self.context = context
+        self.records = records
+        super().__init__(
+            f"{context} must resolve to exactly one socket, found {len(records)}; "
+            f"candidates={json.dumps(records, sort_keys=True, separators=(',', ':'))}"
+        )
 
 
 def utc_now() -> str:
@@ -693,8 +707,15 @@ def _assert_process_roles(channel: dict[str, Any], mavproxy: dict[str, Any], sit
         raise LineageError(f"{channel['uav']} SITL argv[0] is not arducopter")
 
 
-def _one(records: list[dict[str, Any]], context: str) -> dict[str, Any]:
+def _one(
+    records: list[dict[str, Any]],
+    context: str,
+    *,
+    retry_multiple: bool = False,
+) -> dict[str, Any]:
     if len(records) != 1:
+        if retry_multiple and len(records) > 1:
+            raise TransientSocketMultiplicity(context, records)
         raise LineageError(f"{context} must resolve to exactly one socket, found {len(records)}")
     return records[0]
 
@@ -726,7 +747,7 @@ def verify_adapter_sockets(
     return {"identity": identity, "radio_socket": radio, "tail_socket": tail}
 
 
-def verify_channel_lineage(
+def _verify_channel_lineage_once(
     channel: dict[str, Any],
     mavproxy_peer: tuple[str, int],
     *,
@@ -770,6 +791,7 @@ def verify_channel_lineage(
             and record["local"]["host"] == "127.0.0.1"
         ],
         f"{channel['uav']} MAVProxy-to-SITL established TCP master",
+        retry_multiple=True,
     )
     sitl_tcp = owned_inet_records(sitl["pid"], "tcp", sitl["socket_inodes"])
     sitl_master = _one(
@@ -781,6 +803,7 @@ def verify_channel_lineage(
             and record["remote"] == mav_master["local"]
         ],
         f"{channel['uav']} SITL accepted TCP master",
+        retry_multiple=True,
     )
     _one(
         [
@@ -800,6 +823,42 @@ def verify_channel_lineage(
         "mavproxy_tcp_master": mav_master,
         "sitl_tcp_master": sitl_master,
     }
+
+
+def verify_channel_lineage(
+    channel: dict[str, Any],
+    mavproxy_peer: tuple[str, int],
+    *,
+    hash_executable: bool = True,
+) -> dict[str, Any]:
+    """Require one stable TCP master, tolerating only bounded snapshot overlap."""
+
+    ambiguous: list[dict[str, Any]] = []
+    last_error: TransientSocketMultiplicity | None = None
+    for attempt in range(1, LINEAGE_MULTIPLICITY_ATTEMPTS + 1):
+        try:
+            return _verify_channel_lineage_once(
+                channel,
+                mavproxy_peer,
+                hash_executable=hash_executable,
+            )
+        except TransientSocketMultiplicity as exc:
+            last_error = exc
+            ambiguous.append(
+                {
+                    "attempt": attempt,
+                    "context": exc.context,
+                    "candidates": exc.records,
+                }
+            )
+            if attempt < LINEAGE_MULTIPLICITY_ATTEMPTS:
+                time.sleep(LINEAGE_MULTIPLICITY_RETRY_S)
+    assert last_error is not None
+    raise LineageError(
+        "TCP master multiplicity remained ambiguous across "
+        f"{LINEAGE_MULTIPLICITY_ATTEMPTS} bounded snapshots: "
+        f"{json.dumps(ambiguous, sort_keys=True, separators=(',', ':'))}"
+    ) from last_error
 
 
 def socket_inode(sock: socket.socket) -> int:
