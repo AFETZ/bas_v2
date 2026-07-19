@@ -1511,7 +1511,7 @@ class Fixture:
                         control_events.append(
                             {
                                 "event": "control_datagram_receive",
-                                "monotonic_ns": received_ns,
+                                "monotonic_ns": received_ns + 100_000,
                                 "peer_ip": f"10.71.{uav}.10",
                                 "peer_udp_port": 14600 + uav,
                                 "received_monotonic_ns": received_ns,
@@ -3143,6 +3143,70 @@ class M3ExternalMatrixValidatorTests(unittest.TestCase):
         stats["packets_received_kernel"] = len(frames)
         dump(stats_path, stats)
 
+    def rewrite_actual_control_events(
+        self, records: list[dict[str, object]]
+    ) -> None:
+        records.sort(key=lambda item: int(item["monotonic_ns"]))
+        common_keys = {
+            "schema",
+            "run_id",
+            "runtime_id",
+            "run_nonce",
+            "profile",
+            "transport_nonce32",
+            "transport_nonce_derivation",
+            "role_subject",
+            "event_sequence",
+            "previous_record_sha256",
+        }
+        dump_hash_chain(
+            self.run_dir / "raw/actual_control/events.jsonl",
+            [
+                {key: value for key, value in item.items() if key not in common_keys}
+                for item in records
+            ],
+            identity={
+                "schema": control_probe.EVENT_SCHEMA,
+                "run_id": RUN_ID,
+                "runtime_id": RUNTIME_ID,
+                "run_nonce": RUN_NONCE,
+                "profile": "m3",
+                "transport_nonce32": RUN_NONCE,
+                "transport_nonce_derivation": "identity/full_run_nonce32",
+                "role_subject": control_probe.ROLE_SUBJECT,
+            },
+            sequence_key="event_sequence",
+        )
+
+    def mutate_positive_uav1_ack_datagram_time(
+        self, timestamp: int
+    ) -> None:
+        records = validator.strict_jsonl(
+            self.run_dir / "raw/actual_control/events.jsonl"
+        )
+        result = next(
+            item
+            for item in records
+            if item.get("event") == "transaction_result"
+            and item.get("phase") == "positive"
+            and item.get("uav") == 1
+            and item.get("sequence") == 1
+        )
+        ack = result["ack"]
+        datagram = next(
+            item
+            for item in records
+            if item.get("event") == "control_datagram_receive"
+            and item.get("transport_payload_sha256")
+            == ack["transport_payload_sha256"]
+            and item.get("received_monotonic_ns")
+            == ack["received_monotonic_ns"]
+            and item.get("peer_ip") == ack["peer_ip"]
+            and item.get("peer_udp_port") == ack["peer_udp_port"]
+        )
+        datagram["monotonic_ns"] = timestamp
+        self.rewrite_actual_control_events(records)
+
     def test_complete_30_cell_external_fixture_passes(self) -> None:
         result = self.evaluate()
         self.assertTrue(result["passed"], "\n".join(result["failures"][:20]))
@@ -3305,6 +3369,54 @@ class M3ExternalMatrixValidatorTests(unittest.TestCase):
         self.assertIn(
             "recovery/uav1/1 ACK datagram lineage differs",
             "\n".join(adversarial["gates"]["actual_sitl_control"]["failures"]),
+        )
+
+    def test_ack_datagram_event_before_receive_fails_closed(self) -> None:
+        records = validator.strict_jsonl(
+            self.run_dir / "raw/actual_control/events.jsonl"
+        )
+        result = next(
+            item
+            for item in records
+            if item.get("event") == "transaction_result"
+            and item.get("phase") == "positive"
+            and item.get("uav") == 1
+            and item.get("sequence") == 1
+        )
+        self.mutate_positive_uav1_ack_datagram_time(
+            int(result["ack"]["received_monotonic_ns"]) - 1
+        )
+
+        evaluation = self.evaluate()
+
+        self.assertFalse(evaluation["passed"])
+        self.assertIn(
+            "positive/uav1/1 ACK datagram lineage differs",
+            "\n".join(evaluation["gates"]["actual_sitl_control"]["failures"]),
+        )
+
+    def test_ack_datagram_event_after_completion_fails_closed(self) -> None:
+        records = validator.strict_jsonl(
+            self.run_dir / "raw/actual_control/events.jsonl"
+        )
+        result = next(
+            item
+            for item in records
+            if item.get("event") == "transaction_result"
+            and item.get("phase") == "positive"
+            and item.get("uav") == 1
+            and item.get("sequence") == 1
+        )
+        self.mutate_positive_uav1_ack_datagram_time(
+            int(result["monotonic_ns"]) + 1
+        )
+
+        evaluation = self.evaluate()
+
+        self.assertFalse(evaluation["passed"])
+        self.assertIn(
+            "positive/uav1/1 ACK datagram lineage differs",
+            "\n".join(evaluation["gates"]["actual_sitl_control"]["failures"]),
         )
 
     def test_omitted_runtime_source_hash_fails_exact_identity(self) -> None:

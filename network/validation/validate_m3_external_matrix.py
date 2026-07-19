@@ -3074,8 +3074,12 @@ def validate_actual_sitl_control(
                     ack_datagrams = [
                         record
                         for record in datagrams_by_hash.get(ack_hash, [])
-                        if record.get("monotonic_ns") == ack_received_ns
-                        and record.get("received_monotonic_ns") == ack_received_ns
+                        if record.get("received_monotonic_ns") == ack_received_ns
+                        and isinstance(record.get("monotonic_ns"), int)
+                        and not isinstance(record.get("monotonic_ns"), bool)
+                        and ack_received_ns
+                        <= record["monotonic_ns"]
+                        <= completed_ns
                         and record.get("peer_ip") == ack["peer_ip"]
                         and record.get("peer_udp_port") == ack["peer_udp_port"]
                         and record.get("rx_tos") == TOS_BY_CLASS["control"]
