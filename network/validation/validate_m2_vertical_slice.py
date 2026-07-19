@@ -100,6 +100,14 @@ ENDPOINT_MATRIX_RELATIVE = "network/config/endpoint_matrix_5uav.json"
 ENGINE_CONFIG_TOOL_RELATIVE = "network/ns3/tap_packet_engine_config.py"
 ENGINE_RUNNER_RELATIVE = "network/ns3/run_ns3_tap_packet_engine.sh"
 ENGINE_SOURCE_RELATIVE = "network/ns3/scratch/ams-tap-packet-engine.cc"
+CAPTURE_STATS_CONTRACT = "ams.raw-packet-capture-stats/v2"
+CAPTURE_PROTOCOL = "ETH_P_ALL"
+CAPTURE_PACKET_FILTER = "none"
+CAPTURE_RECEIVE_BUFFER_REQUESTED_BYTES = 8_388_608
+CAPTURE_RECEIVE_BUFFER_EFFECTIVE_BYTES = 16_777_216
+CAPTURE_RECEIVE_BUFFER_SETTERS = {"SO_RCVBUF", "SO_RCVBUFFORCE"}
+CAPTURE_DRAIN_BATCH_PACKET_LIMIT = 256
+CAPTURE_DRAIN_BATCH_BYTE_LIMIT = 4_194_304
 REQUIRED_NS3_MODULES = (
     "applications",
     "bridge",
@@ -1466,10 +1474,17 @@ def _capture_stats_gate(run_dir: Path) -> dict[str, Any]:
     exact_keys = {
         "contract",
         "interface",
+        "capture_protocol",
+        "packet_filter",
         "pcap_path",
         "pcap_bytes",
         "linktype",
         "snaplen",
+        "receive_buffer_requested_bytes",
+        "receive_buffer_effective_bytes",
+        "receive_buffer_setter",
+        "drain_batch_packet_limit",
+        "drain_batch_byte_limit",
         "started_monotonic_ns",
         "stopped_monotonic_ns",
         "stop_signal",
@@ -1488,13 +1503,31 @@ def _capture_stats_gate(run_dir: Path) -> dict[str, Any]:
         packet_count = parsed.get("packet_count")
         if stats:
             if set(stats) != exact_keys:
-                failures.append(f"{stats_relative}: fields differ from exact stats v1")
+                failures.append(f"{stats_relative}: fields differ from exact stats v2")
             if (
-                stats.get("contract") != "ams.raw-packet-capture-stats/v1"
+                stats.get("contract") != CAPTURE_STATS_CONTRACT
                 or stats.get("interface") != interface
+                or stats.get("capture_protocol") != CAPTURE_PROTOCOL
+                or stats.get("packet_filter") != CAPTURE_PACKET_FILTER
                 or stats.get("pcap_path") != pcap_path.name
+                or not _is_int(stats.get("linktype"))
                 or stats.get("linktype") != 1
+                or not _is_int(stats.get("snaplen"))
                 or stats.get("snaplen") != 65_535
+                or not _is_int(stats.get("receive_buffer_requested_bytes"))
+                or stats.get("receive_buffer_requested_bytes")
+                != CAPTURE_RECEIVE_BUFFER_REQUESTED_BYTES
+                or not _is_int(stats.get("receive_buffer_effective_bytes"))
+                or stats.get("receive_buffer_effective_bytes")
+                != CAPTURE_RECEIVE_BUFFER_EFFECTIVE_BYTES
+                or stats.get("receive_buffer_setter")
+                not in CAPTURE_RECEIVE_BUFFER_SETTERS
+                or not _is_int(stats.get("drain_batch_packet_limit"))
+                or stats.get("drain_batch_packet_limit")
+                != CAPTURE_DRAIN_BATCH_PACKET_LIMIT
+                or not _is_int(stats.get("drain_batch_byte_limit"))
+                or stats.get("drain_batch_byte_limit")
+                != CAPTURE_DRAIN_BATCH_BYTE_LIMIT
                 or stats.get("stop_signal") != "SIGINT"
             ):
                 failures.append(f"{stats_relative}: capture identity is not exact")

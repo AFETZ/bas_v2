@@ -43,6 +43,7 @@ from network.ns3.ns3_build_receipt import (  # noqa: E402
     EXPECTED_CORE_TREE_SHA256,
     subject_digest,
 )
+from network.scripts import raw_packet_capture  # noqa: E402
 
 
 RUN_ID = "m2_fixture"
@@ -530,12 +531,27 @@ class FixtureBuilder:
             pcap = self.run_dir / relative
             packets = pcap_packet_count(pcap)
             stats = {
-                "contract": "ams.raw-packet-capture-stats/v1",
+                "contract": raw_packet_capture.STATS_CONTRACT,
                 "interface": interface,
+                "capture_protocol": raw_packet_capture.CAPTURE_PROTOCOL,
+                "packet_filter": raw_packet_capture.PACKET_FILTER,
                 "pcap_path": pcap.name,
                 "pcap_bytes": pcap.stat().st_size,
                 "linktype": 1,
-                "snaplen": 65_535,
+                "snaplen": raw_packet_capture.SNAPLEN,
+                "receive_buffer_requested_bytes": (
+                    raw_packet_capture.RECEIVE_BUFFER_REQUESTED_BYTES
+                ),
+                "receive_buffer_effective_bytes": (
+                    raw_packet_capture.RECEIVE_BUFFER_EFFECTIVE_BYTES
+                ),
+                "receive_buffer_setter": "SO_RCVBUF",
+                "drain_batch_packet_limit": (
+                    raw_packet_capture.DRAIN_BATCH_PACKET_LIMIT
+                ),
+                "drain_batch_byte_limit": (
+                    raw_packet_capture.DRAIN_BATCH_BYTE_LIMIT
+                ),
                 "started_monotonic_ns": index * 1_000_000,
                 "stopped_monotonic_ns": index * 1_000_000 + 500_000,
                 "stop_signal": "SIGINT",
@@ -1006,6 +1022,41 @@ class M2VerticalSliceValidatorTests(unittest.TestCase):
                 result["gates"]["capture_accounting"]["details"]["captures"]["tail"]
                 ["packets_written"],
                 0,
+            )
+            capture_stats = json.loads(
+                (run_dir / "logs/capture_tail_stats.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                capture_stats["contract"], raw_packet_capture.STATS_CONTRACT
+            )
+            self.assertEqual(
+                capture_stats["capture_protocol"],
+                raw_packet_capture.CAPTURE_PROTOCOL,
+            )
+            self.assertEqual(
+                capture_stats["packet_filter"], raw_packet_capture.PACKET_FILTER
+            )
+            self.assertEqual(
+                capture_stats["receive_buffer_requested_bytes"],
+                raw_packet_capture.RECEIVE_BUFFER_REQUESTED_BYTES,
+            )
+            self.assertEqual(
+                capture_stats["receive_buffer_effective_bytes"],
+                raw_packet_capture.RECEIVE_BUFFER_EFFECTIVE_BYTES,
+            )
+            self.assertIn(
+                capture_stats["receive_buffer_setter"],
+                {"SO_RCVBUF", "SO_RCVBUFFORCE"},
+            )
+            self.assertEqual(
+                capture_stats["drain_batch_packet_limit"],
+                raw_packet_capture.DRAIN_BATCH_PACKET_LIMIT,
+            )
+            self.assertEqual(
+                capture_stats["drain_batch_byte_limit"],
+                raw_packet_capture.DRAIN_BATCH_BYTE_LIMIT,
             )
 
     def test_producer_file_and_no_write_revalidation_are_identical(self) -> None:

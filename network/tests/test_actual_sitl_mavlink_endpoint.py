@@ -16,6 +16,7 @@ from network.bridge.actual_sitl_mavlink_endpoint import (
     CONTROL_TOS,
     MANIFEST_CONTRACT,
     EndpointError,
+    ForwardLineageGate,
     JsonlAudit,
     LineageError,
     document_sha256,
@@ -30,7 +31,6 @@ from network.bridge.actual_sitl_mavlink_endpoint import (
     validate_authorization,
     validate_jsonl_audit,
     validate_manifest,
-    verify_expected_process,
 )
 from network.bridge.opaque_udp_relay import ByteOpaqueUdpRelay, RelayError
 
@@ -224,16 +224,22 @@ class OpaqueForwardingTests(unittest.TestCase):
                     )
                     for role in ("mavproxy", "sitl")
                 }
+                guard = None
                 try:
                     expected = {
                         role: expected_process_identity(read_process_identity(process.pid))
                         for role, process in processes.items()
                     }
                     radio = FakeSocket()
-
-                    def live_lineage() -> None:
-                        for role in ("mavproxy", "sitl"):
-                            verify_expected_process(role, expected[role])
+                    clock = [1_000_000_000]
+                    full_lineage = mock.Mock()
+                    guard = ForwardLineageGate(
+                        expected,
+                        full_check_interval_ns=250_000_000,
+                        full_check=full_lineage,
+                        monotonic_ns=lambda: clock[0],
+                    )
+                    guard.mark_full_check()
 
                     forwarder = ByteOpaqueUdpRelay(
                         radio,
@@ -242,17 +248,26 @@ class OpaqueForwardingTests(unittest.TestCase):
                         tail_peer_host="10.72.1.1",
                         strict_tail_peer=True,
                         forwarding_enabled=False,
-                        before_forward=live_lineage,
+                        before_forward=guard.check,
                     )
                     peer = ("10.72.1.1", 43000)
                     forwarder.lock_peer(peer)
                     forwarder.authorize()
+                    for ordinal in range(3):
+                        forwarder.relay_tail(f"frame-{ordinal}".encode(), peer)
+                    full_lineage.assert_not_called()
+                    clock[0] += 250_000_000
+                    forwarder.relay_tail(b"cadence-refresh", peer)
+                    full_lineage.assert_called_once_with()
+                    sent_before_kill = list(radio.sent)
                     processes[killed_role].kill()
                     processes[killed_role].wait(timeout=3)
-                    with self.assertRaisesRegex(LineageError, "cannot snapshot"):
+                    with self.assertRaisesRegex(LineageError, "exited before relay"):
                         forwarder.relay_tail(b"actual-vehicle-frame", peer)
-                    self.assertEqual(radio.sent, [])
+                    self.assertEqual(radio.sent, sent_before_kill)
                 finally:
+                    if guard is not None:
+                        guard.close()
                     for process in processes.values():
                         if process.poll() is None:
                             process.kill()
@@ -269,12 +284,37 @@ class ProtocolAndEvidenceTests(unittest.TestCase):
             "uav1 MAVProxy-to-SITL established TCP master",
             candidates,
         )
+        with self.assertRaises(endpoint.TransientSocketMultiplicity):
+            endpoint._one(
+                [],
+                "uav1 MAVProxy-to-SITL established TCP master",
+                retry_multiple=True,
+            )
         accepted = {"stable": True}
         with (
             mock.patch.object(
                 endpoint,
                 "_verify_channel_lineage_once",
                 side_effect=[ambiguous, accepted],
+            ) as snapshot,
+            mock.patch.object(endpoint.time, "sleep") as pause,
+        ):
+            self.assertEqual(
+                endpoint.verify_channel_lineage({}, ("10.72.1.1", 40000)),
+                accepted,
+            )
+        self.assertEqual(snapshot.call_count, 2)
+        pause.assert_called_once_with(endpoint.LINEAGE_MULTIPLICITY_RETRY_S)
+
+        missing = endpoint.TransientSocketMultiplicity(
+            "uav1 MAVProxy-to-SITL established TCP master",
+            [],
+        )
+        with (
+            mock.patch.object(
+                endpoint,
+                "_verify_channel_lineage_once",
+                side_effect=[missing, accepted],
             ) as snapshot,
             mock.patch.object(endpoint.time, "sleep") as pause,
         ):
@@ -443,11 +483,14 @@ class ProtocolAndEvidenceTests(unittest.TestCase):
         manifest = valid_manifest()
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "adapter.jsonl"
-            audit = JsonlAudit(path, manifest, "uav1")
-            audit.emit("adapter_bound_not_ready")
-            audit.emit("forward", direction="tail_to_gcs", sha256="d" * 64)
-            audit.emit("adapter_stop")
-            audit.close()
+            with mock.patch.object(endpoint.os, "fsync") as fsync:
+                audit = JsonlAudit(path, manifest, "uav1")
+                audit.emit("adapter_bound_not_ready")
+                audit.emit("forward", direction="tail_to_gcs", sha256="d" * 64)
+                audit.emit("adapter_stop")
+                fsync.assert_not_called()
+                audit.close()
+                fsync.assert_called_once()
             records = validate_jsonl_audit(
                 path,
                 run_id=manifest["run_id"],

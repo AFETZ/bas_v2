@@ -79,6 +79,7 @@ FORBIDDEN_KIND_CODES = {
     "legacy_direct_port": 3,
     "unreachable_ipv4": 4,
 }
+ENDPOINT_PUMP_DATAGRAM_LIMIT = 64
 
 
 class ProbeError(RuntimeError):
@@ -792,9 +793,10 @@ class EventWriter:
             json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
         )
         self.handle.flush()
-        os.fsync(self.handle.fileno())
 
     def close(self) -> None:
+        self.handle.flush()
+        os.fsync(self.handle.fileno())
         self.handle.close()
 
 
@@ -905,6 +907,7 @@ class EndpointAgent:
         )
         if HEX32.fullmatch(self.transport_run_nonce) is None:
             raise ProbeError("transport_run_nonce must be exact 128-bit lowercase hex")
+        self._pump_socket_cursor = 0
 
     def all_sockets(self) -> list[socket.socket]:
         return [
@@ -912,60 +915,79 @@ class EndpointAgent:
             *([self.p2mp_socket] if self.p2mp_socket else []),
         ]
 
+    def _receive_one(self, sock: socket.socket) -> bool:
+        try:
+            payload, ancillary, _flags, peer = sock.recvmsg(65535, 128)
+        except BlockingIOError:
+            return False
+        received_ns = time.monotonic_ns()
+        rx_tos: int | None = None
+        for level, kind, data in ancillary:
+            if level == socket.IPPROTO_IP and kind == getattr(
+                socket, "IP_TOS", 1
+            ):
+                rx_tos = int.from_bytes(data, sys.byteorder)
+        base = {
+            "namespace": self.namespace,
+            "local_ip": self.ip,
+            "local_udp_port": int(sock.getsockname()[1]),
+            "peer_ip": peer[0],
+            "peer_udp_port": int(peer[1]),
+            "rx_tos": rx_tos,
+            "transport_payload_hex": payload.hex(),
+            "transport_payload_sha256": sha256_bytes(payload),
+            "transport_payload_size": len(payload),
+            "received_monotonic_ns": received_ns,
+        }
+        try:
+            decoded = decode_transport_unit(payload)
+            if decoded["run_nonce"] != self.transport_run_nonce:
+                self.writer.emit("foreign_receive", reason="run_nonce", **base)
+                return True
+            self.writer.emit(
+                "remote_receive",
+                socket_class=self.socket_class[sock.fileno()],
+                phase=decoded["phase"],
+                flow_id=decoded["flow_id"],
+                cell_id=None if decoded["p2mp"] else decoded["flow_id"],
+                traffic_class=decoded["traffic_class"],
+                direction=decoded["direction"],
+                uav=decoded["uav"],
+                sequence=decoded["sequence"],
+                record_nonce=decoded["record_nonce"],
+                application_unit_sha256=decoded["application_unit_sha256"],
+                protocol_family=decoded["protocol_family"],
+                p2mp=decoded["p2mp"],
+                mavlink_frame_sha256=decoded["mavlink_frame_sha256"],
+                sent_monotonic_ns=decoded.get("sent_monotonic_ns"),
+                **base,
+            )
+        except (ProbeError, UnicodeError, ValueError) as exc:
+            self.writer.emit("foreign_receive", reason=str(exc), **base)
+        return True
+
     def pump(self, timeout_s: float) -> None:
+        sockets = self.all_sockets()
         readable, _writable, _exceptional = select.select(
-            self.all_sockets(), [], [], timeout_s
+            sockets, [], [], timeout_s
         )
-        for sock in readable:
-            while True:
-                try:
-                    payload, ancillary, _flags, peer = sock.recvmsg(65535, 128)
-                except BlockingIOError:
+        if not readable:
+            return
+        start = self._pump_socket_cursor % len(sockets)
+        ordered = sockets[start:] + sockets[:start]
+        readable_fds = {sock.fileno() for sock in readable}
+        active = [sock for sock in ordered if sock.fileno() in readable_fds]
+        self._pump_socket_cursor = (start + 1) % len(sockets)
+        remaining = ENDPOINT_PUMP_DATAGRAM_LIMIT
+        while active and remaining > 0:
+            next_round: list[socket.socket] = []
+            for sock in active:
+                if remaining <= 0:
                     break
-                received_ns = time.monotonic_ns()
-                rx_tos: int | None = None
-                for level, kind, data in ancillary:
-                    if level == socket.IPPROTO_IP and kind == getattr(
-                        socket, "IP_TOS", 1
-                    ):
-                        rx_tos = int.from_bytes(data, sys.byteorder)
-                base = {
-                    "namespace": self.namespace,
-                    "local_ip": self.ip,
-                    "local_udp_port": int(sock.getsockname()[1]),
-                    "peer_ip": peer[0],
-                    "peer_udp_port": int(peer[1]),
-                    "rx_tos": rx_tos,
-                    "transport_payload_hex": payload.hex(),
-                    "transport_payload_sha256": sha256_bytes(payload),
-                    "transport_payload_size": len(payload),
-                    "received_monotonic_ns": received_ns,
-                }
-                try:
-                    decoded = decode_transport_unit(payload)
-                    if decoded["run_nonce"] != self.transport_run_nonce:
-                        self.writer.emit("foreign_receive", reason="run_nonce", **base)
-                        continue
-                    self.writer.emit(
-                        "remote_receive",
-                        socket_class=self.socket_class[sock.fileno()],
-                        phase=decoded["phase"],
-                        flow_id=decoded["flow_id"],
-                        cell_id=None if decoded["p2mp"] else decoded["flow_id"],
-                        traffic_class=decoded["traffic_class"],
-                        direction=decoded["direction"],
-                        uav=decoded["uav"],
-                        sequence=decoded["sequence"],
-                        record_nonce=decoded["record_nonce"],
-                        application_unit_sha256=decoded["application_unit_sha256"],
-                        protocol_family=decoded["protocol_family"],
-                        p2mp=decoded["p2mp"],
-                        mavlink_frame_sha256=decoded["mavlink_frame_sha256"],
-                        sent_monotonic_ns=decoded.get("sent_monotonic_ns"),
-                        **base,
-                    )
-                except (ProbeError, UnicodeError, ValueError) as exc:
-                    self.writer.emit("foreign_receive", reason=str(exc), **base)
+                if self._receive_one(sock):
+                    remaining -= 1
+                    next_round.append(sock)
+            active = next_round
 
     def pump_until(self, deadline_ns: int) -> None:
         while True:

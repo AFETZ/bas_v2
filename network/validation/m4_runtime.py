@@ -35,6 +35,14 @@ MAX_POSE_AGE_NS = 1_500_000_000
 QUERY_DEADLINE_NS = 100_000_000
 RUNTIME_EVENT_SCHEMA = "ams.m4.runtime_event/v1"
 CLOCK_SAMPLE_SCHEMA = "ams.m4.clock_correlation_sample/v1"
+CAPTURE_STATS_CONTRACT = "ams.raw-packet-capture-stats/v2"
+CAPTURE_PROTOCOL = "ETH_P_ALL"
+CAPTURE_PACKET_FILTER = "none"
+CAPTURE_RECEIVE_BUFFER_REQUESTED_BYTES = 8_388_608
+CAPTURE_RECEIVE_BUFFER_EFFECTIVE_BYTES = 16_777_216
+CAPTURE_RECEIVE_BUFFER_SETTERS = {"SO_RCVBUF", "SO_RCVBUFFORCE"}
+CAPTURE_DRAIN_BATCH_PACKET_LIMIT = 256
+CAPTURE_DRAIN_BATCH_BYTE_LIMIT = 4_194_304
 ENDPOINTS = ("gcs", "uav1", "uav2", "uav3", "uav4", "uav5")
 M3_CELL_IDS = {
     f"uav{uav}.{traffic_class}.{direction}"
@@ -2141,10 +2149,17 @@ def validate_external_captures(
         stats_keys = {
             "contract",
             "interface",
+            "capture_protocol",
+            "packet_filter",
             "pcap_path",
             "pcap_bytes",
             "linktype",
             "snaplen",
+            "receive_buffer_requested_bytes",
+            "receive_buffer_effective_bytes",
+            "receive_buffer_setter",
+            "drain_batch_packet_limit",
+            "drain_batch_byte_limit",
             "started_monotonic_ns",
             "stopped_monotonic_ns",
             "stop_signal",
@@ -2163,20 +2178,40 @@ def validate_external_captures(
             stderr = run_dir / f"logs/capture-{name}.stderr"
             if (
                 set(stats) != stats_keys
-                or stats.get("contract") != "ams.raw-packet-capture-stats/v1"
+                or stats.get("contract") != CAPTURE_STATS_CONTRACT
                 or stats.get("interface") != interface
+                or stats.get("capture_protocol") != CAPTURE_PROTOCOL
+                or stats.get("packet_filter") != CAPTURE_PACKET_FILTER
                 or stats.get("pcap_path") != pcap_path.name
+                or type(stats.get("pcap_bytes")) is not int
                 or stats.get("pcap_bytes") != pcap_path.stat().st_size
+                or type(stats.get("linktype")) is not int
                 or stats.get("linktype") != 1
+                or type(stats.get("snaplen")) is not int
                 or stats.get("snaplen") != 65_535
+                or type(stats.get("receive_buffer_requested_bytes")) is not int
+                or stats.get("receive_buffer_requested_bytes")
+                != CAPTURE_RECEIVE_BUFFER_REQUESTED_BYTES
+                or type(stats.get("receive_buffer_effective_bytes")) is not int
+                or stats.get("receive_buffer_effective_bytes")
+                != CAPTURE_RECEIVE_BUFFER_EFFECTIVE_BYTES
+                or stats.get("receive_buffer_setter")
+                not in CAPTURE_RECEIVE_BUFFER_SETTERS
+                or type(stats.get("drain_batch_packet_limit")) is not int
+                or stats.get("drain_batch_packet_limit")
+                != CAPTURE_DRAIN_BATCH_PACKET_LIMIT
+                or type(stats.get("drain_batch_byte_limit")) is not int
+                or stats.get("drain_batch_byte_limit")
+                != CAPTURE_DRAIN_BATCH_BYTE_LIMIT
                 or stats.get("stop_signal") != "SIGINT"
+                or type(stats.get("packets_written")) is not int
                 or stats.get("packets_written") != count
-                or isinstance(stats.get("packets_received_kernel"), bool)
-                or not isinstance(stats.get("packets_received_kernel"), int)
+                or type(stats.get("packets_received_kernel")) is not int
                 or stats["packets_received_kernel"] < count
+                or type(stats.get("packets_dropped_kernel")) is not int
                 or stats.get("packets_dropped_kernel") != 0
-                or not isinstance(stats.get("started_monotonic_ns"), int)
-                or not isinstance(stats.get("stopped_monotonic_ns"), int)
+                or type(stats.get("started_monotonic_ns")) is not int
+                or type(stats.get("stopped_monotonic_ns")) is not int
                 or stats["started_monotonic_ns"] >= start_ns
                 or stats["stopped_monotonic_ns"] <= end_ns
                 or not regular_file(stderr)

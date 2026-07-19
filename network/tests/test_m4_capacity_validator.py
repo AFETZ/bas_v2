@@ -26,16 +26,19 @@ from network.validation.m4_runtime import (  # noqa: E402
     REQUIRED_PROCESS_COUNTS,
     _consume_ordered_occurrence,
     validate_clock_process_binding,
+    validate_external_captures,
 )
 from network.validation.validate_m4_capacity import (  # noqa: E402
     _accepted_m3_actual_control_api,
     _actual_control_event_audit,
     _expected_actual_control_api,
     _runtime_process_samples,
+    _tail_capture_evidence,
     _tail_topology_evidence,
 )
 from network.scripts import actual_sitl_control_probe as control_probe  # noqa: E402
 from network.scripts import m4_capacity_airborne as airborne  # noqa: E402
+from network.scripts import raw_packet_capture  # noqa: E402
 
 
 def canonical_bytes(value: object) -> bytes:
@@ -44,6 +47,54 @@ def canonical_bytes(value: object) -> bytes:
 
 def sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def write_capture_stats_v2_fixture(
+    run_dir: Path,
+    *,
+    name: str,
+    interface: str,
+    setter: str = "SO_RCVBUF",
+) -> None:
+    pcap = run_dir / f"pcap/{name}.pcap"
+    pcap.parent.mkdir(parents=True, exist_ok=True)
+    pcap.write_bytes(b"fixture-pcap")
+    logs = run_dir / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    (logs / f"capture-{name}.json").write_bytes(
+        canonical_bytes(
+            {
+                "contract": raw_packet_capture.STATS_CONTRACT,
+                "interface": interface,
+                "capture_protocol": raw_packet_capture.CAPTURE_PROTOCOL,
+                "packet_filter": raw_packet_capture.PACKET_FILTER,
+                "pcap_path": pcap.name,
+                "pcap_bytes": pcap.stat().st_size,
+                "linktype": 1,
+                "snaplen": raw_packet_capture.SNAPLEN,
+                "receive_buffer_requested_bytes": (
+                    raw_packet_capture.RECEIVE_BUFFER_REQUESTED_BYTES
+                ),
+                "receive_buffer_effective_bytes": (
+                    raw_packet_capture.RECEIVE_BUFFER_EFFECTIVE_BYTES
+                ),
+                "receive_buffer_setter": setter,
+                "drain_batch_packet_limit": (
+                    raw_packet_capture.DRAIN_BATCH_PACKET_LIMIT
+                ),
+                "drain_batch_byte_limit": (
+                    raw_packet_capture.DRAIN_BATCH_BYTE_LIMIT
+                ),
+                "started_monotonic_ns": 1_000_000_000,
+                "stopped_monotonic_ns": 4_000_000_000,
+                "stop_signal": "SIGINT",
+                "packets_written": 1,
+                "packets_received_kernel": 1,
+                "packets_dropped_kernel": 0,
+            }
+        )
+    )
+    (logs / f"capture-{name}.stderr").write_bytes(b"")
 
 
 class AcceptedActualControlApiTests(unittest.TestCase):
@@ -920,6 +971,132 @@ class FrozenRuntimeContractTests(unittest.TestCase):
                 *(f"tail-uav{index}" for index in range(1, 6)),
             },
         )
+
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            control = {
+                "delivered_request_hashes": {
+                    f"uav{index}": [f"{index:064x}"] for index in range(1, 6)
+                },
+                "response_hashes": {
+                    f"uav{index}": [f"{index + 5:064x}"] for index in range(1, 6)
+                },
+            }
+            all_control_hashes = {
+                digest
+                for mapping in control.values()
+                for hashes in mapping.values()
+                for digest in hashes
+            }
+            for index in range(1, 6):
+                write_capture_stats_v2_fixture(
+                    run_dir,
+                    name=f"tail-root-uav{index}",
+                    interface=f"ams-tail{index}",
+                    setter="SO_RCVBUF" if index % 2 else "SO_RCVBUFFORCE",
+                )
+                write_capture_stats_v2_fixture(
+                    run_dir,
+                    name=f"tail-uav{index}",
+                    interface="tail0",
+                    setter="SO_RCVBUFFORCE" if index % 2 else "SO_RCVBUF",
+                )
+            with mock.patch(
+                "network.validation.validate_m4_capacity._pcap_udp_payload_hashes",
+                return_value=(all_control_hashes, 1),
+            ):
+                details, failures = _tail_capture_evidence(
+                    run_dir,
+                    control=control,
+                    start_ns=2_000_000_000,
+                    end_ns=3_000_000_000,
+                )
+            self.assertEqual(failures, [])
+            self.assertEqual(details["tail_capture_count"], 10)
+
+            tail_stats_path = run_dir / "logs/capture-tail-uav3.json"
+            tail_stats = json.loads(tail_stats_path.read_text())
+            tail_stats["receive_buffer_effective_bytes"] -= 1
+            tail_stats_path.write_bytes(canonical_bytes(tail_stats))
+            with mock.patch(
+                "network.validation.validate_m4_capacity._pcap_udp_payload_hashes",
+                return_value=(all_control_hashes, 1),
+            ):
+                _details, failures = _tail_capture_evidence(
+                    run_dir,
+                    control=control,
+                    start_ns=2_000_000_000,
+                    end_ns=3_000_000_000,
+                )
+            self.assertTrue(any("capture accounting differs" in item for item in failures))
+
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            (run_dir / "raw").mkdir(parents=True)
+            (run_dir / "raw/m4_capacity_contract.json").write_bytes(
+                canonical_bytes({})
+            )
+            capture_specs = [
+                *((f"endpoint-{endpoint}", "eth0") for endpoint in (
+                    "gcs", "uav1", "uav2", "uav3", "uav4", "uav5"
+                )),
+                *((f"ns3-external-{endpoint}", f"vp-{endpoint}") for endpoint in (
+                    "gcs", "uav1", "uav2", "uav3", "uav4", "uav5"
+                )),
+            ]
+            for ordinal, (name, interface) in enumerate(capture_specs):
+                write_capture_stats_v2_fixture(
+                    run_dir,
+                    name=name,
+                    interface=interface,
+                    setter=(
+                        "SO_RCVBUF" if ordinal % 2 else "SO_RCVBUFFORCE"
+                    ),
+                )
+            with (
+                mock.patch(
+                    "network.validation.validate_m3_external_matrix.parse_pcap",
+                    return_value=(1, [], []),
+                ),
+                mock.patch(
+                    "network.validation.m4_runtime._collect_capacity_endpoint_records",
+                    return_value=({}, {}),
+                ),
+            ):
+                details, failures = validate_external_captures(
+                    run_dir,
+                    start_ns=2_000_000_000,
+                    end_ns=3_000_000_000,
+                )
+            self.assertEqual(details["capture_count"], 12)
+            self.assertFalse(
+                any("capture accounting differs" in item for item in failures),
+                failures,
+            )
+
+            endpoint_stats_path = run_dir / "logs/capture-endpoint-uav2.json"
+            endpoint_stats = json.loads(endpoint_stats_path.read_text())
+            endpoint_stats["drain_batch_packet_limit"] = 255
+            endpoint_stats_path.write_bytes(canonical_bytes(endpoint_stats))
+            with (
+                mock.patch(
+                    "network.validation.validate_m3_external_matrix.parse_pcap",
+                    return_value=(1, [], []),
+                ),
+                mock.patch(
+                    "network.validation.m4_runtime._collect_capacity_endpoint_records",
+                    return_value=({}, {}),
+                ),
+            ):
+                _details, failures = validate_external_captures(
+                    run_dir,
+                    start_ns=2_000_000_000,
+                    end_ns=3_000_000_000,
+                )
+            self.assertIn(
+                "capture accounting differs: endpoint-uav2",
+                failures,
+            )
 
     def test_actual_control_runtime_roles_are_classified_separately(self) -> None:
         self.assertEqual(

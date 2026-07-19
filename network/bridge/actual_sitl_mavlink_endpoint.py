@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import re
+import select
 import selectors
 import signal
 import socket
@@ -26,7 +27,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -222,7 +223,6 @@ class JsonlAudit:
             "uav": uav,
         }
         self._sequence = 0
-        self._last_fsync_ns = time.monotonic_ns()
         self._dirty = False
         self._previous_record_sha256: str | None = None
 
@@ -245,13 +245,6 @@ class JsonlAudit:
             offset += os.write(self._descriptor, payload[offset:])
         self._previous_record_sha256 = hashlib.sha256(payload).hexdigest()
         self._dirty = True
-        # Packet forwarding can generate hundreds of audit records per second.
-        # Bound durability work to at most one fsync per second; an incomplete
-        # crash artifact still fails strict sequence/hash-chain validation.
-        if now_ns - self._last_fsync_ns >= 1_000_000_000:
-            os.fsync(self._descriptor)
-            self._last_fsync_ns = now_ns
-            self._dirty = False
 
     def close(self) -> None:
         if self._dirty:
@@ -627,6 +620,87 @@ def verify_expected_process(
     return actual
 
 
+class ForwardLineageGate:
+    """Keep forwarding cheap while preserving fail-closed process identity.
+
+    A pidfd is pinned to each frozen process instance and polled immediately
+    before every relay.  The expensive executable/socket/TCP snapshot remains
+    synchronous, but is bounded by the manifest cadence instead of being
+    repeated for every telemetry datagram.
+    """
+
+    def __init__(
+        self,
+        expected_processes: dict[str, dict[str, Any]],
+        *,
+        full_check_interval_ns: int,
+        full_check: Callable[[], Any],
+        monotonic_ns: Callable[[], int] = time.monotonic_ns,
+    ) -> None:
+        if full_check_interval_ns <= 0:
+            raise EndpointError("full lineage check interval must be positive")
+        pidfd_open = getattr(os, "pidfd_open", None)
+        if pidfd_open is None:
+            raise EndpointError("pidfd_open is required for fail-closed forwarding")
+        self._poller = select.poll()
+        self._roles_by_fd: dict[int, str] = {}
+        self._full_check_interval_ns = full_check_interval_ns
+        self._full_check = full_check
+        self._monotonic_ns = monotonic_ns
+        self._last_full_check_ns: int | None = None
+        try:
+            for role, expected in expected_processes.items():
+                fd = pidfd_open(int(expected["pid"]), 0)
+                self._roles_by_fd[fd] = role
+                self._poller.register(
+                    fd,
+                    select.POLLIN | select.POLLERR | select.POLLHUP | select.POLLNVAL,
+                )
+            # Close the PID-reuse race between the frozen manifest and pidfd_open.
+            for role, expected in expected_processes.items():
+                verify_expected_process(role, expected, hash_executable=False)
+            self.check_processes()
+        except Exception:
+            self.close()
+            raise
+
+    def check_processes(self) -> None:
+        events = self._poller.poll(0)
+        if events:
+            roles = sorted({self._roles_by_fd.get(fd, f"pidfd:{fd}") for fd, _ in events})
+            raise LineageError(f"frozen process exited before relay: {roles}")
+
+    def mark_full_check(self) -> None:
+        self._last_full_check_ns = self._monotonic_ns()
+
+    def check(self) -> None:
+        self.check_processes()
+        now_ns = self._monotonic_ns()
+        if (
+            self._last_full_check_ns is None
+            or now_ns - self._last_full_check_ns >= self._full_check_interval_ns
+        ):
+            self._full_check()
+            self.mark_full_check()
+            # A frozen process may have exited while the full snapshot ran.
+            self.check_processes()
+
+    def close(self) -> None:
+        roles_by_fd = getattr(self, "_roles_by_fd", {})
+        poller = getattr(self, "_poller", None)
+        for fd in list(roles_by_fd):
+            if poller is not None:
+                try:
+                    poller.unregister(fd)
+                except (KeyError, OSError):
+                    pass
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            roles_by_fd.pop(fd, None)
+
+
 def _decode_ipv4(value: str) -> str:
     try:
         return socket.inet_ntoa(struct.pack("<I", int(value, 16)))
@@ -714,7 +788,10 @@ def _one(
     retry_multiple: bool = False,
 ) -> dict[str, Any]:
     if len(records) != 1:
-        if retry_multiple and len(records) > 1:
+        # A live TCP pair can transiently appear as either zero or multiple
+        # ESTABLISHED rows while the two /proc/net snapshots advance.  Retry
+        # both non-unit cardinalities under the same strict finite budget.
+        if retry_multiple:
             raise TransientSocketMultiplicity(context, records)
         raise LineageError(f"{context} must resolve to exactly one socket, found {len(records)}")
     return records[0]
@@ -1058,6 +1135,7 @@ def run_endpoint(args: argparse.Namespace) -> int:
     stop = False
     clock_stop = threading.Event()
     clock_thread: threading.Thread | None = None
+    lineage_gate: ForwardLineageGate | None = None
 
     def request_stop(_signum: int, _frame: Any) -> None:
         nonlocal stop
@@ -1096,7 +1174,6 @@ def run_endpoint(args: argparse.Namespace) -> int:
     candidate_hash: str | None = None
     buffered_tail: tuple[bytes, tuple[str, int]] | None = None
     last_tail_ns: int | None = None
-    last_full_check_ns = 0
     authorized = False
 
     try:
@@ -1131,24 +1208,27 @@ def run_endpoint(args: argparse.Namespace) -> int:
             before_forward=lambda: None,
         )
 
-        def current_lineage(*, full: bool) -> dict[str, Any]:
-            nonlocal last_full_check_ns
+        def current_lineage() -> dict[str, Any]:
             if forwarder.mavproxy_peer is None:
                 raise LineageError("MAVProxy peer is not learned")
             current_adapter = verify_adapter_sockets(os.getpid(), channel, radio_inode, tail_inode)
             expected_adapter = expected_process_identity(adapter_identity)
             actual_adapter = current_adapter["identity"]
-            compare = EXPECTED_PROCESS_KEYS if full else EXPECTED_PROCESS_KEYS - {"exe_sha256"}
-            if any(actual_adapter[key] != expected_adapter[key] for key in compare):
+            if any(
+                actual_adapter[key] != expected_adapter[key]
+                for key in EXPECTED_PROCESS_KEYS
+            ):
                 raise LineageError("adapter process identity changed after bind")
-            lineage = verify_channel_lineage(
-                channel, forwarder.mavproxy_peer, hash_executable=full
+            return verify_channel_lineage(
+                channel, forwarder.mavproxy_peer, hash_executable=True
             )
-            if full:
-                last_full_check_ns = time.monotonic_ns()
-            return lineage
 
-        forwarder.lineage_check = lambda: current_lineage(full=False)
+        lineage_gate = ForwardLineageGate(
+            {role: channel[role] for role in ("mavproxy", "sitl")},
+            full_check_interval_ns=manifest["lineage_check_ms"] * 1_000_000,
+            full_check=current_lineage,
+        )
+        forwarder.lineage_check = lineage_gate.check
         audit.emit(
             "adapter_bound_not_ready",
             pid=os.getpid(),
@@ -1166,13 +1246,13 @@ def run_endpoint(args: argparse.Namespace) -> int:
 
         while not stop:
             now_ns = time.monotonic_ns()
+            lineage_gate.check_processes()
             if now_ns >= deadline_ns and not authorized:
                 raise LineageError("external endpoint authorization timed out")
             if candidate is not None and last_tail_ns is not None:
                 if now_ns - last_tail_ns > manifest["peer_lease_ms"] * 1_000_000:
                     raise LineageError("dynamic MAVProxy tail peer lease expired")
-                if now_ns - last_full_check_ns >= manifest["lineage_check_ms"] * 1_000_000:
-                    current_lineage(full=True)
+                lineage_gate.check()
 
             if candidate is not None and not authorized and paths["authorization"].exists():
                 authorization = strict_json(paths["authorization"])
@@ -1185,7 +1265,8 @@ def run_endpoint(args: argparse.Namespace) -> int:
                     candidate,
                     candidate_hash,
                 )
-                lineage = current_lineage(full=True)
+                lineage = current_lineage()
+                lineage_gate.mark_full_check()
                 forwarder.authorize()
                 authorization_hash = document_sha256(authorization)
                 ready = {
@@ -1278,6 +1359,7 @@ def run_endpoint(args: argparse.Namespace) -> int:
                             continue
                         forwarder.lock_peer(peer)
                         lineage = verify_channel_lineage(channel, peer, hash_executable=True)
+                        lineage_gate.mark_full_check()
                         adapter_snapshot = verify_adapter_sockets(
                             os.getpid(), channel, radio_inode, tail_inode
                         )
@@ -1408,6 +1490,8 @@ def run_endpoint(args: argparse.Namespace) -> int:
         return 2
     finally:
         clock_stop.set()
+        if lineage_gate is not None:
+            lineage_gate.close()
         if clock_thread is not None:
             clock_thread.join(timeout=2.0)
             if clock_thread.is_alive():

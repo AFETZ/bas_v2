@@ -102,6 +102,15 @@
     "test_provenance_v2.ProvenanceV2Tests.test_source_hash_is_deterministic",
     "test_provenance_v2.ProvenanceV2Tests.test_structurally_forged_clean_provenance_cannot_pass",
     "test_provenance_v2.ProvenanceV2Tests.test_unknown_container_digest_is_rejected",
+    "test_raw_packet_capture.BoundedDrainTests.test_batch_byte_budget_bounds_temporary_capture_payload",
+    "test_raw_packet_capture.BoundedDrainTests.test_bounded_batch_preserves_a_32000_pps_burst_without_filtering",
+    "test_raw_packet_capture.BoundedDrainTests.test_empty_nonblocking_socket_is_not_reported_as_a_packet",
+    "test_raw_packet_capture.BoundedDrainTests.test_short_batch_write_fails_closed",
+    "test_raw_packet_capture.ReceiveBufferContractTests.test_frozen_capture_configuration_is_finite_and_filterless",
+    "test_raw_packet_capture.ReceiveBufferContractTests.test_receive_buffer_fails_closed_when_force_capability_is_absent",
+    "test_raw_packet_capture.ReceiveBufferContractTests.test_receive_buffer_fails_closed_when_force_result_is_not_exact",
+    "test_raw_packet_capture.ReceiveBufferContractTests.test_receive_buffer_uses_bounded_force_fallback_when_sysctl_caps_regular",
+    "test_raw_packet_capture.ReceiveBufferContractTests.test_regular_receive_buffer_is_accepted_only_at_exact_effective_size",
     "test_uav_mavlink_endpoint.UavMavlinkEndpointTests.test_bidirectional_forwarding_and_exact_pid_shutdown",
     "test_uav_mavlink_endpoint.UavMavlinkEndpointTests.test_shared_core_preserves_m2_dynamic_tail_peer_semantics",
     "test_uav_mavlink_endpoint.UavMavlinkEndpointTests.test_shared_core_rejects_short_send_without_retry_or_mutation",
@@ -127,6 +136,7 @@
     "test_ns3_tap_packet_engine",
     "test_p0_config_consistency",
     "test_provenance_v2",
+    "test_raw_packet_capture",
     "test_uav_mavlink_endpoint",
     "test_validator_hardening_v2"
   ]

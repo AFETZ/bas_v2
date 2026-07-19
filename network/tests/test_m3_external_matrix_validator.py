@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import hashlib
 import io
@@ -17,6 +18,7 @@ from unittest import mock
 
 from network.bridge import actual_sitl_mavlink_endpoint as actual_endpoint
 from network.scripts import m3_external_matrix_probe as producer
+from network.scripts import m3_topology_monitor as topology_monitor
 from network.scripts import raw_packet_capture
 from network.scripts import actual_sitl_control_probe as control_probe
 from network.scripts import actual_sitl_endpoint_orchestrator as actual_orchestrator
@@ -2314,10 +2316,25 @@ class Fixture:
                 {
                     "contract": raw_packet_capture.STATS_CONTRACT,
                     "interface": interface,
+                    "capture_protocol": raw_packet_capture.CAPTURE_PROTOCOL,
+                    "packet_filter": raw_packet_capture.PACKET_FILTER,
                     "pcap_path": path.name,
                     "pcap_bytes": len(payload),
                     "linktype": 1,
-                    "snaplen": 65_535,
+                    "snaplen": raw_packet_capture.SNAPLEN,
+                    "receive_buffer_requested_bytes": (
+                        raw_packet_capture.RECEIVE_BUFFER_REQUESTED_BYTES
+                    ),
+                    "receive_buffer_effective_bytes": (
+                        raw_packet_capture.RECEIVE_BUFFER_EFFECTIVE_BYTES
+                    ),
+                    "receive_buffer_setter": "SO_RCVBUF",
+                    "drain_batch_packet_limit": (
+                        raw_packet_capture.DRAIN_BATCH_PACKET_LIMIT
+                    ),
+                    "drain_batch_byte_limit": (
+                        raw_packet_capture.DRAIN_BATCH_BYTE_LIMIT
+                    ),
                     "started_monotonic_ns": 3_000_000_000,
                     "stopped_monotonic_ns": 117_200_000_000,
                     "stop_signal": "SIGINT",
@@ -2942,6 +2959,36 @@ class M3ExternalMatrixValidatorTests(unittest.TestCase):
     def test_complete_30_cell_external_fixture_passes(self) -> None:
         result = self.evaluate()
         self.assertTrue(result["passed"], "\n".join(result["failures"][:20]))
+        capture_stats = validator.strict_json(
+            self.run_dir / "logs/capture-loopback-container-root.json"
+        )
+        self.assertEqual(capture_stats["contract"], raw_packet_capture.STATS_CONTRACT)
+        self.assertEqual(
+            capture_stats["capture_protocol"], raw_packet_capture.CAPTURE_PROTOCOL
+        )
+        self.assertEqual(
+            capture_stats["packet_filter"], raw_packet_capture.PACKET_FILTER
+        )
+        self.assertEqual(
+            capture_stats["receive_buffer_requested_bytes"],
+            raw_packet_capture.RECEIVE_BUFFER_REQUESTED_BYTES,
+        )
+        self.assertEqual(
+            capture_stats["receive_buffer_effective_bytes"],
+            raw_packet_capture.RECEIVE_BUFFER_EFFECTIVE_BYTES,
+        )
+        self.assertIn(
+            capture_stats["receive_buffer_setter"],
+            {"SO_RCVBUF", "SO_RCVBUFFORCE"},
+        )
+        self.assertEqual(
+            capture_stats["drain_batch_packet_limit"],
+            raw_packet_capture.DRAIN_BATCH_PACKET_LIMIT,
+        )
+        self.assertEqual(
+            capture_stats["drain_batch_byte_limit"],
+            raw_packet_capture.DRAIN_BATCH_BYTE_LIMIT,
+        )
         self.assertEqual(len(result["metrics"]["cells"]["positive"]), 30)
         rate_vector = result["metrics"]["nominal_rate_vector"]
         self.assertEqual(set(rate_vector), set(self.fixture.cells))
@@ -3648,6 +3695,114 @@ class M3ExternalMatrixStaticTests(unittest.TestCase):
             p2mp=True,
         )
         self.assertTrue(producer.decode_transport_unit(root)["p2mp"])
+
+    def test_endpoint_agent_pump_is_bounded_and_round_robin(self) -> None:
+        class BusySocket:
+            def __init__(self, descriptor: int) -> None:
+                self.descriptor = descriptor
+                self.receive_count = 0
+
+            def fileno(self) -> int:
+                return self.descriptor
+
+            def getsockname(self) -> tuple[str, int]:
+                return ("10.71.0.10", 14000 + self.descriptor)
+
+            def recvmsg(
+                self, _payload_size: int, _ancillary_size: int
+            ) -> tuple[bytes, list[tuple[int, int, bytes]], int, tuple[str, int]]:
+                self.receive_count += 1
+                return (b"invalid", [], 0, ("10.71.1.10", 15000))
+
+        sockets = [BusySocket(index) for index in (1, 2, 3)]
+        agent = producer.EndpointAgent.__new__(producer.EndpointAgent)
+        agent.namespace = "ams-gcs"
+        agent.ip = "10.71.0.10"
+        agent.sockets = {"payload": sockets[0], "additional_data": sockets[1]}
+        agent.p2mp_socket = sockets[2]
+        agent.socket_class = {
+            sock.fileno(): "additional_data" for sock in sockets
+        }
+        agent.transport_run_nonce = RUN_NONCE
+        agent.writer = mock.Mock()
+        agent._pump_socket_cursor = 0
+
+        with mock.patch.object(
+            producer.select, "select", return_value=(sockets, [], [])
+        ):
+            agent.pump(0.01)
+            self.assertEqual(
+                [sock.receive_count for sock in sockets], [22, 21, 21]
+            )
+            agent.pump(0.01)
+
+        self.assertEqual(
+            [sock.receive_count for sock in sockets], [43, 43, 42]
+        )
+        self.assertEqual(
+            agent.writer.emit.call_count,
+            2 * producer.ENDPOINT_PUMP_DATAGRAM_LIMIT,
+        )
+
+    def test_hot_path_evidence_writers_sync_only_on_close(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "endpoint.jsonl"
+            with mock.patch.object(producer.os, "fsync") as final_sync:
+                writer = producer.EventWriter(
+                    path,
+                    schema=producer.ENDPOINT_EVENT_SCHEMA,
+                    run_id=RUN_ID,
+                    runtime_id=RUNTIME_ID,
+                    run_nonce=RUN_NONCE,
+                    endpoint="gcs",
+                )
+                writer.emit("one")
+                writer.emit("two")
+                final_sync.assert_not_called()
+                writer.close()
+                final_sync.assert_called_once()
+            self.assertEqual(
+                [json.loads(line)["event_sequence"] for line in path.read_text().splitlines()],
+                [1, 2],
+            )
+
+        monitor = topology_monitor.TopologyMonitor.__new__(
+            topology_monitor.TopologyMonitor
+        )
+        monitor.args = argparse.Namespace(
+            run_id=RUN_ID,
+            runtime_id=RUNTIME_ID,
+            run_nonce=RUN_NONCE,
+            run_dir=Path("/unused"),
+            interval_ms=500,
+        )
+        monitor.commands = {}
+        monitor.base = Path("/unused/raw/topology_monitor")
+        monitor.samples = mock.Mock()
+        monitor.samples.fileno.return_value = 321
+        monitor.hasher = mock.Mock()
+        monitor.sample_sequence = 0
+        monitor.sample_times = []
+        monitor.transition_events = []
+        monitor.netlink_processes = {}
+        monitor.netlink_handles = {}
+        monitor.ensure_netlink_monitors = mock.Mock()
+        with (
+            mock.patch.object(
+                topology_monitor,
+                "collect_namespace",
+                side_effect=lambda name, _commands: {"name": name},
+            ),
+            mock.patch.object(topology_monitor, "collect_processes", return_value=[]),
+            mock.patch.object(topology_monitor.os, "fsync") as final_sync,
+        ):
+            monitor.sample(reason="periodic")
+            final_sync.assert_not_called()
+            with mock.patch.object(topology_monitor, "write_exclusive"):
+                monitor.close()
+            final_sync.assert_called_once_with(321)
+        monitor.samples.flush.assert_called()
+        monitor.samples.close.assert_called_once()
 
     def test_runner_is_root_wrapper_native_and_uses_independent_equality(self) -> None:
         runner = (ROOT / "network/scripts/run_m3_external_matrix.sh").read_text()

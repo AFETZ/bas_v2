@@ -1171,10 +1171,13 @@ class SchedulingAndStateTests(unittest.TestCase):
                 transport_nonce32="22" * 16,
                 transport_nonce_derivation="identity/full_run_nonce32",
             )
-            writer = probe.EventWriter(path, args)
-            writer.emit("one", value=1)
-            writer.emit("two", value=2)
-            writer.close()
+            with mock.patch.object(probe.os, "fsync") as final_sync:
+                writer = probe.EventWriter(path, args)
+                writer.emit("one", value=1)
+                writer.emit("two", value=2)
+                final_sync.assert_not_called()
+                writer.close()
+                final_sync.assert_called_once()
             payload = path.read_bytes()
             self.assertTrue(payload.endswith(b"\n"))
             lines = payload.splitlines(keepends=True)

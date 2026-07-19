@@ -440,7 +440,6 @@ class EventWriter:
         self.args = args
         self.sequence = 0
         self.previous_record_sha256: str | None = None
-        self.last_fsync_ns = time.monotonic_ns()
         self.dirty = False
 
     def emit(self, event: str, **fields: Any) -> None:
@@ -464,11 +463,6 @@ class EventWriter:
         self.handle.write(payload)
         self.previous_record_sha256 = sha256_bytes(payload)
         self.dirty = True
-        now_ns = time.monotonic_ns()
-        if now_ns - self.last_fsync_ns >= 1_000_000_000:
-            os.fsync(self.handle.fileno())
-            self.last_fsync_ns = now_ns
-            self.dirty = False
 
     def close(self) -> None:
         if self.dirty:

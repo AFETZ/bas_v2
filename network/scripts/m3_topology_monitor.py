@@ -433,7 +433,6 @@ class TopologyMonitor:
             raise MonitorError("a namespace netlink monitor exited early")
         self.samples.write(canonical_json(record).decode())
         self.samples.flush()
-        os.fsync(self.samples.fileno())
         self.sample_times.append(now)
         if transition_event is not None:
             self.transition_events.append(transition_event)
@@ -534,6 +533,8 @@ class TopologyMonitor:
                 "stderr_path": stderr_path.relative_to(self.args.run_dir).as_posix(),
                 "stderr_bytes": stderr_path.stat().st_size,
             }
+        self.samples.flush()
+        os.fsync(self.samples.fileno())
         self.samples.close()
         max_gap = max(
             (

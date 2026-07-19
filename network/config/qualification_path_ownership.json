@@ -69,6 +69,7 @@
       "network/tests/test_ns3_tap_packet_engine.py",
       "network/tests/test_p0_config_consistency.py",
       "network/tests/test_provenance_v2.py",
+      "network/tests/test_raw_packet_capture.py",
       "network/tests/test_uav_mavlink_endpoint.py",
       "network/tests/test_validator_hardening_v2.py",
       "network/tests/udp_vertical_slice_smoke.py",
