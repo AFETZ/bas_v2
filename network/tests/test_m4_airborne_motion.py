@@ -37,6 +37,8 @@ class M4AirborneMotionTests(unittest.TestCase):
                         "source_topic": f"/uav{uav}/odometry",
                         "source_frame": "ros_odometry_world_enu",
                         "transform_version": "ams-m4-coordinate-frames-v1",
+                        "source_header_frame": "odom",
+                        "source_child_frame": "base_link",
                         "source_callback_monotonic_ns": callback_ns,
                         "sim_stamp_ns": sample * 500_000_000,
                         "position_m": [
@@ -117,6 +119,8 @@ class M4AirborneMotionTests(unittest.TestCase):
             ("source_topic", "/uav2/odometry"),
             ("source_frame", "ardupilot_local_ned"),
             ("transform_version", "unversioned"),
+            ("source_header_frame", "map"),
+            ("source_child_frame", "uav1/base_link"),
         ):
             records = copy.deepcopy(self.records)
             records[0][field] = replacement
@@ -160,6 +164,8 @@ class M4AirborneMotionTests(unittest.TestCase):
                         "source_topic": f"/uav{uav}/odometry",
                         "source_frame": "ros_odometry_world_enu",
                         "transform_version": "ams-m4-coordinate-frames-v1",
+                        "source_header_frame": "odom",
+                        "source_child_frame": "base_link",
                         "source_callback_monotonic_ns": callback_ns,
                         "sim_stamp_ns": sample * 500_000_000,
                         # The only position change is between the continuity

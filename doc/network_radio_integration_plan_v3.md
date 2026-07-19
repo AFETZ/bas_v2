@@ -540,8 +540,8 @@ canonical scene bundle containing:
 - immutable Gazebo world/assets and Sionna scene/assets manifests;
 - both scene hashes and a bundle ID;
 - Gazebo world, ROS odometry, ArduPilot NED, and Sionna frame definitions:
-  origin, axes, handedness, units, quaternion convention, and transform
-  version;
+  origin, axes, handedness, units, quaternion convention, transform version,
+  and the actual ROS `header.frame_id` / `child_frame_id` lineage;
 - one explicit ArduPilot SITL WGS84 home equal to the Gazebo spherical origin,
   plus synchronized raw `GLOBAL_POSITION_INT` latitude/longitude proof against
   absolute Gazebo ENU position for every UAV throughout acceptance;
@@ -552,8 +552,11 @@ canonical scene bundle containing:
 - a machine-validated coordinate conversion fixture.
 
 Every node state records timestamp, source topic, source frame, transform
-version, pose, orientation, and freshness. Fixed isotropic arrays may not be
-used to claim orientation or pattern effects.
+version, pose, orientation, and freshness. UAV odometry additionally preserves
+the bridge-produced `header.frame_id=odom` and `child_frame_id=base_link`, while
+its position is independently treated as the Gazebo publisher's absolute world
+pose. A semantic frame label without those raw fields is not evidence. Fixed
+isotropic arrays may not be used to claim orientation or pattern effects.
 
 The final kilometre-scale canonical bundle used by M7 must contain a genuine
 paired Gazebo/Sionna scene with a validated path supporting at least 20 km
@@ -1174,7 +1177,10 @@ be eligible:
    ns-3 ingress, decision and egress evidence; producer pass flags are not
    evidence. Raw `GLOBAL_POSITION_INT` coordinates must also match absolute
    Gazebo ENU position under the frozen WGS84 origin, independently of the
-   LOCAL_POSITION_NED and relative-altitude delta checks. The profile must also
+   LOCAL_POSITION_NED and relative-altitude delta checks. The raw odometry
+   events and pose snapshots must retain and validate the actual ROS
+   `odom` / `base_link` header fields rather than assigning the coordinate frame
+   only in producer metadata. The profile must also
    meet the RTF, query-age, late-ratio and
    zero-stale-pose P0 thresholds without increasing the already resolved
    validity deadline. Its receipt is reusable only while Q0-Q4 manifests,
@@ -1502,6 +1508,8 @@ Acceptance:
 - canonical bundle hashes, transforms, asset/mesh bounds, and six distributed
   landmarks
   pass machine validation within 1 metre;
+- every UAV pose used by Sionna is the absolute Gazebo world pose carried by
+  `/uavN/odometry`, with raw `odom` / `base_link` ROS header lineage preserved;
 - raw logs derive `node_state_seq -> query_id -> applied_state_id -> exact
   packet/time interval` for every accepted causal sample;
 - results are asynchronous and ns-3 never blocks on Sionna;

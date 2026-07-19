@@ -292,7 +292,7 @@
   ],
   "bundle_hash_policy": "sha256-canonical-json-with-bundle_sha256-zeroed/v1",
   "bundle_id": "ams-m4-canonical-km-v2",
-  "bundle_sha256": "a6827f964e8fcc668a109324b2760a513577370a59784e3e4eabf4ac3c45c50e",
+  "bundle_sha256": "be74a467aa91cc5c7e0f0d4b510b94b6c04763099931911377d5940a9e9ee0c4",
   "causal_scenarios": {
     "building_blocked": {
       "control_link": "cp>uav5",
@@ -701,11 +701,15 @@
           "z"
         ],
         "frame_id": "ros_odometry_world_enu",
+        "gazebo_pose_source": "worldPose(model_entity)",
         "handedness": "right",
         "linear_velocity_unit": "m/s",
         "message_type": "nav_msgs/msg/Odometry",
+        "pose_semantics": "absolute_gazebo_world_pose",
         "position_unit": "m",
         "quaternion_order": "xyzw",
+        "source_child_frame_id": "base_link",
+        "source_header_frame_id": "odom",
         "source_topic_pattern": "/uavN/odometry"
       },
       "sionna_scene": {

@@ -58,6 +58,8 @@ NODE_IDS = ("cp", "uav1", "uav2", "uav3", "uav4", "uav5")
 UAV_IDS = NODE_IDS[1:]
 TRANSFORM_VERSION = "enu-identity-v1"
 SOURCE_FRAME = "world"
+ODOMETRY_HEADER_FRAME = "odom"
+ODOMETRY_CHILD_FRAME = "base_link"
 DIRECTED_LINK = re.compile(r"^(cp>uav[1-5]|uav[1-5]>cp)$")
 TRAFFIC_CLASSES = {"control", "payload", "additional_data"}
 
@@ -112,6 +114,16 @@ class PoseTracker:
     def update_uav(self, node_id: str, message: Any) -> None:
         if node_id not in UAV_IDS:
             raise PacketAdapterError(f"unknown UAV pose source: {node_id}")
+        header_frame = str(message.header.frame_id)
+        child_frame = str(message.child_frame_id)
+        if (
+            header_frame != ODOMETRY_HEADER_FRAME
+            or child_frame != ODOMETRY_CHILD_FRAME
+        ):
+            raise PacketAdapterError(
+                f"{node_id} odometry header frame differs: "
+                f"{header_frame!r}/{child_frame!r}"
+            )
         now = time.monotonic_ns()
         pose = message.pose.pose
         self._update(
@@ -120,7 +132,8 @@ class PoseTracker:
             f"/{node_id}/odometry",
             int(message.header.stamp.sec) * 1_000_000_000
             + int(message.header.stamp.nanosec),
-            str(message.header.frame_id),
+            header_frame,
+            child_frame,
             pose.position,
             pose.orientation,
         )
@@ -138,6 +151,7 @@ class PoseTracker:
                 int(transform.header.stamp.sec) * 1_000_000_000
                 + int(transform.header.stamp.nanosec),
                 str(transform.header.frame_id),
+                str(transform.child_frame_id),
                 transform.transform.translation,
                 transform.transform.rotation,
             )
@@ -149,6 +163,7 @@ class PoseTracker:
         source_topic: str,
         source_stamp_ns: int,
         source_header_frame: str,
+        source_child_frame: str,
         position: Any,
         orientation: Any,
     ) -> None:
@@ -157,6 +172,7 @@ class PoseTracker:
             "source_topic": source_topic,
             "source_header_stamp_ns": source_stamp_ns,
             "source_header_frame": source_header_frame,
+            "source_child_frame": source_child_frame,
             "source_frame": SOURCE_FRAME,
             "transform_version": TRANSFORM_VERSION,
             "position_m": [float(position.x), float(position.y), float(position.z)],
@@ -201,7 +217,12 @@ class PoseTracker:
                 value = {
                     key: item
                     for key, item in raw_value.items()
-                    if key not in {"source_header_stamp_ns", "source_header_frame"}
+                    if key
+                    not in {
+                        "source_header_stamp_ns",
+                        "source_header_frame",
+                        "source_child_frame",
+                    }
                 }
                 value.update(
                     {
@@ -217,7 +238,12 @@ class PoseTracker:
             jammer = {
                 key: item
                 for key, item in raw_jammer.items()
-                if key not in {"source_header_stamp_ns", "source_header_frame"}
+                if key
+                not in {
+                    "source_header_stamp_ns",
+                    "source_header_frame",
+                    "source_child_frame",
+                }
             }
             jammer.update(
                 {

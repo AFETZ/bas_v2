@@ -16,6 +16,8 @@ FRAME_TRANSFORM_VERSION = "ams-m4-coordinate-frames-v1"
 EXPECTED_UAVS = tuple(range(1, 6))
 ROS_ODOMETRY_SOURCE_FRAME = "ros_odometry_world_enu"
 ROS_ODOMETRY_TOPIC_PATTERN = "/uavN/odometry"
+ROS_ODOMETRY_HEADER_FRAME = "odom"
+ROS_ODOMETRY_CHILD_FRAME = "base_link"
 NED_DELTA_TO_ENU_DELTA_3X3 = (
     (0.0, 1.0, 0.0),
     (1.0, 0.0, 0.0),
@@ -139,6 +141,10 @@ def _validate_declared_contract(contract: Mapping[str, Any]) -> None:
         not isinstance(ros, Mapping)
         or ros.get("frame_id") != ROS_ODOMETRY_SOURCE_FRAME
         or ros.get("source_topic_pattern") != ROS_ODOMETRY_TOPIC_PATTERN
+        or ros.get("source_header_frame_id") != ROS_ODOMETRY_HEADER_FRAME
+        or ros.get("source_child_frame_id") != ROS_ODOMETRY_CHILD_FRAME
+        or ros.get("pose_semantics") != "absolute_gazebo_world_pose"
+        or ros.get("gazebo_pose_source") != "worldPose(model_entity)"
         or ros.get("axes") != ["east", "north", "up"]
         or ros.get("handedness") != "right"
         or ros.get("position_unit") != "m"
@@ -252,6 +258,9 @@ def validate_runtime_frame_correspondence(
             or record.get("source_topic") != f"/uav{uav}/odometry"
             or record.get("source_frame") != ROS_ODOMETRY_SOURCE_FRAME
             or record.get("transform_version") != FRAME_TRANSFORM_VERSION
+            or record.get("source_header_frame")
+            != ROS_ODOMETRY_HEADER_FRAME
+            or record.get("source_child_frame") != ROS_ODOMETRY_CHILD_FRAME
         ):
             raise M4ValidationError("runtime odometry frame/topic lineage differs")
         odometry[uav].append(
@@ -488,6 +497,8 @@ __all__ = [
     "NED_DELTA_TO_ENU_DELTA_3X3",
     "RELATIVE_ALTITUDE_MAX_ABS_ERROR_M",
     "ROS_ODOMETRY_SOURCE_FRAME",
+    "ROS_ODOMETRY_HEADER_FRAME",
+    "ROS_ODOMETRY_CHILD_FRAME",
     "WGS84_ORIGIN",
     "validate_runtime_frame_correspondence",
 ]

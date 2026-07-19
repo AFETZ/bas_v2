@@ -25,7 +25,7 @@ from network.validation.validate_m4_scene_bundle import (
 )
 
 
-EXPECTED_BUNDLE_SHA256 = "a6827f964e8fcc668a109324b2760a513577370a59784e3e4eabf4ac3c45c50e"
+EXPECTED_BUNDLE_SHA256 = "be74a467aa91cc5c7e0f0d4b510b94b6c04763099931911377d5940a9e9ee0c4"
 
 
 def file_sha256(path: Path) -> str:

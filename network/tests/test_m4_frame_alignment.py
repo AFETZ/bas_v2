@@ -74,6 +74,8 @@ class M4RuntimeFrameAlignmentTests(unittest.TestCase):
                         "source_topic": f"/uav{uav}/odometry",
                         "source_frame": ROS_ODOMETRY_SOURCE_FRAME,
                         "transform_version": FRAME_TRANSFORM_VERSION,
+                        "source_header_frame": "odom",
+                        "source_child_frame": "base_link",
                         "position_m": [
                             baseline[axis] + enu_delta[axis] for axis in range(3)
                         ],
@@ -189,6 +191,19 @@ class M4RuntimeFrameAlignmentTests(unittest.TestCase):
         record["source_frame"] = "unversioned_world"
         with self.assertRaisesRegex(M4ValidationError, "frame/topic lineage"):
             self._validate(odometry=odometry)
+
+    def test_actual_ros_odometry_header_frame_is_required(self) -> None:
+        for field, replacement in (
+            ("source_header_frame", "map"),
+            ("source_child_frame", "uav1/base_link"),
+        ):
+            odometry = copy.deepcopy(self.odometry)
+            odometry[0][field] = replacement
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(
+                    M4ValidationError, "frame/topic lineage"
+                ):
+                    self._validate(odometry=odometry)
 
     def test_declared_tolerance_or_transform_mutation_is_rejected(self) -> None:
         contract = expected_coordinate_frame_contract()

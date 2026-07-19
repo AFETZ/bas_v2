@@ -37,6 +37,12 @@ from network.validation.m4_common import (
     validate_wire_log,
     write_new,
 )
+from network.validation.m4_airborne_motion import (
+    COORDINATE_TRANSFORM_VERSION,
+    ODOMETRY_CHILD_FRAME,
+    ODOMETRY_HEADER_FRAME,
+    ODOMETRY_SOURCE_FRAME,
+)
 from network.validation.m4_runtime import (
     FROZEN_BUNDLE_ID,
     FROZEN_BUNDLE_SHA256,
@@ -3472,6 +3478,12 @@ def validate_causal_runtime(
         vectors = (position, orientation, linear, angular)
         if (
             uav not in CAUSAL_PIN_MODELS
+            or record.get("source_topic") != f"/{uav}/odometry"
+            or record.get("source_frame") != ODOMETRY_SOURCE_FRAME
+            or record.get("transform_version")
+            != COORDINATE_TRANSFORM_VERSION
+            or record.get("source_header_frame") != ODOMETRY_HEADER_FRAME
+            or record.get("source_child_frame") != ODOMETRY_CHILD_FRAME
             or isinstance(source_ns, bool)
             or not isinstance(source_ns, int)
             or isinstance(sim_ns, bool)

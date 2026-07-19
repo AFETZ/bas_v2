@@ -3399,9 +3399,10 @@ def _validate_m4_airborne_gate(
                 age = node.get("freshness_age_ns")
                 if (
                     node.get("source_topic") != f"/uav{uav}/odometry"
-                    or node.get("source_frame") != "ros_odometry_world_enu"
-                    or node.get("transform_version")
-                    != "ams-m4-coordinate-frames-v1"
+                    or node.get("source_header_frame") != "odom"
+                    or node.get("source_child_frame") != "base_link"
+                    or node.get("source_frame") != "world"
+                    or node.get("transform_version") != "enu-identity-v1"
                     or node.get("stale") is not False
                     or isinstance(age, bool)
                     or not isinstance(age, int)

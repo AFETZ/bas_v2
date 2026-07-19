@@ -153,6 +153,7 @@ EXPECTED_REPOSITORY_LATER_MANIFESTS = {
         "network/tests/test_m4_capacity_validator.py",
         "network/tests/test_m4_causality_validator.py",
         "network/tests/test_m4_frame_alignment.py",
+        "network/tests/test_m4_pose_lineage.py",
         "network/tests/test_m4_scene_bundle.py",
         "network/tests/test_ns3_sionna_packet_engine.py",
         "network/tests/test_sionna_async_protocol.py",

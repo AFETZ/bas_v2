@@ -38,6 +38,8 @@ CLOCK_TOPICS = tuple(f"/{uav}/clock" for uav in UAV_IDS)
 WORLD_ENTITY_IDS = {*UAV_IDS, "cp", "jammer_m4"}
 ODOMETRY_SOURCE_FRAME = "ros_odometry_world_enu"
 COORDINATE_TRANSFORM_VERSION = "ams-m4-coordinate-frames-v1"
+ODOMETRY_HEADER_FRAME = "odom"
+ODOMETRY_CHILD_FRAME = "base_link"
 
 
 def runtime_entity_name(frame: str) -> str | None:
@@ -283,8 +285,14 @@ def main() -> int:
         topic: {"count": 0, "last_host_ns": 0, "last_sim_ns": 0, "last_emit_ns": 0}
         for topic in CLOCK_TOPICS
     }
-    odometry: dict[str, dict[str, int]] = {
-        uav: {"count": 0, "last_host_ns": 0, "last_stamp_ns": 0, "last_emit_ns": 0}
+    odometry: dict[str, dict[str, Any]] = {
+        uav: {
+            "count": 0,
+            "last_host_ns": 0,
+            "last_stamp_ns": 0,
+            "last_emit_ns": 0,
+            "frame_valid": True,
+        }
         for uav in UAV_IDS
     }
     world_entities: dict[str, dict[str, Any]] = {}
@@ -353,6 +361,11 @@ def main() -> int:
             state["count"] += 1
             state["last_host_ns"] = now
             state["last_stamp_ns"] = stamp
+            state["frame_valid"] = bool(
+                state["frame_valid"]
+                and str(message.header.frame_id) == ODOMETRY_HEADER_FRAME
+                and str(message.child_frame_id) == ODOMETRY_CHILD_FRAME
+            )
             if now - state["last_emit_ns"] >= 200_000_000:
                 pose = message.pose.pose
                 twist = message.twist.twist
@@ -362,6 +375,8 @@ def main() -> int:
                     source_topic=f"/{uav}/odometry",
                     source_frame=ODOMETRY_SOURCE_FRAME,
                     transform_version=COORDINATE_TRANSFORM_VERSION,
+                    source_header_frame=str(message.header.frame_id),
+                    source_child_frame=str(message.child_frame_id),
                     source_callback_monotonic_ns=now,
                     sim_stamp_ns=stamp,
                     position_m=[pose.position.x, pose.position.y, pose.position.z],
@@ -428,6 +443,7 @@ def main() -> int:
             odometry_fresh = all(
                 state["count"] >= 2
                 and now - state["last_host_ns"] <= 1_000_000_000
+                and state["frame_valid"] is True
                 for state in odometry.values()
             )
             poses_fresh = set(world_entities) == WORLD_ENTITY_IDS and all(

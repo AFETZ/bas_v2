@@ -21,6 +21,8 @@ VELOCITY_PATH_MAX_RELATIVE_ERROR = 0.35
 VELOCITY_PATH_MAX_ABS_ERROR_M = 0.50
 ODOMETRY_SOURCE_FRAME = "ros_odometry_world_enu"
 COORDINATE_TRANSFORM_VERSION = "ams-m4-coordinate-frames-v1"
+ODOMETRY_HEADER_FRAME = "odom"
+ODOMETRY_CHILD_FRAME = "base_link"
 
 
 def motion_requirements() -> dict[str, Any]:
@@ -40,6 +42,8 @@ def motion_requirements() -> dict[str, Any]:
         "source_topic_pattern": "/uavN/odometry",
         "source_frame": ODOMETRY_SOURCE_FRAME,
         "transform_version": COORDINATE_TRANSFORM_VERSION,
+        "source_header_frame": ODOMETRY_HEADER_FRAME,
+        "source_child_frame": ODOMETRY_CHILD_FRAME,
     }
 
 
@@ -90,6 +94,8 @@ def validate_measurement_motion(
         "source_topic",
         "source_frame",
         "transform_version",
+        "source_header_frame",
+        "source_child_frame",
         "source_callback_monotonic_ns",
         "sim_stamp_ns",
         "position_m",
@@ -120,6 +126,8 @@ def validate_measurement_motion(
             or record.get("source_frame") != ODOMETRY_SOURCE_FRAME
             or record.get("transform_version")
             != COORDINATE_TRANSFORM_VERSION
+            or record.get("source_header_frame") != ODOMETRY_HEADER_FRAME
+            or record.get("source_child_frame") != ODOMETRY_CHILD_FRAME
             or isinstance(callback_ns, bool)
             or not isinstance(callback_ns, int)
             or isinstance(host_ns, bool)

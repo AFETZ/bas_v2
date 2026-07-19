@@ -475,6 +475,11 @@ def runtime_fixture(windows: dict[str, dict[str, object]]) -> list[dict[str, obj
                         "host_monotonic_ns": host_ns,
                         "event": "odometry_sample",
                         "uav": uav,
+                        "source_topic": f"/{uav}/odometry",
+                        "source_frame": "ros_odometry_world_enu",
+                        "transform_version": "ams-m4-coordinate-frames-v1",
+                        "source_header_frame": "odom",
+                        "source_child_frame": "base_link",
                         "source_callback_monotonic_ns": host_ns,
                         "sim_stamp_ns": host_ns,
                         "position_m": [0.0, 0.0, 100.0],
@@ -1682,6 +1687,7 @@ class CausalWindowTests(unittest.TestCase):
             "nonblocking_pose_service",
             "late_pose_response",
             "observed_velocity",
+            "wrong_odometry_header",
             "odometry_gap",
         ):
             with self.subTest(mutation=mutation):
@@ -1736,6 +1742,12 @@ class CausalWindowTests(unittest.TestCase):
                         for record in records
                         if record.get("event") == "odometry_sample"
                     )["linear_velocity_mps"] = [0.0, 0.0, 0.051]
+                elif mutation == "wrong_odometry_header":
+                    next(
+                        record
+                        for record in records
+                        if record.get("event") == "odometry_sample"
+                    )["source_header_frame"] = "map"
                 else:
                     gap_window = windows["terrain_good"]
                     gap_start = int(gap_window["start_monotonic_ns"])
@@ -1766,6 +1778,7 @@ class CausalWindowTests(unittest.TestCase):
                     "nonblocking_pose_service": "ordering differs",
                     "late_pose_response": "ordering differs",
                     "observed_velocity": "observed pinned odometry sample",
+                    "wrong_odometry_header": "observed pinned odometry sample",
                     "odometry_gap": "observed zero-velocity coverage differs",
                 }[mutation]
                 self.assertTrue(

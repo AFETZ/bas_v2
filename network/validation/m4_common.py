@@ -394,11 +394,6 @@ def validate_states(path: Path, wire: Mapping[str, Any]) -> tuple[dict[str, Any]
 
 
 def _pose_query_form(record: Mapping[str, Any], *, jammer: bool) -> dict[str, Any]:
-    value = {
-        key: item
-        for key, item in record.items()
-        if key not in {"source_header_stamp_ns", "source_header_frame"}
-    }
     expected = {
         "pose_monotonic_ns",
         "source_topic",
@@ -421,6 +416,57 @@ def _pose_query_form(record: Mapping[str, Any], *, jammer: bool) -> dict[str, An
         }
     else:
         expected.add("role")
+    raw_lineage = {
+        "source_header_stamp_ns",
+        "source_header_frame",
+        "source_child_frame",
+    }
+    if set(record) != expected | raw_lineage:
+        raise M4ValidationError(
+            f"raw pose entity keys differ: "
+            f"missing={sorted((expected | raw_lineage)-set(record))} "
+            f"extra={sorted(set(record)-(expected | raw_lineage))}"
+        )
+    source_stamp_ns = record.get("source_header_stamp_ns")
+    source_header_frame = record.get("source_header_frame")
+    source_child_frame = record.get("source_child_frame")
+    identity_key = "jammer_id" if jammer else "node_id"
+    identity = record.get(identity_key)
+    child_parts = (
+        [part for part in source_child_frame.strip("/").split("/") if part]
+        if isinstance(source_child_frame, str)
+        else []
+    )
+    if (
+        isinstance(source_stamp_ns, bool)
+        or not isinstance(source_stamp_ns, int)
+        or source_stamp_ns < 0
+        or not isinstance(source_header_frame, str)
+        or not isinstance(source_child_frame, str)
+        or not source_child_frame
+        or record.get("source_frame") != "world"
+        or record.get("transform_version") != "enu-identity-v1"
+    ):
+        raise M4ValidationError("raw pose source frame/timestamp differs")
+    if identity in {"uav1", "uav2", "uav3", "uav4", "uav5"}:
+        if (
+            record.get("source_topic") != f"/{identity}/odometry"
+            or source_header_frame != "odom"
+            or source_child_frame != "base_link"
+        ):
+            raise M4ValidationError(f"raw {identity} odometry lineage differs")
+    elif identity in {"cp", "jammer_m4"}:
+        if (
+            record.get("source_topic") != "/world/map/pose/info"
+            or not child_parts
+            or child_parts[-1] != identity
+        ):
+            raise M4ValidationError(f"raw {identity} world-pose lineage differs")
+    else:
+        raise M4ValidationError("raw pose entity identity differs")
+    value = {
+        key: item for key, item in record.items() if key not in raw_lineage
+    }
     if set(value) != expected:
         raise M4ValidationError(
             f"pose entity keys differ: missing={sorted(expected-set(value))} "
