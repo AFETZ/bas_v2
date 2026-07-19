@@ -14,10 +14,16 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from network.scripts.validate_m1_health import runtime_inputs_status, scene_status
-
-
 ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from network.scripts.validate_m1_health import (  # noqa: E402
+    runtime_inputs_status,
+    scene_status,
+)
+
+
 PROFILE_PATH = ROOT_DIR / "network/config/flight_capacity_profile.json"
 RESULT_CONTRACT = "ams.flight-capacity-validation/v1"
 EVENT_CONTRACT = "ams.flight-capacity-raw-event/v1"

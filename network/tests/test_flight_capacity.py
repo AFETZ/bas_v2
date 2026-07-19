@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -11,7 +12,9 @@ from pathlib import Path
 from typing import Any
 
 from network.scripts.collect_flight_capacity import (
+    EventWriter,
     load_profile as load_collector_profile,
+    resource_sample_due,
 )
 from network.scripts.validate_flight_capacity import (
     EVENT_CONTRACT,
@@ -285,6 +288,38 @@ class FlightCapacityTests(unittest.TestCase):
         validator_profile = load_validator_profile(profile_path)
         self.assertEqual(collector_profile, validator_profile)
         self.assertEqual(collector_profile["clock_topic"], "/uav1/clock")
+        self.assertTrue(resource_sample_due(299, 300, 299))
+        self.assertFalse(resource_sample_due(300, 300, 300))
+
+        with tempfile.TemporaryDirectory() as temp:
+            event_path = Path(temp) / "events.jsonl"
+            writer = EventWriter(event_path, run_id="fixture", runtime_id=RUNTIME_ID)
+            writer.emit("fixture", observed_monotonic_ns=123)
+            writer.close()
+            event = json.loads(event_path.read_text(encoding="utf-8"))
+        self.assertEqual(event["host_monotonic_ns"], 123)
+
+        result = subprocess.run(
+            [
+                "/usr/bin/python3.10",
+                "network/scripts/validate_flight_capacity.py",
+                "--help",
+            ],
+            cwd=ROOT_DIR,
+            env={
+                "PATH": "/usr/bin:/bin",
+                "LANG": "C.UTF-8",
+                "LC_ALL": "C",
+                "HOME": "/nonexistent",
+                "PYTHONNOUSERSITE": "1",
+                "PYTHONDONTWRITEBYTECODE": "1",
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
 
     def test_interpolation_rejects_unbracketed_or_sparse_clock(self) -> None:
         with self.assertRaisesRegex(ValueError, "bracket"):

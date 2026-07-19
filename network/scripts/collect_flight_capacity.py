@@ -281,7 +281,20 @@ class EventWriter:
         self.index = 0
         self.handle = path.open("xb")
 
-    def emit(self, event: str, **fields: Any) -> None:
+    def emit(
+        self,
+        event: str,
+        *,
+        observed_monotonic_ns: int | None = None,
+        **fields: Any,
+    ) -> None:
+        host_monotonic_ns = (
+            time.monotonic_ns()
+            if observed_monotonic_ns is None
+            else observed_monotonic_ns
+        )
+        if not isinstance(host_monotonic_ns, int) or host_monotonic_ns <= 0:
+            raise ValueError("event monotonic timestamp is invalid")
         record = {
             "schema_version": 1,
             "contract": EVENT_CONTRACT,
@@ -289,7 +302,7 @@ class EventWriter:
             "event": event,
             "run_id": self.run_id,
             "runtime_id": self.runtime_id,
-            "host_monotonic_ns": time.monotonic_ns(),
+            "host_monotonic_ns": host_monotonic_ns,
             "host_realtime_ns": time.time_ns(),
             **fields,
         }
@@ -331,6 +344,14 @@ def load_profile(path: Path) -> dict[str, Any]:
     if profile != expected:
         raise ValueError("flight capacity profile is not the exact accepted schema")
     return profile
+
+
+def resource_sample_due(
+    now_ns: int, measurement_end_ns: int, next_resource_ns: int
+) -> bool:
+    """Keep the periodic series strictly inside the measurement interval."""
+
+    return now_ns < measurement_end_ns and now_ns >= next_resource_ns
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -403,7 +424,11 @@ def main(argv: list[str] | None = None) -> int:
                 nonlocal clock_samples, last_clock_host_ns, last_clock_sim_ns
                 host_ns = time.monotonic_ns()
                 sim_ns = int(message.clock.sec) * 1_000_000_000 + int(message.clock.nanosec)
-                writer.emit("clock_sample", sim_time_ns=sim_ns)
+                writer.emit(
+                    "clock_sample",
+                    observed_monotonic_ns=host_ns,
+                    sim_time_ns=sim_ns,
+                )
                 clock_samples += 1
                 last_clock_host_ns = host_ns
                 last_clock_sim_ns = sim_ns
@@ -419,6 +444,7 @@ def main(argv: list[str] | None = None) -> int:
                 record["last_stamp_ns"] = stamp_ns
                 writer.emit(
                     "odometry_sample",
+                    observed_monotonic_ns=host_ns,
                     uav=uav,
                     sequence=record["count"],
                     sim_stamp_ns=stamp_ns,
@@ -482,13 +508,16 @@ def main(argv: list[str] | None = None) -> int:
             warmup_target_ns = warmup_start_ns + int(profile["warmup_s"] * 1_000_000_000)
             writer.emit(
                 "warmup_start",
+                observed_monotonic_ns=warmup_start_ns,
                 target_duration_ns=int(profile["warmup_s"] * 1_000_000_000),
             )
             next_resource_ns = warmup_start_ns
             while time.monotonic_ns() < warmup_target_ns:
                 rclpy.spin_once(node, timeout_sec=0.05)
                 now_ns = time.monotonic_ns()
-                if now_ns >= next_resource_ns:
+                if resource_sample_due(
+                    now_ns, warmup_target_ns, next_resource_ns
+                ):
                     writer.emit(
                         "warmup_resource_sample",
                         process_group=process_group_sample(args.launch_process_group),
@@ -505,13 +534,16 @@ def main(argv: list[str] | None = None) -> int:
             )
             writer.emit(
                 "measurement_start",
+                observed_monotonic_ns=measurement_start_ns,
                 target_end_monotonic_ns=measurement_end_target_ns,
             )
             next_resource_ns = measurement_start_ns
             while time.monotonic_ns() < measurement_end_target_ns:
                 rclpy.spin_once(node, timeout_sec=0.02)
                 now_ns = time.monotonic_ns()
-                if now_ns >= next_resource_ns:
+                if resource_sample_due(
+                    now_ns, measurement_end_target_ns, next_resource_ns
+                ):
                     writer.emit(
                         "measurement_resource_sample",
                         sample_index=resource_count,
