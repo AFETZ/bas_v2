@@ -22,6 +22,11 @@ from network.scripts.validate_m1_health import (  # noqa: E402
     runtime_inputs_status,
     scene_status,
 )
+from network.validation.qualification_identity import (  # noqa: E402
+    QualificationIdentityError,
+    qualification_content_vector,
+    validate_qualification_consumption,
+)
 
 
 PROFILE_PATH = ROOT_DIR / "network/config/flight_capacity_profile.json"
@@ -262,6 +267,18 @@ def validate_identity(
             root / "network/config/dependency_lock.yaml"
         ),
     }
+    qualification_exact = False
+    try:
+        if not isinstance(vector, dict) or not isinstance(consumption, dict):
+            raise QualificationIdentityError("qualification identity is not an object")
+        recorded_commit = vector.get("git_commit")
+        if not isinstance(recorded_commit, str):
+            raise QualificationIdentityError("qualification commit is absent")
+        expected_vector = qualification_content_vector(root, recorded_commit)
+        validate_qualification_consumption(consumption, expected_vector)
+        qualification_exact = vector == expected_vector
+    except (OSError, QualificationIdentityError):
+        qualification_exact = False
     if (
         provenance.get("schema_version") != 2
         or provenance.get("run_id") != run_dir.name
@@ -274,8 +291,7 @@ def validate_identity(
         or consumption.get("consumed_nodes") != profile["consumed_nodes"]
         or set((consumption.get("consumed_node_sha256") or {}))
         != set(profile["consumed_nodes"])
-        or not isinstance(vector, dict)
-        or vector.get("available") is not True
+        or not qualification_exact
         or not isinstance(image, dict)
         or IMAGE.fullmatch(str(image.get("digest") or "")) is None
         or image.get("digest_source") != "docker_image_inspect_host"

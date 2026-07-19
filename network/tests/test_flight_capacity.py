@@ -28,6 +28,10 @@ from network.scripts.validate_flight_capacity import (
     sha256_file,
     validate_run,
 )
+from network.validation.qualification_identity import (
+    qualification_consumption,
+    qualification_content_vector,
+)
 
 
 IMAGE = "sha256:" + "1" * 64
@@ -109,6 +113,10 @@ class CapacityFixture:
         scenario_path = ROOT_DIR / "network/config/scenario_5uav.yaml"
         plan_path = ROOT_DIR / "doc/network_radio_integration_plan_v3.md"
         lock_path = ROOT_DIR / "network/config/dependency_lock.yaml"
+        qualification_vector = qualification_content_vector(ROOT_DIR)
+        qualification_record = qualification_consumption(
+            qualification_vector, "flight_capacity_prerequisite"
+        )
         provenance = {
             "schema_version": 2,
             "run_id": self.run_dir.name,
@@ -116,12 +124,8 @@ class CapacityFixture:
             "git_status": [],
             "acceptance_eligible": True,
             "acceptance_blockers": [],
-            "qualification_consumption": {
-                "profile": "flight_capacity_prerequisite",
-                "consumed_nodes": ["Q0", "Q1"],
-                "consumed_node_sha256": {"Q0": "2" * 64, "Q1": "3" * 64},
-            },
-            "qualification_content_vector": {"available": True},
+            "qualification_consumption": qualification_record,
+            "qualification_content_vector": qualification_vector,
             "container_image": {
                 "digest": IMAGE,
                 "digest_source": "docker_image_inspect_host",
@@ -334,6 +338,21 @@ class FlightCapacityTests(unittest.TestCase):
         self.assertTrue(result["passed"], result)
         self.assertEqual(result["metrics"]["window_count"], 300)
         self.assertEqual(result["metrics"]["passing_window_count"], 300)
+
+        # Matching forged node hashes in both producer-owned records must not
+        # pass: the validator independently reconstructs the committed vector.
+        provenance_path = fixture.run_dir / "metrics/provenance.json"
+        provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+        forged_hash = "f" * 64
+        provenance["qualification_content_vector"]["node_hashes"]["Q1"] = forged_hash
+        provenance["qualification_consumption"]["consumed_node_sha256"][
+            "Q1"
+        ] = forged_hash
+        provenance_path.write_text(json.dumps(provenance), encoding="utf-8")
+        fixture.write_observation()
+        result = self.validate_fixture(fixture)
+        self.assertFalse(result["passed"], result)
+        self.assertFalse(result["gates"]["identity"]["passed"])
 
     def test_missing_uav_measurement_fails(self) -> None:
         fixture = CapacityFixture()
