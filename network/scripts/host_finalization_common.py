@@ -160,9 +160,34 @@ def validate_source_snapshot(snapshot: Path, source_commit: str) -> None:
 
 
 def immutable_container_configuration(initial: dict[str, Any], final: dict[str, Any]) -> None:
-    for field in ("Config", "HostConfig", "Mounts", "Path", "Args", "Image"):
+    for field in ("Config", "Path", "Args", "Image"):
         if initial.get(field) != final.get(field):
             raise ValueError(f"Docker container immutable field changed: {field}")
+    initial_host = initial.get("HostConfig")
+    final_host = final.get("HostConfig")
+    if not isinstance(initial_host, dict) or not isinstance(final_host, dict):
+        raise ValueError("Docker container immutable field changed: HostConfig")
+    normalized_initial_host = dict(initial_host)
+    normalized_final_host = dict(final_host)
+    for host in (normalized_initial_host, normalized_final_host):
+        # Docker may re-serialize its default pointer-bool from false to null
+        # after the first start/stop.  Both mean that OOM killing is enabled;
+        # true is never accepted by this equivalence rule.
+        if host.get("OomKillDisable") not in (None, False):
+            raise ValueError("Docker container immutable field changed: HostConfig")
+        host["OomKillDisable"] = False
+    if normalized_initial_host != normalized_final_host:
+        raise ValueError("Docker container immutable field changed: HostConfig")
+    initial_mounts = initial.get("Mounts")
+    final_mounts = final.get("Mounts")
+    if (
+        not isinstance(initial_mounts, list)
+        or not isinstance(final_mounts, list)
+        or not all(isinstance(item, dict) for item in [*initial_mounts, *final_mounts])
+        or sorted(_canonical(item) for item in initial_mounts)
+        != sorted(_canonical(item) for item in final_mounts)
+    ):
+        raise ValueError("Docker container immutable field changed: Mounts")
 
 
 def exact_mounts(

@@ -253,7 +253,14 @@ class ComponentFinalizerTests(unittest.TestCase):
 
     def test_capacity_main_container_exact_boundary_passes(self) -> None:
         initial, final = self.main_documents()
+        initial["HostConfig"]["OomKillDisable"] = False
+        final["HostConfig"]["OomKillDisable"] = None
+        final["Mounts"].reverse()
         self.validate_main(initial, final)
+        initial["HostConfig"]["OomKillDisable"] = True
+        final["HostConfig"]["OomKillDisable"] = True
+        with self.assertRaisesRegex(ValueError, "HostConfig"):
+            self.validate_main(initial, final)
 
     def test_m4_main_container_requires_profile_graphics_device_request(self) -> None:
         profile = load_profiles()["m4_capacity_prerequisite"]
