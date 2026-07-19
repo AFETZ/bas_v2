@@ -577,6 +577,32 @@ class SchedulingAndStateTests(unittest.TestCase):
         with self.assertRaises(probe.ControlProbeError):
             probe.validate_m4_window_liveness(policy, heartbeats, ack, telemetry)
 
+    def test_startup_responses_are_ambient_only_before_first_control_window(self) -> None:
+        instance = self.correlated_instance()
+        instance.args.profile = "m3"
+        instance.processed_commands = set()
+        for message_type in ("COMMAND_ACK", "AUTOPILOT_VERSION"):
+            instance._handle_message(
+                self.response_message(1, message_type),
+                peer=("10.71.1.10", 14601),
+                received_ns=1_000_000_000,
+                datagram_sha256="7" * 64,
+            )
+        instance.writer.emit.assert_not_called()
+
+        instance.processed_commands.add("first-window-command")
+        with self.assertRaises(probe.ControlProbeError):
+            instance._handle_message(
+                self.response_message(1, "COMMAND_ACK"),
+                peer=("10.71.1.10", 14601),
+                received_ns=1_000_000_001,
+                datagram_sha256="8" * 64,
+            )
+        self.assertEqual(
+            instance.writer.emit.call_args.args[0],
+            "uncorrelated_control_response",
+        )
+
     def test_five_uav_hundred_slots_allow_exact_five_percent_echo_loss(self) -> None:
         instance = self.correlated_instance()
         policy = self.correlated_policy()

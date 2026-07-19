@@ -1112,6 +1112,17 @@ class ActualSitlControlProbe:
                 )
             return
         if pending is None and message_type in {"COMMAND_ACK", "AUTOPILOT_VERSION"}:
+            # MAVProxy performs its own ArduPilot startup discovery before the
+            # first acceptance window (for example MAV_CMD_GET_HOME_POSITION).
+            # Those responses are already preserved byte-for-byte by the
+            # enclosing ``control_datagram_receive`` record, but they cannot
+            # correlate with an acceptance request because no control command
+            # has been consumed yet.  Treat them like other ambient MAVLink
+            # traffic only in that strictly bounded pre-window state.  Once a
+            # window has ever been consumed, an unbound response remains a
+            # fail-closed condition, including between later windows.
+            if self.active_phase is None and not self.processed_commands:
+                return
             if (
                 getattr(getattr(self, "args", None), "profile", None)
                 == "m4_causality"
