@@ -33,6 +33,7 @@ from network.tests.collect_five_uav_health import (  # noqa: E402
     readiness_status,
     run_process_monitor,
     selected_measurement_duration,
+    utc_from_epoch_seconds,
 )
 from network.validation.evidence import (  # noqa: E402
     M1_PROCESS_SAMPLE_MAX_GAP_S,
@@ -1551,6 +1552,10 @@ class FiveUavHealthV2Tests(unittest.TestCase):
             self.assertIn("readiness heartbeat", "\n".join(result["details"]["failures"]))
 
     def test_clock_correlation_labels_are_complete_and_bound(self) -> None:
+        self.assertEqual(
+            utc_from_epoch_seconds(1.125),
+            "1970-01-01T00:00:01.125000Z",
+        )
         with tempfile.TemporaryDirectory() as temp:
             run_dir = Path(temp) / "clock_mutation"
             write_complete_health_evidence(run_dir)

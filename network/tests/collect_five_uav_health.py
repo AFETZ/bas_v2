@@ -82,6 +82,16 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def utc_from_epoch_seconds(value: float) -> str:
+    """Preserve sub-second wall-clock evidence in canonical UTC form."""
+
+    return (
+        datetime.fromtimestamp(value, timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
+
+
 def rate_hz(record: dict[str, Any]) -> float:
     count = int(record.get("count", 0))
     first = record.get("first_monotonic_s")
@@ -1636,6 +1646,13 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         measurement_ended_mono = time.monotonic()
         measurement_ended_wall = time.time()
+        if ready:
+            event_log.emit(
+                "clock_correlation",
+                correlation_point="measurement_end",
+                monotonic_clock="CLOCK_MONOTONIC",
+                wall_clock="CLOCK_REALTIME",
+            )
         measurement_launch_log_end_offset = (
             launch_log.stat().st_size if launch_log.is_file() else 0
         )
@@ -1653,13 +1670,6 @@ def main(argv: list[str] | None = None) -> int:
         if rclpy.ok():
             rclpy.shutdown()
 
-    if ready:
-        event_log.emit(
-            "clock_correlation",
-            correlation_point="measurement_end",
-            monotonic_clock="CLOCK_MONOTONIC",
-            wall_clock="CLOCK_REALTIME",
-        )
     event_log.set_phase("finalization")
 
     if heartbeat_thread.is_alive():
@@ -1918,10 +1928,8 @@ def main(argv: list[str] | None = None) -> int:
         },
         "component_only": True,
         "packet_path_eligible": False,
-        "started_utc": datetime.fromtimestamp(started_wall, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "ended_utc": datetime.fromtimestamp(measurement_ended_wall, timezone.utc).strftime(
-            "%Y-%m-%dT%H:%M:%SZ"
-        ),
+        "started_utc": utc_from_epoch_seconds(started_wall),
+        "ended_utc": utc_from_epoch_seconds(measurement_ended_wall),
         "observed_duration_s": round(observed_duration, 6),
         "minimum_duration_s": args.minimum_duration_s,
         "minimum_heartbeat_hz": args.minimum_heartbeat_hz,
