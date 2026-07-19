@@ -9,7 +9,6 @@ import hashlib
 import io
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -24,11 +23,10 @@ from network.scripts.validate_m0_baseline import EXPECTED_DEPENDENCY_RECORDS
 from network.scripts.validate_status_documents import (
     STATUS_PATHS,
     M1_NEXT_COMMAND_ARGV,
-    M2_BLOCKING_PREREQUISITES,
+    _component_container_immutable_failures,
     _container_immutable_fingerprint,
     _derive_execution_contract,
     _git_blob_record,
-    _m1_portable_manifest,
     _portable_manifest_from_snapshot,
     _validate_fresh_raw,
     canonical_status_metadata_block,
@@ -1040,6 +1038,33 @@ class StatusDocumentsLiveValidatorTests(unittest.TestCase):
         self.assertEqual(
             _container_immutable_fingerprint(initial),
             _container_immutable_fingerprint(final),
+        )
+
+        component_initial = {
+            "Config": {"Image": "sha256:image"},
+            "HostConfig": {"OomKillDisable": False},
+            "Mounts": copy.deepcopy(initial["Mounts"]),
+            "Path": "/entrypoint",
+            "Args": ["command"],
+            "Image": "sha256:image",
+        }
+        component_final = copy.deepcopy(component_initial)
+        component_final["HostConfig"]["OomKillDisable"] = None
+        component_final["Mounts"].reverse()
+        self.assertEqual(
+            _component_container_immutable_failures(
+                component_initial, component_final, label="component producer"
+            ),
+            [],
+        )
+        component_final["HostConfig"]["OomKillDisable"] = True
+        self.assertTrue(
+            any(
+                "HostConfig" in failure
+                for failure in _component_container_immutable_failures(
+                    component_initial, component_final, label="component producer"
+                )
+            )
         )
 
     def test_passing_booleans_cannot_hide_forged_host_reexecution(self) -> None:

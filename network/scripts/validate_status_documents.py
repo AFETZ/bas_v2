@@ -30,6 +30,7 @@ if str(ROOT_DIR) not in sys.path:
 from network.scripts.host_finalization_common import (  # noqa: E402
     M0_CAPABILITY_COMMAND_SCRIPT,
     M0_CAPABILITY_STDOUT,
+    immutable_container_configuration,
 )
 from network.validation.component_profiles import (  # noqa: E402
     expected_gpu_device_requests,
@@ -929,6 +930,7 @@ def _validate_metadata_v2(
     plan_sha256: str,
     m0_receipt: dict[str, Any],
     m1_receipt: dict[str, Any],
+    closure_receipt_consumed: bool = False,
 ) -> list[str]:
     """Validate the exact count-two M0+M1 live-status contract."""
 
@@ -1071,6 +1073,7 @@ def _validate_metadata_v2(
                 technical_base=str(technical_base),
                 report_commit=report_commit,
                 profiles=profiles,
+                closure_receipt_consumed=closure_receipt_consumed,
             )
         )
     return failures
@@ -1296,6 +1299,7 @@ def _validate_status_next_sequence(
     technical_base: str,
     report_commit: str,
     profiles: dict[str, dict[str, Any]],
+    closure_receipt_consumed: bool = False,
 ) -> list[str]:
     """Validate exact sequence bytes and its dynamic auxiliary cardinality."""
 
@@ -1339,7 +1343,7 @@ def _validate_status_next_sequence(
                 f"status v{version} has multiple successful closure receipts "
                 "for one source epoch"
             )
-        elif len(closure) == 1:
+        elif len(closure) == 1 and not closure_receipt_consumed:
             failures.append(
                 f"status v{version} already has a successful closure receipt; "
                 "advance status before executing another component"
@@ -1363,6 +1367,7 @@ def _validate_metadata_component_version(
     receipts: dict[str, dict[str, Any]],
     receipt_payloads: dict[str, bytes],
     profiles: dict[str, dict[str, Any]],
+    closure_receipt_consumed: bool = False,
 ) -> list[str]:
     """Validate cumulative post-M2/post-M3/post-M4 status authority."""
 
@@ -1507,6 +1512,7 @@ def _validate_metadata_component_version(
                 technical_base=str(technical_base),
                 report_commit=report_commit,
                 profiles=profiles,
+                closure_receipt_consumed=closure_receipt_consumed,
             )
         )
     return failures
@@ -4917,6 +4923,19 @@ def _one_docker_inspect(payload: bytes, label: str) -> dict[str, Any]:
     return value[0]
 
 
+def _component_container_immutable_failures(
+    initial: dict[str, Any], final: dict[str, Any], *, label: str
+) -> list[str]:
+    """Apply the same Docker serialization equivalence as the host finalizer."""
+
+    try:
+        immutable_container_configuration(initial, final)
+    except ValueError as exc:
+        detail = str(exc).removeprefix("Docker container ")
+        return [f"{label} {detail}"]
+    return []
+
+
 def _validate_component_main_container(
     root: Path,
     payloads: dict[str, bytes],
@@ -4949,9 +4968,11 @@ def _validate_component_main_container(
     except ValueError as exc:
         return [str(exc)]
 
-    for field in ("Config", "HostConfig", "Mounts", "Path", "Args", "Image"):
-        if initial.get(field) != final.get(field):
-            failures.append(f"component producer immutable field changed: {field}")
+    failures.extend(
+        _component_container_immutable_failures(
+            initial, final, label="component producer"
+        )
+    )
     initial_state = initial.get("State") if isinstance(initial.get("State"), dict) else {}
     final_state = final.get("State") if isinstance(final.get("State"), dict) else {}
     config = final.get("Config") if isinstance(final.get("Config"), dict) else {}
@@ -5184,9 +5205,11 @@ def _validate_component_validation_container(
         )
     except ValueError as exc:
         return [str(exc)]
-    for field in ("Config", "HostConfig", "Mounts", "Path", "Args", "Image"):
-        if initial.get(field) != final.get(field):
-            failures.append(f"component validation immutable field changed: {field}")
+    failures.extend(
+        _component_container_immutable_failures(
+            initial, final, label="component validation"
+        )
+    )
     initial_state = initial.get("State") if isinstance(initial.get("State"), dict) else {}
     final_state = final.get("State") if isinstance(final.get("State"), dict) else {}
     config = final.get("Config") if isinstance(final.get("Config"), dict) else {}
@@ -5794,6 +5817,7 @@ def _validate_live_v2(
     report_commit: str,
     plan_payload: bytes,
     plan_sha256: str,
+    closure_receipt_consumed: bool = False,
 ) -> tuple[list[str], list[tuple[str, bytes]], dict[str, Any] | None]:
     failures: list[str] = []
     evidence = metadata.get("evidence")
@@ -5911,6 +5935,7 @@ def _validate_live_v2(
             plan_sha256=plan_sha256,
             m0_receipt=m0_receipt,
             m1_receipt=m1_receipt,
+            closure_receipt_consumed=closure_receipt_consumed,
         )
     )
     return failures, receipt_records, state
@@ -5944,6 +5969,7 @@ def _validate_live_component_version(
     report_commit: str,
     plan_payload: bytes,
     plan_sha256: str,
+    closure_receipt_consumed: bool = False,
 ) -> tuple[list[str], list[tuple[str, bytes]], dict[str, Any] | None]:
     """Recursively validate cumulative v3/v4/v5 milestone authority."""
 
@@ -6016,6 +6042,7 @@ def _validate_live_component_version(
             report_commit=latest_source,
             plan_payload=plan_payload,
             plan_sha256=plan_sha256,
+            closure_receipt_consumed=True,
         )
     else:
         previous_failures, _, _ = _validate_live_component_version(
@@ -6026,6 +6053,7 @@ def _validate_live_component_version(
             report_commit=latest_source,
             plan_payload=plan_payload,
             plan_sha256=plan_sha256,
+            closure_receipt_consumed=True,
         )
     failures.extend(
         f"historical v{version - 1}: {failure}" for failure in previous_failures
@@ -6103,6 +6131,7 @@ def _validate_live_component_version(
             receipts=receipts,
             receipt_payloads=receipt_payloads,
             profiles=profiles,
+            closure_receipt_consumed=closure_receipt_consumed,
         )
     )
     return failures, receipt_records, state

@@ -273,6 +273,18 @@ class StatusDocumentGeneratorTests(unittest.TestCase):
                     for item in failures
                 )
             )
+            self.assertEqual(
+                _validate_status_next_sequence(
+                    sequence,
+                    version=version,
+                    root=root,
+                    technical_base=commit,
+                    report_commit=commit,
+                    profiles=profiles,
+                    closure_receipt_consumed=True,
+                ),
+                [],
+            )
             duplicate_closure = write_component(closure_name, "m2_duplicate")
             failures = _validate_status_next_sequence(
                 sequence,
@@ -284,6 +296,21 @@ class StatusDocumentGeneratorTests(unittest.TestCase):
             )
             self.assertTrue(
                 any("multiple successful closure receipts" in item for item in failures)
+            )
+            consumed_failures = _validate_status_next_sequence(
+                sequence,
+                version=version,
+                root=root,
+                technical_base=commit,
+                report_commit=commit,
+                profiles=profiles,
+                closure_receipt_consumed=True,
+            )
+            self.assertTrue(
+                any(
+                    "multiple successful closure receipts" in item
+                    for item in consumed_failures
+                )
             )
             duplicate_closure.chmod(0o600)
             duplicate_closure.unlink()
