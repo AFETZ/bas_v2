@@ -3653,6 +3653,12 @@ class M3ExternalMatrixStaticTests(unittest.TestCase):
         runner = (ROOT / "network/scripts/run_m3_external_matrix.sh").read_text()
         self.assertIn("umask 0002", runner)
         self.assertNotIn("sudo", runner)
+        self.assertIn(
+            'MAVPROXY_SCRIPT="/home/ubuntu/.local/bin/mavproxy.py"', runner
+        )
+        self.assertIn(
+            '[[ ! -f "$MAVPROXY_SCRIPT" || ! -x "$MAVPROXY_SCRIPT" ]]', runner
+        )
         self.assertNotIn("${2:-{}}", runner)
         self.assertIn("details_json='{}'", runner)
         self.assertLess(

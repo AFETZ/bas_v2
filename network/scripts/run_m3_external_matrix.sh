@@ -22,6 +22,7 @@ OPAQUE_RELAY="$ROOT_DIR/network/bridge/opaque_udp_relay.py"
 CLOCK_BEACON="$ROOT_DIR/network/bridge/runtime_clock_beacon.py"
 ACTUAL_ORCHESTRATOR="$ROOT_DIR/network/scripts/actual_sitl_endpoint_orchestrator.py"
 ACTUAL_CONTROL_PROBE="$ROOT_DIR/network/scripts/actual_sitl_control_probe.py"
+MAVPROXY_SCRIPT="/home/ubuntu/.local/bin/mavproxy.py"
 MATRIX="$ROOT_DIR/network/config/endpoint_matrix_5uav.json"
 ENDPOINT_SCHEMA="$ROOT_DIR/network/config/endpoint_transaction_schema.json"
 FLIGHT_SCENARIO="$ROOT_DIR/network/config/scenario_5uav.yaml"
@@ -47,12 +48,17 @@ if [[ "$(id -u)" != "0" ]]; then
   printf 'FAIL M3 runner requires the component wrapper root user/capability profile\n' >&2
   exit 2
 fi
-for command in colcon ip mavproxy.py python3 ros2 setsid; do
+for command in colcon ip python3 ros2 setsid; do
   command -v "$command" >/dev/null || {
     printf 'FAIL required command is absent: %s\n' "$command" >&2
     exit 2
   }
 done
+if [[ ! -f "$MAVPROXY_SCRIPT" || ! -x "$MAVPROXY_SCRIPT" ]]; then
+  printf 'FAIL pinned M3 MAVProxy script is absent or non-executable: %s\n' \
+    "$MAVPROXY_SCRIPT" >&2
+  exit 2
+fi
 REQUIRED_PATHS=(
   "$NS3_BINARY" "$PACKET_SOURCE" "$COPIED_SOURCE" "$RECEIPT_TOOL"
   "$CONFIG_TOOL" "$NS3_RUNNER" "$PROBE" "$CAPTURE_TOOL"

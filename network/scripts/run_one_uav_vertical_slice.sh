@@ -40,6 +40,7 @@ ENDPOINT_MATRIX="$ROOT_DIR/network/config/endpoint_matrix_5uav.json"
 ENDPOINT_CONTRACT="$RUN_DIR/metrics/m2_endpoint_contract.json"
 RAW_CAPTURE="$ROOT_DIR/network/scripts/raw_packet_capture.py"
 PROBE="$ROOT_DIR/network/tests/mavlink_vertical_slice_probe.py"
+MAVPROXY_SCRIPT="/home/ubuntu/.local/bin/mavproxy.py"
 PROCESS_IDENTITY="$RUN_DIR/logs/m2_process_identity.json"
 PROBE_EVENTS="$RUN_DIR/logs/m2_probe_events.jsonl"
 PROCESS_EVENTS="$RUN_DIR/logs/m2_process_events.jsonl"
@@ -63,13 +64,18 @@ if [[ ! -f "$SCENARIO" ]]; then
   exit 2
 fi
 
-for command in bash colcon getent ip mavproxy.py mount python3 ros2 setsid sysctl \
+for command in bash colcon getent ip mount python3 ros2 setsid sysctl \
   unshare; do
   if ! command -v "$command" >/dev/null 2>&1; then
     printf 'FAIL required M2 command is missing: %s\n' "$command" >&2
     exit 2
   fi
 done
+if [[ ! -f "$MAVPROXY_SCRIPT" || ! -x "$MAVPROXY_SCRIPT" ]]; then
+  printf 'FAIL pinned M2 MAVProxy script is missing or non-executable: %s\n' \
+    "$MAVPROXY_SCRIPT" >&2
+  exit 2
+fi
 if ((EUID != 0)); then
   printf 'FAIL formal M2 requires an already capability-bounded root process\n' >&2
   exit 2

@@ -925,6 +925,12 @@ class M2VerticalSliceValidatorTests(unittest.TestCase):
             ).split()
             self.assertNotIn("tcpdump", executable_tokens)
         self.assertIn('NS3_PROGRAM="ams-tap-packet-engine"', runner)
+        self.assertIn(
+            'MAVPROXY_SCRIPT="/home/ubuntu/.local/bin/mavproxy.py"', runner
+        )
+        self.assertIn(
+            '[[ ! -f "$MAVPROXY_SCRIPT" || ! -x "$MAVPROXY_SCRIPT" ]]', runner
+        )
         self.assertIn('UAV_COUNT=1 EVENT_EPOCH="$event_epoch"', runner)
         self.assertIn("SELF_TEST=0", runner)
         self.assertIn("SIONNA_IPC_ENABLED=0", runner)
