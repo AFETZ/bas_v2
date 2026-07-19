@@ -57,6 +57,7 @@ TOS_CONTROL = 184
 MAX_HEARTBEAT_HISTORY_PER_UAV = 10_000
 MAX_RAW_RESPONSE_HISTORY_PER_UAV = 10_000
 OUTCOME_TIMEOUT_NS = 3_000_000_000
+SCHEDULED_PUMP_DATAGRAM_LIMIT = 64
 MAX_RETIRED_TIMESYNC_TOKENS = 100_000
 CORRELATED_TIMESYNC_POLICY = "correlated_timesync_required"
 
@@ -1163,17 +1164,35 @@ class ActualSitlControlProbe:
         if pending.ack is not None and pending.telemetry is not None:
             self._complete_pending(system_id, timed_out=False)
 
-    def pump(self, timeout_s: float) -> None:
+    def pump(
+        self, timeout_s: float, *, max_datagrams: int | None = None
+    ) -> None:
+        if (
+            max_datagrams is not None
+            and (
+                isinstance(max_datagrams, bool)
+                or not isinstance(max_datagrams, int)
+                or max_datagrams < 1
+            )
+        ):
+            raise ControlProbeError("pump datagram limit is invalid")
         self._update_capacity_flight_boundaries(time.monotonic_ns())
         readable, _writable, _errors = select.select([self.sock], [], [], timeout_s)
         if not readable:
             self._update_capacity_flight_boundaries(time.monotonic_ns())
             return
+        received_datagrams = 0
         while True:
+            if (
+                max_datagrams is not None
+                and received_datagrams >= max_datagrams
+            ):
+                return
             try:
                 payload, ancillary, flags, peer_raw = self.sock.recvmsg(65535, 128)
             except BlockingIOError:
                 return
+            received_datagrams += 1
             peer = (str(peer_raw[0]), int(peer_raw[1]))
             received_ns = time.monotonic_ns()
             rx_tos = require_control_rx_tos(ancillary, flags)
@@ -1224,6 +1243,38 @@ class ActualSitlControlProbe:
                     datagram_sha256=datagram_hash,
                 )
             self._update_capacity_flight_boundaries(time.monotonic_ns())
+
+    def _offer_due_requests(
+        self,
+        policy: WindowPolicy,
+        *,
+        now_ns: int,
+        next_sequence: dict[int, int],
+        offered_counts: dict[int, int],
+    ) -> None:
+        """Offer due ordinals without ever overlapping a serial transaction."""
+
+        for uav in range(1, 6):
+            sequence = next_sequence[uav]
+            if sequence > policy.offered_per_uav:
+                continue
+            scheduled_ns = policy.slot_monotonic_ns(sequence)
+            if now_ns < scheduled_ns:
+                continue
+            if (
+                policy.response_policy_for(uav)
+                != CORRELATED_TIMESYNC_POLICY
+                and uav in self.pending
+            ):
+                # A host scheduling delay can make the next nominal slot due
+                # before the prior request has had its frozen three-second
+                # outcome interval.  Keep the ordinal pending until that
+                # transaction completes or _expire_pending() quarantines a
+                # real timeout; never send overlapping serial transactions.
+                continue
+            self.send_request(policy, uav, sequence)
+            offered_counts[uav] += 1
+            next_sequence[uav] += 1
 
     def _update_capacity_flight_boundaries(self, now_ns: int) -> None:
         airborne = getattr(self, "airborne_controller", None)
@@ -1703,35 +1754,17 @@ class ActualSitlControlProbe:
         offered_counts = {uav: 0 for uav in range(1, 6)}
 
         while time.monotonic_ns() < policy.end_monotonic_ns:
-            self.pump(0.01)
+            self.pump(
+                0.01, max_datagrams=SCHEDULED_PUMP_DATAGRAM_LIMIT
+            )
             self._expire_pending()
             now_ns = time.monotonic_ns()
-            for uav in range(1, 6):
-                sequence = next_sequence[uav]
-                if sequence > policy.offered_per_uav:
-                    continue
-                scheduled_ns = policy.slot_monotonic_ns(sequence)
-                if now_ns < scheduled_ns:
-                    continue
-                if (
-                    policy.response_policy_for(uav)
-                    != CORRELATED_TIMESYNC_POLICY
-                    and uav in self.pending
-                ):
-                    self.writer.emit(
-                        "ordinal_send_slot_overlap",
-                        phase=policy.window_id,
-                        window_id=policy.window_id,
-                        uav=uav,
-                        ordinal_send_slot=sequence,
-                        scheduled_send_monotonic_ns=scheduled_ns,
-                    )
-                    raise ControlProbeError(
-                        f"{policy.window_id}/uav{uav} prior outcome overlaps send slot"
-                    )
-                self.send_request(policy, uav, sequence)
-                offered_counts[uav] += 1
-                next_sequence[uav] += 1
+            self._offer_due_requests(
+                policy,
+                now_ns=now_ns,
+                next_sequence=next_sequence,
+                offered_counts=offered_counts,
+            )
             if (
                 all(
                     next_sequence[uav] > policy.offered_per_uav

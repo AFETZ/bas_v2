@@ -145,6 +145,47 @@ class NonceAndCodecTests(unittest.TestCase):
 
 class SchedulingAndStateTests(unittest.TestCase):
     @staticmethod
+    def legacy_serial_policy() -> probe.WindowPolicy:
+        return probe.WindowPolicy(
+            window_id="positive",
+            transport_phase_code=1,
+            start_monotonic_ns=1_000_000_000,
+            end_monotonic_ns=10_000_000_000,
+            offered_per_uav=2,
+            send_span_ms=1_000,
+            expected_engine_state="up_epoch_1",
+            response_policies={uav: "ack_required" for uav in range(1, 6)},
+            minimum_quiet_drain_ns_by_uav={uav: 0 for uav in range(1, 6)},
+            flow_group_ids={
+                uav: f"uav{uav}.control.downlink" for uav in range(1, 6)
+            },
+        )
+
+    @staticmethod
+    def legacy_serial_instance() -> probe.ActualSitlControlProbe:
+        instance = probe.ActualSitlControlProbe.__new__(
+            probe.ActualSitlControlProbe
+        )
+        nonce = "78" * 16
+        instance.args = argparse.Namespace(
+            profile="m3",
+            run_nonce=nonce,
+            transport_nonce32=nonce,
+            transport_nonce_derivation="identity/full_run_nonce32",
+        )
+        instance.pending = {}
+        instance.correlated_pending = {}
+        instance.retired_timesync_tokens = {}
+        instance.quarantined_uavs = set()
+        instance.sequencer = probe.MavlinkSequencer()
+        instance.sock = mock.Mock()
+        instance.sock.sendto.side_effect = (
+            lambda payload, _destination: len(payload)
+        )
+        instance.writer = mock.Mock()
+        return instance
+
+    @staticmethod
     def recovery_policy(window_id: str, start_ns: int) -> probe.WindowPolicy:
         return probe.WindowPolicy(
             window_id=window_id,
@@ -561,6 +602,137 @@ class SchedulingAndStateTests(unittest.TestCase):
             )["uav1"],
             1,
         )
+
+    def test_scheduled_pump_yields_after_bounded_datagram_batch(self) -> None:
+        instance = probe.ActualSitlControlProbe.__new__(
+            probe.ActualSitlControlProbe
+        )
+        payload = b"one-valid-datagram"
+        message = mock.Mock()
+        message.get_type.return_value = "HEARTBEAT"
+        message.get_msgbuf.return_value = payload
+        parser = mock.Mock()
+        parser.parse_buffer.return_value = [message]
+        instance.mavlink_dialect = mock.Mock()
+        instance.mavlink_dialect.MAVLink.return_value = parser
+        instance.sock = mock.Mock()
+        instance.sock.recvmsg.return_value = (
+            payload,
+            [],
+            0,
+            ("10.71.1.10", 14601),
+        )
+        instance.writer = mock.Mock()
+        instance._handle_message = mock.Mock()
+        instance._update_capacity_flight_boundaries = mock.Mock()
+
+        with (
+            mock.patch.object(
+                probe.select,
+                "select",
+                return_value=([instance.sock], [], []),
+            ),
+            mock.patch.object(probe, "require_control_rx_tos", return_value=184),
+            mock.patch.object(probe.time, "monotonic_ns", return_value=123),
+        ):
+            instance.pump(
+                0.01,
+                max_datagrams=probe.SCHEDULED_PUMP_DATAGRAM_LIMIT,
+            )
+
+        self.assertEqual(
+            instance.sock.recvmsg.call_count,
+            probe.SCHEDULED_PUMP_DATAGRAM_LIMIT,
+        )
+        self.assertEqual(
+            instance._handle_message.call_count,
+            probe.SCHEDULED_PUMP_DATAGRAM_LIMIT,
+        )
+
+    def test_serial_due_slot_is_deferred_until_prior_outcome(self) -> None:
+        instance = self.legacy_serial_instance()
+        policy = self.legacy_serial_policy()
+        next_sequence = {1: 2, **{uav: 3 for uav in range(2, 6)}}
+        offered_counts = {1: 1, **{uav: 2 for uav in range(2, 6)}}
+
+        with mock.patch.object(
+            probe.time, "monotonic_ns", return_value=policy.start_monotonic_ns
+        ):
+            instance.send_request(policy, 1, 1)
+        instance._offer_due_requests(
+            policy,
+            now_ns=2_100_000_000,
+            next_sequence=next_sequence,
+            offered_counts=offered_counts,
+        )
+        self.assertEqual(instance.sock.sendto.call_count, 2)
+        self.assertEqual(next_sequence[1], 2)
+        self.assertEqual(offered_counts[1], 1)
+
+        instance.pending[1].ack = {"received": True}
+        instance.pending[1].telemetry = {"received": True}
+        with mock.patch.object(
+            probe.time, "monotonic_ns", return_value=2_200_000_000
+        ):
+            instance._complete_pending(1, timed_out=False)
+        with mock.patch.object(
+            probe.time, "monotonic_ns", return_value=2_300_000_000
+        ):
+            instance._offer_due_requests(
+                policy,
+                now_ns=2_300_000_000,
+                next_sequence=next_sequence,
+                offered_counts=offered_counts,
+            )
+
+        self.assertEqual(instance.sock.sendto.call_count, 4)
+        self.assertEqual(next_sequence[1], 3)
+        self.assertEqual(offered_counts[1], 2)
+        self.assertEqual(instance.pending[1].sequence, 2)
+        self.assertEqual(
+            instance.pending[1].scheduled_send_monotonic_ns,
+            policy.slot_monotonic_ns(2),
+        )
+        self.assertEqual(instance.pending[1].sent_monotonic_ns, 2_300_000_000)
+        self.assertGreaterEqual(
+            instance.pending[1].sent_monotonic_ns, 2_200_000_000
+        )
+
+    def test_serial_defer_preserves_three_second_timeout_quarantine(self) -> None:
+        instance = self.legacy_serial_instance()
+        policy = self.legacy_serial_policy()
+        next_sequence = {1: 2, **{uav: 3 for uav in range(2, 6)}}
+        offered_counts = {1: 1, **{uav: 2 for uav in range(2, 6)}}
+
+        with mock.patch.object(
+            probe.time, "monotonic_ns", return_value=policy.start_monotonic_ns
+        ):
+            instance.send_request(policy, 1, 1)
+        instance._offer_due_requests(
+            policy,
+            now_ns=2_100_000_000,
+            next_sequence=next_sequence,
+            offered_counts=offered_counts,
+        )
+        with mock.patch.object(
+            probe.time,
+            "monotonic_ns",
+            return_value=policy.start_monotonic_ns + probe.OUTCOME_TIMEOUT_NS,
+        ):
+            instance._expire_pending()
+
+        self.assertNotIn(1, instance.pending)
+        self.assertIn(1, instance.quarantined_uavs)
+        with self.assertRaises(probe.ControlProbeError):
+            instance._offer_due_requests(
+                policy,
+                now_ns=policy.start_monotonic_ns + probe.OUTCOME_TIMEOUT_NS,
+                next_sequence=next_sequence,
+                offered_counts=offered_counts,
+            )
+        self.assertEqual(instance.sock.sendto.call_count, 2)
+        self.assertEqual(next_sequence[1], 2)
+        self.assertEqual(offered_counts[1], 1)
 
     def test_m4_liveness_requires_only_correlated_uav_heartbeat_and_raw(self) -> None:
         policy = self.correlated_policy(mixed_timeout_uav=1)
