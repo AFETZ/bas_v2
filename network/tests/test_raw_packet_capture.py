@@ -43,6 +43,60 @@ def decode_batch(payload: bytes) -> list[bytes]:
     return frames
 
 
+def execute_cbpf(program: tuple[capture.SockFilter, ...], frame: bytes) -> int:
+    """Small interpreter for the exact classic-BPF subset emitted by the tool."""
+
+    accumulator = 0
+    index_register = 0
+    instruction_index = 0
+    while instruction_index < len(program):
+        instruction = program[instruction_index]
+        code = instruction.code
+        if code == 0x28:  # ld h [k]
+            accumulator = int.from_bytes(
+                frame[instruction.k : instruction.k + 2], "big"
+            )
+        elif code == 0x30:  # ld b [k]
+            accumulator = frame[instruction.k]
+        elif code == 0x48:  # ld h [x + k]
+            offset = index_register + instruction.k
+            accumulator = int.from_bytes(frame[offset : offset + 2], "big")
+        elif code == 0xB1:  # ldx 4 * ([k] & 0xf)
+            index_register = 4 * (frame[instruction.k] & 0x0F)
+        elif code == 0x15:  # jeq #k
+            instruction_index += (
+                instruction.jt if accumulator == instruction.k else instruction.jf
+            )
+        elif code == 0x06:  # ret #k
+            return instruction.k
+        else:
+            raise AssertionError(f"unsupported test cBPF opcode: {code:#x}")
+        instruction_index += 1
+    raise AssertionError("cBPF program fell off its end")
+
+
+def ethernet_udp_frame(
+    *, version: int, source_port: int, destination_port: int, protocol: int = 17
+) -> bytes:
+    if version == 4:
+        frame = bytearray(14 + 20 + 8)
+        frame[12:14] = (0x0800).to_bytes(2, "big")
+        frame[14] = 0x45
+        frame[23] = protocol
+        udp_offset = 34
+    elif version == 6:
+        frame = bytearray(14 + 40 + 8)
+        frame[12:14] = (0x86DD).to_bytes(2, "big")
+        frame[14] = 0x60
+        frame[20] = protocol
+        udp_offset = 54
+    else:
+        raise AssertionError("unsupported test IP version")
+    frame[udp_offset : udp_offset + 2] = source_port.to_bytes(2, "big")
+    frame[udp_offset + 2 : udp_offset + 4] = destination_port.to_bytes(2, "big")
+    return bytes(frame)
+
+
 class ReceiveBufferContractTests(unittest.TestCase):
     def test_regular_receive_buffer_is_accepted_only_at_exact_effective_size(
         self,
@@ -122,6 +176,52 @@ class ReceiveBufferContractTests(unittest.TestCase):
         self.assertLessEqual(capture.DRAIN_BATCH_PACKET_LIMIT, 1_024)
         self.assertGreater(capture.DRAIN_BATCH_BYTE_LIMIT, capture.SNAPLEN)
         self.assertLessEqual(capture.DRAIN_BATCH_BYTE_LIMIT, 8 * 1024 * 1024)
+
+
+class UdpPortFilterTests(unittest.TestCase):
+    def test_port_contract_requires_canonical_sorted_unique_decimal(self) -> None:
+        self.assertEqual(capture.parse_udp_port_filter(None), ())
+        self.assertEqual(capture.parse_udp_port_filter("14550,15300"), (14550, 15300))
+        self.assertEqual(
+            capture.udp_port_filter_contract((14550, 15300)),
+            "udp-ports:v1:14550,15300",
+        )
+        for malformed in ("", "15300,14550", "14550,14550", "0", "65536", "x"):
+            with self.subTest(malformed=malformed), self.assertRaises(
+                capture.CaptureError
+            ):
+                capture.parse_udp_port_filter(malformed)
+
+    def test_filter_retains_either_udp_port_for_ipv4_and_ipv6_only(self) -> None:
+        program = capture.compile_udp_port_filter((14550, 15300))
+        accepted = (
+            ethernet_udp_frame(version=4, source_port=14550, destination_port=40000),
+            ethernet_udp_frame(version=4, source_port=40000, destination_port=15300),
+            ethernet_udp_frame(version=6, source_port=15300, destination_port=40000),
+            ethernet_udp_frame(version=6, source_port=40000, destination_port=14550),
+        )
+        rejected = (
+            ethernet_udp_frame(version=4, source_port=40000, destination_port=40001),
+            ethernet_udp_frame(
+                version=4,
+                source_port=14550,
+                destination_port=15300,
+                protocol=6,
+            ),
+            ethernet_udp_frame(version=6, source_port=40000, destination_port=40001),
+            ethernet_udp_frame(
+                version=6,
+                source_port=14550,
+                destination_port=15300,
+                protocol=6,
+            ),
+            bytes(64),
+        )
+        self.assertTrue(all(execute_cbpf(program, frame) for frame in accepted))
+        self.assertTrue(
+            all(execute_cbpf(program, frame) == 0 for frame in rejected)
+        )
+        self.assertLessEqual(len(program), 4_096)
 
 
 class BoundedDrainTests(unittest.TestCase):

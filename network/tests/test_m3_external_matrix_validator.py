@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import hashlib
 import io
@@ -12,6 +13,7 @@ import shutil
 import struct
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -980,6 +982,29 @@ class Fixture:
         manifest_hash = actual_endpoint.document_sha256(manifest)
 
         supervisor = actual_endpoint.read_process_identity(os.getpid())
+        # The independent validator runs only after the formal stack has
+        # stopped.  Preserve a structurally valid issuer snapshot whose PID is
+        # deliberately not live, and bind it through aggregate/topology data.
+        supervisor["pid"] = 2_000_000_000
+        supervisor["start_ticks"] += 1
+        supervisor_argv = [
+            str(Path(sys.executable).resolve()),
+            str(ROOT / "network/scripts/actual_sitl_endpoint_orchestrator.py"),
+            "--run-dir",
+            str(self.root),
+            "--manifest",
+            str(manifest_path),
+        ]
+        supervisor_cmdline = b"\0".join(
+            value.encode("utf-8") for value in supervisor_argv
+        ) + b"\0"
+        supervisor["argv"] = supervisor_argv
+        supervisor["cmdline_b64"] = base64.b64encode(supervisor_cmdline).decode(
+            "ascii"
+        )
+        supervisor["cmdline_sha256"] = hashlib.sha256(
+            supervisor_cmdline
+        ).hexdigest()
         python_hash = validator.sha256_file(Path(sys.executable).resolve())
         adapter_identities: dict[str, dict[str, object]] = {}
         aggregate_channels: dict[str, object] = {}
@@ -1453,10 +1478,16 @@ class Fixture:
                     )
                     sim_counter[1 if phase == "positive" else 2] += 20
 
+                    ack_sequence = response_sequence[uav]
+                    if phase == "recovery" and uav == 1 and sequence == 1:
+                        # A MAVLink sequence can wrap/repeat.  This exact ACK
+                        # intentionally duplicates positive/uav1/1 bytes and
+                        # must correlate by peer and transaction time.
+                        ack_sequence = 1
                     ack_frame = control_probe.mavlink_v2_frame(
                         77,
                         struct.pack("<HB", 512, 0),
-                        sequence=response_sequence[uav],
+                        sequence=ack_sequence,
                         system_id=uav,
                         component_id=1,
                     )
@@ -1733,6 +1764,9 @@ class Fixture:
                 "event": "supervisor_start_not_ready",
                 "wall_utc": "2026-01-01T00:00:00Z",
                 "monotonic_ns": 6_100_000_000,
+                "pid": supervisor["pid"],
+                "manifest_sha256": manifest_hash,
+                "expected_uavs": list(actual_endpoint.EXPECTED_UAVS),
             },
             *(
                 {
@@ -1740,6 +1774,15 @@ class Fixture:
                     "wall_utc": "2026-01-01T00:00:01Z",
                     "monotonic_ns": 6_400_000_000 + index,
                     "endpoint_uav": f"uav{index}",
+                    "candidate_sha256": aggregate_channels[f"uav{index}"][
+                        "candidate_sha256"
+                    ],
+                    "authorization_sha256": aggregate_channels[f"uav{index}"][
+                        "authorization_sha256"
+                    ],
+                    "mavproxy_peer": aggregate_channels[f"uav{index}"][
+                        "mavproxy_peer"
+                    ],
                 }
                 for index in range(1, 6)
             ),
@@ -1749,6 +1792,9 @@ class Fixture:
                     "wall_utc": "2026-01-01T00:00:02Z",
                     "monotonic_ns": 6_500_000_000 + index,
                     "endpoint_uav": f"uav{index}",
+                    "ready_sha256": aggregate_channels[f"uav{index}"][
+                        "ready_sha256"
+                    ],
                 }
                 for index in range(1, 6)
             ),
@@ -1756,6 +1802,8 @@ class Fixture:
                 "event": "aggregate_ready",
                 "wall_utc": "2026-01-01T00:00:03Z",
                 "monotonic_ns": 6_600_000_000,
+                "ready_path": "raw/state/actual-sitl-endpoints.ready.json",
+                "ready_sha256": actual_endpoint.document_sha256(aggregate),
             },
         ]
         for sample_sequence, timestamp in enumerate(
@@ -1820,14 +1868,29 @@ class Fixture:
                 },
             ),
             (
+                "captures_start_requested",
+                2_800_000_000,
+                {"capture_processes": 29, "tail_capture_processes": 10},
+            ),
+            (
                 "captures_started",
                 3_000_000_000,
                 {"capture_processes": 29, "tail_capture_processes": 10},
             ),
             (
+                "forbidden_listeners_start_requested",
+                4_300_000_000,
+                {"listener_processes": 6, "active_bindings": 20},
+            ),
+            (
                 "forbidden_listeners_started",
                 4_500_000_000,
                 {"listener_processes": 6, "active_bindings": 20},
+            ),
+            (
+                "endpoint_agents_start_requested",
+                5_300_000_000,
+                {"endpoint_agents": 6},
             ),
             (
                 "endpoint_agents_started",
@@ -1861,6 +1924,11 @@ class Fixture:
                     "authorized_channels": 5,
                     "tail_segments": 5,
                 },
+            ),
+            (
+                "actual_control_start_requested",
+                6_650_000_000,
+                {"control_socket": "10.71.0.10:14600"},
             ),
             (
                 "actual_control_started",
@@ -1905,6 +1973,16 @@ class Fixture:
                 {"event_epoch": 2, "pid": 5_002},
             ),
             (
+                "actual_control_stop_requested",
+                115_900_000_000,
+                {"actual_control_processes": 1},
+            ),
+            (
+                "endpoint_agents_stop_requested",
+                116_000_000_000,
+                {"endpoint_agents": 6},
+            ),
+            (
                 "actual_control_stopped",
                 116_200_000_000,
                 {"exit_code": 0, "actual_control_processes": 1},
@@ -1913,6 +1991,11 @@ class Fixture:
                 "endpoint_agents_stopped",
                 116_300_000_000,
                 {"exit_code": 0, "endpoint_agents": 6},
+            ),
+            (
+                "forbidden_listeners_stop_requested",
+                116_350_000_000,
+                {"listener_processes": 6},
             ),
             (
                 "forbidden_listeners_stopped",
@@ -1925,6 +2008,15 @@ class Fixture:
                 {"event_epoch": 2, "exit_code": 0},
             ),
             (
+                "actual_sitl_stack_stop_requested",
+                116_600_000_000,
+                {
+                    "adapter_processes": 5,
+                    "supervisor_processes": 1,
+                    "flight_process_groups": 1,
+                },
+            ),
+            (
                 "actual_sitl_stack_stopped",
                 117_000_000_000,
                 {
@@ -1932,6 +2024,11 @@ class Fixture:
                     "supervisor_exit_code": 0,
                     "flight_exit_code": 0,
                 },
+            ),
+            (
+                "captures_stop_requested",
+                117_100_000_000,
+                {"capture_processes": 29, "tail_capture_processes": 10},
             ),
             (
                 "captures_stopped",
@@ -2043,10 +2140,24 @@ class Fixture:
                         "transport_payload_size": canary["transport_payload_size"],
                         "p2mp": False,
                         "root_transmission": False,
-                        "queue_depth_packets": 0 if event_name == "drop" else None,
-                        "queue_limit_packets": 128 if event_name == "drop" else None,
+                        "queue_depth_packets": (
+                            0
+                            if event_name == "drop"
+                            and canary["kind"] == "legacy_direct_port"
+                            else None
+                        ),
+                        "queue_limit_packets": (
+                            128
+                            if event_name == "drop"
+                            and canary["kind"] == "legacy_direct_port"
+                            else None
+                        ),
                         "drop_reason": (
-                            "udp_destination_port_not_in_endpoint_matrix"
+                            (
+                                "udp_destination_port_not_in_endpoint_matrix"
+                                if canary["kind"] == "legacy_direct_port"
+                                else "ipv4_no_route"
+                            )
                             if event_name == "drop"
                             else None
                         ),
@@ -2317,7 +2428,11 @@ class Fixture:
                     "contract": raw_packet_capture.STATS_CONTRACT,
                     "interface": interface,
                     "capture_protocol": raw_packet_capture.CAPTURE_PROTOCOL,
-                    "packet_filter": raw_packet_capture.PACKET_FILTER,
+                    "packet_filter": (
+                        validator.expected_root_loopback_packet_filter(RUN_NONCE)
+                        if name == "loopback-container-root"
+                        else raw_packet_capture.PACKET_FILTER
+                    ),
                     "pcap_path": path.name,
                     "pcap_bytes": len(payload),
                     "linktype": 1,
@@ -2389,6 +2504,26 @@ class Fixture:
         }
 
         def namespace_record(namespace: str) -> dict[str, object]:
+            loopback_local_routes = [
+                {
+                    "type": "local",
+                    "dst": "127.0.0.0/8",
+                    "dev": "lo",
+                    "table": "local",
+                },
+                {
+                    "type": "local",
+                    "dst": "127.0.0.1",
+                    "dev": "lo",
+                    "table": "local",
+                },
+                {
+                    "type": "broadcast",
+                    "dst": "127.255.255.255",
+                    "dev": "lo",
+                    "table": "local",
+                },
+            ]
             common: dict[str, object] = {
                 "present": True,
                 "namespace_inode": {
@@ -2445,7 +2580,26 @@ class Fixture:
                             "dev": f"ams-tail{index}",
                         }
                         for index in range(1, 6)
-                    ],
+                    ]
+                    + [
+                        route
+                        for index in range(1, 6)
+                        for route in (
+                            {
+                                "type": "local",
+                                "dst": f"10.72.{index}.1",
+                                "dev": f"ams-tail{index}",
+                                "table": "local",
+                            },
+                            {
+                                "type": "broadcast",
+                                "dst": f"10.72.{index}.3",
+                                "dev": f"ams-tail{index}",
+                                "table": "local",
+                            },
+                        )
+                    ]
+                    + loopback_local_routes,
                 }
             if namespace == "ams-ns3":
                 names = (
@@ -2458,8 +2612,12 @@ class Fixture:
                     **common,
                     "links": [{"ifname": name} for name in names],
                     "addresses": [{"ifname": "lo", "addr_info": []}],
-                    "routes_ipv4": [],
+                    "routes_ipv4": loopback_local_routes,
                     "bridge_links": [
+                        *(
+                            {"ifname": f"br-{name}", "master": f"br-{name}"}
+                            for name in ENDPOINTS
+                        ),
                         *(
                             {"ifname": f"tap-{name}", "master": f"br-{name}"}
                             for name in ENDPOINTS
@@ -2501,6 +2659,19 @@ class Fixture:
                     "dev": "eth0",
                 },
                 {"dst": f"10.71.{index}.0/24", "dev": "eth0"},
+                {
+                    "type": "local",
+                    "dst": f"10.71.{index}.10",
+                    "dev": "eth0",
+                    "table": "local",
+                },
+                {
+                    "type": "broadcast",
+                    "dst": f"10.71.{index}.255",
+                    "dev": "eth0",
+                    "table": "local",
+                },
+                *loopback_local_routes,
             ]
             if endpoint != "gcs":
                 links.append(
@@ -2522,6 +2693,22 @@ class Fixture:
                     }
                 )
                 routes.append({"dst": f"10.72.{index}.0/30", "dev": "tail0"})
+                routes.extend(
+                    [
+                        {
+                            "type": "local",
+                            "dst": f"10.72.{index}.2",
+                            "dev": "tail0",
+                            "table": "local",
+                        },
+                        {
+                            "type": "broadcast",
+                            "dst": f"10.72.{index}.3",
+                            "dev": "tail0",
+                            "table": "local",
+                        },
+                    ]
+                )
             return {
                 **common,
                 "links": links,
@@ -2967,7 +3154,8 @@ class M3ExternalMatrixValidatorTests(unittest.TestCase):
             capture_stats["capture_protocol"], raw_packet_capture.CAPTURE_PROTOCOL
         )
         self.assertEqual(
-            capture_stats["packet_filter"], raw_packet_capture.PACKET_FILTER
+            capture_stats["packet_filter"],
+            validator.expected_root_loopback_packet_filter(RUN_NONCE),
         )
         self.assertEqual(
             capture_stats["receive_buffer_requested_bytes"],
@@ -2994,6 +3182,22 @@ class M3ExternalMatrixValidatorTests(unittest.TestCase):
         self.assertEqual(set(rate_vector), set(self.fixture.cells))
         actual_events = validator.strict_jsonl(
             self.run_dir / "raw/actual_control/events.jsonl"
+        )
+        successful_results = [
+            item
+            for item in actual_events
+            if item.get("event") == "transaction_result"
+            and item.get("success") is True
+        ]
+        ack_hashes = [
+            str(item["ack"]["transport_payload_sha256"])
+            for item in successful_results
+        ]
+        self.assertLess(len(set(ack_hashes)), len(ack_hashes))
+        self.assertFalse(
+            Path(
+                f"/proc/{self.fixture.actual_process_identity['supervisor']['pid']}"
+            ).exists()
         )
         for cell_id, record in rate_vector.items():
             offers = [
@@ -3056,6 +3260,52 @@ class M3ExternalMatrixValidatorTests(unittest.TestCase):
             {"epoch1", "epoch2"},
         )
         self.assertTrue(all(gate["passed"] for gate in result["gates"].values()))
+
+        duplicate_recovery = next(
+            item
+            for item in actual_events
+            if item.get("event") == "transaction_result"
+            and item.get("phase") == "recovery"
+            and item.get("uav") == 1
+            and item.get("sequence") == 1
+        )
+        duplicate_recovery["ack"]["received_monotonic_ns"] += 1
+        common_keys = {
+            "schema",
+            "run_id",
+            "runtime_id",
+            "run_nonce",
+            "profile",
+            "transport_nonce32",
+            "transport_nonce_derivation",
+            "role_subject",
+            "event_sequence",
+            "previous_record_sha256",
+        }
+        dump_hash_chain(
+            self.run_dir / "raw/actual_control/events.jsonl",
+            [
+                {key: value for key, value in item.items() if key not in common_keys}
+                for item in actual_events
+            ],
+            identity={
+                "schema": control_probe.EVENT_SCHEMA,
+                "run_id": RUN_ID,
+                "runtime_id": RUNTIME_ID,
+                "run_nonce": RUN_NONCE,
+                "profile": "m3",
+                "transport_nonce32": RUN_NONCE,
+                "transport_nonce_derivation": "identity/full_run_nonce32",
+                "role_subject": control_probe.ROLE_SUBJECT,
+            },
+            sequence_key="event_sequence",
+        )
+        adversarial = self.evaluate()
+        self.assertFalse(adversarial["passed"])
+        self.assertIn(
+            "recovery/uav1/1 ACK datagram lineage differs",
+            "\n".join(adversarial["gates"]["actual_sitl_control"]["failures"]),
+        )
 
     def test_omitted_runtime_source_hash_fails_exact_identity(self) -> None:
         path = self.run_dir / "raw/run_contract.json"
@@ -3301,6 +3551,17 @@ class M3ExternalMatrixValidatorTests(unittest.TestCase):
         self.assertFalse(result["passed"])
         self.assertIn("drop accounting mismatch", "\n".join(result["failures"]))
 
+    def test_root_loopback_filter_must_cover_every_declared_canary_port(self) -> None:
+        path = self.run_dir / "logs/capture-loopback-container-root.json"
+        stats = json.loads(path.read_text())
+        stats["packet_filter"] = raw_packet_capture.PACKET_FILTER
+        dump(path, stats)
+
+        result = self.evaluate()
+
+        self.assertFalse(result["passed"])
+        self.assertIn("drop accounting mismatch", "\n".join(result["failures"]))
+
     def test_missing_matching_pcap_payload_fails_byte_correlation(self) -> None:
         offered = next(
             item
@@ -3461,6 +3722,25 @@ class M3ExternalMatrixValidatorTests(unittest.TestCase):
             "\n".join(result["gates"]["forbidden_paths"]["failures"]),
         )
 
+    def test_unreachable_ns3_requires_explicit_ipv4_no_route_drop(self) -> None:
+        record = next(
+            item
+            for item in self.fixture.engine_records[1]
+            if item.get("event") == "drop"
+            and item.get("destination_ip") == "198.18.0.1"
+        )
+        self.assertEqual(record["drop_reason"], "ipv4_no_route")
+        self.assertEqual(record["source_udp_port"], 15301)
+        self.assertEqual(record["destination_udp_port"], 15300)
+        record["drop_reason"] = "udp_destination_port_not_in_endpoint_matrix"
+        self.fixture.write_engine_records()
+        result = self.evaluate()
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "unreachable_ipv4.gcs ns3 terminal drop reason is not explicit IPv4 no-route",
+            "\n".join(result["gates"]["forbidden_paths"]["failures"]),
+        )
+
     def test_duplicate_jsonl_key_fails_closed(self) -> None:
         path = self.run_dir / "raw/endpoints/gcs.jsonl"
         lines = path.read_text().splitlines()
@@ -3527,6 +3807,189 @@ class M3ExternalMatrixValidatorTests(unittest.TestCase):
             "\n".join(result["gates"]["continuous_topology"]["failures"]),
         )
 
+    def test_continuous_table_all_local_routes_are_exact(self) -> None:
+        path = self.run_dir / "raw/topology_monitor/samples.jsonl"
+        samples = validator.strict_jsonl(path)
+        sample = next(
+            item for item in samples if item["monotonic_ns"] == 30_000_000_000
+        )
+        routes = sample["namespaces"]["ams-uav2"]["routes_ipv4"]
+        self.assertTrue(any(route.get("table") == "local" for route in routes))
+        routes.append(
+            {
+                "type": "local",
+                "dst": "192.0.2.44",
+                "dev": "eth0",
+                "table": "local",
+            }
+        )
+        dump_jsonl(path, samples)
+        result = self.evaluate()
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "endpoint local IPv4 route set is not exact",
+            "\n".join(result["gates"]["continuous_topology"]["failures"]),
+        )
+
+    def test_continuous_undeclared_route_table_fails_closed(self) -> None:
+        path = self.run_dir / "raw/topology_monitor/samples.jsonl"
+        samples = validator.strict_jsonl(path)
+        sample = next(
+            item for item in samples if item["monotonic_ns"] == 30_000_000_000
+        )
+        sample["namespaces"]["ams-gcs"]["routes_ipv4"].append(
+            {"dst": "192.0.2.0/24", "dev": "eth0", "table": 100}
+        )
+        dump_jsonl(path, samples)
+        result = self.evaluate()
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "has a route in an undeclared IPv4 table",
+            "\n".join(result["gates"]["continuous_topology"]["failures"]),
+        )
+
+    def test_continuous_bridge_self_rows_are_ignored_but_extra_port_fails(
+        self,
+    ) -> None:
+        path = self.run_dir / "raw/topology_monitor/samples.jsonl"
+        samples = validator.strict_jsonl(path)
+        sample = next(
+            item for item in samples if item["monotonic_ns"] == 30_000_000_000
+        )
+        bridge_links = sample["namespaces"]["ams-ns3"]["bridge_links"]
+        self.assertTrue(
+            any(item.get("ifname") == item.get("master") for item in bridge_links)
+        )
+        bridge_links.append({"ifname": "rogue0", "master": "br-gcs"})
+        dump_jsonl(path, samples)
+        result = self.evaluate()
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "ns3 bridge membership is not exact",
+            "\n".join(result["gates"]["continuous_topology"]["failures"]),
+        )
+
+    def test_expected_incomplete_gateway_neighbour_is_accepted(self) -> None:
+        path = self.run_dir / "raw/topology_monitor/samples.jsonl"
+        samples = validator.strict_jsonl(path)
+        sample = next(
+            item for item in samples if item["monotonic_ns"] == 30_000_000_000
+        )
+        sample["namespaces"]["ams-uav2"]["neighbours_ipv4"].append(
+            {"dst": "10.71.2.1", "dev": "eth0", "state": ["INCOMPLETE"]}
+        )
+        dump_jsonl(path, samples)
+        result = self.evaluate()
+        self.assertTrue(result["passed"], "\n".join(result["failures"][:20]))
+
+    def test_expected_failed_gateway_neighbour_is_accepted(self) -> None:
+        path = self.run_dir / "raw/topology_monitor/samples.jsonl"
+        samples = validator.strict_jsonl(path)
+        sample = next(
+            item for item in samples if item["monotonic_ns"] == 30_000_000_000
+        )
+        sample["namespaces"]["ams-uav2"]["neighbours_ipv4"].append(
+            {"dst": "10.71.2.1", "dev": "eth0", "state": ["FAILED"]}
+        )
+        dump_jsonl(path, samples)
+        result = self.evaluate()
+        self.assertTrue(result["passed"], "\n".join(result["failures"][:20]))
+
+    def test_incomplete_unknown_gateway_neighbour_fails_closed(self) -> None:
+        path = self.run_dir / "raw/topology_monitor/samples.jsonl"
+        samples = validator.strict_jsonl(path)
+        sample = next(
+            item for item in samples if item["monotonic_ns"] == 30_000_000_000
+        )
+        sample["namespaces"]["ams-uav2"]["neighbours_ipv4"].append(
+            {"dst": "10.71.2.99", "dev": "eth0", "state": ["INCOMPLETE"]}
+        )
+        dump_jsonl(path, samples)
+        result = self.evaluate()
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "endpoint has an undeclared IPv4 neighbour",
+            "\n".join(result["gates"]["continuous_topology"]["failures"]),
+        )
+
+    def test_failed_unknown_gateway_neighbour_fails_closed(self) -> None:
+        path = self.run_dir / "raw/topology_monitor/samples.jsonl"
+        samples = validator.strict_jsonl(path)
+        sample = next(
+            item for item in samples if item["monotonic_ns"] == 30_000_000_000
+        )
+        sample["namespaces"]["ams-uav2"]["neighbours_ipv4"].append(
+            {"dst": "10.71.2.99", "dev": "eth0", "state": ["FAILED"]}
+        )
+        dump_jsonl(path, samples)
+        result = self.evaluate()
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "endpoint has an undeclared IPv4 neighbour",
+            "\n".join(result["gates"]["continuous_topology"]["failures"]),
+        )
+
+    def test_gcs_cannot_claim_an_incomplete_tail_gateway_neighbour(self) -> None:
+        path = self.run_dir / "raw/topology_monitor/samples.jsonl"
+        samples = validator.strict_jsonl(path)
+        sample = next(
+            item for item in samples if item["monotonic_ns"] == 30_000_000_000
+        )
+        sample["namespaces"]["ams-gcs"]["neighbours_ipv4"].append(
+            {"dst": "10.72.0.1", "dev": "tail0", "state": ["INCOMPLETE"]}
+        )
+        dump_jsonl(path, samples)
+        result = self.evaluate()
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "endpoint has an undeclared IPv4 neighbour",
+            "\n".join(result["gates"]["continuous_topology"]["failures"]),
+        )
+
+    def test_bounded_capture_stop_transition_tolerates_partial_inventory(
+        self,
+    ) -> None:
+        path = self.run_dir / "raw/topology_monitor/samples.jsonl"
+        samples = validator.strict_jsonl(path)
+        sample = next(
+            item
+            for item in samples
+            if item.get("transition_event") == "captures_stop_requested"
+        )
+        sample["processes"] = [
+            process
+            for process in sample["processes"]
+            if "raw_packet_capture.py"
+            not in " ".join(str(token) for token in process.get("cmdline", []))
+        ]
+        dump_jsonl(path, samples)
+        result = self.evaluate()
+        self.assertTrue(result["passed"], "\n".join(result["failures"][:20]))
+
+    def test_capture_transition_rejects_more_than_declared_processes(self) -> None:
+        path = self.run_dir / "raw/topology_monitor/samples.jsonl"
+        samples = validator.strict_jsonl(path)
+        sample = next(
+            item
+            for item in samples
+            if item.get("transition_event") == "captures_stop_requested"
+        )
+        duplicate = next(
+            process
+            for process in sample["processes"]
+            if process["namespace"] == "ams-gcs"
+            and "raw_packet_capture.py"
+            in " ".join(str(token) for token in process.get("cmdline", []))
+        )
+        sample["processes"].append(dict(duplicate))
+        dump_jsonl(path, samples)
+        result = self.evaluate()
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "/ams-gcs capture count is 3, expected 0",
+            "\n".join(result["gates"]["continuous_topology"]["failures"]),
+        )
+
     def test_continuous_agent_pid_restart_fails_identity_gate(self) -> None:
         path = self.run_dir / "raw/topology_monitor/samples.jsonl"
         samples = validator.strict_jsonl(path)
@@ -3539,6 +4002,7 @@ class M3ExternalMatrixValidatorTests(unittest.TestCase):
             if process["namespace"] == "ams-uav2"
             and "m3_external_matrix_probe.py" in " ".join(process["cmdline"])
         )
+        original_agent_identity = (agent["pid"], agent["start_ticks"])
         agent["pid"] = 44_444
         agent["start_ticks"] = 55_555
         dump_jsonl(path, samples)
@@ -3547,6 +4011,24 @@ class M3ExternalMatrixValidatorTests(unittest.TestCase):
         self.assertIn(
             "endpoint agent PID/start_ticks changed: ams-uav2",
             "\n".join(result["gates"]["continuous_topology"]["failures"]),
+        )
+
+        agent["pid"], agent["start_ticks"] = original_agent_identity
+        supervisor = next(
+            process
+            for process in sample["processes"]
+            if any(
+                str(token).endswith("actual_sitl_endpoint_orchestrator.py")
+                for token in process.get("cmdline", [])
+            )
+        )
+        supervisor["start_ticks"] += 1
+        dump_jsonl(path, samples)
+        result = self.evaluate()
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "critical actual process vanished/restarted",
+            "\n".join(result["gates"]["actual_sitl_control"]["failures"]),
         )
 
     def test_continuous_tail_capture_pid_restart_fails_identity_gate(self) -> None:
@@ -3804,6 +4286,129 @@ class M3ExternalMatrixStaticTests(unittest.TestCase):
         monitor.samples.flush.assert_called()
         monitor.samples.close.assert_called_once()
 
+    def test_netlink_monitors_start_in_independent_process_groups(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            monitor = topology_monitor.TopologyMonitor.__new__(
+                topology_monitor.TopologyMonitor
+            )
+            monitor.commands = {"ip": "/usr/bin/ip"}
+            monitor.netlink = Path(temporary)
+            monitor.netlink_processes = {}
+            monitor.netlink_handles = {}
+            processes = [
+                mock.Mock(pid=20_000 + index)
+                for index, _namespace in enumerate(topology_monitor.NAMESPACE_NAMES)
+            ]
+            with (
+                mock.patch.object(
+                    topology_monitor, "namespace_inode", return_value=12345
+                ),
+                mock.patch.object(
+                    topology_monitor.subprocess,
+                    "Popen",
+                    side_effect=processes,
+                ) as popen,
+            ):
+                monitor.ensure_netlink_monitors()
+
+            self.assertEqual(popen.call_count, len(topology_monitor.NAMESPACE_NAMES))
+            self.assertTrue(
+                all(
+                    call.kwargs.get("start_new_session") is True
+                    for call in popen.call_args_list
+                )
+            )
+            for stdout, stderr in monitor.netlink_handles.values():
+                stdout.close()
+                stderr.close()
+
+    def test_netlink_process_groups_are_signalled_before_any_wait(self) -> None:
+        class FakeProcess:
+            def __init__(
+                self,
+                pid: int,
+                events: list[tuple[str, int, object]],
+                wait_barrier: threading.Barrier,
+            ) -> None:
+                self.pid = pid
+                self.returncode: int | None = None
+                self.events = events
+                self.wait_barrier = wait_barrier
+
+            def poll(self) -> int | None:
+                return self.returncode
+
+            def wait(self, timeout: float) -> int:
+                self.events.append(("wait", self.pid, timeout))
+                self.wait_barrier.wait(timeout=0.5)
+                if self.returncode is None:
+                    raise AssertionError("wait occurred before group termination")
+                return self.returncode
+
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            base = run_dir / "raw/topology_monitor"
+            netlink = base / "netlink"
+            netlink.mkdir(parents=True)
+            events: list[tuple[str, int, object]] = []
+            wait_barrier = threading.Barrier(2)
+            processes = {
+                namespace: FakeProcess(21_000 + index, events, wait_barrier)
+                for index, namespace in enumerate(("container-root", "ams-ns3"))
+            }
+            monitor = topology_monitor.TopologyMonitor.__new__(
+                topology_monitor.TopologyMonitor
+            )
+            monitor.args = argparse.Namespace(
+                run_id=RUN_ID,
+                runtime_id=RUNTIME_ID,
+                run_nonce=RUN_NONCE,
+                run_dir=run_dir,
+                interval_ms=500,
+            )
+            monitor.base = base
+            monitor.netlink = netlink
+            monitor.samples = (base / "samples.jsonl").open("x", encoding="utf-8")
+            monitor.sample_times = [1_000_000_000, 1_500_000_000]
+            monitor.sample_sequence = 2
+            monitor.transition_events = []
+            monitor.commands = {"ip": "/usr/bin/ip"}
+            monitor.netlink_processes = processes
+            monitor.netlink_handles = {
+                namespace: (
+                    (netlink / f"{namespace}.jsonl.txt").open("xb"),
+                    (netlink / f"{namespace}.stderr").open("xb"),
+                )
+                for namespace in processes
+            }
+
+            by_pid = {process.pid: process for process in processes.values()}
+
+            def kill_group(pid: int, sig: object) -> None:
+                events.append(("signal", pid, sig))
+                if sig == topology_monitor.signal.SIGINT:
+                    by_pid[pid].returncode = -int(topology_monitor.signal.SIGINT)
+
+            with mock.patch.object(
+                topology_monitor.os, "killpg", side_effect=kill_group
+            ):
+                monitor.close()
+
+            signal_events = [event for event in events if event[0] == "signal"]
+            wait_events = [event for event in events if event[0] == "wait"]
+            self.assertEqual(
+                signal_events,
+                [
+                    ("signal", process.pid, topology_monitor.signal.SIGINT)
+                    for process in processes.values()
+                ],
+            )
+            self.assertEqual(len(wait_events), len(processes))
+            self.assertLess(
+                max(events.index(event) for event in signal_events),
+                min(events.index(event) for event in wait_events),
+            )
+
     def test_runner_is_root_wrapper_native_and_uses_independent_equality(self) -> None:
         runner = (ROOT / "network/scripts/run_m3_external_matrix.sh").read_text()
         self.assertIn("umask 0002", runner)
@@ -3842,6 +4447,19 @@ class M3ExternalMatrixStaticTests(unittest.TestCase):
         self.assertIn("--no-write", runner)
         self.assertIn('RESULT_PATH="$RUN_DIR/metrics/m3_validation_results.json"', runner)
         self.assertIn('cmp "$RESULT_PATH" "$INDEPENDENT_RESULT"', runner)
+        for event in (
+            "captures_start_requested",
+            "forbidden_listeners_start_requested",
+            "endpoint_agents_start_requested",
+            "actual_control_start_requested",
+            "actual_control_stop_requested",
+            "endpoint_agents_stop_requested",
+            "forbidden_listeners_stop_requested",
+            "actual_sitl_stack_stop_requested",
+            "captures_stop_requested",
+        ):
+            self.assertIn(f"lifecycle {event} ", runner)
+        self.assertIn("phase_window_field()", runner)
         probe_source = (
             ROOT / "network/scripts/m3_external_matrix_probe.py"
         ).read_text()

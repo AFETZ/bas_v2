@@ -383,6 +383,7 @@ ip -j -d link show > "$RUN_DIR/raw/topology/container-root.link.json"
 ip -j addr show > "$RUN_DIR/raw/topology/container-root.addr.json"
 ip -j route show table all > "$RUN_DIR/raw/topology/container-root.route.json"
 lifecycle topology_ready '{"namespace_count":7,"external_segment_count":11,"root_tail_count":5}'
+lifecycle captures_start_requested '{"capture_processes":29,"tail_capture_processes":10}'
 
 wait_for_files() {
   local timeout_s=$1
@@ -405,13 +406,20 @@ start_capture() {
   local pcap=$3
   local stats=$4
   local log=$5
+  local udp_port_filter=${6:-}
+  local filter_args=()
+  if [[ -n "$udp_port_filter" ]]; then
+    filter_args=(--udp-port-filter "$udp_port_filter")
+  fi
   if [[ "$namespace" == "container-root" ]]; then
     python3 -u "$CAPTURE_TOOL" \
       --interface "$interface" --pcap "$pcap" --stats "$stats" \
+      "${filter_args[@]}" \
       > /dev/null 2> "$log" &
   else
     ip netns exec "$namespace" python3 -u "$CAPTURE_TOOL" \
       --interface "$interface" --pcap "$pcap" --stats "$stats" \
+      "${filter_args[@]}" \
       > /dev/null 2> "$log" &
   fi
   CAPTURE_PIDS+=("$!")
@@ -444,7 +452,8 @@ done
 start_capture container-root lo \
   "$RUN_DIR/pcap/loopback-container-root.pcap" \
   "$RUN_DIR/logs/capture-loopback-container-root.json" \
-  "$RUN_DIR/logs/capture-loopback-container-root.stderr"
+  "$RUN_DIR/logs/capture-loopback-container-root.stderr" \
+  "14550,15201,15202,15203,15204,15205,15300,15301,15400,15401,15402,15403,15404,15405,15406,15500,15501,15502,15503,15504,15505,15506,15600,15601,15602,15603,15604,15605,15606,15700,15701,15702,15703,15704,15705,15706"
 sleep 0.5
 for pid in "${CAPTURE_PIDS[@]}"; do
   kill -0 "$pid" || {
@@ -454,6 +463,7 @@ for pid in "${CAPTURE_PIDS[@]}"; do
 done
 lifecycle captures_started '{"capture_processes":29,"tail_capture_processes":10}'
 
+lifecycle forbidden_listeners_start_requested '{"listener_processes":6,"active_bindings":20}'
 for endpoint in "${ENDPOINTS[@]}"; do
   ip netns exec "ams-$endpoint" python3 -u "$PROBE" forbidden-listener \
     --run-dir "$RUN_DIR" --run-id "$RUN_ID" \
@@ -478,6 +488,7 @@ for pid in "${FORBIDDEN_LISTENER_PIDS[@]}"; do
 done
 lifecycle forbidden_listeners_started '{"listener_processes":6,"active_bindings":20}'
 
+lifecycle endpoint_agents_start_requested '{"endpoint_agents":6}'
 for endpoint in "${ENDPOINTS[@]}"; do
   ip netns exec "ams-$endpoint" python3 -u "$PROBE" agent \
     --run-dir "$RUN_DIR" \
@@ -659,6 +670,7 @@ for pid in "${ACTUAL_ADAPTER_PIDS[@]}"; do
 done
 lifecycle actual_sitl_adapters_ready '{"adapter_processes":5,"authorized_channels":5,"tail_segments":5}'
 
+lifecycle actual_control_start_requested '{"control_socket":"10.71.0.10:14600"}'
 ip netns exec ams-gcs python3 -u "$ACTUAL_CONTROL_PROBE" \
   --run-dir "$RUN_DIR" --run-id "$RUN_ID" \
   --runtime-id "$RUNTIME_ID" --run-nonce "$RUN_NONCE" --profile m3 --matrix "$MATRIX" \
@@ -763,6 +775,16 @@ print(data[sys.argv[2]])
 PY
 }
 
+phase_window_field() {
+  python3 - "$RUN_DIR/raw/phase_contract.json" "$1" "$2" <<'PY'
+import json
+import sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+window = next(item for item in data["windows"] if item["phase"] == sys.argv[2])
+print(window[sys.argv[3]])
+PY
+}
+
 start_engine 1 engine_started
 wait_for_files 30 "$RUN_DIR/raw/state/actual-control.link-ready.json" || {
   printf 'FAIL five real SITL heartbeat paths did not become ready through ns-3\n' >&2
@@ -801,6 +823,11 @@ stop_engine 1 engine_stopped
 wait_until_ns "$restart_request"
 start_engine 2 engine_restarted
 
+shutdown_not_before=$(( $(phase_window_field recovery end_monotonic_ns) + 500000000 ))
+wait_until_ns "$((shutdown_not_before - 2000000000))"
+lifecycle actual_control_stop_requested '{"actual_control_processes":1}'
+lifecycle endpoint_agents_stop_requested '{"endpoint_agents":6}'
+
 set +e
 wait "$ACTUAL_CONTROL_PID"
 actual_control_exit=$?
@@ -825,6 +852,7 @@ done
 AGENT_PIDS=()
 lifecycle endpoint_agents_stopped '{"exit_code":0,"endpoint_agents":6}'
 
+lifecycle forbidden_listeners_stop_requested '{"listener_processes":6}'
 : > "$RUN_DIR/raw/forbidden/listeners.stop"
 for pid in "${FORBIDDEN_LISTENER_PIDS[@]}"; do
   set +e
@@ -840,6 +868,7 @@ FORBIDDEN_LISTENER_PIDS=()
 lifecycle forbidden_listeners_stopped '{"exit_code":0,"listener_processes":6}'
 stop_engine 2 engine_final_stop
 
+lifecycle actual_sitl_stack_stop_requested '{"adapter_processes":5,"supervisor_processes":1,"flight_process_groups":1}'
 : > "$ACTUAL_STOP"
 set +e
 wait "$ACTUAL_SUPERVISOR_PID"
@@ -877,6 +906,7 @@ FLIGHT_LAUNCH_PID=""
 FLIGHT_LAUNCH_PGID=""
 lifecycle actual_sitl_stack_stopped "$(printf '{\"adapter_exit_code\":0,\"supervisor_exit_code\":0,\"flight_exit_code\":%d}' "$flight_exit")"
 
+lifecycle captures_stop_requested '{"capture_processes":29,"tail_capture_processes":10}'
 for pid in "${CAPTURE_PIDS[@]}"; do
   kill -INT "$pid"
 done

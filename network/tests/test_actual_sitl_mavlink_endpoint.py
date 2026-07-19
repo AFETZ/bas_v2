@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 import os
 import socket
 import subprocess
@@ -456,15 +457,45 @@ class ProtocolAndEvidenceTests(unittest.TestCase):
             candidate,
             candidate_hash,
         )
-        authorization["candidate_sha256"] = "f" * 64
-        with self.assertRaisesRegex(EndpointError, "immutable candidate"):
+        offline_authorization = copy.deepcopy(authorization)
+        offline_authorization["issuer"]["pid"] = 2_000_000_000
+        offline_authorization["issuer"]["start_ticks"] += 1
+        with mock.patch.object(
+            endpoint,
+            "verify_expected_process",
+            side_effect=AssertionError("offline validation consulted a stopped PID"),
+        ):
             validate_authorization(
-                authorization,
+                offline_authorization,
                 manifest,
                 document_sha256(manifest),
                 channel,
                 candidate,
                 candidate_hash,
+                require_live_issuer=False,
+            )
+        malformed_issuer = copy.deepcopy(offline_authorization)
+        malformed_issuer["issuer"]["cmdline_sha256"] = "f" * 64
+        with self.assertRaisesRegex(EndpointError, "command-line bytes/hash differ"):
+            validate_authorization(
+                malformed_issuer,
+                manifest,
+                document_sha256(manifest),
+                channel,
+                candidate,
+                candidate_hash,
+                require_live_issuer=False,
+            )
+        offline_authorization["candidate_sha256"] = "f" * 64
+        with self.assertRaisesRegex(EndpointError, "immutable candidate"):
+            validate_authorization(
+                offline_authorization,
+                manifest,
+                document_sha256(manifest),
+                channel,
+                candidate,
+                candidate_hash,
+                require_live_issuer=False,
             )
 
     def test_json_evidence_is_immutable_and_duplicate_keys_are_rejected(self) -> None:

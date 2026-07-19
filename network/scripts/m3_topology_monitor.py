@@ -41,6 +41,8 @@ REQUIRED_COMMANDS = (
     "ip6tables-save",
 )
 SAFE_EVENT = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+NETLINK_INTERRUPT_GRACE_S = 1.0
+NETLINK_TERMINATE_GRACE_S = 2.0
 
 
 class MonitorError(RuntimeError):
@@ -382,7 +384,12 @@ class TopologyMonitor:
                 "monitor",
                 "all",
             ]
-            process = subprocess.Popen(argv, stdout=stdout, stderr=stderr)
+            process = subprocess.Popen(
+                argv,
+                stdout=stdout,
+                stderr=stderr,
+                start_new_session=True,
+            )
             self.netlink_processes[namespace] = process
             self.netlink_handles[namespace] = (stdout, stderr)
 
@@ -511,15 +518,48 @@ class TopologyMonitor:
 
     def close(self) -> None:
         netlink_summary: dict[str, Any] = {}
+        pending = {
+            namespace: process
+            for namespace, process in self.netlink_processes.items()
+            if process.poll() is None
+        }
+
+        def signal_pending(sig: signal.Signals) -> None:
+            for process in pending.values():
+                try:
+                    os.killpg(process.pid, sig)
+                except ProcessLookupError:
+                    pass
+
+        def reap_until(timeout_s: float) -> None:
+            deadline = time.monotonic() + timeout_s
+            while pending and time.monotonic() < deadline:
+                for namespace, process in list(pending.items()):
+                    if process.poll() is not None:
+                        pending.pop(namespace)
+                if pending:
+                    time.sleep(0.025)
+
+        signal_pending(signal.SIGINT)
+        reap_until(NETLINK_INTERRUPT_GRACE_S)
+        signal_pending(signal.SIGTERM)
+        reap_until(NETLINK_TERMINATE_GRACE_S)
+        signal_pending(signal.SIGKILL)
+
+        returncodes: dict[str, int] = {}
+        if self.netlink_processes:
+            with ThreadPoolExecutor(
+                max_workers=len(self.netlink_processes)
+            ) as executor:
+                waits = {
+                    namespace: executor.submit(process.wait, timeout=1)
+                    for namespace, process in self.netlink_processes.items()
+                }
+                returncodes = {
+                    namespace: future.result()
+                    for namespace, future in waits.items()
+                }
         for namespace, process in self.netlink_processes.items():
-            if process.poll() is None:
-                process.send_signal(signal.SIGINT)
-        for namespace, process in self.netlink_processes.items():
-            try:
-                returncode = process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                returncode = process.wait(timeout=5)
             stdout, stderr = self.netlink_handles[namespace]
             stdout.close()
             stderr.close()
@@ -527,7 +567,7 @@ class TopologyMonitor:
             stderr_path = self.netlink / f"{namespace}.stderr"
             netlink_summary[namespace] = {
                 "pid": process.pid,
-                "returncode": returncode,
+                "returncode": returncodes[namespace],
                 "stdout_path": stdout_path.relative_to(self.args.run_dir).as_posix(),
                 "stdout_bytes": stdout_path.stat().st_size,
                 "stderr_path": stderr_path.relative_to(self.args.run_dir).as_posix(),

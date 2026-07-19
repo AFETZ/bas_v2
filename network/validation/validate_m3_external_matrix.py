@@ -44,6 +44,7 @@ LIFECYCLE_SCHEMA = "ams.m3.lifecycle_event/v1"
 CAPTURE_STATS_CONTRACT = "ams.raw-packet-capture-stats/v2"
 CAPTURE_PROTOCOL = "ETH_P_ALL"
 CAPTURE_PACKET_FILTER = "none"
+CAPTURE_UDP_PORT_FILTER_PREFIX = "udp-ports:v1:"
 CAPTURE_RECEIVE_BUFFER_REQUESTED_BYTES = 8_388_608
 CAPTURE_RECEIVE_BUFFER_EFFECTIVE_BYTES = 16_777_216
 CAPTURE_RECEIVE_BUFFER_SETTERS = {"SO_RCVBUF", "SO_RCVBUFFORCE"}
@@ -52,6 +53,7 @@ CAPTURE_DRAIN_BATCH_BYTE_LIMIT = 4_194_304
 TOPOLOGY_SAMPLE_SCHEMA = "ams.m3.topology_sample/v1"
 TOPOLOGY_SUMMARY_CONTRACT = "ams.m3.topology_monitor_summary/v1"
 TOPOLOGY_ACK_CONTRACT = "ams.m3.topology_monitor_ack/v1"
+PROCESS_TRANSITION_MAX_NS = 30_000_000_000
 FORBIDDEN_CONTRACT = "ams.m3.forbidden_canary_contract/v1"
 FORBIDDEN_RESULT_CONTRACT = "ams.m3.forbidden_canary_observation/v1"
 FORBIDDEN_LISTENER_SCHEMA = "ams.m3.forbidden_listener_event/v1"
@@ -982,6 +984,19 @@ def expected_forbidden_canaries(run_nonce: str) -> list[dict[str, Any]]:
     return records
 
 
+def expected_root_loopback_packet_filter(run_nonce: str) -> str:
+    """Independently derive the lossless root-loopback canary capture filter."""
+
+    ports = sorted(
+        {
+            int(record[field])
+            for record in expected_forbidden_canaries(run_nonce)
+            for field in ("source_udp_port", "destination_udp_port")
+        }
+    )
+    return CAPTURE_UDP_PORT_FILTER_PREFIX + ",".join(str(port) for port in ports)
+
+
 def decode_transport(payload_hex: Any) -> dict[str, Any]:
     if not isinstance(payload_hex, str) or len(payload_hex) % 2:
         raise ValidationError("transport_payload_hex is not even-length hexadecimal")
@@ -1467,6 +1482,33 @@ def _continuous_namespace_failures(
     failures.extend(_default_rule_failures(record["rules_ipv4"], f"{label}/IPv4"))
     failures.extend(_default_rule_failures(record["rules_ipv6"], f"{label}/IPv6"))
     link_names = {item.get("ifname") for item in record["links"]}
+    main_ipv4_routes: list[dict[str, Any]] = []
+    local_ipv4_routes: list[dict[str, Any]] = []
+    for route in record["routes_ipv4"]:
+        if not isinstance(route, dict):
+            failures.append(f"{label} IPv4 route record is not an object")
+            continue
+        table = route.get("table", "main")
+        if table in {"main", 254, "254"}:
+            main_ipv4_routes.append(route)
+        elif table in {"local", 255, "255"}:
+            local_ipv4_routes.append(route)
+        else:
+            failures.append(f"{label} has a route in an undeclared IPv4 table")
+
+    loopback_local_routes = {
+        ("local", "127.0.0.0/8", "lo"),
+        ("local", "127.0.0.1", "lo"),
+        ("broadcast", "127.255.255.255", "lo"),
+    }
+
+    def local_route_id(route: dict[str, Any]) -> tuple[str, str, str]:
+        return (
+            str(route.get("type", "unicast")),
+            str(route.get("dst")),
+            str(route.get("dev")),
+        )
+
     if namespace == "container-root":
         expected_links = {"lo", *(f"ams-tail{index}" for index in range(1, 6))}
         if link_names != expected_links:
@@ -1484,7 +1526,7 @@ def _continuous_namespace_failures(
         }
         if root_ipv4 != expected_ipv4:
             failures.append(f"{label} root tail IPv4 set is not exact")
-        if any(route.get("dst") == "default" for route in record["routes_ipv4"]):
+        if any(route.get("dst") == "default" for route in main_ipv4_routes):
             failures.append(f"{label} root container has an undeclared default route")
         allowed_routes = {
             (f"10.72.{index}.0/30", f"ams-tail{index}")
@@ -1492,10 +1534,23 @@ def _continuous_namespace_failures(
         }
         observed_routes = {
             (str(route.get("dst")), str(route.get("dev")))
-            for route in record["routes_ipv4"]
+            for route in main_ipv4_routes
         }
         if observed_routes != allowed_routes:
             failures.append(f"{label} root tail route set is not exact")
+        expected_local_routes = loopback_local_routes | {
+            route
+            for index in range(1, 6)
+            for route in (
+                ("local", f"10.72.{index}.1", f"ams-tail{index}"),
+                ("broadcast", f"10.72.{index}.3", f"ams-tail{index}"),
+            )
+        }
+        if (
+            {local_route_id(route) for route in local_ipv4_routes}
+            != expected_local_routes
+        ):
+            failures.append(f"{label} root local IPv4 route set is not exact")
         return failures
     if namespace == "ams-ns3":
         expected = (
@@ -1517,16 +1572,25 @@ def _continuous_namespace_failures(
                 and str(info.get("local", "")).lower().startswith("fe80:")
             )
         ]
-        if nonlocal_addresses or record["routes_ipv4"]:
+        if nonlocal_addresses or main_ipv4_routes:
             failures.append(f"{label} ns3 namespace has an IP routing bypass")
-        members = {
-            item.get("ifname"): item.get("master") for item in record["bridge_links"]
-        }
+        if (
+            {local_route_id(route) for route in local_ipv4_routes}
+            != loopback_local_routes
+        ):
+            failures.append(f"{label} ns3 local IPv4 route set is not exact")
+        # `bridge -j -d link show` includes one self row per bridge on current
+        # iproute2.  Self rows are bridge identities, not enslaved ports.  Keep
+        # the raw rows in evidence, but compare every actual port exactly.
+        members = [
+            (item.get("ifname"), item.get("master"))
+            for item in record["bridge_links"]
+            if isinstance(item, dict) and item.get("ifname") != item.get("master")
+        ]
         expected_members = {
-            **{f"tap-{endpoint}": f"br-{endpoint}" for endpoint in ENDPOINTS},
-            **{f"vp-{endpoint}": f"br-{endpoint}" for endpoint in ENDPOINTS},
-        }
-        if members != expected_members:
+            (f"tap-{endpoint}", f"br-{endpoint}") for endpoint in ENDPOINTS
+        } | {(f"vp-{endpoint}", f"br-{endpoint}") for endpoint in ENDPOINTS}
+        if len(members) != len(expected_members) or set(members) != expected_members:
             failures.append(f"{label} ns3 bridge membership is not exact")
         if record["neighbours_ipv4"] or record["neighbours_ipv6"]:
             failures.append(f"{label} ns3 Linux namespace has neighbour state")
@@ -1561,7 +1625,7 @@ def _continuous_namespace_failures(
         if tail_ipv4 != [(f"10.72.{index}.2", 30)]:
             failures.append(f"{label} actual MAVProxy tail IPv4 identity is not exact")
     defaults = [
-        route for route in record["routes_ipv4"] if route.get("dst") == "default"
+        route for route in main_ipv4_routes if route.get("dst") == "default"
     ]
     if (
         len(defaults) != 1
@@ -1570,7 +1634,7 @@ def _continuous_namespace_failures(
     ):
         failures.append(f"{label} endpoint default route is not exact")
     segment = ipaddress.IPv4Network(f"10.71.{index}.0/24")
-    for route in record["routes_ipv4"]:
+    for route in main_ipv4_routes:
         destination = route.get("dst")
         if destination == "default":
             continue
@@ -1587,16 +1651,49 @@ def _continuous_namespace_failures(
             and route_dev == "tail0"
         ):
             failures.append(f"{label} endpoint has an out-of-segment IPv4 route")
-    allowed_neighbour = (f"10.71.{index}.1", f"02:71:{index:02x}:00:00:01")
-    for neighbour in record["neighbours_ipv4"]:
-        tail_neighbour = (
-            f"10.72.{index}.1",
-            f"02:72:{index:02x}:00:00:01",
+    expected_local_routes = loopback_local_routes | {
+        ("local", f"10.71.{index}.10", "eth0"),
+        ("broadcast", f"10.71.{index}.255", "eth0"),
+    }
+    if endpoint != "gcs":
+        expected_local_routes |= {
+            ("local", f"10.72.{index}.2", "tail0"),
+            ("broadcast", f"10.72.{index}.3", "tail0"),
+        }
+    if (
+        {local_route_id(route) for route in local_ipv4_routes}
+        != expected_local_routes
+    ):
+        failures.append(f"{label} endpoint local IPv4 route set is not exact")
+
+    allowed_neighbour = (
+        f"10.71.{index}.1",
+        "eth0",
+        f"02:71:{index:02x}:00:00:01",
+    )
+    expected_neighbours = {allowed_neighbour}
+    if endpoint != "gcs":
+        expected_neighbours.add(
+            (
+                f"10.72.{index}.1",
+                "tail0",
+                f"02:72:{index:02x}:00:00:01",
+            )
         )
-        if (neighbour.get("dst"), neighbour.get("lladdr")) not in {
-            allowed_neighbour,
-            tail_neighbour,
-        }:
+    for neighbour in record["neighbours_ipv4"]:
+        identity = (
+            neighbour.get("dst"),
+            neighbour.get("dev"),
+            neighbour.get("lladdr"),
+        )
+        unresolved_expected_gateway = (
+            neighbour.get("lladdr") is None
+            and neighbour.get("state") in (["INCOMPLETE"], ["FAILED"])
+            and any(
+                identity[:2] == candidate[:2] for candidate in expected_neighbours
+            )
+        )
+        if identity not in expected_neighbours and not unresolved_expected_gateway:
             failures.append(f"{label} endpoint has an undeclared IPv4 neighbour")
     if record["neighbours_ipv6"] or record["bridge_links"]:
         failures.append(f"{label} endpoint has IPv6 neighbours/bridge membership")
@@ -1779,14 +1876,36 @@ def validate_continuous_topology(
         transition_by_name: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for sample in transition_samples:
             transition_by_name[str(sample.get("transition_event"))].append(sample)
+        process_transition_events = {
+            "captures": (
+                "captures_start_requested",
+                "captures_started",
+                "captures_stop_requested",
+                "captures_stopped",
+            ),
+            "forbidden_listeners": (
+                "forbidden_listeners_start_requested",
+                "forbidden_listeners_started",
+                "forbidden_listeners_stop_requested",
+                "forbidden_listeners_stopped",
+            ),
+            "endpoint_agents": (
+                "endpoint_agents_start_requested",
+                "endpoint_agents_started",
+                "endpoint_agents_stop_requested",
+                "endpoint_agents_stopped",
+            ),
+            "actual_control": (
+                "actual_control_start_requested",
+                "actual_control_started",
+                "actual_control_stop_requested",
+                "actual_control_stopped",
+            ),
+        }
         required_boundaries = {
             "topology_ready",
-            "captures_started",
-            "forbidden_listeners_started",
-            "endpoint_agents_started",
-            "endpoint_agents_stopped",
-            "forbidden_listeners_stopped",
-            "captures_stopped",
+            "actual_sitl_stack_stop_requested",
+            *(event for events in process_transition_events.values() for event in events),
         }
         missing_boundaries = sorted(
             event
@@ -1798,6 +1917,31 @@ def validate_continuous_topology(
                 "continuous topology acceptance boundaries are absent/nonunique: "
                 + str(missing_boundaries)
             )
+        transition_bounds: dict[str, tuple[int, int, int, int]] = {}
+        for role, events in process_transition_events.items():
+            bounds = tuple(
+                int(transition_by_name[event][0]["monotonic_ns"])
+                for event in events
+            )
+            if (
+                list(bounds) != sorted(bounds)
+                or len(set(bounds)) != len(bounds)
+                or bounds[1] - bounds[0] > PROCESS_TRANSITION_MAX_NS
+                or bounds[3] - bounds[2] > PROCESS_TRANSITION_MAX_NS
+            ):
+                raise ValidationError(
+                    f"continuous {role} transition interval is invalid/unbounded"
+                )
+            transition_bounds[role] = bounds
+
+        def expected_process_state(role: str, sample_time: int) -> bool | None:
+            start_requested, started, stop_requested, stopped = transition_bounds[role]
+            if started <= sample_time < stop_requested:
+                return True
+            if sample_time < start_requested or sample_time >= stopped:
+                return False
+            return None
+
         acceptance_start = transition_by_name["topology_ready"][0]["monotonic_ns"]
         acceptance_end = transition_by_name["captures_stopped"][0]["monotonic_ns"]
         acceptance_samples = [
@@ -1812,16 +1956,6 @@ def validate_continuous_topology(
         inodes_by_namespace: dict[str, set[int]] = defaultdict(set)
         netlink_identities: dict[str, set[tuple[int, int]]] = defaultdict(set)
         process_identities: dict[str, set[tuple[int, int]]] = defaultdict(set)
-        agent_start = transition_by_name["endpoint_agents_started"][0]["monotonic_ns"]
-        agent_stop = transition_by_name["endpoint_agents_stopped"][0]["monotonic_ns"]
-        capture_start = transition_by_name["captures_started"][0]["monotonic_ns"]
-        capture_stop = acceptance_end
-        listener_start = transition_by_name["forbidden_listeners_started"][0][
-            "monotonic_ns"
-        ]
-        listener_stop = transition_by_name["forbidden_listeners_stopped"][0][
-            "monotonic_ns"
-        ]
         listener_bindings: dict[str, list[tuple[str, int]]] = defaultdict(list)
         for canary in expected_forbidden_canaries(str(run_nonce)):
             listener_bindings[canary["listener_namespace"]].append(
@@ -1959,28 +2093,44 @@ def validate_continuous_topology(
                     "m3_external_matrix_probe.py agent" in command
                     for command in commands
                 )
-                expected_agents = (
-                    1
-                    if namespace != "ams-ns3"
-                    and agent_start <= sample["monotonic_ns"] < agent_stop
-                    else 0
+                agent_state = expected_process_state(
+                    "endpoint_agents", int(sample["monotonic_ns"])
                 )
-                if agent_count != expected_agents:
+                expected_agents = 1 if namespace != "ams-ns3" else 0
+                if (
+                    agent_state is True and agent_count != expected_agents
+                ) or (
+                    agent_state is False and agent_count != 0
+                ) or (
+                    agent_state is None and not 0 <= agent_count <= expected_agents
+                ):
+                    expected_label = expected_agents if agent_state is True else 0
                     failures.append(
-                        f"sample {sample['sample_sequence']}/{namespace} agent count is {agent_count}, expected {expected_agents}"
+                        f"sample {sample['sample_sequence']}/{namespace} agent count is {agent_count}, expected {expected_label}"
                     )
                 capture_count = sum(
                     "raw_packet_capture.py" in command for command in commands
                 )
-                expected_captures = 0
-                if capture_start <= sample["monotonic_ns"] < capture_stop:
-                    if namespace == "ams-ns3":
-                        expected_captures = 6
-                    elif namespace == "ams-gcs":
-                        expected_captures = 2
-                    else:
-                        expected_captures = 3
-                if capture_count != expected_captures:
+                capture_state = expected_process_state(
+                    "captures", int(sample["monotonic_ns"])
+                )
+                if namespace == "ams-ns3":
+                    active_capture_count = 6
+                elif namespace == "ams-gcs":
+                    active_capture_count = 2
+                else:
+                    active_capture_count = 3
+                if (
+                    capture_state is True and capture_count != active_capture_count
+                ) or (
+                    capture_state is False and capture_count != 0
+                ) or (
+                    capture_state is None
+                    and not 0 <= capture_count <= active_capture_count
+                ):
+                    expected_captures = (
+                        active_capture_count if capture_state is True else 0
+                    )
                     failures.append(
                         f"sample {sample['sample_sequence']}/{namespace} capture count is {capture_count}, expected {expected_captures}"
                     )
@@ -1988,17 +2138,26 @@ def validate_continuous_topology(
                     "m3_external_matrix_probe.py forbidden-listener" in command
                     for command in commands
                 )
-                expected_listeners = (
-                    1
-                    if namespace != "ams-ns3"
-                    and listener_start <= sample["monotonic_ns"] < listener_stop
-                    else 0
+                listener_state = expected_process_state(
+                    "forbidden_listeners", int(sample["monotonic_ns"])
                 )
-                if listener_count != expected_listeners:
+                active_listener_count = 1 if namespace != "ams-ns3" else 0
+                if (
+                    listener_state is True
+                    and listener_count != active_listener_count
+                ) or (
+                    listener_state is False and listener_count != 0
+                ) or (
+                    listener_state is None
+                    and not 0 <= listener_count <= active_listener_count
+                ):
+                    expected_listeners = (
+                        active_listener_count if listener_state is True else 0
+                    )
                     failures.append(
                         f"sample {sample['sample_sequence']}/{namespace} forbidden listener count is {listener_count}, expected {expected_listeners}"
                     )
-                if expected_listeners == 1:
+                if listener_state is True and active_listener_count == 1:
                     socket_lines = namespaces[namespace]["sockets"]
                     for ip, port in listener_bindings[namespace]:
                         ip_tokens = (f"[{ip}]:", f"{ip}:") if ":" in ip else (f"{ip}:",)
@@ -2016,10 +2175,18 @@ def validate_continuous_topology(
                 if "raw_packet_capture.py"
                 in " ".join(str(item) for item in process.get("cmdline", []))
             ]
-            expected_root_captures = (
-                6 if capture_start <= sample["monotonic_ns"] < capture_stop else 0
+            root_capture_state = expected_process_state(
+                "captures", int(sample["monotonic_ns"])
             )
-            if len(root_capture_processes) != expected_root_captures:
+            if (
+                root_capture_state is True and len(root_capture_processes) != 6
+            ) or (
+                root_capture_state is False and root_capture_processes
+            ) or (
+                root_capture_state is None
+                and not 0 <= len(root_capture_processes) <= 6
+            ):
+                expected_root_captures = 6 if root_capture_state is True else 0
                 failures.append(
                     f"sample {sample['sample_sequence']}/container-root capture count is {len(root_capture_processes)}, expected {expected_root_captures}"
                 )
@@ -2140,7 +2307,7 @@ def validate_continuous_topology(
                 stdout_path = run_dir / str(monitor["stdout_path"])
                 stderr_path = run_dir / str(monitor["stderr_path"])
                 if (
-                    monitor.get("returncode") not in {-2, 0, 130}
+                    monitor.get("returncode") not in {-15, -2, 0, 130, 143}
                     or not regular_file(stdout_path)
                     or not regular_file(stderr_path)
                     or stdout_path.stat().st_size != monitor.get("stdout_bytes")
@@ -2300,6 +2467,7 @@ def validate_actual_sitl_control(
     manifest: dict[str, Any] = {}
     manifest_hash = "unavailable"
     ready_documents: dict[str, dict[str, Any]] = {}
+    authorization_documents: dict[str, dict[str, Any]] = {}
     aggregate: dict[str, Any] = {}
     try:
         from network.bridge.actual_sitl_mavlink_endpoint import (
@@ -2375,6 +2543,7 @@ def validate_actual_sitl_control(
                     channel,
                     candidate,
                     sha256_bytes(canonical_json(candidate)),
+                    require_live_issuer=False,
                 )
             except EndpointError as exc:
                 raise ValidationError(f"{uav} candidate/authorization invalid: {exc}") from exc
@@ -2441,6 +2610,7 @@ def validate_actual_sitl_control(
                 raise ValidationError(f"{uav} audit lacks bidirectional real forwarding")
             adapter_audits[uav] = audit
             adapter_forward[uav] = forwards
+            authorization_documents[uav] = authorization
             ready_documents[uav] = ready
             aggregate_channels[uav] = {
                 "system_id": index,
@@ -2454,9 +2624,29 @@ def validate_actual_sitl_control(
             }
         if any(identity != supervisor_identities[0] for identity in supervisor_identities[1:]):
             raise ValidationError("five authorizations were not issued by one supervisor")
+        if not any(
+            Path(str(token)).name == "actual_sitl_endpoint_orchestrator.py"
+            for token in supervisor_identities[0].get("argv", [])
+        ):
+            raise ValidationError("authorization issuer is not the endpoint supervisor")
         aggregate = strict_json(run_dir / "raw/state/actual-sitl-endpoints.ready.json")
         if (
-            aggregate.get("contract") != AGGREGATE_READY_CONTRACT
+            set(aggregate)
+            != {
+                "schema_version",
+                "contract",
+                "status",
+                "run_id",
+                "runtime_id",
+                "run_nonce",
+                "manifest_sha256",
+                "ready_wall_utc",
+                "ready_monotonic_ns",
+                "supervisor",
+                "channels",
+            }
+            or aggregate.get("schema_version") != 1
+            or aggregate.get("contract") != AGGREGATE_READY_CONTRACT
             or aggregate.get("status") != "ready"
             or (aggregate.get("run_id"), aggregate.get("runtime_id"), aggregate.get("run_nonce"))
             != (run_id, runtime_id, run_nonce)
@@ -2490,6 +2680,63 @@ def validate_actual_sitl_control(
             raise ValidationError("actual-SITL supervisor lifecycle cardinality differs")
         if supervisor_events[-1] != "supervisor_stop" or "supervisor_failed_closed" in supervisor_events:
             raise ValidationError("actual-SITL supervisor did not stop cleanly")
+        issuer = supervisor_identities[0]
+        start_event = next(
+            record
+            for record in supervisor_audit
+            if record.get("event") == "supervisor_start_not_ready"
+        )
+        if (
+            start_event.get("pid") != issuer["pid"]
+            or start_event.get("manifest_sha256") != manifest_hash
+        ):
+            raise ValidationError("authorization issuer is not bound to supervisor start")
+        for uav in (f"uav{index}" for index in range(1, 6)):
+            authorization_events = [
+                record
+                for record in supervisor_audit
+                if record.get("event") == "endpoint_authorized_not_aggregate_ready"
+                and record.get("endpoint_uav") == uav
+            ]
+            ready_events = [
+                record
+                for record in supervisor_audit
+                if record.get("event") == "endpoint_ready_not_aggregate_ready"
+                and record.get("endpoint_uav") == uav
+            ]
+            if len(authorization_events) != 1 or len(ready_events) != 1:
+                raise ValidationError(f"{uav} supervisor authorization/readiness audit differs")
+            authorization_event = authorization_events[0]
+            ready_event = ready_events[0]
+            channel_evidence = aggregate_channels[uav]
+            if (
+                authorization_event.get("candidate_sha256")
+                != channel_evidence["candidate_sha256"]
+                or authorization_event.get("authorization_sha256")
+                != channel_evidence["authorization_sha256"]
+                or authorization_event.get("mavproxy_peer")
+                != channel_evidence["mavproxy_peer"]
+                or int(authorization_event["monotonic_ns"])
+                < int(authorization_documents[uav]["authorized_monotonic_ns"])
+                or ready_event.get("ready_sha256") != channel_evidence["ready_sha256"]
+                or int(ready_event["monotonic_ns"])
+                < int(ready_documents[uav]["ready_monotonic_ns"])
+            ):
+                raise ValidationError(f"{uav} supervisor hash authorization binding differs")
+        aggregate_event = next(
+            record
+            for record in supervisor_audit
+            if record.get("event") == "aggregate_ready"
+        )
+        if (
+            aggregate_event.get("ready_path")
+            != "raw/state/actual-sitl-endpoints.ready.json"
+            or aggregate_event.get("ready_sha256")
+            != sha256_bytes(canonical_json(aggregate))
+            or int(aggregate_event["monotonic_ns"])
+            < int(aggregate["ready_monotonic_ns"])
+        ):
+            raise ValidationError("aggregate readiness is not hash-bound to supervisor audit")
         samples = [
             record for record in supervisor_audit if record.get("event") == "lineage_sample_pass"
         ]
@@ -2516,6 +2763,8 @@ def validate_actual_sitl_control(
             "channel_count": 5,
             "launch_pgid": next(iter(launch_pgids)),
             "lineage_sample_count": len(samples),
+            "authorization_issuer_sha256": sha256_bytes(canonical_json(issuer)),
+            "aggregate_ready_sha256": sha256_bytes(canonical_json(aggregate)),
             "relay_core_source_sha256": manifest["relay_core_source_sha256"],
         }
     except (
@@ -2797,18 +3046,49 @@ def validate_actual_sitl_control(
                         or (ack_frame["system_id"], ack_frame["component_id"]) != (uav, 1)
                         or int.from_bytes(ack_frame["payload"][:2], "little") != 512
                         or ack_frame["payload"][2] != 0
+                        or ack.get("mavlink_frame_sha256") != ack_frame["sha256"]
+                        or ack.get("mavlink_frame_size") != ack_frame["size"]
+                        or ack.get("transport_payload_sha256") != ack_frame["sha256"]
                         or ack.get("mavlink_command") != 512
                         or ack.get("mavlink_result") != 0
+                        or ack.get("peer_ip") != f"10.71.{uav}.10"
+                        or ack.get("peer_udp_port") != 14600 + uav
+                        or ack.get("uav") != uav
+                        or ack.get("phase") != phase
+                        or ack.get("sequence") != sequence
+                        or ack.get("request_command_frame_sha256") != command_frame["sha256"]
                         or telemetry_frame["message_id"] != 148
                         or (telemetry_frame["system_id"], telemetry_frame["component_id"]) != (uav, 1)
                     ):
                         raise ValidationError(f"{phase}/uav{uav}/{sequence} ACK/telemetry bytes differ")
                     ack_hash = str(ack["transport_payload_sha256"])
-                    ack_datagrams = datagrams_by_hash.get(ack_hash, [])
+                    ack_received_ns = ack.get("received_monotonic_ns")
+                    if (
+                        isinstance(ack_received_ns, bool)
+                        or not isinstance(ack_received_ns, int)
+                        or not sent_ns <= ack_received_ns <= completed_ns
+                    ):
+                        raise ValidationError(
+                            f"{phase}/uav{uav}/{sequence} ACK receive time differs"
+                        )
+                    ack_datagrams = [
+                        record
+                        for record in datagrams_by_hash.get(ack_hash, [])
+                        if record.get("monotonic_ns") == ack_received_ns
+                        and record.get("received_monotonic_ns") == ack_received_ns
+                        and record.get("peer_ip") == ack["peer_ip"]
+                        and record.get("peer_udp_port") == ack["peer_udp_port"]
+                        and record.get("rx_tos") == TOS_BY_CLASS["control"]
+                        and record.get("transport_payload_size") == ack_frame["size"]
+                    ]
                     tail_forwards = [
                         record
                         for record in adapter_forward.get(f"uav{uav}", {}).get("tail_to_gcs", [])
                         if record.get("sha256") == ack_hash
+                        and record.get("bytes") == ack_frame["size"]
+                        and sent_ns
+                        <= int(record.get("monotonic_ns", -1))
+                        <= completed_ns
                     ]
                     if len(ack_datagrams) != 1 or len(tail_forwards) != 1:
                         raise ValidationError(f"{phase}/uav{uav}/{sequence} ACK datagram lineage differs")
@@ -2835,7 +3115,7 @@ def validate_actual_sitl_control(
                     received[(phase, f"uav{uav}.control.uplink")].append(
                         {
                             **uplink_record,
-                            "received_monotonic_ns": int(ack["received_monotonic_ns"]),
+                            "received_monotonic_ns": ack_received_ns,
                         }
                     )
                     success_count += 1
@@ -2913,15 +3193,21 @@ def validate_actual_sitl_control(
             if record.get("event")
             in {
                 "actual_sitl_adapters_ready",
+                "actual_control_start_requested",
                 "actual_control_started",
+                "actual_control_stop_requested",
                 "actual_control_stopped",
+                "actual_sitl_stack_stop_requested",
                 "actual_sitl_stack_stopped",
             }
         }
         required_lifecycle = {
             "actual_sitl_adapters_ready",
+            "actual_control_start_requested",
             "actual_control_started",
+            "actual_control_stop_requested",
             "actual_control_stopped",
+            "actual_sitl_stack_stop_requested",
             "actual_sitl_stack_stopped",
         }
         if set(lifecycle_times) != required_lifecycle:
@@ -2941,7 +3227,11 @@ def validate_actual_sitl_control(
                 str(adapter["exe_sha256"]),
             )
         supervisor = aggregate.get("supervisor", {})
-        critical[(int(supervisor["pid"]), int(supervisor["start_ticks"]))] = (
+        supervisor_identity = (
+            int(supervisor["pid"]),
+            int(supervisor["start_ticks"]),
+        )
+        critical[supervisor_identity] = (
             "container-root",
             str(supervisor["exe_sha256"]),
         )
@@ -2952,7 +3242,7 @@ def validate_actual_sitl_control(
             for sample in topology_samples
             if lifecycle_times["actual_sitl_adapters_ready"]
             <= int(sample.get("monotonic_ns", -1))
-            < lifecycle_times["actual_sitl_stack_stopped"]
+            < lifecycle_times["actual_sitl_stack_stop_requested"]
         ]
         if not stack_samples:
             raise ValidationError("continuous topology has no actual stack samples")
@@ -2974,21 +3264,37 @@ def validate_actual_sitl_control(
                     raise ValidationError(
                         f"critical actual process vanished/restarted: {identity}"
                     )
+            supervisor_process = process_index.get(supervisor_identity)
+            if supervisor_process is None or not any(
+                str(token).endswith("actual_sitl_endpoint_orchestrator.py")
+                for token in supervisor_process.get("cmdline", [])
+            ):
+                raise ValidationError("authorization issuer supervisor role differs")
             sample_time = int(sample["monotonic_ns"])
             control_process = process_index.get(control_identity)
-            control_expected = (
-                lifecycle_times["actual_control_started"]
-                <= sample_time
-                < lifecycle_times["actual_control_stopped"]
-            )
-            if control_expected != (
+            control_present = (
                 control_process is not None
                 and control_process.get("namespace") == "ams-gcs"
                 and any(
                     str(token).endswith("actual_sitl_control_probe.py")
                     for token in control_process.get("cmdline", [])
                 )
+            )
+            control_expected: bool | None
+            if (
+                lifecycle_times["actual_control_started"]
+                <= sample_time
+                < lifecycle_times["actual_control_stop_requested"]
             ):
+                control_expected = True
+            elif (
+                sample_time < lifecycle_times["actual_control_start_requested"]
+                or sample_time >= lifecycle_times["actual_control_stopped"]
+            ):
+                control_expected = False
+            else:
+                control_expected = None
+            if control_expected is not None and control_expected != control_present:
                 raise ValidationError("GCS actual control process continuity differs")
         details["critical_process_lineage"] = {
             "stack_sample_count": len(stack_samples),
@@ -4160,11 +4466,17 @@ def validate(
                 gate_failures["forbidden_paths"].append(
                     f"{canary_id} ns3 event identity differs from declared bytes"
                 )
-        if drops[0].get("drop_reason") != (
-            "udp_destination_port_not_in_endpoint_matrix"
-        ):
+        if canary["kind"] == "legacy_direct_port":
+            if (
+                drops[0].get("drop_reason")
+                != "udp_destination_port_not_in_endpoint_matrix"
+            ):
+                gate_failures["forbidden_paths"].append(
+                    f"{canary_id} ns3 terminal drop reason is not the endpoint-port allowlist"
+                )
+        elif drops[0].get("drop_reason") != "ipv4_no_route":
             gate_failures["forbidden_paths"].append(
-                f"{canary_id} ns3 terminal drop reason is not the endpoint-port allowlist"
+                f"{canary_id} ns3 terminal drop reason is not explicit IPv4 no-route"
             )
         forbidden_ns3_metrics[canary_id] = {
             "ingress_count": 1,
@@ -4300,12 +4612,16 @@ def validate(
         required_order = [
             "run_initialized",
             "topology_ready",
+            "captures_start_requested",
             "captures_started",
+            "forbidden_listeners_start_requested",
             "forbidden_listeners_started",
+            "endpoint_agents_start_requested",
             "endpoint_agents_started",
             "flight_stack_started",
             "actual_sitl_manifest_frozen",
             "actual_sitl_adapters_ready",
+            "actual_control_start_requested",
             "actual_control_started",
             "engine_started",
             "engine_ready",
@@ -4316,11 +4632,16 @@ def validate(
             "engine_stopped",
             "engine_restarted",
             "engine_ready",
+            "actual_control_stop_requested",
+            "endpoint_agents_stop_requested",
             "actual_control_stopped",
             "endpoint_agents_stopped",
+            "forbidden_listeners_stop_requested",
             "forbidden_listeners_stopped",
             "engine_final_stop",
+            "actual_sitl_stack_stop_requested",
             "actual_sitl_stack_stopped",
+            "captures_stop_requested",
             "captures_stopped",
         ]
         if event_names != required_order:
@@ -4336,14 +4657,23 @@ def validate(
                 "external_segment_count": 11,
                 "root_tail_count": 5,
             },
+            "captures_start_requested": {
+                "capture_processes": 29,
+                "tail_capture_processes": 10,
+            },
             "captures_started": {
                 "capture_processes": 29,
                 "tail_capture_processes": 10,
+            },
+            "forbidden_listeners_start_requested": {
+                "listener_processes": 6,
+                "active_bindings": 20,
             },
             "forbidden_listeners_started": {
                 "listener_processes": 6,
                 "active_bindings": 20,
             },
+            "endpoint_agents_start_requested": {"endpoint_agents": 6},
             "endpoint_agents_started": {"endpoint_agents": 6},
             "actual_sitl_manifest_frozen": {
                 "channels": 5,
@@ -4354,6 +4684,9 @@ def validate(
                 "adapter_processes": 5,
                 "authorized_channels": 5,
                 "tail_segments": 5,
+            },
+            "actual_control_start_requested": {
+                "control_socket": "10.71.0.10:14600"
             },
             "actual_control_link_ready": {
                 "uav_links": 5,
@@ -4366,16 +4699,28 @@ def validate(
             },
             "engine_stop_requested": {"event_epoch": 1},
             "engine_stopped": {"event_epoch": 1, "exit_code": 0},
+            "actual_control_stop_requested": {"actual_control_processes": 1},
+            "endpoint_agents_stop_requested": {"endpoint_agents": 6},
             "actual_control_stopped": {
                 "exit_code": 0,
                 "actual_control_processes": 1,
             },
             "endpoint_agents_stopped": {"exit_code": 0, "endpoint_agents": 6},
+            "forbidden_listeners_stop_requested": {"listener_processes": 6},
             "forbidden_listeners_stopped": {
                 "exit_code": 0,
                 "listener_processes": 6,
             },
             "engine_final_stop": {"event_epoch": 2, "exit_code": 0},
+            "actual_sitl_stack_stop_requested": {
+                "adapter_processes": 5,
+                "supervisor_processes": 1,
+                "flight_process_groups": 1,
+            },
+            "captures_stop_requested": {
+                "capture_processes": 29,
+                "tail_capture_processes": 10,
+            },
             "captures_stopped": {
                 "exit_code": 0,
                 "capture_processes": 29,
@@ -4389,6 +4734,29 @@ def validate(
         ):
             gate_failures["lifecycle"].append(
                 "lifecycle static event details are not exact"
+            )
+        transition_pairs = (
+            ("captures_start_requested", "captures_started"),
+            ("forbidden_listeners_start_requested", "forbidden_listeners_started"),
+            ("endpoint_agents_start_requested", "endpoint_agents_started"),
+            ("actual_control_start_requested", "actual_control_started"),
+            ("actual_control_stop_requested", "actual_control_stopped"),
+            ("endpoint_agents_stop_requested", "endpoint_agents_stopped"),
+            ("forbidden_listeners_stop_requested", "forbidden_listeners_stopped"),
+            ("actual_sitl_stack_stop_requested", "actual_sitl_stack_stopped"),
+            ("captures_stop_requested", "captures_stopped"),
+        )
+        if any(
+            len(lifecycle_by_event[requested]) != 1
+            or len(lifecycle_by_event[completed]) != 1
+            or not 0
+            < lifecycle_by_event[completed][0]["monotonic_ns"]
+            - lifecycle_by_event[requested][0]["monotonic_ns"]
+            <= PROCESS_TRANSITION_MAX_NS
+            for requested, completed in transition_pairs
+        ):
+            gate_failures["lifecycle"].append(
+                "process lifecycle transition interval is invalid/unbounded"
             )
         run_initialized = lifecycle_by_event.get("run_initialized", [])
         run_details = (
@@ -4610,14 +4978,24 @@ def validate(
         "packets_dropped_kernel",
     }
     capture_specs = [
-        *((f"endpoint-{endpoint}", "eth0") for endpoint in ENDPOINTS),
-        *((f"ns3-external-{endpoint}", f"vp-{endpoint}") for endpoint in ENDPOINTS),
-        *((f"loopback-{endpoint}", "lo") for endpoint in ENDPOINTS),
-        *((f"tail-uav{index}", "tail0") for index in range(1, 6)),
-        *((f"tail-root-uav{index}", f"ams-tail{index}") for index in range(1, 6)),
-        ("loopback-container-root", "lo"),
+        *((f"endpoint-{endpoint}", "eth0", CAPTURE_PACKET_FILTER) for endpoint in ENDPOINTS),
+        *(
+            (f"ns3-external-{endpoint}", f"vp-{endpoint}", CAPTURE_PACKET_FILTER)
+            for endpoint in ENDPOINTS
+        ),
+        *((f"loopback-{endpoint}", "lo", CAPTURE_PACKET_FILTER) for endpoint in ENDPOINTS),
+        *((f"tail-uav{index}", "tail0", CAPTURE_PACKET_FILTER) for index in range(1, 6)),
+        *(
+            (f"tail-root-uav{index}", f"ams-tail{index}", CAPTURE_PACKET_FILTER)
+            for index in range(1, 6)
+        ),
+        (
+            "loopback-container-root",
+            "lo",
+            expected_root_loopback_packet_filter(str(run_nonce)),
+        ),
     ]
-    for name, expected_interface in capture_specs:
+    for name, expected_interface, expected_packet_filter in capture_specs:
         stats_path = run_dir / f"logs/capture-{name}.json"
         stderr_path = run_dir / f"logs/capture-{name}.stderr"
         try:
@@ -4629,7 +5007,7 @@ def validate(
                 stats.get("contract") != CAPTURE_STATS_CONTRACT
                 or stats.get("interface") != expected_interface
                 or stats.get("capture_protocol") != CAPTURE_PROTOCOL
-                or stats.get("packet_filter") != CAPTURE_PACKET_FILTER
+                or stats.get("packet_filter") != expected_packet_filter
                 or stats.get("pcap_path") != pcap_path.name
                 or type(stats.get("pcap_bytes")) is not int
                 or stats.get("pcap_bytes") != pcap_path.stat().st_size

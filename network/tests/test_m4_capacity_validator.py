@@ -392,6 +392,26 @@ class TailTopologyTests(unittest.TestCase):
             }
             for index in range(1, 6)
         ]
+        loopback_local_routes = [
+            {
+                "type": "local",
+                "dst": "127.0.0.0/8",
+                "dev": "lo",
+                "table": "local",
+            },
+            {
+                "type": "local",
+                "dst": "127.0.0.1",
+                "dev": "lo",
+                "table": "local",
+            },
+            {
+                "type": "broadcast",
+                "dst": "127.255.255.255",
+                "dev": "lo",
+                "table": "local",
+            },
+        ]
         namespaces: dict[str, object] = {
             "container-root": namespace(
                 100,
@@ -401,7 +421,26 @@ class TailTopologyTests(unittest.TestCase):
                 routes=[
                     {"dst": f"10.72.{index}.0/30", "dev": f"ams-tail{index}"}
                     for index in range(1, 6)
-                ],
+                ]
+                + [
+                    route
+                    for index in range(1, 6)
+                    for route in (
+                        {
+                            "type": "local",
+                            "dst": f"10.72.{index}.1",
+                            "dev": f"ams-tail{index}",
+                            "table": "local",
+                        },
+                        {
+                            "type": "broadcast",
+                            "dst": f"10.72.{index}.3",
+                            "dev": f"ams-tail{index}",
+                            "table": "local",
+                        },
+                    )
+                ]
+                + loopback_local_routes,
                 sockets=[
                     f"UNCONN 0 0 0.0.0.0:{43000 + index} 10.72.{index}.2:{14559 + index}"
                     for index in range(1, 6)
@@ -416,7 +455,7 @@ class TailTopologyTests(unittest.TestCase):
                     for prefix in ("br", "tap", "vp")
                 ],
                 addresses=[],
-                routes=[],
+                routes=loopback_local_routes,
                 sockets=[],
                 bridge_links=[
                     {"ifname": f"{prefix}-{endpoint}", "master": f"br-{endpoint}"}
@@ -438,7 +477,23 @@ class TailTopologyTests(unittest.TestCase):
                         ],
                     }
                 ],
-                routes=[{"dst": "default", "gateway": "10.71.0.1", "dev": "eth0"}],
+                routes=[
+                    {"dst": "default", "gateway": "10.71.0.1", "dev": "eth0"},
+                    {"dst": "10.71.0.0/24", "dev": "eth0"},
+                    {
+                        "type": "local",
+                        "dst": "10.71.0.10",
+                        "dev": "eth0",
+                        "table": "local",
+                    },
+                    {
+                        "type": "broadcast",
+                        "dst": "10.71.0.255",
+                        "dev": "eth0",
+                        "table": "local",
+                    },
+                    *loopback_local_routes,
+                ],
                 sockets=["UNCONN 0 0 10.71.0.10:14600 0.0.0.0:*"],
             ),
         }
@@ -480,7 +535,34 @@ class TailTopologyTests(unittest.TestCase):
                         "dst": "default",
                         "gateway": f"10.71.{index}.1",
                         "dev": "eth0",
-                    }
+                    },
+                    {"dst": f"10.71.{index}.0/24", "dev": "eth0"},
+                    {"dst": f"10.72.{index}.0/30", "dev": "tail0"},
+                    {
+                        "type": "local",
+                        "dst": f"10.71.{index}.10",
+                        "dev": "eth0",
+                        "table": "local",
+                    },
+                    {
+                        "type": "broadcast",
+                        "dst": f"10.71.{index}.255",
+                        "dev": "eth0",
+                        "table": "local",
+                    },
+                    {
+                        "type": "local",
+                        "dst": f"10.72.{index}.2",
+                        "dev": "tail0",
+                        "table": "local",
+                    },
+                    {
+                        "type": "broadcast",
+                        "dst": f"10.72.{index}.3",
+                        "dev": "tail0",
+                        "table": "local",
+                    },
+                    *loopback_local_routes,
                 ],
                 sockets=[
                     f"UNCONN 0 0 10.71.{index}.10:{14600 + index} 0.0.0.0:*",

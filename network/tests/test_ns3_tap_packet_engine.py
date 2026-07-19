@@ -157,6 +157,36 @@ class TapPacketEngineConfigTests(unittest.TestCase):
 
 
 class TapPacketEngineStaticTests(unittest.TestCase):
+    def test_source_uses_bounded_nonstarving_three_class_scheduler(self) -> None:
+        source = SOURCE.read_text(encoding="utf-8")
+        queue_start = source.index("class BoundedPriorityScheduler")
+        queue_end = source.index("struct EngineConfig", queue_start)
+        queue_source = source[queue_start:queue_end]
+
+        self.assertRegex(
+            queue_source,
+            r"CONTROL_BURST_LIMIT\s*=\s*8",
+        )
+        self.assertIn("m_controlBurst < CONTROL_BURST_LIMIT", queue_source)
+        self.assertIn("counts[m_nextLowerClass] > 0", queue_source)
+        self.assertIn(
+            "m_nextLowerClass = selectedClass == PAYLOAD_CLASS",
+            queue_source,
+        )
+        self.assertIn("const auto selected = SelectNextIterator();", queue_source)
+        self.assertNotRegex(
+            queue_source,
+            r"Do(?:Dequeue|Remove|Peek)\(GetContainer\(\)\.begin\(\)\)",
+        )
+        self.assertGreaterEqual(
+            queue_source.count("m_scheduler.Record(classIndex, m_counts)"),
+            2,
+        )
+        self.assertIn(
+            "BoundedPriorityScheduler::DeterministicSelfTest()",
+            source,
+        )
+
     def test_source_uses_external_tap_netdevices_and_no_ns3_applications(self) -> None:
         source = SOURCE.read_text(encoding="utf-8")
         self.assertIn("TapBridgeHelper", source)
@@ -172,6 +202,20 @@ class TapPacketEngineStaticTests(unittest.TestCase):
         self.assertIn("InternetStackHelper", source)
         self.assertIn("radio.Install(routers)", source)
         self.assertEqual(source.count("radio.Install(routers)"), 1)
+
+    def test_source_traces_real_ipv4_no_route_and_reconstructs_udp_identity(
+        self,
+    ) -> None:
+        source = SOURCE.read_text(encoding="utf-8")
+        self.assertIn("ReconstructIpv4EthernetFrame", source)
+        self.assertIn("reconstructedHeader.SetPayloadSize(frame->GetSize())", source)
+        self.assertIn("frame->AddHeader(reconstructedHeader)", source)
+        self.assertIn("reason != Ipv4L3Protocol::DROP_NO_ROUTE", source)
+        self.assertIn('logger->Log("drop", context, frame, -1, -1, "ipv4_no_route")', source)
+        self.assertRegex(
+            source,
+            r'routerIpv4->TraceConnect\(\s*"Drop"[\s\S]+?TraceIpv4Drop',
+        )
 
     def test_source_declares_all_required_packet_stages_and_fields(self) -> None:
         source = SOURCE.read_text(encoding="utf-8")
@@ -330,9 +374,6 @@ class TapPacketEngineCompiledTests(unittest.TestCase):
             <= {record["event"] for record in records}
         )
         self.assertNotIn("unknown", {record["traffic_class"] for record in records})
-        self.assertTrue(
-            all("unknown" not in record["directed_link"] for record in records)
-        )
 
         radio_cells = {
             (record["directed_link"], record["traffic_class"])
@@ -430,6 +471,56 @@ class TapPacketEngineCompiledTests(unittest.TestCase):
                 and record["event"] in {"channel", "egress"}
                 for record in records
             )
+        )
+
+        unreachable = [
+            record
+            for record in records
+            if record["destination_ip"] == "198.18.0.1"
+        ]
+        self.assertEqual(
+            [record["event"] for record in unreachable],
+            ["ingress", "drop"],
+        )
+        self.assertEqual(unreachable[1]["drop_reason"], "ipv4_no_route")
+        self.assertIsNone(unreachable[0]["drop_reason"])
+        self.assertEqual(
+            {
+                (
+                    record["transport_protocol"],
+                    record["source_ip"],
+                    record["destination_ip"],
+                    record["source_udp_port"],
+                    record["destination_udp_port"],
+                    record["tos"],
+                    record["transport_payload_sha256"],
+                    record["transport_payload_size"],
+                )
+                for record in unreachable
+            },
+            {
+                (
+                    17,
+                    "10.71.0.10",
+                    "198.18.0.1",
+                    20033,
+                    15300,
+                    0,
+                    unreachable[0]["transport_payload_sha256"],
+                    len("ams-self-test:33"),
+                )
+            },
+        )
+        self.assertRegex(
+            unreachable[0]["transport_payload_sha256"], r"^[0-9a-f]{64}$"
+        )
+        self.assertEqual(
+            [
+                record
+                for record in records
+                if "unknown" in record["directed_link"]
+            ],
+            unreachable,
         )
         allowed_ports = {
             *range(14600, 14606),

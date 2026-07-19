@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import hashlib
 import json
 import os
@@ -602,6 +603,93 @@ def expected_process_identity(identity: dict[str, Any]) -> dict[str, Any]:
     return {key: identity[key] for key in EXPECTED_PROCESS_KEYS}
 
 
+def validate_frozen_process_identity(
+    identity: Any,
+    *,
+    context: str = "frozen process identity",
+) -> dict[str, Any]:
+    """Validate a preserved process snapshot without consulting ``/proc``.
+
+    A completed-run validator cannot require the issuer PID to remain alive.
+    This check instead authenticates the snapshot's exact schema, canonical
+    command-line bytes/hash/argv relation, executable hash fields, and other
+    immutable identity material.  Live callers must additionally call
+    :func:`verify_expected_process`; ``validate_authorization`` does that by
+    default.
+    """
+
+    if not isinstance(identity, dict):
+        raise EndpointError(f"{context} must be an object")
+    _exact_keys(identity, PROCESS_IDENTITY_KEYS, context)
+    positive_fields = (
+        "pid",
+        "pgid",
+        "session_id",
+        "start_ticks",
+        "exe_dev",
+        "exe_inode",
+        "exe_size",
+        "netns_inode",
+    )
+    if any(
+        isinstance(identity.get(key), bool)
+        or not isinstance(identity.get(key), int)
+        or identity[key] <= 0
+        for key in positive_fields
+    ):
+        raise EndpointError(f"{context} contains invalid positive numeric fields")
+    if (
+        isinstance(identity.get("ppid"), bool)
+        or not isinstance(identity.get("ppid"), int)
+        or identity["ppid"] < 0
+    ):
+        raise EndpointError(f"{context}.ppid is invalid")
+    state = identity.get("state")
+    if not isinstance(state, str) or len(state) != 1 or state in {"Z", "X", "x"}:
+        raise EndpointError(f"{context}.state is invalid or terminal")
+    for key in ("cmdline_sha256", "exe_sha256", "cgroup_sha256"):
+        value = identity.get(key)
+        if not isinstance(value, str) or HEX64.fullmatch(value) is None:
+            raise EndpointError(f"{context}.{key} is invalid")
+    encoded_cmdline = identity.get("cmdline_b64")
+    if not isinstance(encoded_cmdline, str) or not encoded_cmdline:
+        raise EndpointError(f"{context}.cmdline_b64 is invalid")
+    try:
+        raw_cmdline = base64.b64decode(encoded_cmdline, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise EndpointError(f"{context}.cmdline_b64 is not canonical base64") from exc
+    if (
+        not raw_cmdline
+        or not raw_cmdline.endswith(b"\0")
+        or base64.b64encode(raw_cmdline).decode("ascii") != encoded_cmdline
+        or hashlib.sha256(raw_cmdline).hexdigest() != identity["cmdline_sha256"]
+    ):
+        raise EndpointError(f"{context} command-line bytes/hash differ")
+    expected_argv = [
+        item.decode("utf-8", errors="surrogateescape")
+        for item in raw_cmdline.rstrip(b"\0").split(b"\0")
+        if item
+    ]
+    argv = identity.get("argv")
+    if not expected_argv or argv != expected_argv:
+        raise EndpointError(f"{context} argv differs from cmdline_b64")
+    executable = identity.get("exe_path")
+    if (
+        not isinstance(executable, str)
+        or not Path(executable).is_absolute()
+        or os.path.normpath(executable) != executable
+    ):
+        raise EndpointError(f"{context}.exe_path is not canonical absolute")
+    inodes = identity.get("socket_inodes")
+    if (
+        not isinstance(inodes, list)
+        or any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in inodes)
+        or inodes != sorted(set(inodes))
+    ):
+        raise EndpointError(f"{context}.socket_inodes is not a sorted unique integer list")
+    return {key: identity[key] for key in EXPECTED_PROCESS_KEYS}
+
+
 def verify_expected_process(
     role: str,
     expected: dict[str, Any],
@@ -981,7 +1069,11 @@ def validate_authorization(
     channel: dict[str, Any],
     candidate: dict[str, Any],
     candidate_hash: str,
+    *,
+    require_live_issuer: bool = True,
 ) -> None:
+    if not isinstance(require_live_issuer, bool):
+        raise EndpointError("require_live_issuer must be a boolean")
     _exact_keys(
         authorization,
         {
@@ -1020,10 +1112,27 @@ def validate_authorization(
     }
     if differences:
         raise EndpointError(f"authorization does not match the immutable candidate: {differences}")
+    authorized_wall_utc = authorization.get("authorized_wall_utc")
+    try:
+        if not isinstance(authorized_wall_utc, str):
+            raise ValueError("timestamp is not a string")
+        datetime.strptime(authorized_wall_utc, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError as exc:
+        raise EndpointError("authorization wall timestamp is invalid") from exc
+    authorized_monotonic_ns = authorization.get("authorized_monotonic_ns")
+    if (
+        isinstance(authorized_monotonic_ns, bool)
+        or not isinstance(authorized_monotonic_ns, int)
+        or authorized_monotonic_ns <= 0
+    ):
+        raise EndpointError("authorization monotonic timestamp is invalid")
     issuer = authorization["issuer"]
-    if not isinstance(issuer, dict) or set(issuer) != PROCESS_IDENTITY_KEYS:
-        raise EndpointError("authorization issuer identity is incomplete")
-    verify_expected_process("authorization issuer", expected_process_identity(issuer))
+    issuer_expected = validate_frozen_process_identity(
+        issuer,
+        context="authorization issuer identity",
+    )
+    if require_live_issuer:
+        verify_expected_process("authorization issuer", issuer_expected)
 
 
 def _endpoint_tuple(value: dict[str, Any]) -> tuple[str, int]:

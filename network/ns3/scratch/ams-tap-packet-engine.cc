@@ -1123,6 +1123,123 @@ using QueueEventSink = std::function<void(const std::string&,
                                           int64_t,
                                           const std::string&)>;
 
+class BoundedPriorityScheduler
+{
+  public:
+    static constexpr uint32_t CONTROL_CLASS = 0;
+    static constexpr uint32_t PAYLOAD_CLASS = 1;
+    static constexpr uint32_t ADDITIONAL_DATA_CLASS = 2;
+    static constexpr uint32_t NO_CLASS = 3;
+
+    // Eight packets preserve a strong control preference without permitting
+    // an always-backlogged control stream to starve the other two classes.
+    // Under three-class saturation one lower-class packet is selected after
+    // every bounded control burst, and the two lower classes alternate.
+    static constexpr uint32_t CONTROL_BURST_LIMIT = 8;
+
+    uint32_t Select(const std::array<uint32_t, 3>& counts) const
+    {
+        const bool lowerWaiting = counts[PAYLOAD_CLASS] > 0 ||
+                                  counts[ADDITIONAL_DATA_CLASS] > 0;
+        if (counts[CONTROL_CLASS] > 0 &&
+            (!lowerWaiting || m_controlBurst < CONTROL_BURST_LIMIT))
+        {
+            return CONTROL_CLASS;
+        }
+        if (lowerWaiting)
+        {
+            if (counts[m_nextLowerClass] > 0)
+            {
+                return m_nextLowerClass;
+            }
+            return m_nextLowerClass == PAYLOAD_CLASS ? ADDITIONAL_DATA_CLASS : PAYLOAD_CLASS;
+        }
+        return counts[CONTROL_CLASS] > 0 ? CONTROL_CLASS : NO_CLASS;
+    }
+
+    void Record(uint32_t selectedClass, const std::array<uint32_t, 3>& countsAfter)
+    {
+        if (selectedClass == CONTROL_CLASS)
+        {
+            const bool lowerWaiting = countsAfter[PAYLOAD_CLASS] > 0 ||
+                                      countsAfter[ADDITIONAL_DATA_CLASS] > 0;
+            m_controlBurst = lowerWaiting ? m_controlBurst + 1 : 0;
+            return;
+        }
+        if (selectedClass == PAYLOAD_CLASS || selectedClass == ADDITIONAL_DATA_CLASS)
+        {
+            m_controlBurst = 0;
+            m_nextLowerClass = selectedClass == PAYLOAD_CLASS ? ADDITIONAL_DATA_CLASS
+                                                               : PAYLOAD_CLASS;
+        }
+    }
+
+    void Reset()
+    {
+        m_controlBurst = 0;
+        m_nextLowerClass = PAYLOAD_CLASS;
+    }
+
+    static bool DeterministicSelfTest();
+
+  private:
+    uint32_t m_controlBurst = 0;
+    uint32_t m_nextLowerClass = PAYLOAD_CLASS;
+};
+
+bool
+BoundedPriorityScheduler::DeterministicSelfTest()
+{
+    const auto drain = [](std::array<uint32_t, 3> counts) {
+        BoundedPriorityScheduler scheduler;
+        std::vector<uint32_t> selections;
+        while (true)
+        {
+            const uint32_t selected = scheduler.Select(counts);
+            if (selected == NO_CLASS)
+            {
+                break;
+            }
+            if (selected >= counts.size() || counts[selected] == 0)
+            {
+                return std::vector<uint32_t>{NO_CLASS};
+            }
+            --counts[selected];
+            scheduler.Record(selected, counts);
+            selections.push_back(selected);
+        }
+        return selections;
+    };
+
+    const std::vector<uint32_t> saturatedExpected = {
+        0, 0, 0, 0, 0, 0, 0, 0, 1,
+        0, 0, 0, 0, 0, 0, 0, 0, 2,
+        0, 1, 2,
+    };
+    if (drain({17, 2, 2}) != saturatedExpected ||
+        drain({0, 2, 2}) != std::vector<uint32_t>({1, 2, 1, 2}) ||
+        drain({9, 0, 2}) !=
+            std::vector<uint32_t>({0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 2}) ||
+        drain({1, 0, 0}) != std::vector<uint32_t>({0}))
+    {
+        return false;
+    }
+
+    // Uncontended control traffic does not consume the contested burst: when
+    // a lower-class packet arrives later, control still receives immediate
+    // priority before the newly bounded burst begins.
+    BoundedPriorityScheduler scheduler;
+    std::array<uint32_t, 3> counts = {2, 0, 0};
+    if (scheduler.Select(counts) != CONTROL_CLASS)
+    {
+        return false;
+    }
+    --counts[CONTROL_CLASS];
+    scheduler.Record(CONTROL_CLASS, counts);
+    counts[PAYLOAD_CLASS] = 1;
+    return scheduler.Select(counts) == CONTROL_CLASS;
+}
+
 class AmsThreeClassQueue : public Queue<Packet>
 {
   public:
@@ -1143,6 +1260,7 @@ class AmsThreeClassQueue : public Queue<Packet>
     void SetLimits(uint32_t control, uint32_t payload, uint32_t additionalData)
     {
         m_limits = {control, payload, additionalData};
+        m_scheduler.Reset();
         SetMaxSize(QueueSize(std::to_string(control + payload + additionalData) + "p"));
     }
 
@@ -1236,7 +1354,9 @@ class AmsThreeClassQueue : public Queue<Packet>
     {
         while (!GetContainer().empty())
         {
-            Ptr<const Packet> candidate = *GetContainer().begin();
+            const auto selected = SelectNextIterator();
+            NS_ASSERT(selected != GetContainer().end());
+            Ptr<const Packet> candidate = *selected;
             const uint32_t classIndex = ClassIndex(InspectFrame(candidate));
             RadioDecision transmitDecision;
             if (m_radioTransmitSink)
@@ -1246,13 +1366,14 @@ class AmsThreeClassQueue : public Queue<Packet>
                 // or inherit a newer cell state that was not its causal decision.
                 transmitDecision = m_radioTransmitSink(m_deviceId, candidate, m_radioDevice);
             }
-            Ptr<Packet> packet = DoDequeue(GetContainer().begin());
+            Ptr<Packet> packet = DoDequeue(selected);
             if (!packet || classIndex >= m_counts.size())
             {
                 return packet;
             }
             NS_ASSERT(m_counts[classIndex] > 0);
             --m_counts[classIndex];
+            m_scheduler.Record(classIndex, m_counts);
             if (transmitDecision.drop)
             {
                 DropAfterDequeue(packet);
@@ -1287,13 +1408,16 @@ class AmsThreeClassQueue : public Queue<Packet>
         {
             return nullptr;
         }
-        Ptr<const Packet> candidate = *GetContainer().begin();
+        const auto selected = SelectNextIterator();
+        NS_ASSERT(selected != GetContainer().end());
+        Ptr<const Packet> candidate = *selected;
         const uint32_t classIndex = ClassIndex(InspectFrame(candidate));
-        Ptr<Packet> packet = DoRemove(GetContainer().begin());
+        Ptr<Packet> packet = DoRemove(selected);
         if (packet && classIndex < m_counts.size())
         {
             NS_ASSERT(m_counts[classIndex] > 0);
             --m_counts[classIndex];
+            m_scheduler.Record(classIndex, m_counts);
             Emit("drop", packet, m_counts[classIndex], m_limits[classIndex], "queue_flush");
         }
         return packet;
@@ -1301,10 +1425,29 @@ class AmsThreeClassQueue : public Queue<Packet>
 
     Ptr<const Packet> Peek() const override
     {
-        return GetContainer().empty() ? nullptr : DoPeek(GetContainer().begin());
+        const auto selected = SelectNextIterator();
+        return selected == GetContainer().end() ? nullptr : DoPeek(selected);
     }
 
   private:
+    ConstIterator SelectNextIterator() const
+    {
+        const uint32_t selectedClass = m_scheduler.Select(m_counts);
+        if (selectedClass == BoundedPriorityScheduler::NO_CLASS)
+        {
+            return GetContainer().end();
+        }
+        for (auto position = GetContainer().begin(); position != GetContainer().end(); ++position)
+        {
+            if (ClassIndex(InspectFrame(*position)) == selectedClass)
+            {
+                return position;
+            }
+        }
+        NS_ASSERT_MSG(false, "scheduler selected an empty traffic class");
+        return GetContainer().end();
+    }
+
     static void EnsureSendEnabled(Ptr<CsmaNetDevice> device)
     {
         if (device && !device->IsSendEnabled())
@@ -1335,6 +1478,7 @@ class AmsThreeClassQueue : public Queue<Packet>
 
     std::array<uint32_t, 3> m_limits{};
     std::array<uint32_t, 3> m_counts{};
+    BoundedPriorityScheduler m_scheduler;
     std::string m_deviceId;
     QueueEventSink m_sink;
     RadioDecisionSink m_radioDecisionSink;
@@ -1615,6 +1759,89 @@ std::string
 RadioIp(uint32_t deviceIndex)
 {
     return "10.72.0." + std::to_string(deviceIndex + 1);
+}
+
+uint32_t
+EndpointIndexFromDevice(const std::string& device)
+{
+    if (device == "gcs" || device == "cp")
+    {
+        return 0;
+    }
+    for (uint32_t index = 1; index <= MAX_UAVS; ++index)
+    {
+        if (device == "uav" + std::to_string(index))
+        {
+            return index;
+        }
+    }
+    return MAX_UAVS + 1;
+}
+
+uint32_t
+EndpointIndexFromIp(const Ipv4Address& address)
+{
+    const std::string value = Ipv4ToString(address);
+    for (uint32_t index = 0; index <= MAX_UAVS; ++index)
+    {
+        if (value == EndpointIp(index))
+        {
+            return index;
+        }
+    }
+    return MAX_UAVS + 1;
+}
+
+Ptr<Packet>
+ReconstructIpv4EthernetFrame(const Ipv4Header& header,
+                             Ptr<const Packet> ipv4Payload,
+                             const std::string& observedDevice,
+                             bool externalIngress)
+{
+    Ptr<Packet> frame = ipv4Payload->Copy();
+    Ipv4Header reconstructedHeader = header;
+    reconstructedHeader.SetPayloadSize(frame->GetSize());
+    if (Node::ChecksumEnabled())
+    {
+        reconstructedHeader.EnableChecksum();
+    }
+    frame->AddHeader(reconstructedHeader);
+
+    // CsmaNetDevice's DIX framing pads the IPv4 datagram to Ethernet's
+    // minimum 46-byte payload before adding the header and trailer.
+    if (frame->GetSize() < 46)
+    {
+        uint8_t padding[46]{};
+        frame->AddAtEnd(Create<Packet>(padding, 46 - frame->GetSize()));
+    }
+
+    const uint32_t observedIndex = EndpointIndexFromDevice(observedDevice);
+    const uint32_t sourceIndex = EndpointIndexFromIp(header.GetSource());
+    if (observedIndex > MAX_UAVS)
+    {
+        throw std::runtime_error("cannot reconstruct IPv4 drop for unknown router identity");
+    }
+    const Mac48Address source = sourceIndex <= MAX_UAVS
+                                    ? Mac48Address((externalIngress ? EndpointMac(sourceIndex)
+                                                                  : RadioMac(sourceIndex))
+                                                       .c_str())
+                                    : Mac48Address("00:00:00:00:00:00");
+    const Mac48Address destination(
+        (externalIngress ? RouterExternalMac(observedIndex) : RadioMac(observedIndex)).c_str());
+    EthernetHeader ethernet(false);
+    ethernet.SetSource(source);
+    ethernet.SetDestination(destination);
+    ethernet.SetLengthType(0x0800);
+    frame->AddHeader(ethernet);
+
+    EthernetTrailer trailer;
+    if (Node::ChecksumEnabled())
+    {
+        trailer.EnableFcs(true);
+    }
+    trailer.CalcFcs(frame);
+    frame->AddTrailer(trailer);
+    return frame;
 }
 
 class PacketEventLogger
@@ -1949,8 +2176,13 @@ class PacketEventLogger
         {
             return "p2mp";
         }
-        std::string destination =
-            DeviceFromMacOrIp(metadata.destinationMac, metadata.destinationIp);
+        // For routed IPv4 traffic the L3 destination is authoritative.  The
+        // ingress Ethernet destination is merely this router's local MAC and
+        // must not turn an unreachable address into a false cp>cp link.
+        std::string destination = metadata.ipv4
+                                      ? DeviceFromMacOrIp("", metadata.destinationIp)
+                                      : DeviceFromMacOrIp(metadata.destinationMac,
+                                                          metadata.destinationIp);
         if (destination == "unknown" && (event == "egress" || event == "phy_rx_drop"))
         {
             destination = observed;
@@ -1975,6 +2207,27 @@ void
 TraceIngress(PacketEventLogger* logger, std::string context, Ptr<const Packet> packet)
 {
     logger->Log("ingress", context, packet);
+}
+
+void
+TraceIpv4Drop(PacketEventLogger* logger,
+              Ptr<NetDevice> externalDevice,
+              std::string context,
+              const Ipv4Header& header,
+              Ptr<const Packet> ipv4Payload,
+              Ipv4L3Protocol::DropReason reason,
+              Ptr<Ipv4> ipv4,
+              uint32_t interface)
+{
+    if (reason != Ipv4L3Protocol::DROP_NO_ROUTE)
+    {
+        return;
+    }
+    const bool externalIngress = ipv4 && interface < ipv4->GetNInterfaces() &&
+                                 ipv4->GetNetDevice(interface) == externalDevice;
+    Ptr<Packet> frame =
+        ReconstructIpv4EthernetFrame(header, ipv4Payload, context, externalIngress);
+    logger->Log("drop", context, frame, -1, -1, "ipv4_no_route");
 }
 
 void
@@ -2207,6 +2460,21 @@ ScheduleSelfTest(const NetDeviceContainer& endpointDevices,
                                       CONTROL_TOS,
                                       sequence++,
                                       14550});
+    nextUs += 5000;
+
+    // This destination is outside every configured endpoint and radio subnet.
+    // It must produce one independent Ipv4L3Protocol DROP_NO_ROUTE event; its
+    // allowed-looking UDP identity must not be relabelled as a queue rejection.
+    Simulator::Schedule(MicroSeconds(nextUs),
+                        &SendSelfTestFrame,
+                        SelfTestFrame{gcs,
+                                      EndpointMacAddress(0),
+                                      RouterExternalMacAddress(0),
+                                      Ipv4Address(EndpointIp(0).c_str()),
+                                      Ipv4Address("198.18.0.1"),
+                                      ADDITIONAL_DATA_TOS,
+                                      sequence++,
+                                      15300});
     nextUs += 5000;
 
     for (uint32_t index = 0; index < burst; ++index)
@@ -2493,6 +2761,10 @@ main(int argc, char* argv[])
 
     try
     {
+        if (config.selfTest && !BoundedPriorityScheduler::DeterministicSelfTest())
+        {
+            throw std::runtime_error("bounded-priority scheduler self-test failed");
+        }
         RngSeedManager::SetSeed(config.seed);
         RngSeedManager::SetRun(config.run);
         if (!config.selfTest || config.sionnaIpcEnabled)
@@ -2622,6 +2894,15 @@ main(int argc, char* argv[])
                 "MacRx",
                 deviceId,
                 MakeBoundCallback(&TraceIngress, &logger));
+            Ptr<Ipv4L3Protocol> routerIpv4 = routers.Get(index)->GetObject<Ipv4L3Protocol>();
+            if (!routerIpv4)
+            {
+                throw std::runtime_error("router has no ns-3 Ipv4L3Protocol drop trace");
+            }
+            routerIpv4->TraceConnect(
+                "Drop",
+                deviceId,
+                MakeBoundCallback(&TraceIpv4Drop, &logger, routerExternalDevices.Get(index)));
             endpointDevices.Get(index)->TraceConnect("MacPromiscRx",
                                                      deviceId,
                                                      MakeBoundCallback(&TraceEgress, &logger));

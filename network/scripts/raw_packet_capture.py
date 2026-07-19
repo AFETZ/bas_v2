@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+import errno
 import json
 import os
 import select
@@ -24,8 +26,10 @@ SOL_PACKET = 263
 PACKET_STATISTICS = 6
 ETH_P_ALL = 0x0003
 SO_RCVBUFFORCE = 33
+SO_ATTACH_FILTER = 26
 CAPTURE_PROTOCOL = "ETH_P_ALL"
 PACKET_FILTER = "none"
+UDP_PORT_FILTER_PREFIX = "udp-ports:v1:"
 
 # Linux accounts twice the requested SO_RCVBUF value and reports that doubled
 # value through getsockopt().  Keep both sides of that contract exact: the
@@ -46,6 +50,163 @@ SELECT_TIMEOUT_SECONDS = 0.2
 
 class CaptureError(RuntimeError):
     """Raw capture cannot produce trustworthy evidence."""
+
+
+class SockFilter(ctypes.Structure):
+    """Linux classic-BPF instruction layout from ``linux/filter.h``."""
+
+    _fields_ = [
+        ("code", ctypes.c_ushort),
+        ("jt", ctypes.c_ubyte),
+        ("jf", ctypes.c_ubyte),
+        ("k", ctypes.c_uint32),
+    ]
+
+
+class SockFprog(ctypes.Structure):
+    """Linux classic-BPF program descriptor copied by ``setsockopt``."""
+
+    _fields_ = [
+        ("length", ctypes.c_ushort),
+        ("filters", ctypes.POINTER(SockFilter)),
+    ]
+
+
+def parse_udp_port_filter(value: str | None) -> tuple[int, ...]:
+    """Parse one canonical, finite UDP-port allowlist."""
+
+    if value is None:
+        return ()
+    if not value:
+        raise CaptureError("UDP port filter must not be empty")
+    try:
+        ports = tuple(sorted({int(item) for item in value.split(",")}))
+    except ValueError as exc:
+        raise CaptureError("UDP port filter contains a non-integer") from exc
+    if not ports or any(port < 1 or port > 65_535 for port in ports):
+        raise CaptureError("UDP port filter contains an out-of-range port")
+    canonical = ",".join(str(port) for port in ports)
+    if value != canonical:
+        raise CaptureError("UDP port filter is not sorted, unique, canonical decimal")
+    return ports
+
+
+def udp_port_filter_contract(ports: tuple[int, ...]) -> str:
+    return PACKET_FILTER if not ports else UDP_PORT_FILTER_PREFIX + ",".join(
+        str(port) for port in ports
+    )
+
+
+def compile_udp_port_filter(ports: tuple[int, ...]) -> tuple[SockFilter, ...]:
+    """Compile an Ethernet IPv4/IPv6 UDP-port cBPF allowlist.
+
+    Both source and destination ports are checked.  That is important for the
+    M3 root-loopback proof: every declared canary is retained even if a buggy
+    path reverses or otherwise leaks it, while unrelated ROS/DDS traffic never
+    enters the packet-socket receive queue.
+    """
+
+    if not ports:
+        raise CaptureError("refusing to compile an empty UDP port filter")
+
+    # Classic-BPF opcodes used below.
+    ld_h_abs = 0x28
+    ld_b_abs = 0x30
+    ld_h_ind = 0x48
+    ldx_b_msh = 0xB1
+    jmp_jeq_k = 0x15
+    ret_k = 0x06
+
+    # Instructions are assembled with symbolic true/false targets so all jump
+    # distances are independently range-checked rather than hand-counted.
+    assembled: list[tuple[int, int | str, int | str, int]] = []
+    labels: dict[str, int] = {}
+
+    def label(name: str) -> None:
+        labels[name] = len(assembled)
+
+    def emit(code: int, k: int, jt: int | str = 0, jf: int | str = 0) -> None:
+        assembled.append((code, jt, jf, k))
+
+    def emit_port_checks(*, load_code: int, offset: int, accept: str) -> None:
+        emit(load_code, offset)
+        for port in ports:
+            emit(jmp_jeq_k, port, accept, 0)
+
+    emit(ld_h_abs, 12)
+    emit(jmp_jeq_k, 0x0800, "ipv4", 0)
+    emit(jmp_jeq_k, 0x86DD, "ipv6", "reject_non_ip")
+    label("reject_non_ip")
+    emit(ret_k, 0)
+
+    label("ipv4")
+    emit(ld_b_abs, 23)
+    emit(jmp_jeq_k, socket.IPPROTO_UDP, 0, "reject_ipv4")
+    emit(ldx_b_msh, 14)
+    emit_port_checks(load_code=ld_h_ind, offset=14, accept="accept_ipv4")
+    emit_port_checks(load_code=ld_h_ind, offset=16, accept="accept_ipv4")
+    label("reject_ipv4")
+    emit(ret_k, 0)
+    label("accept_ipv4")
+    emit(ret_k, SNAPLEN)
+
+    label("ipv6")
+    emit(ld_b_abs, 20)
+    emit(jmp_jeq_k, socket.IPPROTO_UDP, 0, "reject_ipv6")
+    emit_port_checks(load_code=ld_h_abs, offset=54, accept="accept_ipv6")
+    emit_port_checks(load_code=ld_h_abs, offset=56, accept="accept_ipv6")
+    label("reject_ipv6")
+    emit(ret_k, 0)
+    label("accept_ipv6")
+    emit(ret_k, SNAPLEN)
+
+    program: list[SockFilter] = []
+    for index, (code, raw_jt, raw_jf, k) in enumerate(assembled):
+        jumps: list[int] = []
+        for target in (raw_jt, raw_jf):
+            if isinstance(target, str):
+                if target not in labels:
+                    raise CaptureError(f"unknown cBPF target: {target}")
+                distance = labels[target] - index - 1
+                if distance < 0 or distance > 255:
+                    raise CaptureError("UDP port filter cBPF jump is out of range")
+                jumps.append(distance)
+            else:
+                jumps.append(target)
+        program.append(SockFilter(code, jumps[0], jumps[1], k))
+    if len(program) > 4_096:
+        raise CaptureError("UDP port filter exceeds Linux cBPF instruction limit")
+    return tuple(program)
+
+
+def attach_udp_port_filter(
+    packet_socket: socket.socket, ports: tuple[int, ...]
+) -> str:
+    """Attach the compiled filter directly to the owned AF_PACKET socket."""
+
+    if not ports:
+        return PACKET_FILTER
+    instructions = compile_udp_port_filter(ports)
+    array_type = SockFilter * len(instructions)
+    array = array_type(*instructions)
+    descriptor = SockFprog(
+        len(instructions), ctypes.cast(array, ctypes.POINTER(SockFilter))
+    )
+    libc = ctypes.CDLL(None, use_errno=True)
+    result = libc.setsockopt(
+        packet_socket.fileno(),
+        socket.SOL_SOCKET,
+        SO_ATTACH_FILTER,
+        ctypes.byref(descriptor),
+        ctypes.sizeof(descriptor),
+    )
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise CaptureError(
+            "cannot attach exact UDP port cBPF filter: "
+            + os.strerror(error_number or errno.EINVAL)
+        )
+    return udp_port_filter_contract(ports)
 
 
 def canonical_json(value: Any) -> bytes:
@@ -133,7 +294,13 @@ def drain_packet_batch(
     return drained
 
 
-def capture(interface: str, pcap: Path, stats: Path) -> None:
+def capture(
+    interface: str,
+    pcap: Path,
+    stats: Path,
+    *,
+    udp_port_filter: tuple[int, ...] = (),
+) -> None:
     """Write one Ethernet PCAP without any privilege-changing helper.
 
     The formal component profile intentionally omits SETUID/SETGID. Debian's
@@ -160,12 +327,14 @@ def capture(interface: str, pcap: Path, stats: Path) -> None:
     )
     receive_buffer_setter = ""
     receive_buffer_effective = 0
+    packet_filter = PACKET_FILTER
     started_ns = 0
     written = 0
     try:
         receive_buffer_setter, receive_buffer_effective = configure_receive_buffer(
             packet_socket
         )
+        packet_filter = attach_udp_port_filter(packet_socket, udp_port_filter)
         packet_socket.bind((interface, 0))
         packet_socket.setblocking(False)
         started_ns = time.monotonic_ns()
@@ -206,7 +375,7 @@ def capture(interface: str, pcap: Path, stats: Path) -> None:
             "contract": STATS_CONTRACT,
             "interface": interface,
             "capture_protocol": CAPTURE_PROTOCOL,
-            "packet_filter": PACKET_FILTER,
+            "packet_filter": packet_filter,
             "pcap_path": pcap.name,
             "pcap_bytes": pcap.stat().st_size,
             "linktype": 1,
@@ -231,9 +400,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--interface", required=True)
     parser.add_argument("--pcap", type=Path, required=True)
     parser.add_argument("--stats", type=Path, required=True)
+    parser.add_argument(
+        "--udp-port-filter",
+        help="canonical comma-separated UDP source/destination port allowlist",
+    )
     args = parser.parse_args(argv)
     try:
-        capture(args.interface, args.pcap, args.stats)
+        capture(
+            args.interface,
+            args.pcap,
+            args.stats,
+            udp_port_filter=parse_udp_port_filter(args.udp_port_filter),
+        )
     except (CaptureError, OSError, ValueError) as exc:
         print(f"FAIL raw packet capture: {exc}", file=sys.stderr)
         return 2
