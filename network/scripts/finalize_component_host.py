@@ -8,8 +8,10 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -481,6 +483,69 @@ def fsync_tree(root: Path) -> None:
         os.close(descriptor)
 
 
+def fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def make_tree_removable(root: Path) -> None:
+    directories = [
+        path for path in root.rglob("*") if path.is_dir() and not path.is_symlink()
+    ]
+    for directory in sorted(directories, key=lambda item: len(item.parts)):
+        directory.chmod(0o700)
+    root.chmod(0o700)
+
+
+def publish_durable(
+    run_dir: Path,
+    destination: Path,
+    staging_root: Path,
+    runs_root: Path,
+) -> None:
+    """Publish through a same-parent no-replace rename after an exact frozen copy."""
+
+    if sorted(staging_root.iterdir()) != [run_dir]:
+        raise ValueError("component staging parent contains unexpected entries")
+    publish_source = Path(
+        tempfile.mkdtemp(prefix=f".{destination.name}.publish-", dir=runs_root)
+    )
+    renamed = False
+    try:
+        shutil.copytree(
+            run_dir,
+            publish_source,
+            dirs_exist_ok=True,
+            symlinks=True,
+            copy_function=shutil.copy2,
+        )
+        freeze_tree(publish_source)
+        fsync_tree(publish_source)
+        if tree_manifest(run_dir) != tree_manifest(publish_source):
+            raise ValueError(
+                "direct-parent component publication copy differs from frozen source"
+            )
+        make_tree_removable(staging_root)
+        shutil.rmtree(staging_root)
+        fsync_directory(runs_root)
+        rename_noreplace(publish_source, destination)
+        renamed = True
+        fsync_directory(runs_root)
+    except Exception:
+        if publish_source.exists():
+            make_tree_removable(publish_source)
+            shutil.rmtree(publish_source, ignore_errors=True)
+        if not renamed:
+            raise
+        quarantine = runs_root / f".{destination.name}.failed-{os.getpid()}"
+        rename_noreplace(destination, quarantine)
+        fsync_directory(runs_root)
+        raise
+
+
 def parse_receipt_arguments(values: list[str]) -> dict[str, Path]:
     result: dict[str, Path] = {}
     for value in values:
@@ -784,16 +849,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     freeze_tree(staging_run)
     fsync_tree(staging_run)
-    rename_noreplace(staging_run, publish_run)
-    parent_descriptor = os.open(publish_run.parent, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(parent_descriptor)
-    finally:
-        os.close(parent_descriptor)
-    try:
-        staging_run.parent.rmdir()
-    except OSError:
-        pass
+    publish_durable(staging_run, publish_run, staging_run.parent, publish_run.parent)
     print(pretty(receipt).decode("utf-8"), end="")
     return 0
 

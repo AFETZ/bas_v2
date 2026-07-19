@@ -18,6 +18,8 @@
     "test_causal_gates_positive_v2.StrictCausalGatePositiveControls.test_every_strict_profile_passes_from_valid_raw_samples",
     "test_causal_gates_positive_v2.StrictCausalGatePositiveControls.test_strict_profile_does_not_need_summary_success_booleans",
     "test_component_finalizer.ComponentFinalizerTests.test_capacity_main_container_exact_boundary_passes",
+    "test_component_finalizer.ComponentFinalizerTests.test_durable_publication_is_no_replace_and_read_only",
+    "test_component_finalizer.ComponentFinalizerTests.test_durable_publication_never_replaces_existing_destination",
     "test_component_finalizer.ComponentFinalizerTests.test_finalizer_enforces_truthful_profile_aware_provider_consumption",
     "test_component_finalizer.ComponentFinalizerTests.test_finalizer_requires_exact_profile_bound_sionna_runtime",
     "test_component_finalizer.ComponentFinalizerTests.test_gpu_or_extra_ams_environment_mutation_fails",

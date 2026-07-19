@@ -563,6 +563,45 @@ class ComponentFinalizerTests(unittest.TestCase):
             )
             recursive.assert_called_once()
 
+    def test_durable_publication_is_no_replace_and_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            runs = Path(temp) / "runs"
+            staging = runs / ".component-stage-fixture.abcdefghij"
+            run = staging / RUN_ID
+            run.mkdir(parents=True)
+            (run / "result.json").write_text("{}\n", encoding="utf-8")
+            destination = runs / RUN_ID
+            finalizer.freeze_tree(run)
+            finalizer.fsync_tree(run)
+            finalizer.publish_durable(run, destination, staging, runs)
+            self.assertTrue(destination.is_dir())
+            self.assertFalse(staging.exists())
+            self.assertEqual(destination.stat().st_mode & 0o222, 0)
+            self.assertEqual((destination / "result.json").stat().st_mode & 0o222, 0)
+
+    def test_durable_publication_never_replaces_existing_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            runs = Path(temp) / "runs"
+            staging = runs / ".component-stage-fixture.abcdefghij"
+            run = staging / RUN_ID
+            run.mkdir(parents=True)
+            (run / "result.json").write_text("candidate\n", encoding="utf-8")
+            destination = runs / RUN_ID
+            destination.mkdir()
+            (destination / "owner.txt").write_text("existing\n", encoding="utf-8")
+            finalizer.freeze_tree(run)
+            finalizer.fsync_tree(run)
+            with self.assertRaises(FileExistsError):
+                finalizer.publish_durable(run, destination, staging, runs)
+            self.assertEqual(
+                (destination / "owner.txt").read_text(encoding="utf-8"),
+                "existing\n",
+            )
+            self.assertEqual(
+                [path.name for path in runs.iterdir() if ".publish-" in path.name],
+                [],
+            )
+
     def test_tun_profile_requires_exact_root_capability_boundary(self) -> None:
         profile = load_profiles()["m2_component"]
         initial, final = self.main_documents()
