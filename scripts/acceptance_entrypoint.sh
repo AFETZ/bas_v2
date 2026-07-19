@@ -459,6 +459,10 @@ else
   fi
 fi
 
+# Formal simulations are single-host runs.  Pin Gazebo Transport discovery to
+# loopback so VPN / TUN policy routes cannot capture its multicast heartbeats
+# and silently expire otherwise healthy local publishers mid-run.
+export GZ_IP=127.0.0.1
 export GZ_VERSION=harmonic
 export GZ_SIM_RESOURCE_PATH="${GZ_SIM_RESOURCE_PATH:-}:$PWD/src/multiagent_simulation/models:$PWD/src/multiagent_simulation/worlds:$PWD/src"
 exec "$@"

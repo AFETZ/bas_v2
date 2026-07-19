@@ -46,6 +46,7 @@ ROBOT_MODEL="${ROBOT_MODEL:-iris_radio_headless}"
 RUNTIME_ID="${AMS_RUNTIME_ID:-${RUN_PROFILE//_/-}-$(/usr/bin/python3.10 -c 'import uuid; print(uuid.uuid4())')}"
 ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-$((20 + $(printf '%s' "$RUN_ID" | cksum | awk '{print $1}') % 180))}"
 GZ_PARTITION="${GZ_PARTITION:-ams_${RUN_ID//[^a-zA-Z0-9_]/_}}"
+export GZ_IP=127.0.0.1
 
 if [[ -e "$RUN_DIR" ]]; then
   printf 'FAIL immutable M1 run directory already exists: %s\n' "$RUN_DIR" >&2
@@ -169,6 +170,7 @@ printf '\n' >> "$RUN_DIR/command.txt"
   fi
   printf 'ros_domain_id=%s\n' "$ROS_DOMAIN_ID"
   printf 'gz_partition=%s\n' "$GZ_PARTITION"
+  printf 'gz_ip=%s\n' "$GZ_IP"
   printf 'component_only=true\n'
   printf 'packet_path_eligible=false\n'
   printf 'source_mode=%s\n' "${AMS_M1_SOURCE_MODE:-diagnostic_live_checkout}"

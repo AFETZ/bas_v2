@@ -46,6 +46,11 @@ class ComponentProfileTests(unittest.TestCase):
             '$AMS_M0_BASE_PYTHONPATH"\n',
             entrypoint,
         )
+        self.assertEqual(entrypoint.count("export GZ_IP=127.0.0.1\n"), 1)
+        self.assertLess(
+            entrypoint.index("export GZ_IP=127.0.0.1\n"),
+            entrypoint.index('exec "$@"'),
+        )
 
     def test_root_component_git_checks_use_only_exact_checkout_safe_directory(self) -> None:
         entrypoint = (

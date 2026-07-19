@@ -217,6 +217,7 @@ class M1SceneValidatorTests(unittest.TestCase):
             f"runtime_overlay={overlay}\n"
             f"installed_package_share={installed_share}\n"
             f"gz_sim_resource_path={resource_path}\n"
+            "gz_ip=127.0.0.1\n"
             "generate_sensor_models=false\n"
             "python_dont_write_bytecode=1\n"
             "python_pycache_prefix=/tmp/ams-m1-pycache\n"
@@ -578,6 +579,8 @@ class M1SceneValidatorTests(unittest.TestCase):
             "M1_PYTHON_SITE=/home/ubuntu/.local/lib/python3.10/site-packages",
             runner,
         )
+        self.assertEqual(runner.count("export GZ_IP=127.0.0.1\n"), 1)
+        self.assertIn("printf 'gz_ip=%s\\n' \"$GZ_IP\"", runner)
         self.assertIn('"$M1_PYTHON" "$ROOT_DIR/network/tests/collect_five_uav_health.py"', runner)
         self.assertIn('"/home/ubuntu/.local/bin/mavproxy.py"', launch)
         self.assertNotIn('\n                "mavproxy.py",', launch)

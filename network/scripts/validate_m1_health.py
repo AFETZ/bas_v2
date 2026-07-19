@@ -857,6 +857,8 @@ def runtime_inputs_status(run_dir: Path) -> dict[str, Any]:
     )
     if environment.get("gz_sim_resource_path") != expected_resource_path:
         failures.append("Gazebo resources are not restricted to the run-local install")
+    if environment.get("gz_ip") != "127.0.0.1":
+        failures.append("Gazebo Transport discovery is not pinned to loopback")
     if environment.get("generate_sensor_models") != "false":
         failures.append("M1 launch did not disable source-tree sensor generation")
     if environment.get("python_dont_write_bytecode") != "1":
@@ -1096,7 +1098,7 @@ def evaluate_m1(run_dir: Path) -> dict[str, Any]:
             name: gate("failed", "unsafe M1 input", {"failures": [failure]})
             for name in ("provenance", "five_uav_health", "scene", "runtime_inputs")
         }
-        run_id, run_path = run_dir.name, str(run_dir)
+        run_id = run_dir.name
     else:
         gates = {
             "provenance": _call_gate("provenance_status", provenance_status, safe_run),
@@ -1108,7 +1110,7 @@ def evaluate_m1(run_dir: Path) -> dict[str, Any]:
                 "runtime_inputs_status", runtime_inputs_status, safe_run
             ),
         }
-        run_id, run_path = safe_run.name, str(safe_run)
+        run_id = safe_run.name
     failures = [
         f"{name}: {value.get('proof', 'gate failed')}"
         for name, value in gates.items()
