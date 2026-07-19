@@ -10,6 +10,7 @@ and published as append-only IPC state updates consumed by the packet engine.
 from __future__ import annotations
 
 import copy
+import heapq
 import hashlib
 import json
 import math
@@ -59,6 +60,17 @@ CELL_RE = re.compile(r"^(cp>uav[1-5]|uav[1-5]>cp)$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/+\-]*$")
 TRAFFIC_CLASSES = ("control", "payload", "additional_data")
+FIXED_QUERY_PERIOD_NS = 1_000_000_000
+FIXED_QUERY_GLOBAL_SPACING_NS = 33_333_333
+FIXED_QUERY_SLOT_COUNT_PER_CELL = 600
+FIXED_QUERY_CELLS = tuple(
+    sorted(
+        (link, traffic_class)
+        for uav in range(1, 6)
+        for link in (f"cp>uav{uav}", f"uav{uav}>cp")
+        for traffic_class in TRAFFIC_CLASSES
+    )
+)
 
 
 class PacketAdapterError(RuntimeError):
@@ -1096,6 +1108,8 @@ class PacketAdapterConfig:
     max_fault_pending_per_cell: int = 2
     query_period_ns: int = 1_000_000_000
     global_query_spacing_ns: int = 0
+    fixed_query_schedule_start_ns: Optional[int] = None
+    fixed_query_schedule_end_ns: Optional[int] = None
 
 
 class PacketSionnaAdapter:
@@ -1135,12 +1149,51 @@ class PacketSionnaAdapter:
         self._last_packet_by_cell: Dict[Tuple[str, str], Mapping[str, Any]] = {}
         self._next_query_due_by_cell: Dict[Tuple[str, str], int] = {}
         self._next_global_query_ns = 0
+        self._next_fixed_query_slot_by_cell: Dict[Tuple[str, str], int] = {}
         if not 1 <= self.config.query_period_ns <= 60_000_000_000:
             raise PacketAdapterError("query_period_ns must be in 1..60000000000")
+        if not 1 <= self.config.query_deadline_ns <= self.config.query_period_ns:
+            raise PacketAdapterError(
+                "query_deadline_ns must be in 1..query_period_ns"
+            )
         if not 0 <= self.config.global_query_spacing_ns <= self.config.query_period_ns:
             raise PacketAdapterError(
                 "global_query_spacing_ns must be in 0..query_period_ns"
             )
+        fixed_start = self.config.fixed_query_schedule_start_ns
+        fixed_end = self.config.fixed_query_schedule_end_ns
+        if (fixed_start is None) != (fixed_end is None):
+            raise PacketAdapterError(
+                "fixed query schedule start/end must be configured together"
+            )
+        if fixed_start is not None and fixed_end is not None:
+            if (
+                isinstance(fixed_start, bool)
+                or not isinstance(fixed_start, int)
+                or fixed_start < 0
+                or isinstance(fixed_end, bool)
+                or not isinstance(fixed_end, int)
+                or fixed_end <= fixed_start
+            ):
+                raise PacketAdapterError("fixed query schedule bounds are invalid")
+            if self.config.query_period_ns != FIXED_QUERY_PERIOD_NS:
+                raise PacketAdapterError(
+                    "fixed query schedule requires the frozen one-second period"
+                )
+            if self.config.global_query_spacing_ns != FIXED_QUERY_GLOBAL_SPACING_NS:
+                raise PacketAdapterError(
+                    "fixed query schedule requires the frozen 33333333-ns spacing"
+                )
+            if (
+                fixed_end - fixed_start
+                != FIXED_QUERY_SLOT_COUNT_PER_CELL * FIXED_QUERY_PERIOD_NS
+            ):
+                raise PacketAdapterError(
+                    "fixed query schedule must contain exactly 600 slots per cell"
+                )
+            self._next_fixed_query_slot_by_cell = {
+                cell: 1 for cell in FIXED_QUERY_CELLS
+            }
 
     def update_poses(self, poses: PoseSnapshot) -> None:
         """Atomically replace the live ROS/Gazebo pose snapshot.
@@ -1154,12 +1207,73 @@ class PacketSionnaAdapter:
         with self._poses_lock:
             self.poses = poses
 
+    def _fixed_query_schedule_complete(self) -> bool:
+        return bool(self._next_fixed_query_slot_by_cell) and all(
+            ordinal > FIXED_QUERY_SLOT_COUNT_PER_CELL
+            for ordinal in self._next_fixed_query_slot_by_cell.values()
+        )
+
+    def _fixed_query_slot_ns(
+        self, cell: Tuple[str, str], ordinal: int
+    ) -> int:
+        start = self.config.fixed_query_schedule_start_ns
+        if start is None or cell not in FIXED_QUERY_CELLS:
+            raise PacketAdapterError("fixed query slot requested without a schedule")
+        if not 1 <= ordinal <= FIXED_QUERY_SLOT_COUNT_PER_CELL:
+            raise PacketAdapterError("fixed query slot ordinal is outside 1..600")
+        return (
+            start
+            + (ordinal - 1) * FIXED_QUERY_PERIOD_NS
+            + FIXED_QUERY_CELLS.index(cell) * FIXED_QUERY_GLOBAL_SPACING_NS
+        )
+
+    def _fixed_schedule_blocks_unscheduled_query(self, now_ns: int) -> bool:
+        start = self.config.fixed_query_schedule_start_ns
+        end = self.config.fixed_query_schedule_end_ns
+        if start is None or end is None:
+            return False
+        # Drain ordinary warm-up queries for one deadline before slot 1.  Once
+        # the absolute schedule starts, only its declared ordinals may create
+        # normal queries until all 18,000 slots have been consumed.
+        return (
+            now_ns >= start - self.config.query_deadline_ns
+            and (
+                now_ns < end
+                or not self._fixed_query_schedule_complete()
+            )
+        )
+
+    def _audit_fixed_query_slot_missed(
+        self,
+        cell: Tuple[str, str],
+        ordinal: int,
+        scheduled_ns: int,
+        reason: str,
+        packet: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        lineage = packet or {
+            "directed_link": cell[0],
+            "traffic_class": cell[1],
+        }
+        self._audit_event(
+            "query_slot_missed",
+            lineage,
+            reason=reason,
+            query_slot_ordinal=ordinal,
+            query_slot_scheduled_monotonic_ns=scheduled_ns,
+            query_slot_deadline_monotonic_ns=(
+                scheduled_ns + self.config.query_deadline_ns
+            ),
+        )
+
     def process_packet_event(
         self,
         event: Mapping[str, Any],
         *,
         _fault_parallel_query: bool = False,
         _fault_decision: Optional[str] = None,
+        _scheduled_slot_ordinal: Optional[int] = None,
+        _scheduled_slot_ns: Optional[int] = None,
     ) -> Optional[Mapping[str, Any]]:
         packet = _validate_packet_event(event)
         if packet["event"] != "ingress":
@@ -1171,14 +1285,70 @@ class PacketSionnaAdapter:
         cell = (link, traffic_class)
         self._last_packet_by_cell[cell] = copy.deepcopy(packet)
         now = self._clock_ns()
+        fixed_slot = _scheduled_slot_ordinal is not None or _scheduled_slot_ns is not None
+        if (_scheduled_slot_ordinal is None) != (_scheduled_slot_ns is None):
+            raise PacketAdapterError(
+                "fixed query slot ordinal/time must be supplied together"
+            )
+        if fixed_slot:
+            assert _scheduled_slot_ordinal is not None
+            assert _scheduled_slot_ns is not None
+            expected_slot_ns = self._fixed_query_slot_ns(
+                cell, _scheduled_slot_ordinal
+            )
+            if _scheduled_slot_ns != expected_slot_ns:
+                raise PacketAdapterError("fixed query slot timestamp differs")
+            if not _scheduled_slot_ns <= now < (
+                _scheduled_slot_ns + self.config.query_deadline_ns
+            ):
+                self._audit_fixed_query_slot_missed(
+                    cell,
+                    _scheduled_slot_ordinal,
+                    _scheduled_slot_ns,
+                    "slot_elapsed_without_submission",
+                    packet,
+                )
+                return None
+        elif (
+            not _fault_parallel_query
+            and self._fixed_schedule_blocks_unscheduled_query(now)
+        ):
+            self._audit_event(
+                "query_deferred", packet, reason="fixed_query_schedule_owns_cell"
+            )
+            return None
         with self._poses_lock:
             pose_snapshot = self.poses
         nodes, jammers = pose_snapshot.refreshed(now, self.limits.max_pose_age_ns)
         if any(bool(item["stale"]) for item in [*nodes, *jammers]):
-            return self._write_unavailable(packet, "pose_stale")
+            unavailable = self._write_unavailable(packet, "pose_stale")
+            if fixed_slot:
+                assert _scheduled_slot_ordinal is not None
+                assert _scheduled_slot_ns is not None
+                self._audit_fixed_query_slot_missed(
+                    cell,
+                    _scheduled_slot_ordinal,
+                    _scheduled_slot_ns,
+                    "pose_stale",
+                    packet,
+                )
+            return unavailable
         pending = self._pending_by_cell.get(cell, set())
         if pending and not _fault_parallel_query:
-            self._audit_event("query_coalesced", packet, reason="cell_already_pending")
+            if fixed_slot:
+                assert _scheduled_slot_ordinal is not None
+                assert _scheduled_slot_ns is not None
+                self._audit_fixed_query_slot_missed(
+                    cell,
+                    _scheduled_slot_ordinal,
+                    _scheduled_slot_ns,
+                    "cell_pending_at_slot",
+                    packet,
+                )
+            else:
+                self._audit_event(
+                    "query_coalesced", packet, reason="cell_already_pending"
+                )
             return None
         if _fault_parallel_query:
             if not self.config.fault_injection_enabled:
@@ -1189,23 +1359,44 @@ class PacketSionnaAdapter:
                 return self._write_unavailable(packet, "fault_pending_bound_exceeded")
         if (
             not _fault_parallel_query
+            and not fixed_slot
             and now < self._next_query_due_by_cell.get(cell, 0)
         ):
             self._audit_event("query_deferred", packet, reason="update_period_not_due")
             return None
-        if not _fault_parallel_query and now < self._next_global_query_ns:
+        if (
+            not _fault_parallel_query
+            and not fixed_slot
+            and now < self._next_global_query_ns
+        ):
             self._audit_event("query_deferred", packet, reason="global_query_slot_not_due")
             return None
         envelope = self.transport.reserve_query_envelope()
         if envelope is None:
-            return self._write_unavailable(packet, "transport_not_ready")
+            unavailable = self._write_unavailable(packet, "transport_not_ready")
+            if fixed_slot:
+                assert _scheduled_slot_ordinal is not None
+                assert _scheduled_slot_ns is not None
+                self._audit_fixed_query_slot_missed(
+                    cell,
+                    _scheduled_slot_ordinal,
+                    _scheduled_slot_ns,
+                    "transport_not_ready",
+                    packet,
+                )
+            return unavailable
         wire_sequence, generation = envelope
         query_ordinal = self._query_ordinal_by_cell.get(cell, 0) + 1
         self._query_ordinal_by_cell[cell] = query_ordinal
         state_seq = pose_snapshot.snapshot_sequence
+        slot_identity = (
+            f".slot{_scheduled_slot_ordinal}"
+            if _scheduled_slot_ordinal is not None
+            else ""
+        )
         query_id = (
             f"{self.config.identity.run_id}.{link.replace('>', '-to-')}."
-            f"{traffic_class}.q{query_ordinal}.s{state_seq}"
+            f"{traffic_class}.q{query_ordinal}{slot_identity}.s{state_seq}"
         )
         query_message = self._build_query(
             packet,
@@ -1228,9 +1419,21 @@ class PacketSionnaAdapter:
                 )
             arm_hold(str(query_message["directed_link_id"]))
         if not self.transport.submit_query(query_message):
-            return self._write_unavailable(packet, "query_queue_overflow")
-        self._next_query_due_by_cell[cell] = now + self.config.query_period_ns
-        if not _fault_parallel_query:
+            unavailable = self._write_unavailable(packet, "query_queue_overflow")
+            if fixed_slot:
+                assert _scheduled_slot_ordinal is not None
+                assert _scheduled_slot_ns is not None
+                self._audit_fixed_query_slot_missed(
+                    cell,
+                    _scheduled_slot_ordinal,
+                    _scheduled_slot_ns,
+                    "query_queue_overflow",
+                    packet,
+                )
+            return unavailable
+        if not fixed_slot:
+            self._next_query_due_by_cell[cell] = now + self.config.query_period_ns
+        if not _fault_parallel_query and not fixed_slot:
             self._next_global_query_ns = now + self.config.global_query_spacing_ns
         self._pending_by_cell.setdefault(cell, set()).add(query_id)
         self._pending_context[query_id] = {
@@ -1240,6 +1443,17 @@ class PacketSionnaAdapter:
             ).hexdigest(),
             "directed_link_id": query_message["directed_link_id"],
             "cell": cell,
+            "node_state_sha256": query_message["node_state_sha256"],
+            "query_deadline_monotonic_ns": query_message[
+                "deadline_monotonic_ns"
+            ],
+            "query_slot_ordinal": _scheduled_slot_ordinal,
+            "query_slot_scheduled_monotonic_ns": _scheduled_slot_ns,
+            "query_slot_deadline_monotonic_ns": (
+                _scheduled_slot_ns + self.config.query_deadline_ns
+                if _scheduled_slot_ns is not None
+                else None
+            ),
         }
         self._audit_event(
             "query_submitted",
@@ -1248,9 +1462,20 @@ class PacketSionnaAdapter:
             decision=(
                 _fault_decision
                 if _fault_parallel_query and _fault_decision is not None
-                else "fault_parallel" if _fault_parallel_query else "normal"
+                else "fault_parallel"
+                if _fault_parallel_query
+                else "fixed_slot"
+                if fixed_slot
+                else "normal"
             ),
             query_wire_sha256=self._pending_context[query_id]["query_wire_sha256"],
+            query_slot_ordinal=_scheduled_slot_ordinal,
+            query_slot_scheduled_monotonic_ns=_scheduled_slot_ns,
+            query_slot_deadline_monotonic_ns=(
+                _scheduled_slot_ns + self.config.query_deadline_ns
+                if _scheduled_slot_ns is not None
+                else None
+            ),
         )
         return query_message
 
@@ -1288,6 +1513,22 @@ class PacketSionnaAdapter:
         if not 1 <= max_cells <= 30:
             raise PacketAdapterError("max_cells must be in 1..30")
         now = self._clock_ns()
+        fixed_start = self.config.fixed_query_schedule_start_ns
+        fixed_end = self.config.fixed_query_schedule_end_ns
+        if fixed_start is not None:
+            if now >= fixed_start and not self._fixed_query_schedule_complete():
+                return self._refresh_fixed_query_slots(
+                    now,
+                    max_slots=max_cells,
+                    excluded_cells=excluded_cells,
+                )
+            if (
+                fixed_start - self.config.query_deadline_ns <= now < fixed_start
+                and not self._fixed_query_schedule_complete()
+            ):
+                return ()
+            if fixed_end is not None and now < fixed_end:
+                return ()
         output: List[Mapping[str, Any]] = []
         for cell in sorted(self._last_packet_by_cell):
             if len(output) >= max_cells:
@@ -1301,6 +1542,79 @@ class PacketSionnaAdapter:
             created = self.process_packet_event(self._last_packet_by_cell[cell])
             if created is not None:
                 output.append(created)
+        return tuple(output)
+
+    def _refresh_fixed_query_slots(
+        self,
+        now_ns: int,
+        *,
+        max_slots: int,
+        excluded_cells: Optional[set[Tuple[str, str]]],
+    ) -> Tuple[Mapping[str, Any], ...]:
+        """Consume due capacity slots in absolute chronological order.
+
+        Each cell owns ordinals 1..600.  Advancing an ordinal is independent
+        of actual submission time, provider completion time, and prior misses,
+        so an overloaded loop cannot translate lateness into schedule drift.
+        """
+
+        due: List[Tuple[int, Tuple[str, str], int]] = []
+        for cell, ordinal in self._next_fixed_query_slot_by_cell.items():
+            if ordinal > FIXED_QUERY_SLOT_COUNT_PER_CELL:
+                continue
+            scheduled_ns = self._fixed_query_slot_ns(cell, ordinal)
+            if scheduled_ns <= now_ns:
+                heapq.heappush(due, (scheduled_ns, cell, ordinal))
+
+        output: List[Mapping[str, Any]] = []
+        consumed = 0
+        while due and consumed < max_slots:
+            scheduled_ns, cell, ordinal = heapq.heappop(due)
+            if self._next_fixed_query_slot_by_cell[cell] != ordinal:
+                raise PacketAdapterError("fixed query slot cursor changed unexpectedly")
+            self._next_fixed_query_slot_by_cell[cell] = ordinal + 1
+            consumed += 1
+            packet = self._last_packet_by_cell.get(cell)
+            slot_deadline_ns = scheduled_ns + self.config.query_deadline_ns
+            if now_ns >= slot_deadline_ns:
+                self._audit_fixed_query_slot_missed(
+                    cell,
+                    ordinal,
+                    scheduled_ns,
+                    "slot_elapsed_without_submission",
+                    packet,
+                )
+            elif excluded_cells is not None and cell in excluded_cells:
+                self._audit_fixed_query_slot_missed(
+                    cell,
+                    ordinal,
+                    scheduled_ns,
+                    "cell_excluded_by_fault_arm",
+                    packet,
+                )
+            elif packet is None:
+                self._audit_fixed_query_slot_missed(
+                    cell,
+                    ordinal,
+                    scheduled_ns,
+                    "no_factual_ingress_lineage",
+                )
+            else:
+                created = self.process_packet_event(
+                    packet,
+                    _scheduled_slot_ordinal=ordinal,
+                    _scheduled_slot_ns=scheduled_ns,
+                )
+                if created is not None:
+                    output.append(created)
+
+            next_ordinal = ordinal + 1
+            if next_ordinal <= FIXED_QUERY_SLOT_COUNT_PER_CELL:
+                next_scheduled_ns = self._fixed_query_slot_ns(cell, next_ordinal)
+                if next_scheduled_ns <= now_ns:
+                    heapq.heappush(
+                        due, (next_scheduled_ns, cell, next_ordinal)
+                    )
         return tuple(output)
 
     def expire_states(
@@ -1352,14 +1666,25 @@ class PacketSionnaAdapter:
                 continue
             now = self._clock_ns()
             decision = self._manager.ingest_result_wire(item, now)
+            received_context = self._pending_context.get(
+                str(decision.query_id), {}
+            )
+            received_packet = received_context.get("packet_event", {})
             self._audit_event(
                 "result_received",
-                {},
+                received_packet,
                 query_id=decision.query_id,
                 reason=decision.reason,
                 decision=decision.kind,
                 result_wire_sha256=decision.wire_sha256,
                 adapter_received_monotonic_ns=now,
+                query_slot_ordinal=received_context.get("query_slot_ordinal"),
+                query_slot_scheduled_monotonic_ns=received_context.get(
+                    "query_slot_scheduled_monotonic_ns"
+                ),
+                query_slot_deadline_monotonic_ns=received_context.get(
+                    "query_slot_deadline_monotonic_ns"
+                ),
             )
             query_id = decision.query_id
             if query_id is None or query_id not in self._pending_context:
@@ -1414,9 +1739,77 @@ class PacketSionnaAdapter:
                     )
                 )
                 continue
+            slot_deadline_ns = context.get("query_slot_deadline_monotonic_ns")
+            query_deadline_ns = context.get("query_deadline_monotonic_ns")
+            fixed_cutoff_ns: Optional[int] = None
+            if (
+                isinstance(slot_deadline_ns, int)
+                and not isinstance(slot_deadline_ns, bool)
+                and isinstance(query_deadline_ns, int)
+                and not isinstance(query_deadline_ns, bool)
+            ):
+                fixed_cutoff_ns = min(slot_deadline_ns, query_deadline_ns)
+                try:
+                    decoded_result = decode_message(
+                        item, max_bytes=self.limits.max_message_bytes
+                    )
+                except ProtocolValidationError:
+                    decoded_result = {}
+                completed_ns = decoded_result.get(
+                    "provider_completed_monotonic_ns"
+                )
+                if (
+                    isinstance(completed_ns, bool)
+                    or not isinstance(completed_ns, int)
+                    or completed_ns >= fixed_cutoff_ns
+                    or now >= fixed_cutoff_ns
+                ):
+                    output.append(
+                        self._write_unavailable(
+                            context["packet_event"], "fixed_query_slot_late"
+                        )
+                    )
+                    self._audit_event(
+                        "result_discarded",
+                        context["packet_event"],
+                        reason="fixed_query_slot_late",
+                        query_id=query_id,
+                        decision="late",
+                        result_wire_sha256=decision.wire_sha256,
+                        adapter_received_monotonic_ns=now,
+                        query_slot_ordinal=context.get("query_slot_ordinal"),
+                        query_slot_scheduled_monotonic_ns=context.get(
+                            "query_slot_scheduled_monotonic_ns"
+                        ),
+                        query_slot_deadline_monotonic_ns=slot_deadline_ns,
+                    )
+                    continue
+            apply_now = self._clock_ns()
+            if fixed_cutoff_ns is not None and apply_now >= fixed_cutoff_ns:
+                output.append(
+                    self._write_unavailable(
+                        context["packet_event"], "fixed_query_slot_late"
+                    )
+                )
+                self._audit_event(
+                    "result_discarded",
+                    context["packet_event"],
+                    reason="fixed_query_slot_late",
+                    query_id=query_id,
+                    decision="late",
+                    result_wire_sha256=decision.wire_sha256,
+                    adapter_received_monotonic_ns=now,
+                    adapter_applied_monotonic_ns=apply_now,
+                    query_slot_ordinal=context.get("query_slot_ordinal"),
+                    query_slot_scheduled_monotonic_ns=context.get(
+                        "query_slot_scheduled_monotonic_ns"
+                    ),
+                    query_slot_deadline_monotonic_ns=slot_deadline_ns,
+                )
+                continue
             state_id = f"applied-{query_id}-{decision.wire_sha256[:12]}"
             applied = self._manager.apply_latest(
-                context["directed_link_id"], now, state_id
+                context["directed_link_id"], apply_now, state_id
             )
             if applied.kind != "applied":
                 output.append(
@@ -1426,7 +1819,9 @@ class PacketSionnaAdapter:
                     )
                 )
                 continue
-            state = self._manager.state_for_packet(context["directed_link_id"], now)
+            state = self._manager.state_for_packet(
+                context["directed_link_id"], apply_now
+            )
             if state is None:
                 output.append(
                     self._write_unavailable(context["packet_event"], "state_not_fresh")
@@ -1457,6 +1852,7 @@ class PacketSionnaAdapter:
                 "source_packet_causal_sha256": packet_hash,
                 "query_id": state.query_id,
                 "node_state_seq": state.node_state_seq,
+                "node_state_sha256": context["node_state_sha256"],
                 "query_wire_sha256": context["query_wire_sha256"],
                 "result_wire_sha256": state.wire_sha256,
                 "applied_state_id": state.applied_state_id,
@@ -1487,6 +1883,13 @@ class PacketSionnaAdapter:
                 adapter_applied_monotonic_ns=state.applied_monotonic_ns,
                 validity_start_monotonic_ns=state.validity_start_monotonic_ns,
                 expires_monotonic_ns=state.expires_monotonic_ns,
+                query_slot_ordinal=context.get("query_slot_ordinal"),
+                query_slot_scheduled_monotonic_ns=context.get(
+                    "query_slot_scheduled_monotonic_ns"
+                ),
+                query_slot_deadline_monotonic_ns=context.get(
+                    "query_slot_deadline_monotonic_ns"
+                ),
             )
             output.append(record)
         return tuple(output)
@@ -1667,6 +2070,7 @@ class PacketSionnaAdapter:
                 else None,
                 "query_id": None,
                 "node_state_seq": None,
+                "node_state_sha256": None,
                 "query_wire_sha256": None,
                 "result_wire_sha256": None,
                 "applied_state_id": None,
@@ -1695,6 +2099,9 @@ class PacketSionnaAdapter:
         adapter_applied_monotonic_ns: Optional[int] = None,
         validity_start_monotonic_ns: Optional[int] = None,
         expires_monotonic_ns: Optional[int] = None,
+        query_slot_ordinal: Optional[int] = None,
+        query_slot_scheduled_monotonic_ns: Optional[int] = None,
+        query_slot_deadline_monotonic_ns: Optional[int] = None,
     ) -> None:
         self._audit_sequence += 1
         self._audit.append(
@@ -1717,6 +2124,13 @@ class PacketSionnaAdapter:
                 "adapter_applied_monotonic_ns": adapter_applied_monotonic_ns,
                 "validity_start_monotonic_ns": validity_start_monotonic_ns,
                 "expires_monotonic_ns": expires_monotonic_ns,
+                "query_slot_ordinal": query_slot_ordinal,
+                "query_slot_scheduled_monotonic_ns": (
+                    query_slot_scheduled_monotonic_ns
+                ),
+                "query_slot_deadline_monotonic_ns": (
+                    query_slot_deadline_monotonic_ns
+                ),
             }
         )
 

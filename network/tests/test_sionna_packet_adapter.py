@@ -25,6 +25,8 @@ from network.radio_provider.sionna_async import (  # noqa: E402
 from network.radio_provider.sionna_packet_adapter import (  # noqa: E402
     AppliedStateIPCWriter,
     ClientFault,
+    FIXED_QUERY_CELLS,
+    FIXED_QUERY_SLOT_COUNT_PER_CELL,
     PacketAdapterConfig,
     PacketAdapterError,
     PacketEffectsPolicy,
@@ -36,6 +38,7 @@ from network.radio_provider.sionna_packet_adapter import (  # noqa: E402
     packet_delivery_decision,
 )
 from network.tests.test_sionna_async_protocol import physical, query, result  # noqa: E402
+from network.validation.m4_runtime import validate_capacity_freshness  # noqa: E402
 
 
 class FakeTransport:
@@ -152,6 +155,219 @@ def provider_result(source_query: dict, wire_sequence: int, now: int) -> dict:
     message["validity_start_monotonic_ns"] = now + 10
     message["expires_monotonic_ns"] = now + 1_000_000
     return message
+
+
+def capacity_slot_evidence(start_ns: int) -> tuple[dict, dict, dict, dict]:
+    """Build exact wire/state/audit evidence for all 18,000 slots."""
+
+    provider_identity = {
+        "provider_id": "sionna-provider-m4",
+        "provider_mode": "real_sionna",
+        "acceptance_eligible": True,
+        "sionna_rt_version": "1.0",
+        "mitsuba_version": "3.0",
+    }
+    identity = {
+        "run_id": "capacity-run",
+        "profile": "m4_capacity_prerequisite",
+        "phase_id": "m4_continuous_runtime",
+        "contract_hash": "c" * 64,
+        "config_hash": "d" * 64,
+        "bundle_id": "ams-m4-canonical-km-v2",
+    }
+    messages: list[dict] = [
+        {
+            "message_type": "hello",
+            "sender_id": "provider",
+            "wire_sequence": 0,
+            "sender_role": "provider",
+            "provider_identity": provider_identity,
+        }
+    ]
+    message_by_hash: dict[str, dict] = {}
+    states: list[dict] = []
+    audits: list[dict] = []
+    shared_physical = physical()
+    wire_sequence = 0
+    for cell_index, (link, traffic_class) in enumerate(FIXED_QUERY_CELLS):
+        source, destination = link.split(">", 1)
+        for ordinal in range(1, FIXED_QUERY_SLOT_COUNT_PER_CELL + 1):
+            scheduled_ns = (
+                start_ns
+                + (ordinal - 1) * 1_000_000_000
+                + cell_index * 33_333_333
+            )
+            sent_ns = scheduled_ns + 1_000_000
+            query_id = (
+                f"capacity.{link.replace('>', '-to-')}.{traffic_class}."
+                f"q{ordinal}.slot{ordinal}.s{ordinal}"
+            )
+            poses_for_query = [
+                {
+                    "node_id": node_id,
+                    "pose_monotonic_ns": sent_ns - 100,
+                    "freshness_age_ns": 100,
+                    "stale": False,
+                }
+                for node_id in ("cp", "uav1", "uav2", "uav3", "uav4", "uav5")
+            ]
+            jammer = {
+                "jammer_id": "jammer_m4",
+                "pose_monotonic_ns": sent_ns - 100,
+                "freshness_age_ns": 100,
+                "stale": False,
+            }
+            wire_sequence += 1
+            node_hash = hashlib.sha256(
+                f"node-state:{link}:{traffic_class}:{ordinal}".encode()
+            ).hexdigest()
+            directed_link_id = (
+                f"{source}-to-{destination}-{traffic_class}"
+            )
+            query_message = {
+                **identity,
+                "message_type": "query",
+                "sender_id": "adapter",
+                "sender_clock_domain": "host-monotonic",
+                "wire_sequence": wire_sequence,
+                "query_id": query_id,
+                "node_state_seq": ordinal,
+                "node_state_sha256": node_hash,
+                "directed_link_id": directed_link_id,
+                "tx_node_id": source,
+                "rx_node_id": destination,
+                "traffic_class": traffic_class,
+                "request_sent_monotonic_ns": sent_ns,
+                "deadline_monotonic_ns": sent_ns + 100_000_000,
+                "nodes": poses_for_query,
+                "jammers": [jammer],
+            }
+            result_message = {
+                **identity,
+                "message_type": "result",
+                "sender_id": "provider",
+                "sender_clock_domain": "host-monotonic",
+                "wire_sequence": wire_sequence,
+                "query_id": query_id,
+                "node_state_seq": ordinal,
+                "directed_link_id": directed_link_id,
+                "tx_node_id": source,
+                "rx_node_id": destination,
+                "traffic_class": traffic_class,
+                "status": "ok",
+                "provider_clock_domain": "host-monotonic",
+                "validity_clock_domain": "host-monotonic",
+                "provider_received_monotonic_ns": sent_ns + 1,
+                "provider_started_monotonic_ns": sent_ns + 1,
+                "provider_completed_monotonic_ns": sent_ns + 2,
+                "provider_sent_monotonic_ns": sent_ns + 2,
+                "emitted_monotonic_ns": sent_ns + 2,
+                "validity_start_monotonic_ns": sent_ns + 2,
+                "expires_monotonic_ns": sent_ns + 2_000_000_002,
+                "physical": shared_physical,
+            }
+            query_raw = (
+                json.dumps(
+                    query_message,
+                    allow_nan=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode()
+            result_raw = (
+                json.dumps(
+                    result_message,
+                    allow_nan=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode()
+            query_wire_sha256 = hashlib.sha256(query_raw).hexdigest()
+            result_wire_sha256 = hashlib.sha256(result_raw).hexdigest()
+            message_by_hash[query_wire_sha256] = query_message
+            message_by_hash[result_wire_sha256] = result_message
+            messages.extend((query_message, result_message))
+            adapter_received_ns = sent_ns + 3
+            adapter_applied_ns = sent_ns + 4
+            applied_state_id = f"applied-{query_id}"
+            states.append(
+                {
+                    **{
+                        key: identity[key]
+                        for key in ("run_id", "profile", "phase_id")
+                    },
+                    "availability": "fresh",
+                    "directed_link": link,
+                    "traffic_class": traffic_class,
+                    "query_id": query_id,
+                    "node_state_seq": ordinal,
+                    "node_state_sha256": node_hash,
+                    "query_wire_sha256": query_wire_sha256,
+                    "result_wire_sha256": result_wire_sha256,
+                    "applied_state_id": applied_state_id,
+                    "validity_start_monotonic_ns": sent_ns + 2,
+                    "expires_monotonic_ns": sent_ns + 2_000_000_002,
+                    "adapter_applied_monotonic_ns": adapter_applied_ns,
+                    "physical": shared_physical,
+                }
+            )
+            slot_common = {
+                "directed_link": link,
+                "traffic_class": traffic_class,
+                "query_id": query_id,
+                "query_slot_ordinal": ordinal,
+                "query_slot_scheduled_monotonic_ns": scheduled_ns,
+                "query_slot_deadline_monotonic_ns": scheduled_ns + 100_000_000,
+            }
+            audits.extend(
+                (
+                    {
+                        **slot_common,
+                        "event": "query_submitted",
+                        "decision": "fixed_slot",
+                        "query_wire_sha256": query_wire_sha256,
+                    },
+                    {
+                        **slot_common,
+                        "event": "result_received",
+                        "decision": "pending",
+                        "result_wire_sha256": result_wire_sha256,
+                        "adapter_received_monotonic_ns": adapter_received_ns,
+                    },
+                    {
+                        **slot_common,
+                        "event": "result_applied",
+                        "decision": "applied",
+                        "result_wire_sha256": result_wire_sha256,
+                        "applied_state_id": applied_state_id,
+                        "adapter_received_monotonic_ns": adapter_received_ns,
+                        "adapter_applied_monotonic_ns": adapter_applied_ns,
+                        "validity_start_monotonic_ns": sent_ns + 2,
+                        "expires_monotonic_ns": sent_ns + 2_000_000_002,
+                    },
+                )
+            )
+    packets = {
+        "records": [
+            {
+                "host_monotonic_ns": start_ns + 1,
+                "event": "enqueue",
+                "directed_link": link,
+                "traffic_class": traffic_class,
+                "radio_state_status": "fresh",
+                "radio_state_age_ns": 0,
+            }
+            for link, traffic_class in FIXED_QUERY_CELLS
+        ]
+    }
+    return (
+        {"messages": messages, "message_by_hash": message_by_hash},
+        {"records": states},
+        packets,
+        {"records": audits},
+    )
 
 
 class EffectsTests(unittest.TestCase):
@@ -702,6 +918,343 @@ class PacketSionnaAdapterTests(unittest.TestCase):
         refreshed = self.adapter.refresh_due_cells(max_cells=1)
         self.assertEqual(len(refreshed), 1)
         self.assertEqual(refreshed[0]["directed_link_id"], "cp-to-uav2-control")
+
+        # Capacity mode owns an immutable 600-ordinal grid.  A five-ms late
+        # first send must not move the second ordinal by five ms, and cells
+        # without factual lineage still consume (miss) their declared slots.
+        self.transport = FakeTransport()
+        self.writer = AppliedStateIPCWriter(
+            Path(self.temp.name) / "states-fixed-slots.jsonl"
+        )
+        schedule_start = self.now + 100_000_000
+        fixed_audit = Path(self.temp.name) / "audit-fixed-slots.jsonl"
+        self.adapter = PacketSionnaAdapter(
+            dataclasses.replace(
+                adapter_config(),
+                query_deadline_ns=100_000_000,
+                global_query_spacing_ns=33_333_333,
+                fixed_query_schedule_start_ns=schedule_start,
+                fixed_query_schedule_end_ns=(
+                    schedule_start
+                    + FIXED_QUERY_SLOT_COUNT_PER_CELL * 1_000_000_000
+                ),
+            ),
+            poses(self.now),
+            self.transport,
+            self.writer,
+            fixed_audit,
+            clock_ns=lambda: self.now,
+        )
+        first_cell = FIXED_QUERY_CELLS[0]
+        lineage = packet_event(
+            3, link=first_cell[0], traffic_class=first_cell[1]
+        )
+        self.assertIsNone(self.adapter.process_packet_event(lineage))
+        self.assertEqual(self.transport.submitted, [])
+
+        self.now = schedule_start + 5_000_000
+        first_slot = self.adapter.refresh_due_cells(max_cells=1)
+        self.assertEqual(len(first_slot), 1)
+        self.assertIn(".slot1.", first_slot[0]["query_id"])
+        self.assertEqual(
+            first_slot[0]["deadline_monotonic_ns"]
+            - first_slot[0]["request_sent_monotonic_ns"],
+            100_000_000,
+        )
+        self.complete(first_slot[0], 100)
+        self.assertEqual(self.adapter.poll_results()[0]["availability"], "fresh")
+
+        self.now = schedule_start + 1_000_000_000
+        second_round = self.adapter.refresh_due_cells(max_cells=30)
+        submitted = [
+            item for item in second_round if item.get("message_type") == "query"
+        ]
+        self.assertEqual(len(submitted), 1)
+        self.assertIn(".slot2.", submitted[0]["query_id"])
+        self.assertEqual(
+            submitted[0]["request_sent_monotonic_ns"],
+            schedule_start + 1_000_000_000,
+        )
+        fixed_records = [
+            json.loads(line) for line in fixed_audit.read_text().splitlines()
+        ]
+        slot_submissions = [
+            item for item in fixed_records if item["event"] == "query_submitted"
+        ]
+        self.assertEqual(
+            [item["query_slot_ordinal"] for item in slot_submissions], [1, 2]
+        )
+        self.assertEqual(
+            slot_submissions[0]["query_slot_scheduled_monotonic_ns"],
+            schedule_start,
+        )
+        self.assertEqual(
+            sum(item["event"] == "query_slot_missed" for item in fixed_records),
+            29,
+        )
+
+        # Provider completion alone is insufficient: receipt on the half-open
+        # boundary must be discarded without producing a fresh state.
+        second_query = submitted[0]
+        on_time_provider_result = provider_result(second_query, 101, self.now)
+        second_cutoff_ns = schedule_start + 1_100_000_000
+        on_time_provider_result["expires_monotonic_ns"] = (
+            second_cutoff_ns + 2_000_000_000
+        )
+        self.now = second_cutoff_ns
+        self.transport.results.append(encode_message(on_time_provider_result))
+        receipt_late = self.adapter.poll_results()
+        self.assertEqual(len(receipt_late), 1)
+        self.assertEqual(receipt_late[0]["availability"], "unavailable")
+        self.assertEqual(
+            receipt_late[0]["unavailable_reason"], "fixed_query_slot_late"
+        )
+
+        # A result received one ns before cutoff is still rejected if the
+        # actual application clock reaches the boundary before apply_latest.
+        self.now = schedule_start + 2_000_000_000
+        self.adapter.update_poses(poses(self.now))
+        third_round = self.adapter.refresh_due_cells(max_cells=30)
+        third_submitted = [
+            item for item in third_round if item.get("message_type") == "query"
+        ]
+        self.assertEqual(len(third_submitted), 1)
+        self.assertIn(".slot3.", third_submitted[0]["query_id"])
+        third_cutoff_ns = schedule_start + 2_100_000_000
+        third_provider_result = provider_result(
+            third_submitted[0], 102, self.now
+        )
+        third_provider_result["expires_monotonic_ns"] = (
+            third_cutoff_ns + 2_000_000_000
+        )
+        self.transport.results.append(encode_message(third_provider_result))
+        clock_ticks = iter(
+            (third_cutoff_ns - 1, third_cutoff_ns - 1, third_cutoff_ns)
+        )
+        self.adapter._clock_ns = lambda: next(clock_ticks, third_cutoff_ns)
+        apply_late = self.adapter.poll_results()
+        self.assertEqual(len(apply_late), 1)
+        self.assertEqual(apply_late[0]["availability"], "unavailable")
+        self.assertEqual(
+            apply_late[0]["unavailable_reason"], "fixed_query_slot_late"
+        )
+        self.adapter._clock_ns = lambda: self.now
+        fixed_records = [
+            json.loads(line) for line in fixed_audit.read_text().splitlines()
+        ]
+        discarded = [
+            item
+            for item in fixed_records
+            if item["event"] == "result_discarded"
+            and item["reason"] == "fixed_query_slot_late"
+        ]
+        self.assertEqual(len(discarded), 2)
+        self.assertIsNone(discarded[0]["adapter_applied_monotonic_ns"])
+        self.assertEqual(
+            discarded[1]["adapter_applied_monotonic_ns"], third_cutoff_ns
+        )
+
+        # The independent Q4 calculation has a frozen denominator even when
+        # no wire query exists; absence can no longer improve the late ratio.
+        freshness, failures = validate_capacity_freshness(
+            {"messages": []},
+            {},
+            {"records": []},
+            {},
+            start_ns=schedule_start,
+            end_ns=schedule_start + 600_000_000_000,
+        )
+        self.assertEqual(freshness["scheduled_query_slot_count"], 18_000)
+        self.assertEqual(freshness["missed_slot_count"], 18_000)
+        self.assertEqual(freshness["failed_slot_count"], 18_000)
+        self.assertEqual(freshness["late_update_ratio"], 1.0)
+        self.assertTrue(
+            any("successful ordinal slots" in failure for failure in failures)
+        )
+
+        (
+            nominal_wire,
+            nominal_states,
+            nominal_packets,
+            nominal_adapter,
+        ) = capacity_slot_evidence(schedule_start)
+        nominal, nominal_failures = validate_capacity_freshness(
+            nominal_wire,
+            nominal_states,
+            nominal_packets,
+            nominal_adapter,
+            start_ns=schedule_start,
+            end_ns=schedule_start + 600_000_000_000,
+        )
+        self.assertEqual(nominal_failures, [])
+        self.assertEqual(nominal["query_count"], 18_000)
+        self.assertEqual(nominal["ok_result_count"], 18_000)
+
+        first_result = next(
+            item
+            for item in nominal_wire["messages"]
+            if item.get("message_type") == "result"
+        )
+        first_query_id = first_result["query_id"]
+        first_state = next(
+            item
+            for item in nominal_states["records"]
+            if item.get("query_id") == first_query_id
+        )
+        receipt_audit = next(
+            item
+            for item in nominal_adapter["records"]
+            if item.get("query_id") == first_query_id
+            and item.get("event") == "result_received"
+        )
+        applied_audit = next(
+            item
+            for item in nominal_adapter["records"]
+            if item.get("query_id") == first_query_id
+            and item.get("event") == "result_applied"
+        )
+        original_receipt_ns = receipt_audit["adapter_received_monotonic_ns"]
+        receipt_audit["adapter_received_monotonic_ns"] = (
+            schedule_start + 100_000_000
+        )
+        applied_audit["adapter_received_monotonic_ns"] = (
+            schedule_start + 100_000_000
+        )
+        late_receipt, late_receipt_failures = validate_capacity_freshness(
+            nominal_wire,
+            nominal_states,
+            nominal_packets,
+            nominal_adapter,
+            start_ns=schedule_start,
+            end_ns=schedule_start + 600_000_000_000,
+        )
+        self.assertEqual(late_receipt_failures, [])
+        self.assertEqual(late_receipt["missed_slot_count"], 0)
+        self.assertEqual(late_receipt["late_or_invalid_slot_count"], 1)
+        self.assertEqual(late_receipt["failed_slot_count"], 1)
+        receipt_audit["adapter_received_monotonic_ns"] = original_receipt_ns
+        applied_audit["adapter_received_monotonic_ns"] = original_receipt_ns
+
+        original_applied_ns = first_state["adapter_applied_monotonic_ns"]
+        first_state["adapter_applied_monotonic_ns"] = (
+            schedule_start + 100_000_000
+        )
+        applied_audit["adapter_applied_monotonic_ns"] = (
+            schedule_start + 100_000_000
+        )
+        late_apply, late_apply_failures = validate_capacity_freshness(
+            nominal_wire,
+            nominal_states,
+            nominal_packets,
+            nominal_adapter,
+            start_ns=schedule_start,
+            end_ns=schedule_start + 600_000_000_000,
+        )
+        self.assertEqual(late_apply_failures, [])
+        self.assertEqual(late_apply["late_or_invalid_slot_count"], 1)
+        self.assertEqual(late_apply["failed_slot_count"], 1)
+        first_state["adapter_applied_monotonic_ns"] = original_applied_ns
+        applied_audit["adapter_applied_monotonic_ns"] = original_applied_ns
+
+        original_node_state_seq = first_result["node_state_seq"]
+        original_result_hash = first_state["result_wire_sha256"]
+        first_result["node_state_seq"] = original_node_state_seq + 10_000
+        first_state["node_state_seq"] = original_node_state_seq + 10_000
+        mutated_result_hash = hashlib.sha256(
+            (
+                json.dumps(
+                    first_result,
+                    allow_nan=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode()
+        ).hexdigest()
+        nominal_wire["message_by_hash"].pop(original_result_hash)
+        nominal_wire["message_by_hash"][mutated_result_hash] = first_result
+        first_state["result_wire_sha256"] = mutated_result_hash
+        receipt_audit["result_wire_sha256"] = mutated_result_hash
+        applied_audit["result_wire_sha256"] = mutated_result_hash
+        mutated, mutation_failures = validate_capacity_freshness(
+            nominal_wire,
+            nominal_states,
+            nominal_packets,
+            nominal_adapter,
+            start_ns=schedule_start,
+            end_ns=schedule_start + 600_000_000_000,
+        )
+        self.assertEqual(mutated["failed_slot_count"], 1)
+        self.assertTrue(
+            any(
+                "query/result correlation tuple differs" in item
+                for item in mutation_failures
+            )
+        )
+        self.assertTrue(
+            any(
+                "applied-state correlation tuple differs" in item
+                for item in mutation_failures
+            )
+        )
+        first_result["node_state_seq"] = original_node_state_seq
+        first_state["node_state_seq"] = original_node_state_seq
+        nominal_wire["message_by_hash"].pop(mutated_result_hash)
+        nominal_wire["message_by_hash"][original_result_hash] = first_result
+        first_state["result_wire_sha256"] = original_result_hash
+        receipt_audit["result_wire_sha256"] = original_result_hash
+        applied_audit["result_wire_sha256"] = original_result_hash
+
+        target_link, target_class = FIXED_QUERY_CELLS[0]
+        removed_query_ids = {
+            item["query_id"]
+            for item in nominal_wire["messages"]
+            if item.get("message_type") == "query"
+            and item.get("tx_node_id") + ">" + item.get("rx_node_id")
+            == target_link
+            and item.get("traffic_class") == target_class
+            and int(item["query_id"].split(".slot", 1)[1].split(".", 1)[0])
+            <= 31
+        }
+        missing_wire = {
+            "messages": [
+                item
+                for item in nominal_wire["messages"]
+                if item.get("query_id") not in removed_query_ids
+            ],
+            "message_by_hash": {
+                digest: item
+                for digest, item in nominal_wire["message_by_hash"].items()
+                if item.get("query_id") not in removed_query_ids
+            },
+        }
+        missing, missing_failures = validate_capacity_freshness(
+            missing_wire,
+            {
+                "records": [
+                    item
+                    for item in nominal_states["records"]
+                    if item.get("query_id") not in removed_query_ids
+                ]
+            },
+            nominal_packets,
+            {
+                "records": [
+                    item
+                    for item in nominal_adapter["records"]
+                    if item.get("query_id") not in removed_query_ids
+                ]
+            },
+            start_ns=schedule_start,
+            end_ns=schedule_start + 600_000_000_000,
+        )
+        self.assertEqual(len(removed_query_ids), 31)
+        self.assertEqual(missing["missed_slot_count"], 31)
+        self.assertEqual(missing["failed_slot_count"], 31)
+        self.assertEqual(missing["minimum_successful_slots_in_one_cell"], 569)
+        self.assertTrue(
+            any("569 < 570 successful ordinal slots" in item for item in missing_failures)
+        )
 
 
 if __name__ == "__main__":

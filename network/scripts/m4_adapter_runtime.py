@@ -24,9 +24,9 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in os.sys.path:
     os.sys.path.insert(0, str(ROOT_DIR))
 
-from network.radio_provider.sionna_async import load_protocol_limits
-from network.radio_provider.sionna_async_service import ExactWireLog
-from network.radio_provider.sionna_packet_adapter import (
+from network.radio_provider.sionna_async import load_protocol_limits  # noqa: E402
+from network.radio_provider.sionna_async_service import ExactWireLog  # noqa: E402
+from network.radio_provider.sionna_packet_adapter import (  # noqa: E402
     AdapterClientConfig,
     AppliedStateIPCWriter,
     PacketAdapterConfig,
@@ -37,14 +37,15 @@ from network.radio_provider.sionna_packet_adapter import (
     SionnaAsyncTCPClient,
     SupervisedResultFaultInjector,
 )
-from network.bridge.runtime_clock_beacon import beacon
-from network.scripts.m4_runtime_orchestrator import (
+from network.bridge.runtime_clock_beacon import beacon  # noqa: E402
+from network.scripts.m4_gazebo_pose_source import GazeboPoseVSource  # noqa: E402
+from network.scripts.m4_runtime_orchestrator import (  # noqa: E402
     ROOT,
     identity_for_contract,
     write_exclusive,
 )
-from network.validation.m4_common import M4ValidationError, strict_json
-from network.validation.m4_runtime import (
+from network.validation.m4_common import M4ValidationError, strict_json  # noqa: E402
+from network.validation.m4_runtime import (  # noqa: E402
     MAX_POSE_AGE_NS,
     QUERY_DEADLINE_NS,
     QUERY_PERIOD_NS,
@@ -60,6 +61,8 @@ TRANSFORM_VERSION = "enu-identity-v1"
 SOURCE_FRAME = "world"
 ODOMETRY_HEADER_FRAME = "odom"
 ODOMETRY_CHILD_FRAME = "base_link"
+ODOMETRY_SOURCE_TRANSPORT = "ros2_dds_odometry"
+ODOMETRY_SOURCE_STAMP_SCOPE = "ros_header"
 DIRECTED_LINK = re.compile(r"^(cp>uav[1-5]|uav[1-5]>cp)$")
 TRAFFIC_CLASSES = {"control", "payload", "additional_data"}
 
@@ -76,15 +79,6 @@ def load_yaml(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise M4ValidationError(f"YAML root is not an object: {path}")
     return value
-
-
-def entity_name(frame: str) -> str | None:
-    clean = frame.strip("/")
-    parts = [part for part in clean.split("/") if part]
-    for candidate in reversed(parts):
-        if candidate in {"cp", "jammer_m4"}:
-            return candidate
-    return None
 
 
 class PoseTracker:
@@ -132,28 +126,34 @@ class PoseTracker:
             f"/{node_id}/odometry",
             int(message.header.stamp.sec) * 1_000_000_000
             + int(message.header.stamp.nanosec),
+            ODOMETRY_SOURCE_TRANSPORT,
+            ODOMETRY_SOURCE_STAMP_SCOPE,
             header_frame,
             child_frame,
-            pose.position,
-            pose.orientation,
+            [float(pose.position.x), float(pose.position.y), float(pose.position.z)],
+            [
+                float(pose.orientation.x),
+                float(pose.orientation.y),
+                float(pose.orientation.z),
+                float(pose.orientation.w),
+            ],
         )
 
-    def update_world(self, message: Any) -> None:
-        now = time.monotonic_ns()
-        for transform in message.transforms:
-            name = entity_name(str(transform.child_frame_id))
-            if name is None:
+    def update_world(self, observations: tuple[Any, ...]) -> None:
+        for observation in observations:
+            if observation.entity_id not in {"cp", "jammer_m4"}:
                 continue
             self._update(
-                name,
-                now,
-                "/world/map/pose/info",
-                int(transform.header.stamp.sec) * 1_000_000_000
-                + int(transform.header.stamp.nanosec),
-                str(transform.header.frame_id),
-                str(transform.child_frame_id),
-                transform.transform.translation,
-                transform.transform.rotation,
+                str(observation.entity_id),
+                int(observation.source_callback_monotonic_ns),
+                str(observation.source_topic),
+                int(observation.sim_stamp_ns),
+                str(observation.source_transport),
+                str(observation.source_stamp_scope),
+                str(observation.source_header_frame),
+                str(observation.source_child_frame),
+                list(observation.position_m),
+                list(observation.orientation_quat_xyzw),
             )
 
     def _update(
@@ -162,26 +162,25 @@ class PoseTracker:
         now: int,
         source_topic: str,
         source_stamp_ns: int,
+        source_transport: str,
+        source_stamp_scope: str,
         source_header_frame: str,
         source_child_frame: str,
-        position: Any,
-        orientation: Any,
+        position_m: list[float],
+        orientation_quat_xyzw: list[float],
     ) -> None:
         record = {
             "pose_monotonic_ns": now,
             "source_topic": source_topic,
             "source_header_stamp_ns": source_stamp_ns,
+            "source_transport": source_transport,
+            "source_stamp_scope": source_stamp_scope,
             "source_header_frame": source_header_frame,
             "source_child_frame": source_child_frame,
             "source_frame": SOURCE_FRAME,
             "transform_version": TRANSFORM_VERSION,
-            "position_m": [float(position.x), float(position.y), float(position.z)],
-            "orientation_quat_xyzw": [
-                float(orientation.x),
-                float(orientation.y),
-                float(orientation.z),
-                float(orientation.w),
-            ],
+            "position_m": position_m,
+            "orientation_quat_xyzw": orientation_quat_xyzw,
             "freshness_age_ns": 0,
             "stale": False,
         }
@@ -222,6 +221,8 @@ class PoseTracker:
                         "source_header_stamp_ns",
                         "source_header_frame",
                         "source_child_frame",
+                        "source_transport",
+                        "source_stamp_scope",
                     }
                 }
                 value.update(
@@ -243,6 +244,8 @@ class PoseTracker:
                     "source_header_stamp_ns",
                     "source_header_frame",
                     "source_child_frame",
+                    "source_transport",
+                    "source_stamp_scope",
                 }
             }
             jammer.update(
@@ -350,6 +353,27 @@ def build_adapter(
     SupervisedResultFaultInjector | None,
 ]:
     contract = strict_json(args.contract)
+    fixed_query_schedule_start_ns: int | None = None
+    fixed_query_schedule_end_ns: int | None = None
+    if contract.get("contract") == "ams.m4.capacity_run/v3":
+        if contract.get("profile") != "m4_capacity_prerequisite":
+            raise M4ValidationError("capacity adapter contract profile differs")
+        schedule = contract.get("schedule")
+        if not isinstance(schedule, dict):
+            raise M4ValidationError("capacity adapter schedule is absent")
+        fixed_query_schedule_start_ns = schedule.get(
+            "measurement_start_monotonic_ns"
+        )
+        fixed_query_schedule_end_ns = schedule.get(
+            "measurement_end_monotonic_ns"
+        )
+        if (
+            isinstance(fixed_query_schedule_start_ns, bool)
+            or not isinstance(fixed_query_schedule_start_ns, int)
+            or isinstance(fixed_query_schedule_end_ns, bool)
+            or not isinstance(fixed_query_schedule_end_ns, int)
+        ):
+            raise M4ValidationError("capacity adapter schedule bounds are invalid")
     identity, _contract_hash, _config_hash = identity_for_contract(args.contract)
     bundle = strict_json(ROOT / "network/config/m4_canonical_scene_bundle.json")
     radio = load_yaml(ROOT / "network/config/radio_m4_canonical.yaml")["radio"]
@@ -424,6 +448,8 @@ def build_adapter(
         max_fault_pending_per_cell=int(contract["limits"]["max_fault_pending_per_cell"]),
         query_period_ns=QUERY_PERIOD_NS,
         global_query_spacing_ns=33_333_333,
+        fixed_query_schedule_start_ns=fixed_query_schedule_start_ns,
+        fixed_query_schedule_end_ns=fixed_query_schedule_end_ns,
     )
     adapter = PacketSionnaAdapter(
         adapter_config,
@@ -608,7 +634,6 @@ def main() -> int:
     from nav_msgs.msg import Odometry
     from rclpy.node import Node
     from rclpy.qos import qos_profile_sensor_data
-    from tf2_msgs.msg import TFMessage
 
     class TrackerNode(Node):
         def __init__(self) -> None:
@@ -620,25 +645,21 @@ def main() -> int:
                     lambda message, identity=node_id: tracker.update_uav(identity, message),
                     qos_profile_sensor_data,
                 )
-            self.create_subscription(
-                TFMessage,
-                "/world/map/pose/info",
-                tracker.update_world,
-                qos_profile_sensor_data,
-            )
-
     client: SionnaAsyncTCPClient | None = None
     control: ControlReader | None = None
     node: Any = None
+    world_pose_source: GazeboPoseVSource | None = None
     try:
         rclpy.init(args=None)
         node = TrackerNode()
+        world_pose_source = GazeboPoseVSource(tracker.update_world)
         clock_thread.start()
         tracker_clock_thread.start()
         deadline = time.monotonic_ns() + 120_000_000_000
         initial = None
         while time.monotonic_ns() < deadline and not stop.is_set():
             rclpy.spin_once(node, timeout_sec=0.05)
+            world_pose_source.raise_if_failed()
             now = time.monotonic_ns()
             if tracker.complete_and_fresh(now):
                 initial = tracker.snapshot(now)
@@ -657,6 +678,7 @@ def main() -> int:
         client_deadline = time.monotonic_ns() + 10_000_000_000
         while not client.ready and time.monotonic_ns() < client_deadline:
             rclpy.spin_once(node, timeout_sec=0.02)
+            world_pose_source.raise_if_failed()
         if not client.ready:
             raise M4ValidationError("real Sionna TCP handshake did not become ready")
         write_exclusive(
@@ -673,9 +695,12 @@ def main() -> int:
         deferred: dict[Path, dict[str, Any]] = {}
         fault_seed_cells: set[tuple[str, str]] = set()
         fault_parallel_cells: set[tuple[str, str]] = set()
+        loop_period_ns = 5_000_000
+        next_loop_tick_ns = time.monotonic_ns()
         while not stop.is_set() and not args.stop_file.exists():
             started = time.monotonic_ns()
             rclpy.spin_once(node, timeout_sec=0.0)
+            world_pose_source.raise_if_failed()
             snapshot = tracker.snapshot(started)
             if snapshot is not None:
                 adapter.update_poses(snapshot)
@@ -700,7 +725,15 @@ def main() -> int:
                 fault_seed_cells=fault_seed_cells,
                 fault_parallel_cells=fault_parallel_cells,
             )
-            remaining = 5_000_000 - (time.monotonic_ns() - started)
+            # Keep the foreground poll cadence on an absolute monotonic grid.
+            # Query slots have their own absolute grid in PacketSionnaAdapter;
+            # neither schedule is advanced from an actual send/completion.
+            next_loop_tick_ns += loop_period_ns
+            now = time.monotonic_ns()
+            if next_loop_tick_ns <= now:
+                skipped = (now - next_loop_tick_ns) // loop_period_ns + 1
+                next_loop_tick_ns += skipped * loop_period_ns
+            remaining = next_loop_tick_ns - now
             if remaining > 0:
                 stop.wait(remaining / 1_000_000_000)
         return 0
@@ -709,6 +742,8 @@ def main() -> int:
         return 2
     finally:
         stop.set()
+        if world_pose_source is not None:
+            world_pose_source.close()
         if client is not None:
             client.stop(5.0)
         if clock_thread.ident is not None:

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import bisect
 import hashlib
+import importlib.metadata
 import json
 import math
 import re
@@ -15,6 +16,12 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+import yaml
+
+from network.radio_provider.sionna_async import (
+    ProtocolValidationError,
+    decode_message,
+)
 from network.validation.m4_common import (
     M4ValidationError,
     canonical_json,
@@ -51,6 +58,7 @@ from network.validation.m4_runtime import (
     validate_clock_correlations,
     validate_clock_process_binding,
     validate_external_captures,
+    validate_query_pose_runtime_binding,
     validate_scene_prerequisite,
     split_exact_mavlink_datagram,
 )
@@ -107,12 +115,29 @@ CAPTURE_RECEIVE_BUFFER_EFFECTIVE_BYTES = 16_777_216
 CAPTURE_RECEIVE_BUFFER_SETTERS = {"SO_RCVBUF", "SO_RCVBUFFORCE"}
 CAPTURE_DRAIN_BATCH_PACKET_LIMIT = 256
 CAPTURE_DRAIN_BATCH_BYTE_LIMIT = 4_194_304
+PROVIDER_SCRIPT_PATH = "network/scripts/m4_runtime_orchestrator.py"
+PROVIDER_READY_PATH = "raw/state/provider.ready.json"
+PROVIDER_STOP_PATH = "raw/control/provider.stop"
+PROVIDER_SENDER_ID = "sionna-provider-m4"
+ADAPTER_SENDER_ID = "sionna-adapter-m4"
+PROVIDER_ID = "sionna-rt-cuda-m4"
+ADAPTER_SCRIPT_PATH = "network/scripts/m4_adapter_runtime.py"
+ADAPTER_READY_PATH = "raw/state/adapter.ready.json"
+ADAPTER_STOP_PATH = "raw/control/adapter.stop"
+WIRE_MINIMAL_MESSAGE_KEYS = {
+    "message_type",
+    "sender_id",
+    "wire_sequence",
+    "reconnect_generation",
+    "query_id",
+}
 REQUIRED_SOURCE_PATHS = {
     "doc/network_radio_integration_plan_v3.md",
     "network/config/component_acceptance_profiles.json",
     "network/config/dependency_lock.yaml",
     "network/config/endpoints.yaml",
     "network/config/endpoint_matrix_5uav.json",
+    "network/config/endpoint_transaction_schema.json",
     "network/config/jammers_m4_canonical.yaml",
     "network/config/m4_canonical_scene_bundle.json",
     "network/config/qualification_path_ownership.json",
@@ -123,6 +148,7 @@ REQUIRED_SOURCE_PATHS = {
     "network/config/sionna_async_schema_v1.json",
     "network/config/sionna_packet_effects_v1.json",
     "network/ns3/run_ns3_tap_packet_engine.sh",
+    "network/ns3/ns3_build_receipt.py",
     "network/ns3/scratch/ams-tap-packet-engine.cc",
     "network/ns3/tap_packet_engine_config.py",
     "network/radio_provider/provider.py",
@@ -131,6 +157,7 @@ REQUIRED_SOURCE_PATHS = {
     "network/radio_provider/sionna_packet_adapter.py",
     "network/scripts/check_m4_canonical_scene_runtime.py",
     "network/scripts/collect_m4_clock_correlations.py",
+    "network/scripts/collect_flight_capacity.py",
     "network/scripts/collect_m4_runtime.py",
     "network/bridge/actual_sitl_mavlink_endpoint.py",
     "network/bridge/opaque_udp_relay.py",
@@ -143,16 +170,24 @@ REQUIRED_SOURCE_PATHS = {
     "network/scripts/m4_capacity_airborne.py",
     "network/bridge/runtime_clock_beacon.py",
     "network/scripts/m4_endpoint_agent.py",
+    "network/scripts/m4_gazebo_pose_source.py",
     "network/scripts/m4_runtime_orchestrator.py",
     "network/scripts/run_m4_capacity.sh",
     "network/scripts/raw_packet_capture.py",
     "network/scripts/validate_m4_capacity.py",
+    "network/scripts/write_run_provenance.py",
     "network/validation/m4_airborne_motion.py",
     "network/validation/m4_capacity_budget.py",
+    "network/validation/component_profiles.py",
+    "network/validation/endpoint_transaction.py",
     "network/validation/m4_frame_alignment.py",
+    "network/validation/m4_pose_observations.py",
     "network/validation/m4_common.py",
     "network/validation/m4_runtime.py",
+    "network/validation/qualification_identity.py",
     "network/validation/validate_m4_capacity.py",
+    "network/validation/validate_m3_external_matrix.py",
+    "network/validation/validate_m4_causality.py",
     "network/validation/validate_m4_scene_bundle.py",
 }
 
@@ -200,6 +235,829 @@ def _runtime_process_samples(run_dir: Path) -> tuple[dict[str, list[dict[str, An
     for record in frozen_records:
         roles[str(record.get("role"))].append(record)
     return dict(roles), len(samples)
+
+
+def _exact_wire_occurrences(
+    directory: Path,
+    validated_wire: Mapping[str, Any] | None,
+    *,
+    label: str,
+    expected_envelope: Mapping[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any], list[str]]:
+    """Stream exact wire bytes and retain only correlation-sized metadata."""
+
+    failures: list[str] = []
+    occurrences: list[dict[str, Any]] = []
+    message_counts: dict[str, int] = defaultdict(int)
+    retained_payload_bytes = 0
+    maximum_retained_message_bytes = 0
+    expected_offset = 0
+
+    def unique_object(pairs: Iterable[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise M4ValidationError(f"duplicate JSON key {key!r}")
+            value[key] = item
+        return value
+
+    try:
+        data_path = directory / "sionna_async_wire.bin"
+        index_path = directory / "sionna_async_wire_index.jsonl"
+        if not regular_file(data_path):
+            raise M4ValidationError(f"{label} wire data is missing/nonregular")
+        if not regular_file(index_path):
+            raise M4ValidationError(f"{label} wire index is missing/nonregular")
+        validated_messages = (
+            validated_wire.get("message_by_hash")
+            if isinstance(validated_wire, Mapping)
+            else None
+        )
+        if not isinstance(validated_messages, dict):
+            validated_messages = None
+        saw_record = False
+        with data_path.open("rb") as data_stream, index_path.open("rb") as index_stream:
+            ordinal = 0
+            while True:
+                line = index_stream.readline(16_385)
+                if not line:
+                    break
+                ordinal += 1
+                saw_record = True
+                if (
+                    not line.endswith(b"\n")
+                    or len(line) > 16_384
+                    or not line.rstrip(b"\r\n")
+                ):
+                    raise M4ValidationError(
+                        f"{label} wire index record {ordinal} is not a bounded line"
+                    )
+                record = json.loads(
+                    line.decode("utf-8"), object_pairs_hook=unique_object
+                )
+                if not isinstance(record, dict):
+                    raise M4ValidationError(
+                        f"{label} wire index record {ordinal} is not an object"
+                    )
+                record_failures = exact_keys(
+                    record,
+                    {
+                        "connection_id",
+                        "direction",
+                        "length",
+                        "monotonic_ns",
+                        "offset",
+                        "sha256",
+                    },
+                    f"{label} wire index record {ordinal}",
+                )
+                if record_failures:
+                    failures.extend(record_failures)
+                    raise M4ValidationError(
+                        f"{label} wire occurrence {ordinal} envelope differs"
+                    )
+                offset = record.get("offset")
+                length = record.get("length")
+                digest = record.get("sha256")
+                observed_ns = record.get("monotonic_ns")
+                connection_id = record.get("connection_id")
+                direction = record.get("direction")
+                if (
+                    isinstance(offset, bool)
+                    or not isinstance(offset, int)
+                    or offset != expected_offset
+                    or isinstance(length, bool)
+                    or not isinstance(length, int)
+                    or not 1 <= length <= 1_048_576
+                    or not isinstance(digest, str)
+                    or HEX64.fullmatch(digest) is None
+                    or isinstance(observed_ns, bool)
+                    or not isinstance(observed_ns, int)
+                    or observed_ns <= 0
+                    or not isinstance(connection_id, str)
+                    or not connection_id
+                    or direction not in {"inbound", "outbound"}
+                ):
+                    raise M4ValidationError(
+                        f"{label} wire occurrence {ordinal} envelope differs"
+                    )
+                raw = data_stream.read(length)
+                if len(raw) != length:
+                    raise M4ValidationError(
+                        f"{label} wire occurrence {ordinal} is truncated"
+                    )
+                expected_offset += length
+                if hashlib.sha256(raw).hexdigest() != digest:
+                    failures.append(
+                        f"{label} wire occurrence {ordinal} bytes/hash differ"
+                    )
+                    continue
+                cached = (
+                    validated_messages.get(digest)
+                    if validated_messages is not None
+                    else None
+                )
+                try:
+                    message = (
+                        dict(cached)
+                        if isinstance(cached, dict)
+                        else dict(decode_message(raw, max_bytes=1_048_576))
+                    )
+                except (ProtocolValidationError, TypeError, ValueError) as exc:
+                    failures.append(
+                        f"{label} wire occurrence {ordinal} schema differs: {exc}"
+                    )
+                    continue
+                generation = message.get("reconnect_generation")
+                if (
+                    isinstance(generation, bool)
+                    or not isinstance(generation, int)
+                    or generation < 0
+                ):
+                    failures.append(
+                        f"{label} wire occurrence {ordinal} reconnect generation differs"
+                    )
+                    continue
+                if expected_envelope is not None and any(
+                    message.get(key) != expected
+                    for key, expected in expected_envelope.items()
+                ):
+                    failures.append(
+                        f"{label} wire occurrence {ordinal} "
+                        "is not bound to the current contract/config"
+                    )
+                message_type = message.get("message_type")
+                message_counts[str(message_type)] += 1
+                retained_message = (
+                    message
+                    if message_type in {"hello", "ready"}
+                    else {
+                        key: message[key]
+                        for key in WIRE_MINIMAL_MESSAGE_KEYS
+                        if key in message
+                    }
+                )
+                retained_size = len(canonical_json(retained_message))
+                retained_payload_bytes += retained_size
+                maximum_retained_message_bytes = max(
+                    maximum_retained_message_bytes, retained_size
+                )
+                occurrences.append(
+                    {
+                        "ordinal": ordinal,
+                        "connection_id": connection_id,
+                        "direction": direction,
+                        "monotonic_ns": observed_ns,
+                        "length": length,
+                        "sha256": digest,
+                        "message": retained_message,
+                        "generation": generation,
+                    }
+                )
+            if not saw_record:
+                raise M4ValidationError(f"{label} wire index is empty")
+            if data_stream.read(1):
+                failures.append(
+                    f"{label} wire index does not cover its exact byte stream"
+                )
+        for required in ("hello", "ready", "query", "result"):
+            if message_counts.get(required, 0) == 0:
+                failures.append(f"{label} wire log has no {required} frame")
+    except (OSError, TypeError, UnicodeError, ValueError, M4ValidationError) as exc:
+        failures.append(f"{label} wire occurrences cannot be recovered: {exc}")
+    details = {
+        "wire_records": sum(message_counts.values()),
+        "wire_bytes": expected_offset,
+        "message_counts": dict(sorted(message_counts.items())),
+        "retained_message_payload_bytes": retained_payload_bytes,
+        "maximum_retained_message_bytes": maximum_retained_message_bytes,
+        "streamed_binary_and_index": True,
+    }
+    return occurrences, details, failures
+
+
+def _correlate_exact_peer_wire(
+    client_directory: Path,
+    provider_directory: Path,
+    client_wire: Mapping[str, Any] | None,
+    *,
+    expected_envelope: Mapping[str, Any],
+) -> tuple[dict[str, Any], list[str], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Prove that each TCP frame was observed once, in order, at both peers."""
+
+    failures: list[str] = []
+    client, client_scan, client_failures = _exact_wire_occurrences(
+        client_directory,
+        client_wire,
+        label="client",
+        expected_envelope=expected_envelope,
+    )
+    provider, provider_scan, provider_failures = _exact_wire_occurrences(
+        provider_directory,
+        None,
+        label="provider",
+        expected_envelope=expected_envelope,
+    )
+    failures.extend(client_failures)
+    failures.extend(provider_failures)
+
+    side_cardinality: dict[str, dict[str, int]] = {}
+    for side_label, records in (("client", client), ("provider", provider)):
+        sender_sequences: set[tuple[str, int]] = set()
+        query_ids: dict[str, int] = defaultdict(int)
+        result_ids: dict[str, int] = defaultdict(int)
+        for record in records:
+            message = record["message"]
+            sender_id = message.get("sender_id")
+            wire_sequence = message.get("wire_sequence")
+            if (
+                not isinstance(sender_id, str)
+                or not sender_id
+                or isinstance(wire_sequence, bool)
+                or not isinstance(wire_sequence, int)
+                or wire_sequence <= 0
+            ):
+                failures.append(
+                    f"{side_label} wire occurrence {record['ordinal']} sender sequence differs"
+                )
+            else:
+                sender_sequence = (sender_id, wire_sequence)
+                if sender_sequence in sender_sequences:
+                    failures.append(
+                        f"{side_label} wire repeats sender/wire_sequence {sender_sequence}"
+                    )
+                sender_sequences.add(sender_sequence)
+
+            message_type = message.get("message_type")
+            if message_type not in {"query", "result"}:
+                continue
+            query_id = message.get("query_id")
+            if not isinstance(query_id, str) or not query_id:
+                failures.append(
+                    f"{side_label} {message_type} occurrence {record['ordinal']} "
+                    "has invalid query_id"
+                )
+                continue
+            target = query_ids if message_type == "query" else result_ids
+            target[query_id] += 1
+
+        for message_type, identifiers in (
+            ("query", query_ids),
+            ("result", result_ids),
+        ):
+            for query_id, count in identifiers.items():
+                if count != 1:
+                    failures.append(
+                        f"{side_label} {message_type} query_id {query_id!r} "
+                        f"has {count} exact wire occurrences"
+                    )
+        orphan_results = sorted(set(result_ids) - set(query_ids))
+        if orphan_results:
+            failures.append(
+                f"{side_label} wire has orphan result query_ids {orphan_results}"
+            )
+        side_cardinality[side_label] = {
+            "unique_sender_sequence_count": len(sender_sequences),
+            "unique_query_id_count": len(query_ids),
+            "unique_result_query_id_count": len(result_ids),
+        }
+
+    client_out = [item for item in client if item["direction"] == "outbound"]
+    client_in = [item for item in client if item["direction"] == "inbound"]
+    provider_out = [item for item in provider if item["direction"] == "outbound"]
+    provider_in = [item for item in provider if item["direction"] == "inbound"]
+
+    def exact_peer_sequence(
+        sent: list[dict[str, Any]],
+        received: list[dict[str, Any]],
+        label: str,
+    ) -> None:
+        if len(sent) != len(received):
+            failures.append(
+                f"{label} occurrence count differs: sent={len(sent)} received={len(received)}"
+            )
+        for ordinal, (source, destination) in enumerate(
+            zip(sent, received), start=1
+        ):
+            if (
+                source["sha256"] != destination["sha256"]
+                or source["length"] != destination["length"]
+                or source["generation"] != destination["generation"]
+            ):
+                failures.append(f"{label} occurrence {ordinal} bytes/order differ")
+
+    exact_peer_sequence(client_out, provider_in, "client-to-provider")
+    exact_peer_sequence(provider_out, client_in, "provider-to-client")
+
+    generation_sets: dict[str, set[int]] = {}
+    for side_label, records in (("client", client), ("provider", provider)):
+        by_connection: dict[str, set[int]] = defaultdict(set)
+        by_generation: dict[int, set[str]] = defaultdict(set)
+        for record in records:
+            by_connection[record["connection_id"]].add(record["generation"])
+            by_generation[record["generation"]].add(record["connection_id"])
+        if any(len(values) != 1 for values in by_connection.values()) or any(
+            len(values) != 1 for values in by_generation.values()
+        ):
+            failures.append(f"{side_label} wire connection/generation map is ambiguous")
+        generation_sets[side_label] = set(by_generation)
+    if generation_sets.get("client") != generation_sets.get("provider"):
+        failures.append("client/provider reconnect generation sets differ")
+    if generation_sets.get("client") != {0}:
+        failures.append("formal capacity wire must use exactly reconnect_generation 0")
+
+    expected_handshake_prefixes = {
+        "client": [
+            ("inbound", "hello", PROVIDER_SENDER_ID),
+            ("inbound", "ready", PROVIDER_SENDER_ID),
+            ("outbound", "hello", ADAPTER_SENDER_ID),
+            ("outbound", "ready", ADAPTER_SENDER_ID),
+        ],
+        "provider": [
+            ("outbound", "hello", PROVIDER_SENDER_ID),
+            ("outbound", "ready", PROVIDER_SENDER_ID),
+            ("inbound", "hello", ADAPTER_SENDER_ID),
+            ("inbound", "ready", ADAPTER_SENDER_ID),
+        ],
+    }
+    for side_label, records in (("client", client), ("provider", provider)):
+        observed_prefix = [
+            (
+                item["direction"],
+                item["message"].get("message_type"),
+                item["message"].get("sender_id"),
+            )
+            for item in records[:4]
+        ]
+        if observed_prefix != expected_handshake_prefixes[side_label]:
+            failures.append(f"{side_label} exact peer handshake prefix differs")
+
+    allowed_by_origin = {
+        ADAPTER_SENDER_ID: {"hello", "ready", "query"},
+        PROVIDER_SENDER_ID: {"hello", "ready", "result"},
+    }
+    for side_label, records, direction, sender_id in (
+        ("client", client, "outbound", ADAPTER_SENDER_ID),
+        ("provider", provider, "outbound", PROVIDER_SENDER_ID),
+    ):
+        origin = [item for item in records if item["direction"] == direction]
+        for record in origin:
+            message = record["message"]
+            if (
+                message.get("sender_id") != sender_id
+                or message.get("message_type") not in allowed_by_origin[sender_id]
+            ):
+                failures.append(
+                    f"{side_label} outbound occurrence {record['ordinal']} has wrong origin/type"
+                )
+        for generation in sorted(generation_sets.get(side_label, set())):
+            lifecycle = [
+                item["message"].get("message_type")
+                for item in origin
+                if item["generation"] == generation
+            ]
+            if (
+                lifecycle[:2] != ["hello", "ready"]
+                or lifecycle.count("hello") != 1
+                or lifecycle.count("ready") != 1
+            ):
+                failures.append(
+                    f"{side_label} generation {generation} handshake order/count differs"
+                )
+
+    details = {
+        "client_wire_occurrence_count": len(client),
+        "provider_wire_occurrence_count": len(provider),
+        "client_to_provider_occurrence_count": len(client_out),
+        "provider_to_client_occurrence_count": len(provider_out),
+        "reconnect_generations": sorted(generation_sets.get("client", set())),
+        "per_side_cardinality": side_cardinality,
+        "stream_scans": {
+            "client": client_scan,
+            "provider": provider_scan,
+        },
+    }
+    return details, failures, client, provider
+
+
+def _expected_provider_cmdline_sha256(
+    run_dir: Path, *, port: int, runtime_id: str
+) -> str:
+    argv = [
+        "python3",
+        "-u",
+        str((ROOT / PROVIDER_SCRIPT_PATH).resolve()),
+        "provider",
+        "--run-dir",
+        str(run_dir.resolve()),
+        "--contract",
+        str((run_dir / "raw/m4_capacity_contract.json").resolve()),
+        "--port",
+        str(port),
+        "--ready-file",
+        str((run_dir / PROVIDER_READY_PATH).resolve()),
+        "--stop-file",
+        str((run_dir / PROVIDER_STOP_PATH).resolve()),
+        "--clock-socket",
+        f"/tmp/ams-m4-clock-{runtime_id}.sock",
+    ]
+    return hashlib.sha256(
+        b"".join(item.encode("utf-8") + b"\0" for item in argv)
+    ).hexdigest()
+
+
+def _expected_adapter_cmdline_sha256(
+    run_dir: Path, *, port: int, runtime_id: str
+) -> str:
+    argv = [
+        "python3",
+        "-u",
+        str((ROOT / ADAPTER_SCRIPT_PATH).resolve()),
+        "--run-dir",
+        str(run_dir.resolve()),
+        "--contract",
+        str((run_dir / "raw/m4_capacity_contract.json").resolve()),
+        "--packet-events",
+        str((run_dir / "logs/ns3_packet_events.jsonl").resolve()),
+        "--state-file",
+        str((run_dir / "logs/sionna_applied_states.jsonl").resolve()),
+        "--ready-file",
+        str((run_dir / ADAPTER_READY_PATH).resolve()),
+        "--stop-file",
+        str((run_dir / ADAPTER_STOP_PATH).resolve()),
+        "--control-dir",
+        str((run_dir / "raw/control/adapter").resolve()),
+        "--clock-socket",
+        f"/tmp/ams-m4-clock-{runtime_id}.sock",
+        "--provider-port",
+        str(port),
+    ]
+    return hashlib.sha256(
+        b"".join(item.encode("utf-8") + b"\0" for item in argv)
+    ).hexdigest()
+
+
+def _validate_real_provider_wire_binding(
+    run_dir: Path,
+    run: Mapping[str, Any],
+    client_wire: Mapping[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    """Bind exact peer observations to the sampled real provider process."""
+
+    details: dict[str, Any] = {}
+    failures: list[str] = []
+    try:
+        contract_path = run_dir / "raw/m4_capacity_contract.json"
+        contract_hash = sha256_file(contract_path)
+        bundle = strict_json(FROZEN_BUNDLE_PATH)
+        script_path = (ROOT / PROVIDER_SCRIPT_PATH).resolve(strict=True)
+        script_sha256 = sha256_file(script_path)
+        source_hashes = run.get("source_sha256")
+        if (
+            not isinstance(source_hashes, dict)
+            or source_hashes.get(PROVIDER_SCRIPT_PATH) != script_sha256
+        ):
+            failures.append("provider handshake script is not bound by source identity")
+
+        config_material = {
+            "async_policy": run["async_policy"],
+            "bundle": run["bundle"],
+            "limits": run["limits"],
+            "profile": run["profile"],
+            "radio_sha256": sha256_file(
+                ROOT / "network/config/radio_m4_canonical.yaml"
+            ),
+            "effects_sha256": sha256_file(
+                ROOT / "network/config/sionna_packet_effects_v1.json"
+            ),
+        }
+        config_hash = hashlib.sha256(canonical_json(config_material)).hexdigest()
+        expected_envelope = {
+            "run_id": run.get("run_id"),
+            "profile": run.get("profile"),
+            "phase_id": "m4_continuous_runtime",
+            "contract_hash": contract_hash,
+            "config_hash": config_hash,
+            "bundle_id": FROZEN_BUNDLE_ID,
+            "sender_clock_domain": "host-monotonic",
+        }
+        (
+            correlation_details,
+            correlation_failures,
+            client_occurrences,
+            provider_occurrences,
+        ) = _correlate_exact_peer_wire(
+            run_dir / "logs",
+            run_dir / "logs/provider_wire",
+            client_wire,
+            expected_envelope=expected_envelope,
+        )
+        details.update(correlation_details)
+        failures.extend(correlation_failures)
+        installed_versions = {
+            "sionna_rt_version": importlib.metadata.version("sionna"),
+            "mitsuba_version": importlib.metadata.version("mitsuba"),
+        }
+        dependency_lock = yaml.safe_load(
+            (ROOT / "network/config/dependency_lock.yaml").read_text(encoding="utf-8")
+        )
+        locked_dependencies = (
+            dependency_lock.get("dependencies")
+            if isinstance(dependency_lock, dict)
+            else None
+        )
+        locked_versions = {
+            "sionna_rt_version": (
+                locked_dependencies.get("sionna_rt", {}).get("version")
+                if isinstance(locked_dependencies, dict)
+                else None
+            ),
+            "mitsuba_version": (
+                locked_dependencies.get("mitsuba", {}).get("version")
+                if isinstance(locked_dependencies, dict)
+                else None
+            ),
+        }
+        if any(
+            not isinstance(locked, (str, int, float))
+            or str(locked) != installed_versions[name]
+            for name, locked in locked_versions.items()
+        ):
+            failures.append("installed provider package versions differ from dependency lock")
+        expected_versions = installed_versions
+        expected_executable = {
+            "path": str(script_path),
+            "sha256": script_sha256,
+        }
+        expected_provider_identity = {
+            "provider_id": PROVIDER_ID,
+            "provider_mode": "real_sionna",
+            "acceptance_eligible": True,
+            **expected_versions,
+        }
+        expected_scene = {
+            "bundle_id": FROZEN_BUNDLE_ID,
+            "scene_manifest_sha256": str(bundle["bundle_sha256"]),
+            "scene_path": str((ROOT / str(bundle["sionna_scene_xml"])).resolve()),
+        }
+
+        provider_out = [
+            item
+            for item in provider_occurrences
+            if item.get("direction") == "outbound"
+        ]
+        hellos = [
+            item for item in provider_out if item["message"].get("message_type") == "hello"
+        ]
+        readies = [
+            item for item in provider_out if item["message"].get("message_type") == "ready"
+        ]
+        if len(hellos) != 1 or len(readies) != 1:
+            failures.append("provider wire must contain exactly one hello/ready pair")
+        else:
+            hello = hellos[0]["message"]
+            ready_message = readies[0]["message"]
+            for label, message, readiness in (
+                ("hello", hello, "initializing"),
+                ("ready", ready_message, "ready"),
+            ):
+                if (
+                    message.get("sender_id") != PROVIDER_SENDER_ID
+                    or message.get("sender_role") != "provider"
+                    or message.get("run_id") != run.get("run_id")
+                    or message.get("profile") != run.get("profile")
+                    or message.get("phase_id") != "m4_continuous_runtime"
+                    or message.get("contract_hash") != contract_hash
+                    or message.get("config_hash") != config_hash
+                    or message.get("bundle_id") != FROZEN_BUNDLE_ID
+                    or message.get("reconnect_generation") != 0
+                    or message.get("sender_clock_domain") != "host-monotonic"
+                    or message.get("protocol_name") != "sionna_async"
+                    or message.get("protocol_version") != 1
+                    or message.get("accepted_run_id") != run.get("run_id")
+                    or message.get("accepted_config_hash") != config_hash
+                    or message.get("accepted_bundle_id") != FROZEN_BUNDLE_ID
+                    or message.get("readiness_state") != readiness
+                    or message.get("executable_identity") != expected_executable
+                    or message.get("provider_identity") != expected_provider_identity
+                ):
+                    failures.append(f"provider {label} process/package identity differs")
+            if ready_message.get("scene_identity") != expected_scene:
+                failures.append("provider ready canonical scene identity differs")
+
+        adapter_path = (ROOT / ADAPTER_SCRIPT_PATH).resolve(strict=True)
+        adapter_sha256 = sha256_file(adapter_path)
+        if (
+            not isinstance(source_hashes, dict)
+            or source_hashes.get(ADAPTER_SCRIPT_PATH) != adapter_sha256
+        ):
+            failures.append("adapter handshake script is not bound by source identity")
+        adapter_out = [
+            item
+            for item in client_occurrences
+            if item.get("direction") == "outbound"
+        ]
+        adapter_hellos = [
+            item for item in adapter_out if item["message"].get("message_type") == "hello"
+        ]
+        adapter_readies = [
+            item for item in adapter_out if item["message"].get("message_type") == "ready"
+        ]
+        if len(adapter_hellos) != 1 or len(adapter_readies) != 1:
+            failures.append("adapter wire must contain exactly one hello/ready pair")
+        else:
+            adapter_executable = {
+                "path": str(adapter_path),
+                "sha256": adapter_sha256,
+            }
+            for label, item, readiness in (
+                ("hello", adapter_hellos[0]["message"], "initializing"),
+                ("ready", adapter_readies[0]["message"], "ready"),
+            ):
+                if (
+                    item.get("sender_id") != ADAPTER_SENDER_ID
+                    or item.get("sender_role") != "adapter"
+                    or item.get("protocol_name") != "sionna_async"
+                    or item.get("protocol_version") != 1
+                    or item.get("accepted_run_id") != run.get("run_id")
+                    or item.get("accepted_config_hash") != config_hash
+                    or item.get("accepted_bundle_id") != FROZEN_BUNDLE_ID
+                    or item.get("readiness_state") != readiness
+                    or item.get("executable_identity") != adapter_executable
+                ):
+                    failures.append(f"adapter {label} executable/contract identity differs")
+            if adapter_readies[0]["message"].get("scene_identity") != expected_scene:
+                failures.append("adapter ready canonical scene identity differs")
+
+        ready_path = run_dir / PROVIDER_READY_PATH
+        ready = strict_json(ready_path)
+        failures.extend(
+            exact_keys(
+                ready,
+                {
+                    "pid",
+                    "port",
+                    "monotonic_ns",
+                    "provider_mode",
+                    "bundle_sha256",
+                    "run_id",
+                },
+                "provider readiness",
+            )
+        )
+        ready_pid = ready.get("pid")
+        port = ready.get("port")
+        ready_ns = ready.get("monotonic_ns")
+        if (
+            isinstance(ready_pid, bool)
+            or not isinstance(ready_pid, int)
+            or ready_pid <= 1
+            or isinstance(port, bool)
+            or not isinstance(port, int)
+            or not 1 <= port <= 65_535
+            or isinstance(ready_ns, bool)
+            or not isinstance(ready_ns, int)
+            or ready_ns <= 0
+            or ready.get("provider_mode") != "real_sionna"
+            or ready.get("bundle_sha256") != bundle.get("bundle_sha256")
+            or ready.get("run_id") != run.get("run_id")
+        ):
+            failures.append("provider readiness identity differs")
+
+        roles, sample_count = _runtime_process_samples(run_dir)
+        identity = run.get("identity")
+        manifest = identity.get("executable_manifest") if isinstance(identity, dict) else None
+        python_executable = manifest.get("python") if isinstance(manifest, dict) else None
+        workers = roles.get("sionna_worker", [])
+        if len(workers) != 1:
+            failures.append("runtime must contain exactly one frozen sionna_worker")
+        elif isinstance(port, int) and not isinstance(port, bool):
+            worker = workers[0]
+            expected_cmdline_sha256 = _expected_provider_cmdline_sha256(
+                run_dir, port=port, runtime_id=str(run.get("runtime_id"))
+            )
+            if (
+                not isinstance(python_executable, dict)
+                or worker.get("pid") != ready_pid
+                or worker.get("role") != "sionna_worker"
+                or worker.get("state") == "Z"
+                or worker.get("executable_path") != python_executable.get("path")
+                or worker.get("executable_sha256") != python_executable.get("sha256")
+                or worker.get("cmdline_sha256") != expected_cmdline_sha256
+            ):
+                failures.append("provider handshake is not bound to the exact sampled process")
+            details.update(
+                {
+                    "provider_pid": worker.get("pid"),
+                    "provider_process_sample_count": sample_count,
+                    "provider_process_executable_path": worker.get("executable_path"),
+                    "provider_cmdline_sha256": worker.get("cmdline_sha256"),
+                }
+            )
+
+        adapter_ready_path = run_dir / ADAPTER_READY_PATH
+        adapter_ready = strict_json(adapter_ready_path)
+        failures.extend(
+            exact_keys(
+                adapter_ready,
+                {
+                    "pid",
+                    "monotonic_ns",
+                    "run_id",
+                    "runtime_id",
+                    "provider_mode",
+                    "pose_entities",
+                },
+                "adapter readiness",
+            )
+        )
+        adapter_ready_pid = adapter_ready.get("pid")
+        adapter_ready_ns = adapter_ready.get("monotonic_ns")
+        if (
+            isinstance(adapter_ready_pid, bool)
+            or not isinstance(adapter_ready_pid, int)
+            or adapter_ready_pid <= 1
+            or isinstance(adapter_ready_ns, bool)
+            or not isinstance(adapter_ready_ns, int)
+            or adapter_ready_ns <= 0
+            or adapter_ready.get("run_id") != run.get("run_id")
+            or adapter_ready.get("runtime_id") != run.get("runtime_id")
+            or adapter_ready.get("provider_mode") != "real_sionna"
+            or adapter_ready.get("pose_entities")
+            != ["cp", "uav1", "uav2", "uav3", "uav4", "uav5", "jammer_m4"]
+        ):
+            failures.append("adapter readiness identity differs")
+
+        adapters = roles.get("sionna_adapter", [])
+        if len(adapters) != 1:
+            failures.append("runtime must contain exactly one frozen sionna_adapter")
+        elif isinstance(port, int) and not isinstance(port, bool):
+            adapter_process = adapters[0]
+            expected_adapter_cmdline_sha256 = _expected_adapter_cmdline_sha256(
+                run_dir, port=port, runtime_id=str(run.get("runtime_id"))
+            )
+            if (
+                not isinstance(python_executable, dict)
+                or adapter_process.get("pid") != adapter_ready_pid
+                or adapter_process.get("role") != "sionna_adapter"
+                or adapter_process.get("state") == "Z"
+                or adapter_process.get("executable_path")
+                != python_executable.get("path")
+                or adapter_process.get("executable_sha256")
+                != python_executable.get("sha256")
+                or adapter_process.get("cmdline_sha256")
+                != expected_adapter_cmdline_sha256
+            ):
+                failures.append(
+                    "adapter handshake is not bound to the exact sampled process"
+                )
+            details.update(
+                {
+                    "adapter_pid": adapter_process.get("pid"),
+                    "adapter_process_sample_count": sample_count,
+                    "adapter_process_executable_path": adapter_process.get(
+                        "executable_path"
+                    ),
+                    "adapter_cmdline_sha256": adapter_process.get(
+                        "cmdline_sha256"
+                    ),
+                }
+            )
+
+        adapter_handshake_records = [*adapter_hellos, *adapter_readies]
+        if (
+            adapter_handshake_records
+            and isinstance(adapter_ready_ns, int)
+            and not isinstance(adapter_ready_ns, bool)
+            and adapter_ready_ns
+            < max(item["monotonic_ns"] for item in adapter_handshake_records)
+        ):
+            failures.append("adapter process readiness predates its exact handshake")
+
+        if provider_out and isinstance(ready_ns, int) and not isinstance(ready_ns, bool):
+            first_provider_wire_ns = min(item["monotonic_ns"] for item in provider_out)
+            if first_provider_wire_ns < ready_ns:
+                failures.append("provider wire predates provider process readiness")
+
+        details.update(
+            {
+                "provider_script_path": str(script_path),
+                "provider_script_sha256": script_sha256,
+                "provider_versions": expected_versions,
+                "provider_scene_identity": expected_scene,
+            }
+        )
+    except (
+        KeyError,
+        OSError,
+        TypeError,
+        ValueError,
+        importlib.metadata.PackageNotFoundError,
+        yaml.YAMLError,
+        M4ValidationError,
+    ) as exc:
+        failures.append(f"real provider process/handshake binding cannot be proven: {exc}")
+    return details, failures
 
 
 def _safe_relative(value: Any, label: str) -> str:
@@ -4158,10 +5016,18 @@ def validate(run_dir: Path) -> dict[str, Any]:
 
     wire, wire_failures = validate_wire_log(run_dir / "logs")
     gate_failures["real_provider_wire"].extend(wire_failures)
+    provider_binding, provider_binding_failures = _validate_real_provider_wire_binding(
+        run_dir, run, wire
+    )
+    gate_failures["real_provider_wire"].extend(provider_binding_failures)
     details["real_provider_wire"] = {
-        key: value
-        for key, value in wire.items()
-        if key not in {"messages", "message_by_hash", "raw_by_hash"}
+        "client": {
+            key: value
+            for key, value in wire.items()
+            if key not in {"messages", "message_by_hash"}
+        },
+        "provider": provider_binding.get("stream_scans", {}).get("provider", {}),
+        "binding": provider_binding,
     }
     states, state_failures = validate_states(
         run_dir / "logs/sionna_applied_states.jsonl", wire
@@ -4177,6 +5043,24 @@ def validate(run_dir: Path) -> dict[str, Any]:
         end_monotonic_ns=end_ns,
     )
     gate_failures["current_pose_lineage"].extend(pose_failures)
+    try:
+        pose_records = strict_jsonl(
+            run_dir / "logs/m4_pose_snapshots.jsonl", max_line_bytes=262_144
+        )
+        binding_details, binding_failures = validate_query_pose_runtime_binding(
+            pose_records,
+            wire,
+            events,
+            run_dir / "logs/m4_pose_observations.jsonl.gz",
+            run_id=str(run_id),
+            runtime_id=str(runtime_id),
+            start_monotonic_ns=start_ns,
+            end_monotonic_ns=end_ns,
+        )
+        gate_failures["current_pose_lineage"].extend(binding_failures)
+        poses["runtime_binding"] = binding_details
+    except M4ValidationError as exc:
+        gate_failures["current_pose_lineage"].append(str(exc))
     details["current_pose_lineage"] = poses
     adapter, adapter_failures = validate_adapter_audit(
         run_dir / "logs/sionna_packet_adapter.jsonl",
@@ -4184,7 +5068,9 @@ def validate(run_dir: Path) -> dict[str, Any]:
         end_monotonic_ns=end_ns,
     )
     gate_failures["bounded_nonblocking"].extend(adapter_failures)
-    details["bounded_nonblocking"].update(adapter)
+    details["bounded_nonblocking"].update(
+        {key: value for key, value in adapter.items() if key != "records"}
+    )
     packets, packet_failures = validate_packet_events(
         run_dir / "logs/ns3_packet_events.jsonl",
         states,
@@ -4197,7 +5083,7 @@ def validate(run_dir: Path) -> dict[str, Any]:
     }
 
     freshness, freshness_failures = validate_capacity_freshness(
-        wire, states, packets, start_ns=start_ns, end_ns=end_ns
+        wire, states, packets, adapter, start_ns=start_ns, end_ns=end_ns
     )
     gate_failures["freshness_expiry"].extend(freshness_failures)
     details["freshness_expiry"] = freshness

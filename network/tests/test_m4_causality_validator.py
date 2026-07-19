@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import gzip
 import hashlib
 import json
 import struct
@@ -22,6 +23,7 @@ from network.scripts.m4_adapter_runtime import apply_control  # noqa: E402
 from network.radio_provider.sionna_packet_adapter import (  # noqa: E402
     deterministic_loss_sample,
 )
+from network.radio_provider.sionna_async import node_state_sha256  # noqa: E402
 from network.scripts.actual_sitl_control_probe import (  # noqa: E402
     ControlProbeError,
     MavlinkSequencer,
@@ -33,7 +35,16 @@ from network.scripts.actual_sitl_control_probe import (  # noqa: E402
 from network.scripts.m4_runtime_orchestrator import (  # noqa: E402
     ACTUAL_SITL_AUDIT_LOG_PATHS,
 )
-from network.validation.m4_runtime import QUERY_DEADLINE_NS  # noqa: E402
+from network.validation.m4_common import M4ValidationError  # noqa: E402
+from network.validation.m4_pose_observations import (  # noqa: E402
+    PoseObservationWriter,
+    scan_pose_observation_stream,
+)
+from network.validation.m4_runtime import (  # noqa: E402
+    QUERY_DEADLINE_NS,
+    validate_native_world_entity_observations,
+    validate_query_pose_runtime_binding,
+)
 from network.validation.validate_m4_causality import (  # noqa: E402
     BACKGROUND_CELL_ID,
     CAUSAL_PIN_MODELS,
@@ -541,6 +552,282 @@ def pose_fixture(windows: dict[str, dict[str, object]]) -> list[dict[str, object
     return records
 
 
+def write_pose_observation_fixture(
+    path: Path,
+    observations: list[dict[str, object]],
+    *,
+    run_id: str = "pose-binding-run",
+    runtime_id: str = "pose-binding-runtime",
+) -> None:
+    writer = PoseObservationWriter(
+        path,
+        run_id,
+        runtime_id,
+        created_monotonic_ns=9_000_000_000,
+    )
+    for observation in observations:
+        writer.emit(**observation)
+    last_callback_ns = max(
+        (int(item["source_callback_monotonic_ns"]) for item in observations),
+        default=9_000_000_000,
+    )
+    writer.close(closed_monotonic_ns=last_callback_ns + 1_000_000)
+
+
+def query_pose_runtime_binding_fixture(path: Path) -> tuple[
+    list[dict[str, object]],
+    dict[str, list[dict[str, object]]],
+    list[dict[str, object]],
+    list[dict[str, object]],
+]:
+    """One query snapshot plus an independent collector observation per entity."""
+
+    base_host_ns = 10_000_000_000
+    sim_offset_ns = 2_000_000_000
+    snapshot_ns = base_host_ns + 50_000_000
+    sent_ns = base_host_ns + 60_000_000
+    positions = {
+        "cp": [-8_000.0, -2_500.0, 300.0],
+        "uav1": [-1_000.0, 0.0, 100.0],
+        "uav2": [-500.0, 0.0, 100.0],
+        "uav3": [0.0, 0.0, 100.0],
+        "uav4": [500.0, 0.0, 100.0],
+        "uav5": [1_000.0, 0.0, 100.0],
+        "jammer_m4": [2_000.0, -3_000.0, 100.0],
+    }
+    orientation = [0.0, 0.0, 0.0, 1.0]
+    raw_nodes: list[dict[str, object]] = []
+    raw_jammers: list[dict[str, object]] = []
+    runtime: list[dict[str, object]] = []
+    observations: list[dict[str, object]] = []
+
+    for clock_host_ns in (
+        base_host_ns - 100_000_000,
+        base_host_ns,
+        base_host_ns + 100_000_000,
+        base_host_ns + 200_000_000,
+    ):
+        runtime.append(
+            {
+                "event": "gazebo_clock_sample",
+                "host_monotonic_ns": clock_host_ns + 1_000,
+                "source_callback_monotonic_ns": clock_host_ns,
+                "clock_topic": "/uav1/clock",
+                "sim_time_ns": clock_host_ns - sim_offset_ns,
+            }
+        )
+
+    for ordinal, entity in enumerate(
+        ("cp", "uav1", "uav2", "uav3", "uav4", "uav5", "jammer_m4")
+    ):
+        adapter_callback_ns = base_host_ns + 10_000_000 + ordinal * 1_000_000
+        collector_callback_ns = base_host_ns + 20_000_000 + ordinal * 1_000_000
+        source_stamp_ns = adapter_callback_ns - sim_offset_ns - 5_000_000
+        world_entity = entity in {"cp", "jammer_m4"}
+        source_topic = (
+            "/world/map/pose/info" if world_entity else f"/{entity}/odometry"
+        )
+        source_header_frame = "" if world_entity else "odom"
+        source_child_frame = entity if world_entity else "base_link"
+        raw_entity: dict[str, object] = {
+            "pose_monotonic_ns": adapter_callback_ns,
+            "source_topic": source_topic,
+            "source_header_stamp_ns": source_stamp_ns,
+            "source_transport": (
+                "gazebo_transport_pose_v" if world_entity else "ros2_dds_odometry"
+            ),
+            "source_stamp_scope": (
+                "pose_v_top_level_header" if world_entity else "ros_header"
+            ),
+            "source_header_frame": source_header_frame,
+            "source_child_frame": source_child_frame,
+            "source_frame": "world",
+            "transform_version": "enu-identity-v1",
+            "position_m": list(positions[entity]),
+            "orientation_quat_xyzw": list(orientation),
+            "freshness_age_ns": snapshot_ns - adapter_callback_ns,
+            "stale": False,
+        }
+        if entity == "jammer_m4":
+            raw_entity.update(
+                {
+                    "jammer_id": entity,
+                    "enabled": False,
+                    "center_frequency_hz": 2_437_000_000.0,
+                    "bandwidth_hz": 20_000_000.0,
+                    "power_dbm": 20.0,
+                    "duty_cycle": 1.0,
+                    "antenna_pattern": "isotropic",
+                }
+            )
+            raw_jammers.append(raw_entity)
+        else:
+            raw_entity.update(
+                {
+                    "node_id": entity,
+                    "role": "command_post" if entity == "cp" else "uav",
+                }
+            )
+            raw_nodes.append(raw_entity)
+
+        observation: dict[str, object] = {
+            "kind": "w" if world_entity else "o",
+            "entity_id": entity,
+            "source_callback_monotonic_ns": collector_callback_ns,
+            "source_topic": source_topic,
+            "source_transport": (
+                "gazebo_transport_pose_v" if world_entity else "ros2_dds_odometry"
+            ),
+            "source_stamp_scope": (
+                "pose_v_top_level_header" if world_entity else "ros_header"
+            ),
+            "source_frame": "world" if world_entity else "ros_odometry_world_enu",
+            "transform_version": (
+                "enu-identity-v1"
+                if world_entity
+                else "ams-m4-coordinate-frames-v1"
+            ),
+            "source_header_frame": source_header_frame,
+            "source_child_frame": source_child_frame,
+            "sim_stamp_ns": source_stamp_ns,
+            "position_m": list(positions[entity]),
+            "orientation_quat_xyzw": list(orientation),
+        }
+        observations.append(observation)
+
+    def query_form(entity: dict[str, object]) -> dict[str, object]:
+        result = copy.deepcopy(entity)
+        for key in (
+            "source_header_stamp_ns",
+            "source_header_frame",
+            "source_child_frame",
+            "source_transport",
+            "source_stamp_scope",
+        ):
+            result.pop(key)
+        result["freshness_age_ns"] = sent_ns - int(result["pose_monotonic_ns"])
+        return result
+
+    query_nodes = [query_form(item) for item in raw_nodes]
+    query_jammers = [query_form(item) for item in raw_jammers]
+    digest = node_state_sha256(
+        node_state_seq=1,
+        snapshot_monotonic_ns=snapshot_ns,
+        source_frame="world",
+        transform_version="enu-identity-v1",
+        nodes=query_nodes,
+        jammers=query_jammers,
+    )
+    pose_records: list[dict[str, object]] = [
+        {
+            "schema": "ams.m4.pose_snapshot/v2",
+            "pose_sequence": 1,
+            "node_state_seq": 1,
+            "node_state_sha256": digest,
+            "snapshot_monotonic_ns": snapshot_ns,
+            "host_monotonic_ns": snapshot_ns,
+            "source_frame": "world",
+            "transform_version": "enu-identity-v1",
+            "nodes": raw_nodes,
+            "jammers": raw_jammers,
+        }
+    ]
+    wire = {
+        "messages": [
+            {
+                "message_type": "query",
+                "query_id": "pose-binding.query.1",
+                "request_sent_monotonic_ns": sent_ns,
+                "node_state_seq": 1,
+                "node_state_sha256": digest,
+                "node_state_snapshot_monotonic_ns": snapshot_ns,
+                "source_frame": "world",
+                "transform_version": "enu-identity-v1",
+                "nodes": query_nodes,
+                "jammers": query_jammers,
+            }
+        ]
+    }
+    write_pose_observation_fixture(path, observations)
+    _matches, stream_details = scan_pose_observation_stream(
+        path,
+        run_id="pose-binding-run",
+        runtime_id="pose-binding-runtime",
+        required_keys=set(),
+    )
+    runtime.extend(
+        (
+            {
+                "event": "collector_start",
+                "host_monotonic_ns": 9_100_000_000,
+                "pose_observation_stream": {
+                    "path": "logs/m4_pose_observations.jsonl.gz",
+                    "schema": "ams.m4.pose_observation_stream/v1",
+                    "encoding": "gzip-jsonl-compact-v1",
+                    "created_monotonic_ns": stream_details[
+                        "created_monotonic_ns"
+                    ],
+                    "main_odometry_sample_period_ns": 200_000_000,
+                },
+            },
+            {
+                "event": "collector_stop",
+                "host_monotonic_ns": base_host_ns + 300_000_000,
+                "pose_observation_count": stream_details["observation_count"],
+                "pose_observation_content_sha256": stream_details[
+                    "content_sha256"
+                ],
+                "pose_observation_closed_monotonic_ns": stream_details[
+                    "closed_monotonic_ns"
+                ],
+            },
+        )
+    )
+    runtime.sort(key=lambda item: int(item["host_monotonic_ns"]))
+    for sequence, record in enumerate(runtime, start=1):
+        record["schema"] = "ams.m4.runtime_event/v1"
+        record["event_sequence"] = sequence
+    return pose_records, wire, runtime, observations
+
+
+def rehash_query_pose_binding(
+    pose_records: list[dict[str, object]],
+    wire: dict[str, list[dict[str, object]]],
+) -> None:
+    raw = pose_records[0]
+    message = wire["messages"][0]
+
+    def query_form(entity: dict[str, object]) -> dict[str, object]:
+        result = copy.deepcopy(entity)
+        for key in (
+            "source_header_stamp_ns",
+            "source_header_frame",
+            "source_child_frame",
+            "source_transport",
+            "source_stamp_scope",
+        ):
+            result.pop(key)
+        result["freshness_age_ns"] = int(message["request_sent_monotonic_ns"]) - int(
+            result["pose_monotonic_ns"]
+        )
+        return result
+
+    query_nodes = [query_form(item) for item in raw["nodes"]]
+    query_jammers = [query_form(item) for item in raw["jammers"]]
+    digest = node_state_sha256(
+        node_state_seq=int(raw["node_state_seq"]),
+        snapshot_monotonic_ns=int(raw["snapshot_monotonic_ns"]),
+        source_frame=str(raw["source_frame"]),
+        transform_version=str(raw["transform_version"]),
+        nodes=query_nodes,
+        jammers=query_jammers,
+    )
+    raw["node_state_sha256"] = digest
+    message["node_state_sha256"] = digest
+    message["nodes"] = query_nodes
+    message["jammers"] = query_jammers
+
+
 class CausalWindowTests(unittest.TestCase):
     def test_breaking_causality_and_capacity_prerequisite_versions_are_frozen(
         self,
@@ -811,6 +1098,9 @@ class CausalWindowTests(unittest.TestCase):
         self.assertIn("actual_sitl_stack_orchestrator.sh", source)
         self.assertIn("--fault-enabled", source)
         self.assertIn("DURATION_MS=1250000", source)
+        self.assertIn("--mavproxy-streamrate 1", source)
+        self.assertIn("--mavproxy-streamrate 1", capacity_runner.read_text())
+        self.assertIn('mavproxy_streamrate:="$MAVPROXY_STREAMRATE"', stack.read_text())
         profiles = json.loads(
             (ROOT / "network/config/component_acceptance_profiles.json").read_text()
         )["profiles"]
@@ -986,6 +1276,376 @@ class CausalWindowTests(unittest.TestCase):
         records[0]["nodes"][1]["position_m"][0] += 2.0
         _details, failures = validate_causal_pose_geometry(records, windows, bundle)
         self.assertTrue(any("outside canonical 1-m" in item for item in failures))
+
+    def test_each_query_pose_is_bound_to_independent_runtime_and_clock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pose.jsonl.gz"
+            pose_records, wire, runtime, _observations = (
+                query_pose_runtime_binding_fixture(path)
+            )
+            details, failures = validate_query_pose_runtime_binding(
+                pose_records,
+                wire,
+                runtime,
+                path,
+                run_id="pose-binding-run",
+                runtime_id="pose-binding-runtime",
+            )
+        self.assertEqual(failures, [])
+        self.assertEqual(details["referenced_snapshot_count"], 1)
+        self.assertEqual(details["bound_entity_count"], 7)
+        self.assertEqual(details["clock_interpolation_count"], 14)
+        self.assertEqual(details["observation_count"], 7)
+        self.assertEqual(details["matching_observation_count"], 7)
+
+    def test_runtime_entities_require_exact_native_gazebo_lineage(self) -> None:
+        entities = {
+            entity: {
+                "last_host_ns": 10_000_000_000 + index,
+                "sim_stamp_ns": 8_000_000_000,
+                "source_topic": "/world/map/pose/info",
+                "source_transport": "gazebo_transport_pose_v",
+                "source_stamp_scope": "pose_v_top_level_header",
+                "source_frame": "world",
+                "transform_version": "enu-identity-v1",
+                "source_header_frame": "",
+                "source_child_frame": entity,
+                "position_m": [float(index), 0.0, 100.0],
+                "orientation_quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+            }
+            for index, entity in enumerate(
+                ("cp", "uav1", "uav2", "uav3", "uav4", "uav5", "jammer_m4")
+            )
+        }
+        self.assertEqual(validate_native_world_entity_observations(entities), [])
+        for field, forged in (
+            ("source_topic", "/world/foreign/pose/info"),
+            ("source_transport", "ros2_tf_bridge"),
+            ("source_stamp_scope", "per_pose_header"),
+            ("source_frame", "map"),
+            ("transform_version", "forged-v1"),
+            ("source_header_frame", "world"),
+            ("source_child_frame", "cp"),
+        ):
+            with self.subTest(field=field):
+                mutated = copy.deepcopy(entities)
+                mutated["uav3"][field] = forged
+                self.assertEqual(
+                    validate_native_world_entity_observations(mutated),
+                    ["active Gazebo entity evidence differs: uav3"],
+                )
+
+    def test_pose_binding_uses_precomputed_capacity_scale_indexes(self) -> None:
+        source = (ROOT / "network/validation/m4_runtime.py").read_text()
+        stream = (
+            ROOT / "network/validation/m4_pose_observations.py"
+        ).read_text()
+        self.assertIn("scan_pose_observation_stream(", source)
+        self.assertIn("if key in required_keys:", stream)
+        self.assertIn("clock_hosts = [sample[0] for sample in clocks]", source)
+        self.assertIn("bisect.bisect_left(clock_hosts, callback_ns)", source)
+
+    def test_raw_source_stamp_without_independent_observation_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pose.jsonl.gz"
+            pose_records, wire, runtime, _observations = (
+                query_pose_runtime_binding_fixture(path)
+            )
+            pose_records[0]["nodes"][3]["source_header_stamp_ns"] += 1
+            _details, failures = validate_query_pose_runtime_binding(
+                pose_records,
+                wire,
+                runtime,
+                path,
+                run_id="pose-binding-run",
+                runtime_id="pose-binding-runtime",
+            )
+        self.assertTrue(
+            any("uav3 has no exact independent runtime pose sample" in item for item in failures),
+            failures,
+        )
+
+    def test_self_consistent_pose_forgery_cannot_replace_collector_pose(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pose.jsonl.gz"
+            pose_records, wire, runtime, _observations = (
+                query_pose_runtime_binding_fixture(path)
+            )
+            pose_records[0]["nodes"][5]["position_m"][0] += 0.25
+            rehash_query_pose_binding(pose_records, wire)
+            _details, failures = validate_query_pose_runtime_binding(
+                pose_records,
+                wire,
+                runtime,
+                path,
+                run_id="pose-binding-run",
+                runtime_id="pose-binding-runtime",
+            )
+        self.assertTrue(
+            any("uav5 has no exact independent runtime pose sample" in item for item in failures),
+            failures,
+        )
+
+    def test_matching_forged_stamp_is_rejected_by_gazebo_clock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pose.jsonl.gz"
+            pose_records, wire, runtime, observations = (
+                query_pose_runtime_binding_fixture(path)
+            )
+            forged_stamp_ns = int(
+                pose_records[0]["nodes"][2]["source_header_stamp_ns"]
+            ) + 5_000_000_000
+            pose_records[0]["nodes"][2]["source_header_stamp_ns"] = forged_stamp_ns
+            next(
+                record
+                for record in observations
+                if record.get("entity_id") == "uav2"
+            )["sim_stamp_ns"] = forged_stamp_ns
+            forged_path = Path(directory) / "forged.jsonl.gz"
+            write_pose_observation_fixture(forged_path, observations)
+            _details, failures = validate_query_pose_runtime_binding(
+                pose_records,
+                wire,
+                runtime,
+                forged_path,
+                run_id="pose-binding-run",
+                runtime_id="pose-binding-runtime",
+            )
+        self.assertTrue(
+            any("uav2 source stamp is inconsistent with Gazebo clock" in item for item in failures),
+            failures,
+        )
+
+    def test_world_entity_requires_independent_world_pose_sample(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pose.jsonl.gz"
+            pose_records, wire, runtime, observations = (
+                query_pose_runtime_binding_fixture(path)
+            )
+            missing_path = Path(directory) / "missing.jsonl.gz"
+            write_pose_observation_fixture(
+                missing_path,
+                [item for item in observations if item.get("entity_id") != "cp"],
+            )
+            _details, failures = validate_query_pose_runtime_binding(
+                pose_records,
+                wire,
+                runtime,
+                missing_path,
+                run_id="pose-binding-run",
+                runtime_id="pose-binding-runtime",
+            )
+        self.assertTrue(
+            any("cp has no exact independent runtime pose sample" in item for item in failures),
+            failures,
+        )
+
+    def test_pose_stream_identity_digest_and_clean_footer_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "pose.jsonl.gz"
+            _poses, _wire, _runtime, _observations = (
+                query_pose_runtime_binding_fixture(path)
+            )
+            with self.assertRaisesRegex(
+                M4ValidationError, "header schema/identity differs"
+            ):
+                scan_pose_observation_stream(
+                    path,
+                    run_id="foreign-run",
+                    runtime_id="pose-binding-runtime",
+                    required_keys=set(),
+                )
+
+            truncated = root / "truncated.jsonl.gz"
+            truncated.write_bytes(path.read_bytes()[:-8])
+            with self.assertRaises(M4ValidationError):
+                scan_pose_observation_stream(
+                    truncated,
+                    run_id="pose-binding-run",
+                    runtime_id="pose-binding-runtime",
+                    required_keys=set(),
+                )
+
+            lines = gzip.decompress(path.read_bytes()).splitlines(keepends=True)
+            footer = json.loads(lines[-1])
+            footer["content_sha256"] = "0" * 64
+            lines[-1] = (
+                json.dumps(footer, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode()
+            forged = root / "forged-footer.jsonl.gz"
+            forged.write_bytes(
+                gzip.compress(b"".join(lines), compresslevel=1, mtime=0)
+            )
+            with self.assertRaisesRegex(
+                M4ValidationError, "clean-close footer/count differs"
+            ):
+                scan_pose_observation_stream(
+                    forged,
+                    run_id="pose-binding-run",
+                    runtime_id="pose-binding-runtime",
+                    required_keys=set(),
+                )
+
+    def test_pose_stream_must_bind_main_collector_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pose.jsonl.gz"
+            pose_records, wire, runtime, _observations = (
+                query_pose_runtime_binding_fixture(path)
+            )
+            stop = next(
+                record
+                for record in runtime
+                if record.get("event") == "collector_stop"
+            )
+            stop["pose_observation_count"] += 1
+            _details, failures = validate_query_pose_runtime_binding(
+                pose_records,
+                wire,
+                runtime,
+                path,
+                run_id="pose-binding-run",
+                runtime_id="pose-binding-runtime",
+            )
+            self.assertTrue(
+                any(
+                    "stream/main collector lifecycle binding differs" in item
+                    for item in failures
+                ),
+                failures,
+            )
+
+    def test_pose_stream_preserves_exact_source_identity_across_callback_threads(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "concurrent.jsonl.gz"
+            writer = PoseObservationWriter(
+                path,
+                "concurrent-run",
+                "concurrent-runtime",
+                created_monotonic_ns=100,
+            )
+
+            def emit(entity: str, callback_ns: int) -> None:
+                writer.emit(
+                    kind="o",
+                    entity_id=entity,
+                    source_callback_monotonic_ns=callback_ns,
+                    sim_stamp_ns=0,
+                    source_topic=f"/{entity}/odometry",
+                    source_transport="ros2_dds_odometry",
+                    source_stamp_scope="ros_header",
+                    source_frame="ros_odometry_world_enu",
+                    transform_version="ams-m4-coordinate-frames-v1",
+                    source_header_frame="odom",
+                    source_child_frame="base_link",
+                    position_m=[0.0, 0.0, 0.0],
+                    orientation_quat_xyzw=[0.0, 0.0, 0.0, 1.0],
+                )
+
+            # Writer acquisition order can differ from callback-entry order
+            # because native Gazebo and ROS DDS callbacks use separate threads.
+            emit("uav1", 300)
+            emit("uav2", 200)
+            with self.assertRaisesRegex(M4ValidationError, "odometry lineage differs"):
+                writer.emit(
+                    kind="o",
+                    entity_id="uav3",
+                    source_callback_monotonic_ns=350,
+                    sim_stamp_ns=0,
+                    source_topic="/uav3/odometry",
+                    source_transport="gazebo_transport_pose_v",
+                    source_stamp_scope="ros_header",
+                    source_frame="ros_odometry_world_enu",
+                    transform_version="ams-m4-coordinate-frames-v1",
+                    source_header_frame="odom",
+                    source_child_frame="base_link",
+                    position_m=[0.0, 0.0, 0.0],
+                    orientation_quat_xyzw=[0.0, 0.0, 0.0, 1.0],
+                )
+            writer.close(closed_monotonic_ns=400)
+            _matches, details = scan_pose_observation_stream(
+                path,
+                run_id="concurrent-run",
+                runtime_id="concurrent-runtime",
+                required_keys=set(),
+            )
+            self.assertEqual(details["observation_count"], 2)
+
+    def test_pose_stream_is_buffered_compact_and_main_runtime_is_bounded(self) -> None:
+        collector_source = (
+            ROOT / "network/scripts/collect_m4_runtime.py"
+        ).read_text()
+        adapter_source = (
+            ROOT / "network/scripts/m4_adapter_runtime.py"
+        ).read_text()
+        capacity_runner = (ROOT / "network/scripts/run_m4_capacity.sh").read_text()
+        causality_runner = (ROOT / "network/scripts/run_m4_causality.sh").read_text()
+        stream_source = (
+            ROOT / "network/validation/m4_pose_observations.py"
+        ).read_text()
+        self.assertIn(
+            "MAIN_RUNTIME_ODOMETRY_SAMPLE_PERIOD_NS = 200_000_000",
+            collector_source,
+        )
+        self.assertEqual(collector_source.count("pose_writer.emit("), 2)
+        self.assertNotIn('writer.emit(\n                        "world_pose_sample"', collector_source)
+        self.assertIn("GazeboPoseVSource(node.on_world_pose)", collector_source)
+        self.assertIn("GazeboPoseVSource(tracker.update_world)", adapter_source)
+        self.assertNotIn("tf2_msgs/msg/TFMessage[gz.msgs.Pose_V", capacity_runner)
+        self.assertNotIn("tf2_msgs/msg/TFMessage[gz.msgs.Pose_V", causality_runner)
+        self.assertIn("compresslevel=1", stream_source)
+        self.assertIn(
+            "buffer_size=POSE_OBSERVATION_BUFFER_BYTES", stream_source
+        )
+        emit_body = stream_source.split("    def emit(\n", 1)[1].split(
+            "    def close(", 1
+        )[0]
+        self.assertNotIn("flush(", emit_body)
+
+    def test_high_rate_pose_stream_scans_without_materializing_unmatched_records(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "high-rate.jsonl.gz"
+            writer = PoseObservationWriter(
+                path,
+                "benchmark-run",
+                "benchmark-runtime",
+                created_monotonic_ns=20_000_000_000,
+            )
+            count = 20_000
+            for sequence in range(count):
+                callback_ns = 20_000_001_000 + sequence * 500_000
+                writer.emit(
+                    kind="o",
+                    entity_id="uav1",
+                    source_callback_monotonic_ns=callback_ns,
+                    sim_stamp_ns=18_000_001_000 + sequence * 500_000,
+                    source_topic="/uav1/odometry",
+                    source_transport="ros2_dds_odometry",
+                    source_stamp_scope="ros_header",
+                    source_frame="ros_odometry_world_enu",
+                    transform_version="ams-m4-coordinate-frames-v1",
+                    source_header_frame="odom",
+                    source_child_frame="base_link",
+                    position_m=[1.0, 2.0, 100.0],
+                    orientation_quat_xyzw=[0.0, 0.0, 0.0, 1.0],
+                )
+            writer.close(
+                closed_monotonic_ns=20_000_001_000 + count * 500_000
+            )
+            matches, details = scan_pose_observation_stream(
+                path,
+                run_id="benchmark-run",
+                runtime_id="benchmark-runtime",
+                required_keys=set(),
+            )
+            self.assertEqual(matches, {})
+            self.assertEqual(details["observation_count"], count)
+            self.assertEqual(details["matching_observation_count"], 0)
+            self.assertLess(details["compressed_size_bytes"], 1_500_000)
 
     def test_effect_size_zero_delivery_and_expiry_mutations_fail(self) -> None:
         windows, failures = validate_window_manifest(

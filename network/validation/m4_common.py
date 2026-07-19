@@ -155,7 +155,6 @@ def validate_wire_log(directory: Path) -> tuple[dict[str, Any], list[str]]:
     data = data_path.read_bytes()
     expected_offset = 0
     messages: list[dict[str, Any]] = []
-    raw_by_hash: dict[str, bytes] = {}
     message_by_hash: dict[str, dict[str, Any]] = {}
     for number, record in enumerate(index, start=1):
         failures.extend(
@@ -186,7 +185,6 @@ def validate_wire_log(directory: Path) -> tuple[dict[str, Any], list[str]]:
         if hashlib.sha256(raw).hexdigest() != digest:
             failures.append(f"wire index record {number} SHA-256 mismatch")
             continue
-        raw_by_hash[digest] = raw
         try:
             message = dict(decode_message(raw))
         except (ProtocolValidationError, ValueError) as exc:
@@ -238,7 +236,6 @@ def validate_wire_log(directory: Path) -> tuple[dict[str, Any], list[str]]:
             },
             "messages": messages,
             "message_by_hash": message_by_hash,
-            "raw_by_hash": raw_by_hash,
         }
     )
     return details, failures
@@ -254,6 +251,32 @@ def validate_states(path: Path, wire: Mapping[str, Any]) -> tuple[dict[str, Any]
     by_hash: dict[str, dict[str, Any]] = {}
     latest: dict[tuple[str, str], dict[str, Any]] = {}
     message_by_hash = wire.get("message_by_hash", {})
+    provider_identities: dict[str, str] = {}
+    for message in wire.get("messages", []):
+        if (
+            message.get("message_type") not in {"hello", "ready"}
+            or message.get("sender_role") != "provider"
+        ):
+            continue
+        sender_id = message.get("sender_id")
+        provider_identity = message.get("provider_identity")
+        if not isinstance(sender_id, str) or not isinstance(
+            provider_identity, dict
+        ):
+            failures.append("provider handshake identity is incomplete")
+            continue
+        encoded_identity = json.dumps(
+            provider_identity, sort_keys=True, separators=(",", ":")
+        )
+        previous_identity = provider_identities.setdefault(
+            sender_id, encoded_identity
+        )
+        if previous_identity != encoded_identity:
+            failures.append(f"provider identity changed for sender {sender_id}")
+    if len(provider_identities) != 1:
+        failures.append(
+            f"state lineage requires exactly one provider identity, observed {len(provider_identities)}"
+        )
     unavailable = 0
     geometry_counts: dict[str, int] = defaultdict(int)
     for number, record in enumerate(records, start=1):
@@ -285,6 +308,7 @@ def validate_states(path: Path, wire: Mapping[str, Any]) -> tuple[dict[str, Any]
             continue
         required = (
             "query_id",
+            "node_state_sha256",
             "query_wire_sha256",
             "result_wire_sha256",
             "applied_state_id",
@@ -303,8 +327,75 @@ def validate_states(path: Path, wire: Mapping[str, Any]) -> tuple[dict[str, Any]
             failures.append(f"state record {number} query wire hash is not captured")
         if not result_message or result_message.get("message_type") != "result":
             failures.append(f"state record {number} result wire hash is not captured")
-        if query_message and query_message.get("query_id") != record.get("query_id"):
-            failures.append(f"state record {number} query correlation mismatch")
+        if query_message:
+            source = query_message.get("tx_node_id")
+            destination = query_message.get("rx_node_id")
+            traffic_class = query_message.get("traffic_class")
+            expected_link = f"{source}>{destination}"
+            expected_link_id = f"{source}-to-{destination}-{traffic_class}"
+            if (
+                query_message.get("query_id") != record.get("query_id")
+                or query_message.get("node_state_seq")
+                != record.get("node_state_seq")
+                or query_message.get("node_state_sha256")
+                != record.get("node_state_sha256")
+                or not isinstance(record.get("node_state_sha256"), str)
+                or HEX64.fullmatch(str(record.get("node_state_sha256"))) is None
+                or query_message.get("directed_link_id") != expected_link_id
+                or record.get("directed_link") != expected_link
+                or record.get("traffic_class") != traffic_class
+                or any(
+                    record.get(key) != query_message.get(key)
+                    for key in ("run_id", "profile", "phase_id")
+                )
+            ):
+                failures.append(
+                    f"state record {number} query/state correlation tuple mismatch"
+                )
+        if result_message and query_message:
+            correlation_keys = (
+                "query_id",
+                "node_state_seq",
+                "directed_link_id",
+                "traffic_class",
+                "tx_node_id",
+                "rx_node_id",
+                "run_id",
+                "profile",
+                "phase_id",
+                "contract_hash",
+                "config_hash",
+                "bundle_id",
+            )
+            if any(
+                result_message.get(key) != query_message.get(key)
+                for key in correlation_keys
+            ):
+                failures.append(
+                    f"state record {number} query/result correlation tuple mismatch"
+                )
+            if result_message.get("sender_id") not in provider_identities:
+                failures.append(
+                    f"state record {number} result has no provider handshake identity"
+                )
+            provider_received = result_message.get(
+                "provider_received_monotonic_ns"
+            )
+            request_sent = query_message.get("request_sent_monotonic_ns")
+            if (
+                result_message.get("provider_clock_domain")
+                != query_message.get("sender_clock_domain")
+                or result_message.get("validity_clock_domain")
+                != query_message.get("sender_clock_domain")
+                or isinstance(provider_received, bool)
+                or not isinstance(provider_received, int)
+                or isinstance(request_sent, bool)
+                or not isinstance(request_sent, int)
+                or provider_received < request_sent
+            ):
+                failures.append(
+                    f"state record {number} query/result clock tuple mismatch"
+                )
         if result_message:
             if result_message.get("query_id") != record.get("query_id"):
                 failures.append(f"state record {number} result correlation mismatch")
@@ -312,6 +403,15 @@ def validate_states(path: Path, wire: Mapping[str, Any]) -> tuple[dict[str, Any]
                 failures.append(f"state record {number} comes from a failed result")
             if result_message.get("physical") != record.get("physical"):
                 failures.append(f"state record {number} physical output differs from wire")
+            if (
+                result_message.get("validity_start_monotonic_ns")
+                != record.get("validity_start_monotonic_ns")
+                or result_message.get("expires_monotonic_ns")
+                != record.get("expires_monotonic_ns")
+            ):
+                failures.append(
+                    f"state record {number} result validity tuple differs"
+                )
         physical = record.get("physical")
         if isinstance(physical, dict):
             geometry = physical.get("geometry_state")
@@ -420,6 +520,8 @@ def _pose_query_form(record: Mapping[str, Any], *, jammer: bool) -> dict[str, An
         "source_header_stamp_ns",
         "source_header_frame",
         "source_child_frame",
+        "source_transport",
+        "source_stamp_scope",
     }
     if set(record) != expected | raw_lineage:
         raise M4ValidationError(
@@ -430,6 +532,8 @@ def _pose_query_form(record: Mapping[str, Any], *, jammer: bool) -> dict[str, An
     source_stamp_ns = record.get("source_header_stamp_ns")
     source_header_frame = record.get("source_header_frame")
     source_child_frame = record.get("source_child_frame")
+    source_transport = record.get("source_transport")
+    source_stamp_scope = record.get("source_stamp_scope")
     identity_key = "jammer_id" if jammer else "node_id"
     identity = record.get(identity_key)
     child_parts = (
@@ -451,6 +555,8 @@ def _pose_query_form(record: Mapping[str, Any], *, jammer: bool) -> dict[str, An
     if identity in {"uav1", "uav2", "uav3", "uav4", "uav5"}:
         if (
             record.get("source_topic") != f"/{identity}/odometry"
+            or source_transport != "ros2_dds_odometry"
+            or source_stamp_scope != "ros_header"
             or source_header_frame != "odom"
             or source_child_frame != "base_link"
         ):
@@ -458,6 +564,9 @@ def _pose_query_form(record: Mapping[str, Any], *, jammer: bool) -> dict[str, An
     elif identity in {"cp", "jammer_m4"}:
         if (
             record.get("source_topic") != "/world/map/pose/info"
+            or source_transport != "gazebo_transport_pose_v"
+            or source_stamp_scope != "pose_v_top_level_header"
+            or source_header_frame != ""
             or not child_parts
             or child_parts[-1] != identity
         ):
@@ -683,6 +792,7 @@ def validate_adapter_audit(
     if forbidden_reasons:
         failures.append(f"adapter audit contains overload/stale/expiry faults: {forbidden_reasons[:5]}")
     return {
+        "records": records,
         "record_count": len(records),
         "submitted_cells": len(submitted),
         "applied_cells": len(applied),

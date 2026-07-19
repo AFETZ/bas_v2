@@ -17,17 +17,26 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in os.sys.path:
     os.sys.path.insert(0, str(ROOT))
 
-from network.scripts.collect_flight_capacity import (
+from network.scripts.collect_flight_capacity import (  # noqa: E402
     cgroup_sample,
     gpu_sample,
     parse_proc_stat,
     read_text,
     static_runtime_identity,
 )
-from network.bridge.runtime_clock_beacon import beacon
-from network.scripts.m4_runtime_orchestrator import write_exclusive
-from network.validation.m4_common import M4ValidationError, strict_json
-from network.validation.m4_runtime import (
+from network.bridge.runtime_clock_beacon import beacon  # noqa: E402
+from network.scripts.m4_runtime_orchestrator import write_exclusive  # noqa: E402
+from network.scripts.m4_gazebo_pose_source import GazeboPoseVSource  # noqa: E402
+from network.validation.m4_common import M4ValidationError, strict_json  # noqa: E402
+from network.validation.m4_pose_observations import (  # noqa: E402
+    ODOMETRY_SOURCE_STAMP_SCOPE,
+    ODOMETRY_SOURCE_TRANSPORT,
+    POSE_OBSERVATION_STREAM_ENCODING,
+    POSE_OBSERVATION_STREAM_PATH,
+    POSE_OBSERVATION_STREAM_SCHEMA,
+    PoseObservationWriter,
+)
+from network.validation.m4_runtime import (  # noqa: E402
     REQUIRED_PROCESS_COUNTS,
     RUNTIME_EVENT_SCHEMA,
 )
@@ -40,14 +49,7 @@ ODOMETRY_SOURCE_FRAME = "ros_odometry_world_enu"
 COORDINATE_TRANSFORM_VERSION = "ams-m4-coordinate-frames-v1"
 ODOMETRY_HEADER_FRAME = "odom"
 ODOMETRY_CHILD_FRAME = "base_link"
-
-
-def runtime_entity_name(frame: str) -> str | None:
-    parts = [part for part in frame.strip("/").split("/") if part]
-    return next(
-        (candidate for candidate in reversed(parts) if candidate in WORLD_ENTITY_IDS),
-        None,
-    )
+MAIN_RUNTIME_ODOMETRY_SAMPLE_PERIOD_NS = 200_000_000
 
 
 def canonical_line(value: Any) -> bytes:
@@ -127,8 +129,6 @@ def classify_process(comm: str, cmdline: list[str]) -> str | None:
     if executable == "robot_state_publisher" or comm.lower() == "robot_state_publisher":
         return "robot_state_publisher"
     if executable == "parameter_bridge" or comm.lower() == "parameter_bridge":
-        if "/world/map/pose/info" in joined:
-            return "world_pose_bridge"
         return "ros_gz_parameter_bridge"
     if executable == "relay" or comm.lower() == "relay":
         return "topic_relay"
@@ -272,6 +272,16 @@ def main() -> int:
         str(contract["run_id"]),
         str(contract["runtime_id"]),
     )
+    try:
+        pose_writer = PoseObservationWriter(
+            run_dir / POSE_OBSERVATION_STREAM_PATH,
+            str(contract["run_id"]),
+            str(contract["runtime_id"]),
+            created_monotonic_ns=time.monotonic_ns(),
+        )
+    except (M4ValidationError, OSError, TypeError, ValueError):
+        writer.close()
+        raise
     stop = threading.Event()
     signal.signal(signal.SIGINT, lambda *_unused: stop.set())
     signal.signal(signal.SIGTERM, lambda *_unused: stop.set())
@@ -296,13 +306,13 @@ def main() -> int:
         for uav in UAV_IDS
     }
     world_entities: dict[str, dict[str, Any]] = {}
+    world_entities_lock = threading.Lock()
 
     import rclpy
     from nav_msgs.msg import Odometry
     from rclpy.node import Node
     from rclpy.qos import qos_profile_sensor_data
     from rosgraph_msgs.msg import Clock
-    from tf2_msgs.msg import TFMessage
 
     class RuntimeNode(Node):
         def __init__(self) -> None:
@@ -321,12 +331,6 @@ def main() -> int:
                     lambda message, source=uav: self.on_odometry(source, message),
                     qos_profile_sensor_data,
                 )
-            self.create_subscription(
-                TFMessage,
-                "/world/map/pose/info",
-                self.on_world_pose,
-                qos_profile_sensor_data,
-            )
 
         def on_clock(self, topic: str, message: Any) -> None:
             now = time.monotonic_ns()
@@ -366,9 +370,34 @@ def main() -> int:
                 and str(message.header.frame_id) == ODOMETRY_HEADER_FRAME
                 and str(message.child_frame_id) == ODOMETRY_CHILD_FRAME
             )
-            if now - state["last_emit_ns"] >= 200_000_000:
-                pose = message.pose.pose
-                twist = message.twist.twist
+            pose = message.pose.pose
+            twist = message.twist.twist
+            position = [pose.position.x, pose.position.y, pose.position.z]
+            orientation = [
+                pose.orientation.x,
+                pose.orientation.y,
+                pose.orientation.z,
+                pose.orientation.w,
+            ]
+            # Preserve every independent DDS occurrence without blocking the
+            # ROS callback on a flush.  The main runtime log retains only its
+            # bounded 5-Hz motion/readiness sample.
+            pose_writer.emit(
+                kind="o",
+                entity_id=uav,
+                source_callback_monotonic_ns=now,
+                sim_stamp_ns=stamp,
+                source_topic=f"/{uav}/odometry",
+                source_transport=ODOMETRY_SOURCE_TRANSPORT,
+                source_stamp_scope=ODOMETRY_SOURCE_STAMP_SCOPE,
+                source_frame=ODOMETRY_SOURCE_FRAME,
+                transform_version=COORDINATE_TRANSFORM_VERSION,
+                source_header_frame=str(message.header.frame_id),
+                source_child_frame=str(message.child_frame_id),
+                position_m=position,
+                orientation_quat_xyzw=orientation,
+            )
+            if now - state["last_emit_ns"] >= MAIN_RUNTIME_ODOMETRY_SAMPLE_PERIOD_NS:
                 writer.emit(
                     "odometry_sample",
                     uav=uav,
@@ -379,13 +408,8 @@ def main() -> int:
                     source_child_frame=str(message.child_frame_id),
                     source_callback_monotonic_ns=now,
                     sim_stamp_ns=stamp,
-                    position_m=[pose.position.x, pose.position.y, pose.position.z],
-                    orientation_quat_xyzw=[
-                        pose.orientation.x,
-                        pose.orientation.y,
-                        pose.orientation.z,
-                        pose.orientation.w,
-                    ],
+                    position_m=position,
+                    orientation_quat_xyzw=orientation,
                     linear_velocity_mps=[
                         twist.linear.x,
                         twist.linear.y,
@@ -399,30 +423,61 @@ def main() -> int:
                 )
                 state["last_emit_ns"] = now
 
-        def on_world_pose(self, message: Any) -> None:
-            now = time.monotonic_ns()
-            for transform in message.transforms:
-                name = runtime_entity_name(str(transform.child_frame_id))
-                if name is None:
-                    continue
-                translation = transform.transform.translation
-                rotation = transform.transform.rotation
-                world_entities[name] = {
-                    "last_host_ns": now,
-                    "position_m": [translation.x, translation.y, translation.z],
-                    "orientation_quat_xyzw": [rotation.x, rotation.y, rotation.z, rotation.w],
+        def on_world_pose(self, observations: tuple[Any, ...]) -> None:
+            for observation in observations:
+                name = str(observation.entity_id)
+                state = {
+                    "last_host_ns": int(observation.source_callback_monotonic_ns),
+                    "sim_stamp_ns": int(observation.sim_stamp_ns),
+                    "source_topic": str(observation.source_topic),
+                    "source_transport": str(observation.source_transport),
+                    "source_stamp_scope": str(observation.source_stamp_scope),
+                    "source_frame": str(observation.source_frame),
+                    "transform_version": str(observation.transform_version),
+                    "source_header_frame": str(observation.source_header_frame),
+                    "source_child_frame": str(observation.source_child_frame),
+                    "position_m": list(observation.position_m),
+                    "orientation_quat_xyzw": list(
+                        observation.orientation_quat_xyzw
+                    ),
                 }
+                with world_entities_lock:
+                    world_entities[name] = state
+                if name not in {"cp", "jammer_m4"}:
+                    continue
+                pose_writer.emit(
+                    kind="w",
+                    entity_id=name,
+                    source_callback_monotonic_ns=int(
+                        observation.source_callback_monotonic_ns
+                    ),
+                    sim_stamp_ns=int(observation.sim_stamp_ns),
+                    source_topic=str(observation.source_topic),
+                    source_transport=str(observation.source_transport),
+                    source_stamp_scope=str(observation.source_stamp_scope),
+                    source_frame=str(observation.source_frame),
+                    transform_version=str(observation.transform_version),
+                    source_header_frame=str(observation.source_header_frame),
+                    source_child_frame=str(observation.source_child_frame),
+                    position_m=list(observation.position_m),
+                    orientation_quat_xyzw=list(
+                        observation.orientation_quat_xyzw
+                    ),
+                )
 
     node: Any = None
+    world_pose_source: GazeboPoseVSource | None = None
     completed = False
     failure: str | None = None
     try:
         rclpy.init(args=None)
         node = RuntimeNode()
+        world_pose_source = GazeboPoseVSource(node.on_world_pose)
         raw_clock_thread.start()
 
         def spin(timeout: float) -> None:
             rclpy.spin_once(node, timeout_sec=max(0.0, timeout))
+            world_pose_source.raise_if_failed()
 
         def readiness_observation(
             now: int, processes: dict[str, Any]
@@ -446,9 +501,13 @@ def main() -> int:
                 and state["frame_valid"] is True
                 for state in odometry.values()
             )
-            poses_fresh = set(world_entities) == WORLD_ENTITY_IDS and all(
+            with world_entities_lock:
+                world_snapshot = {
+                    name: dict(item) for name, item in world_entities.items()
+                }
+            poses_fresh = set(world_snapshot) == WORLD_ENTITY_IDS and all(
                 now - int(item["last_host_ns"]) <= 1_500_000_000
-                for item in world_entities.values()
+                for item in world_snapshot.values()
             )
             return {
                 "ready": bool(
@@ -475,6 +534,13 @@ def main() -> int:
             accepted_process_groups=sorted(accepted_pgids),
             canonical_clock_topic="/uav1/clock",
             crosscheck_clock_topics=list(CLOCK_TOPICS[1:]),
+            pose_observation_stream={
+                "path": POSE_OBSERVATION_STREAM_PATH.as_posix(),
+                "schema": POSE_OBSERVATION_STREAM_SCHEMA,
+                "encoding": POSE_OBSERVATION_STREAM_ENCODING,
+                "created_monotonic_ns": pose_writer.created_monotonic_ns,
+                "main_odometry_sample_period_ns": MAIN_RUNTIME_ODOMETRY_SAMPLE_PERIOD_NS,
+            },
         )
         write_exclusive(
             args.ready_file,
@@ -600,12 +666,14 @@ def main() -> int:
                         "readiness_complete",
                         stable_since_monotonic_ns=stable_since,
                     )
-                    writer.emit(
-                        "runtime_entities_observed",
-                        entities={
+                    with world_entities_lock:
+                        observed_entities = {
                             name: dict(world_entities[name])
                             for name in sorted(WORLD_ENTITY_IDS)
-                        },
+                        }
+                    writer.emit(
+                        "runtime_entities_observed",
+                        entities=observed_entities,
                     )
                     readiness_emitted = True
             else:
@@ -718,8 +786,21 @@ def main() -> int:
         stop.set()
         if raw_clock_thread.ident is not None:
             raw_clock_thread.join(2.0)
-        writer.emit("collector_stop", completed=completed, failure=failure)
-        writer.close()
+        if world_pose_source is not None:
+            world_pose_source.close()
+        pose_closed_ns = time.monotonic_ns()
+        writer.emit(
+            "collector_stop",
+            completed=completed,
+            failure=failure,
+            pose_observation_count=pose_writer.observation_count,
+            pose_observation_content_sha256=pose_writer.content_sha256,
+            pose_observation_closed_monotonic_ns=pose_closed_ns,
+        )
+        try:
+            pose_writer.close(closed_monotonic_ns=pose_closed_ns)
+        finally:
+            writer.close()
         if node is not None:
             node.destroy_node()
         if rclpy.ok():

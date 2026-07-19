@@ -7,6 +7,7 @@ import bisect
 import hashlib
 import json
 import math
+import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
@@ -19,6 +20,17 @@ from network.validation.m4_common import (
     regular_file,
     strict_json,
     strict_jsonl,
+)
+from network.validation.m4_pose_observations import (
+    GAZEBO_POSE_SOURCE_STAMP_SCOPE,
+    GAZEBO_POSE_SOURCE_TRANSPORT,
+    ODOMETRY_SOURCE_STAMP_SCOPE,
+    ODOMETRY_SOURCE_TRANSPORT,
+    POSE_OBSERVATION_STREAM_ENCODING,
+    POSE_OBSERVATION_STREAM_PATH,
+    POSE_OBSERVATION_STREAM_SCHEMA,
+    pose_observation_exact_key,
+    scan_pose_observation_stream,
 )
 from network.radio_provider.sionna_packet_adapter import deterministic_loss_sample
 
@@ -33,6 +45,21 @@ QUERY_PERIOD_NS = 1_000_000_000
 VALIDITY_TTL_NS = 2_000_000_000
 MAX_POSE_AGE_NS = 1_500_000_000
 QUERY_DEADLINE_NS = 100_000_000
+QUERY_GLOBAL_SPACING_NS = 33_333_333
+QUERY_SLOT_COUNT_PER_CELL = 600
+QUERY_SLOT_ID_RE = re.compile(r"\.slot([1-9][0-9]*)\.s[1-9][0-9]*$")
+POSE_BINDING_CLOCK_MAX_GAP_NS = 250_000_000
+POSE_BINDING_CLOCK_FUTURE_TOLERANCE_NS = 50_000_000
+POSE_BINDING_EMIT_DELAY_NS = 50_000_000
+POSE_BINDING_ENTITIES = (
+    "cp",
+    "uav1",
+    "uav2",
+    "uav3",
+    "uav4",
+    "uav5",
+    "jammer_m4",
+)
 RUNTIME_EVENT_SCHEMA = "ams.m4.runtime_event/v1"
 CLOCK_SAMPLE_SCHEMA = "ams.m4.clock_correlation_sample/v1"
 CAPTURE_STATS_CONTRACT = "ams.raw-packet-capture-stats/v2"
@@ -43,6 +70,13 @@ CAPTURE_RECEIVE_BUFFER_EFFECTIVE_BYTES = 16_777_216
 CAPTURE_RECEIVE_BUFFER_SETTERS = {"SO_RCVBUF", "SO_RCVBUFFORCE"}
 CAPTURE_DRAIN_BATCH_PACKET_LIMIT = 256
 CAPTURE_DRAIN_BATCH_BYTE_LIMIT = 4_194_304
+# PCAP timestamps are taken immediately after AF_PACKET recv(). The capture
+# process polls for at most 200 ms; 50 ms more covers bounded scheduling jitter
+# under the independently enforced 100-ms sampler and realtime-factor gates.
+CAPTURE_OCCURRENCE_MATCH_TOLERANCE_NS = 250_000_000
+# A CLOCK_REALTIME step/drift over one second during the frozen 600-second
+# interval makes interpolation into the PCAP timestamp domain ambiguous.
+CAPTURE_REALTIME_SPAN_TOLERANCE_NS = 1_000_000_000
 ENDPOINTS = ("gcs", "uav1", "uav2", "uav3", "uav4", "uav5")
 M3_CELL_IDS = {
     f"uav{uav}.{traffic_class}.{direction}"
@@ -105,7 +139,6 @@ REQUIRED_PROCESS_COUNTS = {
     "robot_state_publisher": 5,
     "ros_gz_parameter_bridge": 5,
     "topic_relay": 10,
-    "world_pose_bridge": 1,
     "endpoint_companion_agent": 6,
     "gcs_endpoint_probe": 1,
     "uav_endpoint_adapter": 5,
@@ -958,6 +991,581 @@ def _interpolate_sim_ns(
     return before_sim + fraction * (after_sim - before_sim)
 
 
+def _pose_binding_vector(value: Any, size: int) -> tuple[float, ...] | None:
+    if (
+        not isinstance(value, list)
+        or len(value) != size
+        or any(not finite_number(item) for item in value)
+    ):
+        return None
+    return tuple(float(item) for item in value)
+
+
+def validate_query_pose_runtime_binding(
+    pose_records: list[dict[str, Any]],
+    wire: Mapping[str, Any],
+    runtime_records: list[dict[str, Any]],
+    pose_observation_path: Path,
+    *,
+    run_id: str,
+    runtime_id: str,
+    start_monotonic_ns: int | None = None,
+    end_monotonic_ns: int | None = None,
+) -> tuple[dict[str, Any], list[str]]:
+    """Bind every referenced adapter pose to an independent ROS observation.
+
+    The adapter pose log and the query wire share a process and therefore only
+    prove internal consistency.  This check joins each referenced raw entity to
+    the collector's separate subscription by exact source header stamp and pose,
+    then maps both subscriber callback times onto the canonical Gazebo clock.
+    """
+
+    failures: list[str] = []
+    referenced_query_count = 0
+    references: set[tuple[int, str, int]] = set()
+    messages = wire.get("messages")
+    if not isinstance(messages, list):
+        messages = []
+        failures.append("pose/runtime binding wire messages are absent")
+    for message in messages:
+        if not isinstance(message, Mapping) or message.get("message_type") != "query":
+            continue
+        sent_ns = message.get("request_sent_monotonic_ns")
+        if start_monotonic_ns is not None and (
+            isinstance(sent_ns, bool)
+            or not isinstance(sent_ns, int)
+            or sent_ns < start_monotonic_ns
+        ):
+            continue
+        if end_monotonic_ns is not None and (
+            isinstance(sent_ns, bool)
+            or not isinstance(sent_ns, int)
+            or sent_ns >= end_monotonic_ns
+        ):
+            continue
+        referenced_query_count += 1
+        sequence = message.get("node_state_seq")
+        digest = message.get("node_state_sha256")
+        snapshot_ns = message.get("node_state_snapshot_monotonic_ns")
+        if (
+            isinstance(sequence, bool)
+            or not isinstance(sequence, int)
+            or sequence <= 0
+            or not isinstance(digest, str)
+            or HEX64.fullmatch(digest) is None
+            or isinstance(snapshot_ns, bool)
+            or not isinstance(snapshot_ns, int)
+            or snapshot_ns <= 0
+        ):
+            failures.append(
+                f"query {message.get('query_id')} pose reference is invalid"
+            )
+            continue
+        references.add((sequence, digest, snapshot_ns))
+    if referenced_query_count == 0:
+        failures.append("pose/runtime binding has no query in the requested window")
+
+    snapshots: dict[
+        tuple[int, str, int], list[Mapping[str, Any]]
+    ] = defaultdict(list)
+    for record in pose_records:
+        if not isinstance(record, Mapping):
+            continue
+        sequence = record.get("node_state_seq")
+        digest = record.get("node_state_sha256")
+        snapshot_ns = record.get("snapshot_monotonic_ns")
+        if (
+            isinstance(sequence, bool)
+            or not isinstance(sequence, int)
+            or not isinstance(digest, str)
+            or HEX64.fullmatch(digest) is None
+            or isinstance(snapshot_ns, bool)
+            or not isinstance(snapshot_ns, int)
+        ):
+            continue
+        snapshots[(sequence, digest, snapshot_ns)].append(record)
+
+    clocks: list[tuple[int, int]] = []
+    for number, record in enumerate(runtime_records, start=1):
+        if record.get("event") != "gazebo_clock_sample":
+            continue
+        callback_ns = record.get("source_callback_monotonic_ns")
+        emitted_ns = record.get("host_monotonic_ns")
+        sim_ns = record.get("sim_time_ns")
+        if (
+            record.get("clock_topic") != "/uav1/clock"
+            or isinstance(callback_ns, bool)
+            or not isinstance(callback_ns, int)
+            or callback_ns <= 0
+            or isinstance(emitted_ns, bool)
+            or not isinstance(emitted_ns, int)
+            or not 0 <= emitted_ns - callback_ns <= POSE_BINDING_EMIT_DELAY_NS
+            or isinstance(sim_ns, bool)
+            or not isinstance(sim_ns, int)
+            or sim_ns < 0
+        ):
+            failures.append(f"canonical Gazebo clock sample {number} differs")
+            continue
+        clocks.append((callback_ns, sim_ns))
+    if len(clocks) < 2 or any(
+        clocks[index][0] <= clocks[index - 1][0]
+        or clocks[index][1] < clocks[index - 1][1]
+        for index in range(1, len(clocks))
+    ):
+        failures.append("canonical Gazebo clock stream is absent/nonmonotonic")
+
+    clock_interpolation_count = 0
+    bound_entity_count = 0
+    used_pose_observations: set[int] = set()
+    clock_hosts = [sample[0] for sample in clocks]
+
+    def clock_consistent(callback_ns: int, source_stamp_ns: int) -> bool:
+        nonlocal clock_interpolation_count
+        position = bisect.bisect_left(clock_hosts, callback_ns)
+        if position == 0 or position >= len(clocks):
+            return False
+        before_host, before_sim = clocks[position - 1]
+        after_host, after_sim = clocks[position]
+        host_gap_ns = after_host - before_host
+        if (
+            not 0 < host_gap_ns <= POSE_BINDING_CLOCK_MAX_GAP_NS
+            or after_sim < before_sim
+        ):
+            return False
+        fraction = (callback_ns - before_host) / host_gap_ns
+        interpolated_ns = before_sim + fraction * (after_sim - before_sim)
+        lag_ns = interpolated_ns - source_stamp_ns
+        if not (
+            -POSE_BINDING_CLOCK_FUTURE_TOLERANCE_NS
+            <= lag_ns
+            <= MAX_POSE_AGE_NS
+        ):
+            return False
+        clock_interpolation_count += 1
+        return True
+
+    binding_requests: list[dict[str, Any]] = []
+    required_observation_keys: set[tuple[Any, ...]] = set()
+    for reference in sorted(references):
+        candidates = snapshots.get(reference, [])
+        if len(candidates) != 1:
+            failures.append(
+                "referenced pose snapshot cardinality differs: "
+                f"seq={reference[0]} observed={len(candidates)}"
+            )
+            continue
+        snapshot = candidates[0]
+        snapshot_ns = reference[2]
+        nodes = snapshot.get("nodes")
+        jammers = snapshot.get("jammers")
+        if not isinstance(nodes, list) or not isinstance(jammers, list):
+            failures.append(
+                f"referenced pose snapshot {reference[0]} entity arrays differ"
+            )
+            continue
+        node_records = [item for item in nodes if isinstance(item, Mapping)]
+        jammer_records = [item for item in jammers if isinstance(item, Mapping)]
+        node_ids = [item.get("node_id") for item in node_records]
+        jammer_ids = [item.get("jammer_id") for item in jammer_records]
+        expected_nodes = set(POSE_BINDING_ENTITIES[:6])
+        if (
+            len(node_records) != 6
+            or set(node_ids) != expected_nodes
+            or len(set(node_ids)) != len(node_ids)
+            or len(jammer_records) != 1
+            or jammer_ids != ["jammer_m4"]
+        ):
+            failures.append(
+                f"referenced pose snapshot {reference[0]} exact entity set differs"
+            )
+            continue
+        entities = {
+            str(item["node_id"]): item for item in node_records
+        }
+        entities["jammer_m4"] = jammer_records[0]
+
+        for entity in POSE_BINDING_ENTITIES:
+            raw = entities[entity]
+            adapter_callback_ns = raw.get("pose_monotonic_ns")
+            source_stamp_ns = raw.get("source_header_stamp_ns")
+            source_transport = raw.get("source_transport")
+            source_stamp_scope = raw.get("source_stamp_scope")
+            position = _pose_binding_vector(raw.get("position_m"), 3)
+            orientation = _pose_binding_vector(
+                raw.get("orientation_quat_xyzw"), 4
+            )
+            world_entity = entity in {"cp", "jammer_m4"}
+            child_parts = (
+                [
+                    part
+                    for part in str(raw.get("source_child_frame", ""))
+                    .strip("/")
+                    .split("/")
+                    if part
+                ]
+                if world_entity
+                else []
+            )
+            raw_lineage_valid = (
+                raw.get("source_frame") == "world"
+                and raw.get("transform_version") == "enu-identity-v1"
+                and (
+                    (
+                        world_entity
+                        and raw.get("source_topic") == "/world/map/pose/info"
+                        and source_transport == GAZEBO_POSE_SOURCE_TRANSPORT
+                        and source_stamp_scope == GAZEBO_POSE_SOURCE_STAMP_SCOPE
+                        and raw.get("source_header_frame") == ""
+                        and child_parts
+                        and child_parts[-1] == entity
+                    )
+                    or (
+                        not world_entity
+                        and raw.get("source_topic") == f"/{entity}/odometry"
+                        and source_transport == ODOMETRY_SOURCE_TRANSPORT
+                        and source_stamp_scope == ODOMETRY_SOURCE_STAMP_SCOPE
+                        and raw.get("source_header_frame") == "odom"
+                        and raw.get("source_child_frame") == "base_link"
+                    )
+                )
+            )
+            if (
+                not raw_lineage_valid
+                or isinstance(adapter_callback_ns, bool)
+                or not isinstance(adapter_callback_ns, int)
+                or adapter_callback_ns <= 0
+                or not 0 <= snapshot_ns - adapter_callback_ns <= MAX_POSE_AGE_NS
+                or isinstance(source_stamp_ns, bool)
+                or not isinstance(source_stamp_ns, int)
+                or source_stamp_ns < 0
+                or position is None
+                or orientation is None
+            ):
+                failures.append(
+                    f"referenced pose snapshot {reference[0]} {entity} raw lineage differs"
+                )
+                continue
+
+            adapter_clock_valid = clock_consistent(
+                adapter_callback_ns, source_stamp_ns
+            )
+            if not adapter_clock_valid:
+                failures.append(
+                    f"{entity} source stamp is inconsistent with Gazebo clock "
+                    "at adapter callback"
+                )
+
+            expected_event = (
+                "world_pose_sample" if world_entity else "odometry_sample"
+            )
+            expected_runtime_frame = (
+                "world" if world_entity else "ros_odometry_world_enu"
+            )
+            expected_runtime_transform = (
+                "enu-identity-v1"
+                if world_entity
+                else "ams-m4-coordinate-frames-v1"
+            )
+            observation_key = pose_observation_exact_key(
+                kind="w" if world_entity else "o",
+                entity_id=entity,
+                source_topic=str(raw["source_topic"]),
+                source_transport=str(source_transport),
+                source_stamp_scope=str(source_stamp_scope),
+                source_frame=expected_runtime_frame,
+                transform_version=expected_runtime_transform,
+                source_header_frame=str(raw["source_header_frame"]),
+                source_child_frame=str(raw["source_child_frame"]),
+                sim_stamp_ns=source_stamp_ns,
+                position_m=position,
+                orientation_quat_xyzw=orientation,
+            )
+            required_observation_keys.add(observation_key)
+            binding_requests.append(
+                {
+                    "entity": entity,
+                    "adapter_callback_ns": adapter_callback_ns,
+                    "source_stamp_ns": source_stamp_ns,
+                    "observation_key": observation_key,
+                    "adapter_clock_valid": adapter_clock_valid,
+                    "expected_event": expected_event,
+                }
+            )
+
+    observation_index: dict[
+        tuple[Any, ...], list[tuple[int, int]]
+    ] = {}
+    stream_details: dict[str, Any] = {}
+    try:
+        observation_index, stream_details = scan_pose_observation_stream(
+            pose_observation_path,
+            run_id=run_id,
+            runtime_id=runtime_id,
+            required_keys=required_observation_keys,
+        )
+    except M4ValidationError as exc:
+        failures.append(str(exc))
+
+    collector_starts = [
+        record
+        for record in runtime_records
+        if record.get("event") == "collector_start"
+    ]
+    collector_stops = [
+        record
+        for record in runtime_records
+        if record.get("event") == "collector_stop"
+    ]
+    lifecycle_bound = False
+    if len(collector_starts) != 1 or len(collector_stops) != 1:
+        failures.append(
+            "pose-observation collector lifecycle cardinality differs"
+        )
+    elif stream_details:
+        collector_start = collector_starts[0]
+        collector_stop = collector_stops[0]
+        stream_contract = collector_start.get("pose_observation_stream")
+        start_host_ns = collector_start.get("host_monotonic_ns")
+        stop_host_ns = collector_stop.get("host_monotonic_ns")
+        created_ns = stream_details.get("created_monotonic_ns")
+        closed_ns = stream_details.get("closed_monotonic_ns")
+        expected_stream_contract = {
+            "path": POSE_OBSERVATION_STREAM_PATH.as_posix(),
+            "schema": POSE_OBSERVATION_STREAM_SCHEMA,
+            "encoding": POSE_OBSERVATION_STREAM_ENCODING,
+            "created_monotonic_ns": created_ns,
+            "main_odometry_sample_period_ns": 200_000_000,
+        }
+        if (
+            stream_contract != expected_stream_contract
+            or isinstance(start_host_ns, bool)
+            or not isinstance(start_host_ns, int)
+            or isinstance(stop_host_ns, bool)
+            or not isinstance(stop_host_ns, int)
+            or isinstance(created_ns, bool)
+            or not isinstance(created_ns, int)
+            or isinstance(closed_ns, bool)
+            or not isinstance(closed_ns, int)
+            or not created_ns <= start_host_ns < closed_ns <= stop_host_ns
+            or collector_stop.get("pose_observation_count")
+            != stream_details.get("observation_count")
+            or collector_stop.get("pose_observation_content_sha256")
+            != stream_details.get("content_sha256")
+            or collector_stop.get("pose_observation_closed_monotonic_ns")
+            != closed_ns
+        ):
+            failures.append(
+                "pose-observation stream/main collector lifecycle binding differs"
+            )
+        else:
+            lifecycle_bound = True
+
+    for request in binding_requests:
+        entity = str(request["entity"])
+        adapter_callback_ns = int(request["adapter_callback_ns"])
+        source_stamp_ns = int(request["source_stamp_ns"])
+        adapter_clock_valid = bool(request["adapter_clock_valid"])
+        exact_samples = observation_index.get(request["observation_key"], [])
+        if not exact_samples:
+            failures.append(
+                f"{entity} has no exact independent runtime pose sample"
+            )
+            continue
+
+        valid_samples: list[tuple[int, int]] = []
+        for observation_sequence, collector_callback_ns in exact_samples:
+            if (
+                abs(collector_callback_ns - adapter_callback_ns)
+                > MAX_POSE_AGE_NS
+            ):
+                continue
+            if clock_consistent(collector_callback_ns, source_stamp_ns):
+                valid_samples.append(
+                    (observation_sequence, collector_callback_ns)
+                )
+        if not valid_samples or not adapter_clock_valid:
+            failures.append(
+                f"{entity} exact independent runtime pose sample is not clock-bound"
+            )
+            if valid_samples and not adapter_clock_valid:
+                continue
+            if not valid_samples:
+                failures.append(
+                    f"{entity} source stamp is inconsistent with Gazebo clock "
+                    "at collector callback"
+                )
+                continue
+        selected_number, _selected_callback = min(
+            valid_samples,
+            key=lambda item: abs(item[1] - adapter_callback_ns),
+        )
+        used_pose_observations.add(selected_number)
+        bound_entity_count += 1
+
+    details = {
+        **stream_details,
+        "referenced_query_count": referenced_query_count,
+        "referenced_snapshot_count": len(references),
+        "bound_entity_count": bound_entity_count,
+        "independent_runtime_sample_count": len(used_pose_observations),
+        "independent_pose_observation_count": len(used_pose_observations),
+        "canonical_clock_sample_count": len(clocks),
+        "clock_interpolation_count": clock_interpolation_count,
+        "retained_exact_key_count": len(observation_index),
+        "collector_lifecycle_bound": lifecycle_bound,
+    }
+    expected_bindings = len(references) * len(POSE_BINDING_ENTITIES)
+    if references and bound_entity_count != expected_bindings:
+        failures.append(
+            "query pose/runtime binding cardinality differs: "
+            f"expected={expected_bindings} observed={bound_entity_count}"
+        )
+    return details, failures
+
+
+def validate_native_world_entity_observations(entities: Any) -> list[str]:
+    """Require the exact native Gazebo lineage for every active M4 entity."""
+
+    expected_entities = {"cp", "jammer_m4", *[f"uav{i}" for i in range(1, 6)]}
+    if not isinstance(entities, Mapping) or set(entities) != expected_entities:
+        return ["active Gazebo entity set differs"]
+    expected_keys = {
+        "last_host_ns",
+        "sim_stamp_ns",
+        "source_topic",
+        "source_transport",
+        "source_stamp_scope",
+        "source_frame",
+        "transform_version",
+        "source_header_frame",
+        "source_child_frame",
+        "position_m",
+        "orientation_quat_xyzw",
+    }
+    failures: list[str] = []
+    for name in sorted(expected_entities):
+        value = entities[name]
+        if (
+            not isinstance(value, Mapping)
+            or set(value) != expected_keys
+            or isinstance(value.get("last_host_ns"), bool)
+            or not isinstance(value.get("last_host_ns"), int)
+            or int(value["last_host_ns"]) <= 0
+            or isinstance(value.get("sim_stamp_ns"), bool)
+            or not isinstance(value.get("sim_stamp_ns"), int)
+            or int(value["sim_stamp_ns"]) < 0
+            or value.get("source_topic") != "/world/map/pose/info"
+            or value.get("source_transport") != GAZEBO_POSE_SOURCE_TRANSPORT
+            or value.get("source_stamp_scope")
+            != GAZEBO_POSE_SOURCE_STAMP_SCOPE
+            or value.get("source_frame") != "world"
+            or value.get("transform_version") != "enu-identity-v1"
+            or value.get("source_header_frame") != ""
+            or value.get("source_child_frame") != name
+            or not isinstance(value.get("position_m"), list)
+            or len(value["position_m"]) != 3
+            or not all(finite_number(item) for item in value["position_m"])
+            or not isinstance(value.get("orientation_quat_xyzw"), list)
+            or len(value["orientation_quat_xyzw"]) != 4
+            or not all(
+                finite_number(item) for item in value["orientation_quat_xyzw"]
+            )
+        ):
+            failures.append(f"active Gazebo entity evidence differs: {name}")
+    return failures
+
+
+def validate_continuous_readiness_schedule(
+    records: Iterable[Mapping[str, Any]],
+    *,
+    warmup_start_ns: int,
+    measurement_start_ns: int,
+    measurement_end_ns: int,
+) -> tuple[dict[str, Any], list[str]]:
+    """Validate every absolute one-second readiness slot without interpolation."""
+
+    samples = [
+        record
+        for record in records
+        if record.get("event") == "continuous_readiness_sample"
+    ]
+    failures: list[str] = []
+    if (
+        isinstance(warmup_start_ns, bool)
+        or not isinstance(warmup_start_ns, int)
+        or isinstance(measurement_start_ns, bool)
+        or not isinstance(measurement_start_ns, int)
+        or isinstance(measurement_end_ns, bool)
+        or not isinstance(measurement_end_ns, int)
+        or measurement_start_ns - warmup_start_ns != 30_000_000_000
+        or measurement_end_ns - measurement_start_ns != 600_000_000_000
+    ):
+        return {
+            "sample_count": len(samples),
+            "warmup_sample_count": 0,
+            "measurement_sample_count": 0,
+        }, ["continuous readiness boundaries are not exact 30+600 seconds"]
+
+    expected_count = 630
+    if len(samples) != expected_count:
+        failures.append(
+            "continuous readiness sample count differs: "
+            f"observed={len(samples)} expected={expected_count}"
+        )
+
+    warmup_count = sum(record.get("phase") == "warmup" for record in samples)
+    measurement_count = sum(
+        record.get("phase") == "measurement" for record in samples
+    )
+    for index, record in enumerate(samples):
+        if index < 30:
+            phase = "warmup"
+            phase_index = index
+            scheduled_ns = warmup_start_ns + phase_index * 1_000_000_000
+            sample_index_valid = "sample_index" not in record
+        else:
+            phase = "measurement"
+            phase_index = index - 30
+            scheduled_ns = measurement_start_ns + phase_index * 1_000_000_000
+            sample_index = record.get("sample_index")
+            sample_index_valid = (
+                isinstance(sample_index, int)
+                and not isinstance(sample_index, bool)
+                and sample_index == phase_index
+            )
+        host_ns = record.get("host_monotonic_ns")
+        complete_readiness = all(
+            record.get(field) is True
+            for field in (
+                "ready",
+                "files_ready",
+                "clocks_fresh",
+                "clocks_coherent",
+                "odometry_fresh",
+                "world_poses_fresh",
+            )
+        )
+        if (
+            record.get("phase") != phase
+            or record.get("scheduled_monotonic_ns") != scheduled_ns
+            or not sample_index_valid
+            or isinstance(host_ns, bool)
+            or not isinstance(host_ns, int)
+            or not scheduled_ns <= host_ns <= scheduled_ns + 100_000_000
+            or not complete_readiness
+        ):
+            failures.append(
+                "continuous readiness absolute slot differs: "
+                f"series_index={index} phase={phase} phase_index={phase_index}"
+            )
+
+    return {
+        "sample_count": len(samples),
+        "warmup_sample_count": warmup_count,
+        "measurement_sample_count": measurement_count,
+    }, failures
+
+
 def validate_capacity_runtime(
     records: list[dict[str, Any]],
     *,
@@ -965,6 +1573,7 @@ def validate_capacity_runtime(
 ) -> tuple[dict[str, Any], list[str]]:
     failures: list[str] = []
     details: dict[str, Any] = {}
+    warmup_start_ns = 0
     start_ns = 0
     end_ns = 0
     try:
@@ -1131,24 +1740,13 @@ def validate_capacity_runtime(
             failures.append(f"resource process identity set changed at sample {index}")
             break
 
-    readiness = [
-        record
-        for record in records
-        if record.get("event") == "continuous_readiness_sample"
-    ]
-    readiness_hosts = [record.get("host_monotonic_ns") for record in readiness]
-    if (
-        len(readiness) < 630
-        or not readiness_hosts
-        or readiness_hosts[0] > int(schedule.get("warmup_start_monotonic_ns", 0)) + 100_000_000
-        or readiness_hosts[-1] < end_ns - 1_500_000_000
-        or any(record.get("ready") is not True for record in readiness)
-        or any(
-            not 0 < readiness_hosts[index] - readiness_hosts[index - 1] <= 1_500_000_000
-            for index in range(1, len(readiness_hosts))
-        )
-    ):
-        failures.append("continuous full readiness does not cover warm-up and measurement")
+    readiness_details, readiness_failures = validate_continuous_readiness_schedule(
+        records,
+        warmup_start_ns=warmup_start_ns,
+        measurement_start_ns=start_ns,
+        measurement_end_ns=end_ns,
+    )
+    failures.extend(readiness_failures)
     try:
         collector = _one_event(records, "collector_start")
         identity = collector.get("static_runtime_identity")
@@ -1170,21 +1768,9 @@ def validate_capacity_runtime(
     try:
         entity_event = _one_event(records, "runtime_entities_observed")
         entities = entity_event.get("entities")
-        expected_entities = {"cp", "jammer_m4", *[f"uav{i}" for i in range(1, 6)]}
-        if not isinstance(entities, dict) or set(entities) != expected_entities:
-            raise M4ValidationError("active Gazebo entity set differs")
-        for name, value in entities.items():
-            if (
-                not isinstance(value, dict)
-                or not isinstance(value.get("last_host_ns"), int)
-                or not isinstance(value.get("position_m"), list)
-                or len(value["position_m"]) != 3
-                or not all(finite_number(item) for item in value["position_m"])
-                or not isinstance(value.get("orientation_quat_xyzw"), list)
-                or len(value["orientation_quat_xyzw"]) != 4
-                or not all(finite_number(item) for item in value["orientation_quat_xyzw"])
-            ):
-                raise M4ValidationError(f"active Gazebo entity evidence differs: {name}")
+        entity_failures = validate_native_world_entity_observations(entities)
+        if entity_failures:
+            raise M4ValidationError(entity_failures[0])
     except M4ValidationError as exc:
         failures.append(str(exc))
 
@@ -1198,7 +1784,13 @@ def validate_capacity_runtime(
             "minimum_rtf": min(rtf_values) if rtf_values else None,
             "maximum_rtf": max(rtf_values) if rtf_values else None,
             "resource_sample_count": len(resources),
-            "continuous_readiness_sample_count": len(readiness),
+            "continuous_readiness_sample_count": readiness_details["sample_count"],
+            "warmup_readiness_sample_count": readiness_details[
+                "warmup_sample_count"
+            ],
+            "measurement_readiness_sample_count": readiness_details[
+                "measurement_sample_count"
+            ],
             "frozen_process_identity_count": len(frozen_process_identities or ()),
         }
     )
@@ -1493,99 +2085,561 @@ def validate_capacity_freshness(
     wire: Mapping[str, Any],
     states: Mapping[str, Any],
     packets: Mapping[str, Any],
+    adapter: Mapping[str, Any],
     *,
     start_ns: int,
     end_ns: int,
 ) -> tuple[dict[str, Any], list[str]]:
     failures: list[str] = []
+    scheduled_slot_count = len(EXPECTED_CELLS) * QUERY_SLOT_COUNT_PER_CELL
+    if (
+        isinstance(start_ns, bool)
+        or not isinstance(start_ns, int)
+        or isinstance(end_ns, bool)
+        or not isinstance(end_ns, int)
+        or end_ns - start_ns != QUERY_SLOT_COUNT_PER_CELL * QUERY_PERIOD_NS
+    ):
+        return {
+            "scheduled_query_slot_count": scheduled_slot_count,
+            "query_count": 0,
+            "ok_result_count": 0,
+            "missed_slot_count": scheduled_slot_count,
+            "late_result_count": scheduled_slot_count,
+            "failed_slot_count": scheduled_slot_count,
+            "late_update_ratio": 1.0,
+        }, ["capacity freshness interval is not the frozen 600 seconds"]
     try:
         messages = unique_wire_messages(wire.get("messages", []))
     except (M4ValidationError, TypeError, ValueError) as exc:
         return {}, [str(exc)]
-    queries = {
-        str(message.get("query_id")): message
-        for message in messages
-        if message.get("message_type") == "query"
-        and start_ns <= int(message.get("request_sent_monotonic_ns", -1)) < end_ns
+
+    state_records = states.get("records", [])
+    adapter_records = adapter.get("records", [])
+    if not isinstance(state_records, list):
+        failures.append("capacity state occurrence list is absent")
+        state_records = []
+    if not isinstance(adapter_records, list):
+        failures.append("capacity adapter occurrence list is absent")
+        adapter_records = []
+
+    ordered_cells = tuple(sorted(EXPECTED_CELLS))
+    cell_offsets = {
+        cell: index * QUERY_GLOBAL_SPACING_NS
+        for index, cell in enumerate(ordered_cells)
     }
-    results_by_query: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    slot_queries: dict[
+        tuple[tuple[str, str], int], list[dict[str, Any]]
+    ] = defaultdict(list)
+    query_slot_by_id: dict[str, tuple[tuple[str, str], int]] = {}
+    unexpected_measurement_queries = 0
     for message in messages:
-        if message.get("message_type") == "result" and str(message.get("query_id")) in queries:
-            results_by_query[str(message["query_id"])].append(message)
-    cell_counts: dict[tuple[str, str], int] = defaultdict(int)
-    stale_pose = 0
-    provider_receive_stale_pose = 0
-    late = 0
-    ok = 0
-    for query_id, query in queries.items():
+        if message.get("message_type") != "query":
+            continue
+        query = dict(message)
+        query_id = str(query.get("query_id"))
+        sent = query.get("request_sent_monotonic_ns")
+        in_measurement = (
+            isinstance(sent, int)
+            and not isinstance(sent, bool)
+            and start_ns <= sent < end_ns
+        )
         cell = (
             f"{query.get('tx_node_id')}>{query.get('rx_node_id')}",
             str(query.get("traffic_class")),
         )
-        if cell not in EXPECTED_CELLS:
-            failures.append(f"measurement query {query_id} uses undeclared cell {cell}")
-            continue
-        cell_counts[cell] += 1
-        sent = query.get("request_sent_monotonic_ns")
-        deadline = query.get("deadline_monotonic_ns")
-        if not isinstance(sent, int) or not isinstance(deadline, int) or deadline - sent != QUERY_DEADLINE_NS:
-            failures.append(f"query {query_id} changes the frozen 100-ms deadline")
-        nodes = query.get("nodes")
-        jammers = query.get("jammers")
-        if (
-            not isinstance(nodes, list)
-            or {node.get("node_id") for node in nodes} != {"cp", "uav1", "uav2", "uav3", "uav4", "uav5"}
-            or not isinstance(jammers, list)
-            or {item.get("jammer_id") for item in jammers} != {"jammer_m4"}
-        ):
-            failures.append(f"query {query_id} does not carry exact six-node/jammer poses")
-        for pose in [*(nodes or []), *(jammers or [])]:
-            age = pose.get("freshness_age_ns")
-            if (
-                pose.get("stale") is not False
-                or isinstance(age, bool)
-                or not isinstance(age, int)
-                or not 0 <= age <= MAX_POSE_AGE_NS
+        match = QUERY_SLOT_ID_RE.search(query_id)
+        ordinal = int(match.group(1)) if match is not None else 0
+        if cell in EXPECTED_CELLS and 1 <= ordinal <= QUERY_SLOT_COUNT_PER_CELL:
+            slot = (cell, ordinal)
+            previous = query_slot_by_id.setdefault(query_id, slot)
+            if previous != slot or any(
+                query_id == str(candidate.get("query_id"))
+                for candidate in slot_queries[slot]
             ):
-                stale_pose += 1
-        results = results_by_query.get(query_id, [])
-        if len(results) != 1:
-            late += 1
-            if len(results) > 1:
-                failures.append(f"query {query_id} has conflicting multiple result frames")
+                failures.append(f"capacity query_id {query_id} is not globally unique")
+            slot_queries[slot].append(query)
             continue
-        result = results[0]
-        completed = result.get("provider_completed_monotonic_ns")
-        received = result.get("provider_received_monotonic_ns")
-        for pose in [*(nodes or []), *(jammers or [])]:
-            pose_ns = pose.get("pose_monotonic_ns")
-            if (
-                isinstance(received, bool)
-                or not isinstance(received, int)
-                or isinstance(pose_ns, bool)
-                or not isinstance(pose_ns, int)
-                or not 0 <= received - pose_ns <= MAX_POSE_AGE_NS
-            ):
-                provider_receive_stale_pose += 1
+        if in_measurement:
+            unexpected_measurement_queries += 1
+            failures.append(
+                f"measurement query {query_id} has no declared cell/slot ordinal"
+            )
+
+    results_by_query: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for message in messages:
+        if message.get("message_type") == "result":
+            results_by_query[str(message.get("query_id"))].append(dict(message))
+
+    wire_hashes_by_query_kind: dict[tuple[str, str], list[str]] = defaultdict(list)
+    message_by_hash = wire.get("message_by_hash", {})
+    if not isinstance(message_by_hash, dict):
+        failures.append("capacity wire hash index is absent")
+        message_by_hash = {}
+    for wire_sha256, message in message_by_hash.items():
+        if not isinstance(message, Mapping):
+            continue
+        kind = message.get("message_type")
+        if kind in {"query", "result"}:
+            wire_hashes_by_query_kind[
+                (str(message.get("query_id")), str(kind))
+            ].append(str(wire_sha256))
+
+    provider_identity_by_sender: dict[str, str] = {}
+    for message in messages:
         if (
-            result.get("status") != "ok"
-            or not isinstance(completed, int)
-            or not isinstance(deadline, int)
-            or completed > deadline
+            message.get("message_type") not in {"hello", "ready"}
+            or message.get("sender_role") != "provider"
         ):
-            late += 1
-        else:
-            ok += 1
-            start = result.get("validity_start_monotonic_ns")
-            expiry = result.get("expires_monotonic_ns")
-            if not isinstance(start, int) or not isinstance(expiry, int) or expiry - start != VALIDITY_TTL_NS:
-                failures.append(f"result {query_id} changes the frozen 2-s validity TTL")
+            continue
+        sender_id = message.get("sender_id")
+        provider_identity = message.get("provider_identity")
+        if not isinstance(sender_id, str) or not isinstance(
+            provider_identity, dict
+        ):
+            failures.append("capacity provider handshake identity is incomplete")
+            continue
+        identity_json = json.dumps(
+            provider_identity, sort_keys=True, separators=(",", ":")
+        )
+        previous = provider_identity_by_sender.setdefault(sender_id, identity_json)
+        if previous != identity_json:
+            failures.append(f"capacity provider identity changed for {sender_id}")
+    if len(provider_identity_by_sender) != 1:
+        failures.append(
+            "capacity freshness requires exactly one provider handshake identity"
+        )
+
+    states_by_query: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for record in state_records:
+        if isinstance(record, Mapping) and record.get("availability") == "fresh":
+            states_by_query[str(record.get("query_id"))].append(record)
+    audits_by_event_query: dict[
+        tuple[str, str], list[Mapping[str, Any]]
+    ] = defaultdict(list)
+    for record in adapter_records:
+        if not isinstance(record, Mapping):
+            continue
+        event = record.get("event")
+        query_id = record.get("query_id")
+        if isinstance(event, str) and isinstance(query_id, str):
+            audits_by_event_query[(event, query_id)].append(record)
+
+    cell_counts: dict[tuple[str, str], int] = defaultdict(int)
+    successful_cell_counts: dict[tuple[str, str], int] = defaultdict(int)
+    stale_pose = 0
+    provider_receive_stale_pose = 0
+    missed = 0
+    late_or_invalid = 0
+    failed = 0
+    ok = 0
+    for cell in ordered_cells:
+        for ordinal in range(1, QUERY_SLOT_COUNT_PER_CELL + 1):
+            candidates = slot_queries.get((cell, ordinal), [])
+            cell_counts[cell] += len(candidates)
+            if not candidates:
+                missed += 1
+                failed += 1
+                continue
+
+            slot_failed = len(candidates) != 1
+            if len(candidates) != 1:
+                failures.append(
+                    f"cell {cell} slot {ordinal} has {len(candidates)} query frames"
+                )
+            query = candidates[0]
+            query_id = str(query.get("query_id"))
+            scheduled_ns = (
+                start_ns
+                + (ordinal - 1) * QUERY_PERIOD_NS
+                + cell_offsets[cell]
+            )
+            slot_deadline_ns = scheduled_ns + QUERY_DEADLINE_NS
+            sent = query.get("request_sent_monotonic_ns")
+            deadline = query.get("deadline_monotonic_ns")
+            if (
+                isinstance(sent, bool)
+                or not isinstance(sent, int)
+                or isinstance(deadline, bool)
+                or not isinstance(deadline, int)
+                or deadline - sent != QUERY_DEADLINE_NS
+            ):
+                failures.append(f"query {query_id} changes the frozen 100-ms deadline")
+                slot_failed = True
+            if (
+                isinstance(sent, bool)
+                or not isinstance(sent, int)
+                or not scheduled_ns <= sent < slot_deadline_ns
+            ):
+                failures.append(
+                    f"query {query_id} was not sent inside its absolute ordinal slot"
+                )
+                slot_failed = True
+
+            query_hashes = wire_hashes_by_query_kind.get((query_id, "query"), [])
+            query_wire_sha256 = query_hashes[0] if len(query_hashes) == 1 else None
+            if len(query_hashes) != 1:
+                failures.append(
+                    f"query {query_id} has {len(query_hashes)} exact wire hashes"
+                )
+                slot_failed = True
+            elif hashlib.sha256(
+                (
+                    json.dumps(
+                        query,
+                        allow_nan=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                ).encode()
+            ).hexdigest() != query_wire_sha256:
+                failures.append(f"query {query_id} exact wire hash differs")
+                slot_failed = True
+            submitted_audits = audits_by_event_query.get(
+                ("query_submitted", query_id), []
+            )
+            if len(submitted_audits) != 1:
+                failures.append(
+                    f"query {query_id} has {len(submitted_audits)} submission audit occurrences"
+                )
+                slot_failed = True
+            else:
+                submitted_audit = submitted_audits[0]
+                if (
+                    submitted_audit.get("decision") != "fixed_slot"
+                    or submitted_audit.get("directed_link") != cell[0]
+                    or submitted_audit.get("traffic_class") != cell[1]
+                    or submitted_audit.get("query_wire_sha256")
+                    != query_wire_sha256
+                    or submitted_audit.get("query_slot_ordinal") != ordinal
+                    or submitted_audit.get(
+                        "query_slot_scheduled_monotonic_ns"
+                    )
+                    != scheduled_ns
+                    or submitted_audit.get("query_slot_deadline_monotonic_ns")
+                    != slot_deadline_ns
+                ):
+                    failures.append(
+                        f"query {query_id} submission audit tuple differs"
+                    )
+                    slot_failed = True
+
+            nodes = query.get("nodes")
+            jammers = query.get("jammers")
+            exact_poses = (
+                isinstance(nodes, list)
+                and {node.get("node_id") for node in nodes}
+                == {"cp", "uav1", "uav2", "uav3", "uav4", "uav5"}
+                and isinstance(jammers, list)
+                and {item.get("jammer_id") for item in jammers} == {"jammer_m4"}
+            )
+            if not exact_poses:
+                failures.append(
+                    f"query {query_id} does not carry exact six-node/jammer poses"
+                )
+                slot_failed = True
+            poses = [
+                *(nodes if isinstance(nodes, list) else []),
+                *(jammers if isinstance(jammers, list) else []),
+            ]
+            for pose in poses:
+                age = pose.get("freshness_age_ns")
+                if (
+                    pose.get("stale") is not False
+                    or isinstance(age, bool)
+                    or not isinstance(age, int)
+                    or not 0 <= age <= MAX_POSE_AGE_NS
+                ):
+                    stale_pose += 1
+                    slot_failed = True
+
+            results = results_by_query.get(query_id, [])
+            if len(results) != 1:
+                slot_failed = True
+                if len(results) > 1:
+                    failures.append(
+                        f"query {query_id} has conflicting multiple result frames"
+                    )
+            else:
+                result = results[0]
+                completed = result.get("provider_completed_monotonic_ns")
+                provider_received = result.get("provider_received_monotonic_ns")
+                provider_started = result.get("provider_started_monotonic_ns")
+                provider_sent = result.get("provider_sent_monotonic_ns")
+                provider_emitted = result.get("emitted_monotonic_ns")
+                cutoff_ns = (
+                    min(deadline, slot_deadline_ns)
+                    if isinstance(deadline, int) and not isinstance(deadline, bool)
+                    else slot_deadline_ns
+                )
+                correlation_keys = (
+                    "query_id",
+                    "node_state_seq",
+                    "directed_link_id",
+                    "traffic_class",
+                    "tx_node_id",
+                    "rx_node_id",
+                    "run_id",
+                    "profile",
+                    "phase_id",
+                    "contract_hash",
+                    "config_hash",
+                    "bundle_id",
+                )
+                if any(result.get(key) != query.get(key) for key in correlation_keys):
+                    failures.append(
+                        f"query {query_id} query/result correlation tuple differs"
+                    )
+                    slot_failed = True
+                if result.get("sender_id") not in provider_identity_by_sender:
+                    failures.append(
+                        f"query {query_id} result has no exact provider identity"
+                    )
+                    slot_failed = True
+                if (
+                    result.get("provider_clock_domain")
+                    != query.get("sender_clock_domain")
+                    or result.get("validity_clock_domain")
+                    != query.get("sender_clock_domain")
+                ):
+                    failures.append(
+                        f"query {query_id} result clock identity differs"
+                    )
+                    slot_failed = True
+                provider_times = (
+                    provider_received,
+                    provider_started,
+                    completed,
+                    provider_sent,
+                    provider_emitted,
+                )
+                if (
+                    any(
+                        isinstance(value, bool) or not isinstance(value, int)
+                        for value in provider_times
+                    )
+                    or list(provider_times) != sorted(provider_times)
+                    or not isinstance(sent, int)
+                    or isinstance(sent, bool)
+                    or provider_received < sent
+                ):
+                    failures.append(
+                        f"query {query_id} provider timing tuple differs"
+                    )
+                    slot_failed = True
+                for pose in poses:
+                    pose_ns = pose.get("pose_monotonic_ns")
+                    if (
+                        isinstance(provider_received, bool)
+                        or not isinstance(provider_received, int)
+                        or isinstance(pose_ns, bool)
+                        or not isinstance(pose_ns, int)
+                        or not 0
+                        <= provider_received - pose_ns
+                        <= MAX_POSE_AGE_NS
+                    ):
+                        provider_receive_stale_pose += 1
+                        slot_failed = True
+
+                result_hashes = wire_hashes_by_query_kind.get(
+                    (query_id, "result"), []
+                )
+                result_wire_sha256 = (
+                    result_hashes[0] if len(result_hashes) == 1 else None
+                )
+                if len(result_hashes) != 1:
+                    failures.append(
+                        f"query {query_id} has {len(result_hashes)} exact result wire hashes"
+                    )
+                    slot_failed = True
+                elif hashlib.sha256(
+                    (
+                        json.dumps(
+                            result,
+                            allow_nan=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                        + "\n"
+                    ).encode()
+                ).hexdigest() != result_wire_sha256:
+                    failures.append(
+                        f"query {query_id} exact result wire hash differs"
+                    )
+                    slot_failed = True
+                received_audits = audits_by_event_query.get(
+                    ("result_received", query_id), []
+                )
+                adapter_received = None
+                if len(received_audits) != 1:
+                    failures.append(
+                        f"query {query_id} has {len(received_audits)} receipt audit occurrences"
+                    )
+                    slot_failed = True
+                else:
+                    received_audit = received_audits[0]
+                    adapter_received = received_audit.get(
+                        "adapter_received_monotonic_ns"
+                    )
+                    if (
+                        received_audit.get("decision") != "pending"
+                        or received_audit.get("directed_link") != cell[0]
+                        or received_audit.get("traffic_class") != cell[1]
+                        or received_audit.get("result_wire_sha256")
+                        != result_wire_sha256
+                        or received_audit.get("query_slot_ordinal") != ordinal
+                        or received_audit.get(
+                            "query_slot_scheduled_monotonic_ns"
+                        )
+                        != scheduled_ns
+                        or received_audit.get(
+                            "query_slot_deadline_monotonic_ns"
+                        )
+                        != slot_deadline_ns
+                        or isinstance(adapter_received, bool)
+                        or not isinstance(adapter_received, int)
+                        or isinstance(provider_emitted, bool)
+                        or not isinstance(provider_emitted, int)
+                        or provider_emitted > adapter_received
+                    ):
+                        failures.append(
+                            f"query {query_id} receipt audit tuple differs"
+                        )
+                        slot_failed = True
+
+                validity_start = result.get("validity_start_monotonic_ns")
+                expiry = result.get("expires_monotonic_ns")
+                if (
+                    result.get("status") != "ok"
+                    or isinstance(completed, bool)
+                    or not isinstance(completed, int)
+                    or completed >= cutoff_ns
+                    or isinstance(adapter_received, bool)
+                    or not isinstance(adapter_received, int)
+                    or adapter_received >= cutoff_ns
+                ):
+                    slot_failed = True
+                if result.get("status") == "ok" and (
+                    isinstance(validity_start, bool)
+                    or not isinstance(validity_start, int)
+                    or isinstance(expiry, bool)
+                    or not isinstance(expiry, int)
+                    or expiry - validity_start != VALIDITY_TTL_NS
+                ):
+                    failures.append(
+                        f"result {query_id} changes the frozen 2-s validity TTL"
+                    )
+                    slot_failed = True
+
+                state_occurrences = states_by_query.get(query_id, [])
+                applied_audits = audits_by_event_query.get(
+                    ("result_applied", query_id), []
+                )
+                if len(state_occurrences) > 1 or len(applied_audits) > 1:
+                    failures.append(
+                        f"query {query_id} has multiple applied state/audit occurrences"
+                    )
+                    slot_failed = True
+                if len(state_occurrences) != 1 or len(applied_audits) != 1:
+                    slot_failed = True
+                else:
+                    state = state_occurrences[0]
+                    applied_audit = applied_audits[0]
+                    adapter_applied = state.get("adapter_applied_monotonic_ns")
+                    expected_link_id = (
+                        f"{query.get('tx_node_id')}-to-{query.get('rx_node_id')}-"
+                        f"{query.get('traffic_class')}"
+                    )
+                    state_tuple_differs = (
+                        query.get("directed_link_id") != expected_link_id
+                        or state.get("directed_link") != cell[0]
+                        or state.get("traffic_class") != cell[1]
+                        or state.get("query_id") != query_id
+                        or state.get("node_state_seq")
+                        != query.get("node_state_seq")
+                        or state.get("node_state_seq")
+                        != result.get("node_state_seq")
+                        or state.get("node_state_sha256")
+                        != query.get("node_state_sha256")
+                        or state.get("query_wire_sha256")
+                        != query_wire_sha256
+                        or state.get("result_wire_sha256")
+                        != result_wire_sha256
+                        or any(
+                            state.get(key) != query.get(key)
+                            for key in ("run_id", "profile", "phase_id")
+                        )
+                        or state.get("validity_start_monotonic_ns")
+                        != validity_start
+                        or state.get("expires_monotonic_ns") != expiry
+                        or state.get("physical") != result.get("physical")
+                    )
+                    audit_tuple_differs = (
+                        applied_audit.get("decision") != "applied"
+                        or applied_audit.get("directed_link") != cell[0]
+                        or applied_audit.get("traffic_class") != cell[1]
+                        or applied_audit.get("result_wire_sha256")
+                        != result_wire_sha256
+                        or applied_audit.get("applied_state_id")
+                        != state.get("applied_state_id")
+                        or applied_audit.get("adapter_received_monotonic_ns")
+                        != adapter_received
+                        or applied_audit.get("adapter_applied_monotonic_ns")
+                        != adapter_applied
+                        or applied_audit.get("validity_start_monotonic_ns")
+                        != validity_start
+                        or applied_audit.get("expires_monotonic_ns") != expiry
+                        or applied_audit.get("query_slot_ordinal") != ordinal
+                        or applied_audit.get(
+                            "query_slot_scheduled_monotonic_ns"
+                        )
+                        != scheduled_ns
+                        or applied_audit.get(
+                            "query_slot_deadline_monotonic_ns"
+                        )
+                        != slot_deadline_ns
+                    )
+                    if state_tuple_differs:
+                        failures.append(
+                            f"query {query_id} applied-state correlation tuple differs"
+                        )
+                        slot_failed = True
+                    if audit_tuple_differs:
+                        failures.append(
+                            f"query {query_id} application audit tuple differs"
+                        )
+                        slot_failed = True
+                    if (
+                        isinstance(adapter_applied, bool)
+                        or not isinstance(adapter_applied, int)
+                        or adapter_applied >= cutoff_ns
+                        or isinstance(validity_start, bool)
+                        or not isinstance(validity_start, int)
+                        or isinstance(expiry, bool)
+                        or not isinstance(expiry, int)
+                        or not validity_start <= adapter_applied < expiry
+                        or not isinstance(adapter_received, int)
+                        or isinstance(adapter_received, bool)
+                        or adapter_applied < adapter_received
+                    ):
+                        slot_failed = True
+
+            if slot_failed:
+                late_or_invalid += 1
+                failed += 1
+            else:
+                ok += 1
+                successful_cell_counts[cell] += 1
+
     minimum_queries_per_cell = 570
     for cell in EXPECTED_CELLS:
-        if cell_counts.get(cell, 0) < minimum_queries_per_cell:
-            failures.append(f"cell {cell} has {cell_counts.get(cell, 0)} < 570 queries")
-    query_count = len(queries)
-    late_ratio = late / query_count if query_count else 1.0
+        successful = successful_cell_counts.get(cell, 0)
+        if successful < minimum_queries_per_cell:
+            failures.append(
+                f"cell {cell} has {successful} < 570 successful ordinal slots"
+            )
+    query_count = sum(len(candidates) for candidates in slot_queries.values())
+    late_ratio = failed / scheduled_slot_count
     if stale_pose != 0:
         failures.append(f"stale pose samples must be exactly zero, observed {stale_pose}")
     if provider_receive_stale_pose != 0:
@@ -1620,14 +2674,25 @@ def validate_capacity_freshness(
     if state_age_p95 is None or state_age_p95 > 2 * QUERY_PERIOD_NS:
         failures.append("link-state age p95 exceeds two configured update periods")
     return {
+        "scheduled_query_slot_count": scheduled_slot_count,
+        "scheduled_slots_per_cell": QUERY_SLOT_COUNT_PER_CELL,
         "query_count": query_count,
+        "unexpected_measurement_query_count": unexpected_measurement_queries,
         "ok_result_count": ok,
-        "late_result_count": late,
+        "missed_slot_count": missed,
+        "late_or_invalid_slot_count": late_or_invalid,
+        "late_result_count": failed,
+        "failed_slot_count": failed,
         "late_update_ratio": late_ratio,
         "stale_pose_count": stale_pose,
         "provider_receive_stale_pose_count": provider_receive_stale_pose,
-        "query_cells": len(cell_counts),
-        "minimum_queries_in_one_cell": min(cell_counts.values()) if cell_counts else 0,
+        "query_cells": sum(cell_counts[cell] > 0 for cell in EXPECTED_CELLS),
+        "minimum_queries_in_one_cell": min(
+            cell_counts[cell] for cell in EXPECTED_CELLS
+        ),
+        "minimum_successful_slots_in_one_cell": min(
+            successful_cell_counts[cell] for cell in EXPECTED_CELLS
+        ),
         "measurement_packet_decisions": len(packet_records),
         "measurement_packet_cells": len(decision_cells),
         "state_age_sample_count": len(ages),
@@ -2124,6 +3189,223 @@ def validate_capacity_workload(
     }, failures
 
 
+def _measurement_capture_realtime_bounds(
+    run_dir: Path,
+    *,
+    start_ns: int,
+    end_ns: int,
+) -> tuple[int, int]:
+    """Map frozen monotonic measurement boundaries into PCAP realtime."""
+
+    records = strict_jsonl(
+        run_dir / "logs/m4_runtime_events.jsonl",
+        max_line_bytes=2 * 1024 * 1024,
+    )
+    start_event = _one_event(records, "measurement_start")
+    end_event = _one_event(records, "measurement_end")
+
+    def mapped(
+        record: Mapping[str, Any],
+        target_ns: int,
+        *,
+        label: str,
+        maximum_emit_delay_ns: int,
+    ) -> int:
+        host_ns = record.get("host_monotonic_ns")
+        realtime_ns = record.get("host_realtime_ns")
+        if (
+            isinstance(host_ns, bool)
+            or not isinstance(host_ns, int)
+            or isinstance(realtime_ns, bool)
+            or not isinstance(realtime_ns, int)
+            or realtime_ns <= 0
+            or not target_ns <= host_ns <= target_ns + maximum_emit_delay_ns
+        ):
+            raise M4ValidationError(
+                f"{label} runtime event cannot calibrate PCAP realtime"
+            )
+        return realtime_ns - (host_ns - target_ns)
+
+    start_realtime_ns = mapped(
+        start_event,
+        start_ns,
+        label="measurement start",
+        maximum_emit_delay_ns=100_000_000,
+    )
+    end_realtime_ns = mapped(
+        end_event,
+        end_ns,
+        label="measurement end",
+        maximum_emit_delay_ns=500_000_000,
+    )
+    monotonic_span_ns = end_ns - start_ns
+    realtime_span_ns = end_realtime_ns - start_realtime_ns
+    if (
+        start_realtime_ns <= 0
+        or monotonic_span_ns <= 0
+        or realtime_span_ns <= 0
+        or abs(realtime_span_ns - monotonic_span_ns)
+        > CAPTURE_REALTIME_SPAN_TOLERANCE_NS
+    ):
+        raise M4ValidationError("measurement PCAP realtime interval is invalid")
+    return start_realtime_ns, end_realtime_ns
+
+
+def _monotonic_to_capture_realtime_ns(
+    monotonic_ns: int,
+    *,
+    start_ns: int,
+    end_ns: int,
+    start_realtime_ns: int,
+    end_realtime_ns: int,
+) -> int:
+    """Linearly map one frozen measurement instant to CLOCK_REALTIME."""
+
+    if (
+        isinstance(monotonic_ns, bool)
+        or not isinstance(monotonic_ns, int)
+        or not start_ns <= monotonic_ns < end_ns
+    ):
+        raise M4ValidationError(
+            "expected capture occurrence timestamp is outside measurement"
+        )
+    monotonic_span_ns = end_ns - start_ns
+    realtime_span_ns = end_realtime_ns - start_realtime_ns
+    if monotonic_span_ns <= 0 or realtime_span_ns <= 0:
+        raise M4ValidationError("capture clock interpolation interval is invalid")
+    return start_realtime_ns + (
+        (monotonic_ns - start_ns) * realtime_span_ns // monotonic_span_ns
+    )
+
+
+def _consume_capture_role_occurrences(
+    index: Mapping[tuple[Any, ...], list[dict[str, Any]]],
+    expected_records: Iterable[Mapping[str, Any]],
+    *,
+    capture: str,
+    key_fn: Callable[[Mapping[str, Any]], tuple[Any, ...]],
+    timestamp_field: str,
+    start_ns: int,
+    end_ns: int,
+    start_realtime_ns: int,
+    end_realtime_ns: int,
+    cursors: dict[tuple[str, tuple[Any, ...]], int],
+) -> tuple[int, int]:
+    """Consume one time-bound captured frame per expected byte occurrence."""
+
+    prepared: list[dict[str, Any]] = []
+    for record in expected_records:
+        timestamp = record.get(timestamp_field)
+        if (
+            isinstance(timestamp, bool)
+            or not isinstance(timestamp, int)
+            or not start_ns <= timestamp < end_ns
+        ):
+            raise M4ValidationError(
+                f"{capture} expected occurrence timestamp is outside measurement"
+            )
+        packet_key = key_fn(record)
+        prepared.append(
+            {
+                "record": record,
+                "packet_key": packet_key,
+                "monotonic_ns": timestamp,
+                "realtime_ns": _monotonic_to_capture_realtime_ns(
+                    timestamp,
+                    start_ns=start_ns,
+                    end_ns=end_ns,
+                    start_realtime_ns=start_realtime_ns,
+                    end_realtime_ns=end_realtime_ns,
+                ),
+            }
+        )
+
+    by_key: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
+    for item in prepared:
+        by_key[item["packet_key"]].append(item)
+    for packet_key, occurrences in by_key.items():
+        occurrences.sort(
+            key=lambda item: (
+                int(item["monotonic_ns"]),
+                str(item["record"].get("record_nonce")),
+            )
+        )
+        if any(
+            int(occurrences[index]["monotonic_ns"])
+            <= int(occurrences[index - 1]["monotonic_ns"])
+            for index in range(1, len(occurrences))
+        ):
+            raise M4ValidationError(
+                f"{capture} repeated expected occurrences have ambiguous order"
+            )
+        if any(
+            int(occurrences[index]["realtime_ns"])
+            - int(occurrences[index - 1]["realtime_ns"])
+            <= 2 * CAPTURE_OCCURRENCE_MATCH_TOLERANCE_NS
+            for index in range(1, len(occurrences))
+        ):
+            raise M4ValidationError(
+                f"{capture} repeated expected occurrence timing windows overlap"
+            )
+        for occurrence_index, item in enumerate(occurrences):
+            realtime_ns = int(item["realtime_ns"])
+            lower_ns = realtime_ns - CAPTURE_OCCURRENCE_MATCH_TOLERANCE_NS
+            upper_ns = realtime_ns + CAPTURE_OCCURRENCE_MATCH_TOLERANCE_NS
+            if occurrence_index:
+                previous_ns = int(
+                    occurrences[occurrence_index - 1]["realtime_ns"]
+                )
+                lower_ns = max(lower_ns, (previous_ns + realtime_ns) // 2 + 1)
+            if occurrence_index + 1 < len(occurrences):
+                next_ns = int(
+                    occurrences[occurrence_index + 1]["realtime_ns"]
+                )
+                upper_ns = min(upper_ns, (realtime_ns + next_ns) // 2)
+            if lower_ns > upper_ns:
+                raise M4ValidationError(
+                    f"{capture} repeated expected occurrence window is empty"
+                )
+            item["capture_lower_realtime_ns"] = lower_ns
+            item["capture_upper_realtime_ns"] = upper_ns
+
+    prepared.sort(
+        key=lambda item: (
+            int(item["monotonic_ns"]),
+            repr(item["packet_key"]),
+            str(item["record"].get("record_nonce")),
+        )
+    )
+
+    matched = 0
+    for item in prepared:
+        packet_key = item["packet_key"]
+        cursor_key = (capture, packet_key)
+        cursor = cursors.get(cursor_key, 0)
+        candidates = index.get(packet_key, [])
+        lower_ns = int(item["capture_lower_realtime_ns"])
+        upper_ns = int(item["capture_upper_realtime_ns"])
+        while cursor < len(candidates):
+            candidate_ns = candidates[cursor].get("timestamp_ns")
+            if (
+                isinstance(candidate_ns, bool)
+                or not isinstance(candidate_ns, int)
+            ):
+                raise M4ValidationError(
+                    f"{capture} captured occurrence realtime is invalid"
+                )
+            if candidate_ns >= lower_ns:
+                break
+            cursor += 1
+        cursors[cursor_key] = cursor
+        if cursor >= len(candidates):
+            continue
+        candidate_ns = int(candidates[cursor]["timestamp_ns"])
+        if candidate_ns <= upper_ns:
+            cursors[cursor_key] = cursor + 1
+            matched += 1
+    return len(prepared), matched
+
+
 def validate_external_captures(
     run_dir: Path,
     *,
@@ -2144,6 +3426,11 @@ def validate_external_captures(
             *((f"endpoint-{endpoint}", "eth0") for endpoint in ENDPOINTS),
             *((f"ns3-external-{endpoint}", f"vp-{endpoint}") for endpoint in ENDPOINTS),
         ]
+        start_realtime_ns, end_realtime_ns = _measurement_capture_realtime_bounds(
+            run_dir,
+            start_ns=start_ns,
+            end_ns=end_ns,
+        )
         capture_records: dict[str, list[dict[str, Any]]] = {}
         packet_counts: dict[str, int] = {}
         stats_keys = {
@@ -2222,7 +3509,31 @@ def validate_external_captures(
         indexes: dict[str, dict[tuple[Any, ...], list[dict[str, Any]]]] = {}
         for name, records in capture_records.items():
             index: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
-            for record in records:
+            ordered_records = sorted(
+                records,
+                key=lambda record: int(record.get("frame_index", -1)),
+            )
+            previous_frame_index = 0
+            previous_timestamp_ns = 0
+            for record in ordered_records:
+                frame_index = record.get("frame_index")
+                timestamp_ns = record.get("timestamp_ns")
+                if (
+                    isinstance(frame_index, bool)
+                    or not isinstance(frame_index, int)
+                    or frame_index <= previous_frame_index
+                    or isinstance(timestamp_ns, bool)
+                    or not isinstance(timestamp_ns, int)
+                    or timestamp_ns <= 0
+                    or timestamp_ns < previous_timestamp_ns
+                ):
+                    raise M4ValidationError(
+                        f"capture {name} decoded occurrence order differs"
+                    )
+                previous_frame_index = frame_index
+                previous_timestamp_ns = timestamp_ns
+                if not start_realtime_ns <= timestamp_ns < end_realtime_ns:
+                    continue
                 index[
                     (
                         record.get("transport_payload_sha256"),
@@ -2252,6 +3563,7 @@ def validate_external_captures(
 
         role_counts: dict[str, dict[str, int]] = {}
         all_capture_names = set(indexes)
+        occurrence_cursors: dict[tuple[str, tuple[Any, ...]], int] = {}
         for cell_id, cell in sorted(cells.items()):
             source_endpoint = (
                 "gcs"
@@ -2291,18 +3603,30 @@ def validate_external_captures(
             cell_counts: dict[str, int] = {}
             permitted = {name for name, _records in roles.values()}
             for role, (capture, expected_records) in roles.items():
-                expected = {str(record["transport_payload_sha256"]) for record in expected_records}
-                matched = {
-                    str(record["transport_payload_sha256"])
-                    for record in expected_records
-                    if indexes[capture].get(key(record))
-                }
-                if matched != expected:
+                timestamp_field = (
+                    "sent_monotonic_ns"
+                    if role in {"source_endpoint", "ns3_ingress"}
+                    else "received_monotonic_ns"
+                )
+                expected_count, matched_count = _consume_capture_role_occurrences(
+                    indexes[capture],
+                    expected_records,
+                    capture=capture,
+                    key_fn=key,
+                    timestamp_field=timestamp_field,
+                    start_ns=start_ns,
+                    end_ns=end_ns,
+                    start_realtime_ns=start_realtime_ns,
+                    end_realtime_ns=end_realtime_ns,
+                    cursors=occurrence_cursors,
+                )
+                if matched_count != expected_count:
                     failures.append(
-                        f"{cell_id}/{role} external capture set differs: "
-                        f"missing={len(expected-matched)}"
+                        f"{cell_id}/{role} external capture occurrences differ: "
+                        f"expected={expected_count} matched={matched_count} "
+                        f"missing={expected_count-matched_count}"
                     )
-                cell_counts[role] = len(matched)
+                cell_counts[role] = matched_count
             for capture in sorted(all_capture_names - permitted):
                 if any(indexes[capture].get(key(record)) for record in source_records):
                     failures.append(f"{cell_id} payload leaked to unrelated capture {capture}")
@@ -2311,6 +3635,8 @@ def validate_external_captures(
             "capture_count": len(capture_specs),
             "packet_counts": packet_counts,
             "cell_role_counts": role_counts,
+            "measurement_start_realtime_ns": start_realtime_ns,
+            "measurement_end_realtime_ns": end_realtime_ns,
         }, failures
     except (OSError, KeyError, TypeError, ValueError, M4ValidationError) as exc:
         failures.append(f"external capture evidence cannot be validated: {exc}")
@@ -2318,6 +3644,8 @@ def validate_external_captures(
 
 
 __all__ = [
+    "CAPTURE_OCCURRENCE_MATCH_TOLERANCE_NS",
+    "CAPTURE_REALTIME_SPAN_TOLERANCE_NS",
     "CLOCK_SAMPLE_SCHEMA",
     "CLOCK_PRODUCER_PROCESS_ROLES",
     "ENDPOINTS",
@@ -2327,7 +3655,9 @@ __all__ = [
     "MAX_POSE_AGE_NS",
     "MANDATORY_CAPTURE_ROLES",
     "QUERY_DEADLINE_NS",
+    "QUERY_GLOBAL_SPACING_NS",
     "QUERY_PERIOD_NS",
+    "QUERY_SLOT_COUNT_PER_CELL",
     "REQUIRED_CLOCK_PRODUCERS",
     "REQUIRED_PROCESS_COUNTS",
     "RUNTIME_EVENT_SCHEMA",
@@ -2341,8 +3671,11 @@ __all__ = [
     "validate_capacity_freshness",
     "validate_capacity_runtime",
     "validate_capacity_workload",
+    "validate_continuous_readiness_schedule",
     "validate_external_captures",
     "validate_clock_correlations",
     "validate_clock_process_binding",
+    "validate_query_pose_runtime_binding",
+    "validate_native_world_entity_observations",
     "validate_scene_prerequisite",
 ]

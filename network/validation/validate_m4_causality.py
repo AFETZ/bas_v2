@@ -58,6 +58,7 @@ from network.validation.m4_runtime import (
     sha256_file,
     validate_clock_correlations,
     validate_clock_process_binding,
+    validate_query_pose_runtime_binding,
     validate_scene_prerequisite,
 )
 from network.validation.validate_m4_capacity import (
@@ -4219,7 +4220,7 @@ def validate(run_dir: Path) -> dict[str, Any]:
     details["real_provider_wire"] = {
         key: value
         for key, value in wire.items()
-        if key not in {"messages", "message_by_hash", "raw_by_hash"}
+        if key not in {"messages", "message_by_hash"}
     }
     states, state_failures = validate_states(
         run_dir / "logs/sionna_applied_states.jsonl", wire
@@ -4245,6 +4246,18 @@ def validate(run_dir: Path) -> dict[str, Any]:
         )
         gate_failures["pose_lineage"].extend(geometry_failures)
         poses.update(geometry_details)
+        binding_details, binding_failures = validate_query_pose_runtime_binding(
+            pose_records,
+            wire,
+            runtime_records,
+            run_dir / "logs/m4_pose_observations.jsonl.gz",
+            run_id=str(run_id),
+            runtime_id=str(runtime_id),
+            start_monotonic_ns=pose_start,
+            end_monotonic_ns=pose_end,
+        )
+        gate_failures["pose_lineage"].extend(binding_failures)
+        poses["runtime_binding"] = binding_details
     except M4ValidationError as exc:
         gate_failures["pose_lineage"].append(str(exc))
     details["pose_lineage"] = poses

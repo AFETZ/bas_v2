@@ -56,25 +56,30 @@ class M4RawPoseLineageTests(unittest.TestCase):
         )
 
     @staticmethod
-    def world_poses() -> SimpleNamespace:
-        transforms = []
+    def world_poses() -> tuple[SimpleNamespace, ...]:
+        observations = []
+        callback_ns = time.monotonic_ns()
         for name, position in (
             ("cp", vector(-8_000.0, -2_500.0, 300.0)),
             ("jammer_m4", vector(2_000.0, -3_000.0, 100.0)),
         ):
-            transforms.append(
+            observations.append(
                 namespace(
-                    header=namespace(
-                        stamp=namespace(sec=10, nanosec=0), frame_id="world"
-                    ),
-                    child_frame_id=name,
-                    transform=namespace(
-                        translation=position,
-                        rotation=quaternion(),
-                    ),
+                    entity_id=name,
+                    source_callback_monotonic_ns=callback_ns,
+                    sim_stamp_ns=10_000_000_000,
+                    source_topic="/world/map/pose/info",
+                    source_transport="gazebo_transport_pose_v",
+                    source_stamp_scope="pose_v_top_level_header",
+                    source_frame="world",
+                    transform_version="enu-identity-v1",
+                    source_header_frame="",
+                    source_child_frame=name,
+                    position_m=(position.x, position.y, position.z),
+                    orientation_quat_xyzw=(0.0, 0.0, 0.0, 1.0),
                 )
             )
-        return namespace(transforms=transforms)
+        return tuple(observations)
 
     def make_evidence(
         self, root: Path
@@ -125,9 +130,24 @@ class M4RawPoseLineageTests(unittest.TestCase):
                 all(
                     item["source_header_frame"] == "odom"
                     and item["source_child_frame"] == "base_link"
+                    and item["source_transport"] == "ros2_dds_odometry"
+                    and item["source_stamp_scope"] == "ros_header"
                     and item["source_frame"] == "world"
                     and item["transform_version"] == "enu-identity-v1"
                     for item in uav_nodes
+                )
+            )
+            world_records = [
+                raw["nodes"][0],
+                raw["jammers"][0],
+            ]
+            self.assertTrue(
+                all(
+                    item["source_header_frame"] == ""
+                    and item["source_transport"] == "gazebo_transport_pose_v"
+                    and item["source_stamp_scope"] == "pose_v_top_level_header"
+                    and item["source_header_stamp_ns"] == 10_000_000_000
+                    for item in world_records
                 )
             )
 

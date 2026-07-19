@@ -17,6 +17,7 @@ STACK_LAUNCHER="$ROOT_DIR/network/scripts/actual_sitl_stack_orchestrator.sh"
 CONTROL_PROBE="$ROOT_DIR/network/scripts/actual_sitl_control_probe.py"
 ENDPOINT_AGENT="$ROOT_DIR/network/scripts/m4_endpoint_agent.py"
 ADAPTER="$ROOT_DIR/network/scripts/m4_adapter_runtime.py"
+GAZEBO_POSE_SOURCE="$ROOT_DIR/network/scripts/m4_gazebo_pose_source.py"
 PHASE_DRIVER="$ROOT_DIR/network/scripts/m4_causal_phase_driver.py"
 RUNTIME_COLLECTOR="$ROOT_DIR/network/scripts/collect_m4_runtime.py"
 CLOCK_COLLECTOR="$ROOT_DIR/network/scripts/collect_m4_clock_correlations.py"
@@ -59,7 +60,7 @@ for command in colcon ip python3 ros2 setsid gz; do
 done
 for path in "$NS3_BINARY" "$PACKET_SOURCE" "$COPIED_SOURCE" "$RECEIPT_TOOL" \
   "$NS3_RUNNER" "$ORCHESTRATOR" "$STACK_LAUNCHER" "$CONTROL_PROBE" \
-  "$ENDPOINT_AGENT" "$ADAPTER" "$PHASE_DRIVER" "$RUNTIME_COLLECTOR" \
+  "$ENDPOINT_AGENT" "$ADAPTER" "$GAZEBO_POSE_SOURCE" "$PHASE_DRIVER" "$RUNTIME_COLLECTOR" \
   "$CLOCK_COLLECTOR" "$CAPTURE_TOOL" "$TOPOLOGY_MONITOR" "$VALIDATOR" \
   "$PROVENANCE_TOOL" "$MATRIX" "$FLIGHT_SCENARIO"; do
   [[ -e "$path" ]] || { printf 'FAIL M4 causality artifact absent: %s\n' "$path" >&2; exit 2; }
@@ -74,16 +75,6 @@ TOPOLOGY_PID=""
 TOPOLOGY_SEQUENCE=0
 SUCCESS=0
 
-stop_group() {
-  local pid="${1:-}"
-  [[ -n "$pid" ]] || return 0
-  kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
-  local deadline=$((SECONDS + 10))
-  while kill -0 -- "-$pid" 2>/dev/null && ((SECONDS < deadline)); do sleep 0.1; done
-  kill -KILL -- "-$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
-}
-
 cleanup() {
   local rc=$?
   set +e
@@ -95,7 +86,7 @@ cleanup() {
   for pid in "${COMPANION_PIDS[@]}" "${CAPTURE_PIDS[@]}" \
     "${CONTROL_PID:-}" "${PHASE_PID:-}" "${RUNTIME_PID:-}" \
     "${ADAPTER_PID:-}" "${ENGINE_PID:-}" "${PROVIDER_PID:-}" \
-    "${CLOCK_PID:-}" "${WORLD_BRIDGE_PID:-}"; do
+    "${CLOCK_PID:-}"; do
     [[ -n "$pid" ]] && kill -TERM -- "-$pid" 2>/dev/null
   done
   [[ -n "$STACK_PID" ]] && kill -TERM "$STACK_PID" 2>/dev/null
@@ -297,11 +288,6 @@ setsid python3 -u "$CLOCK_COLLECTOR" --run-dir "$RUN_DIR" --contract "$CONTRACT"
 CLOCK_PID=$!; PROCESS_GROUPS+=("$CLOCK_PID")
 wait_files 10 "$CLOCK_READY" || { printf 'FAIL clock collector readiness timeout\n' >&2; exit 2; }
 
-setsid ros2 run ros_gz_bridge parameter_bridge \
-  '/world/map/pose/info@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V' \
-  > "$RUN_DIR/logs/world-pose-bridge.stdout" 2> "$RUN_DIR/logs/world-pose-bridge.stderr" &
-WORLD_BRIDGE_PID=$!; PROCESS_GROUPS+=("$WORLD_BRIDGE_PID")
-
 COMPANION_READY=()
 for endpoint in "${ENDPOINTS[@]}"; do
   setsid ip netns exec "ams-$endpoint" python3 -u "$ENDPOINT_AGENT" \
@@ -404,8 +390,6 @@ COMPANION_PIDS=()
 : > "$PROVIDER_STOP_FILE"; wait "$PROVIDER_PID"; PROVIDER_PID=""
 : > "$CLOCK_STOP_FILE"; wait "$CLOCK_PID"; CLOCK_PID=""
 : > "$ACTUAL_STACK_STOP"; wait "$STACK_PID"; STACK_PID=""
-stop_group "$WORLD_BRIDGE_PID"; WORLD_BRIDGE_PID=""
-
 for pid in "${CAPTURE_PIDS[@]}"; do kill -INT -- "-$pid" 2>/dev/null || kill -INT "$pid"; done
 for pid in "${CAPTURE_PIDS[@]}"; do wait "$pid"; done
 CAPTURE_PIDS=()

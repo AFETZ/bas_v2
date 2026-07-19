@@ -16,6 +16,7 @@ STACK_LAUNCHER="$ROOT_DIR/network/scripts/actual_sitl_stack_orchestrator.sh"
 CONTROL_PROBE="$ROOT_DIR/network/scripts/actual_sitl_control_probe.py"
 ENDPOINT_AGENT="$ROOT_DIR/network/scripts/m4_endpoint_agent.py"
 ADAPTER="$ROOT_DIR/network/scripts/m4_adapter_runtime.py"
+GAZEBO_POSE_SOURCE="$ROOT_DIR/network/scripts/m4_gazebo_pose_source.py"
 RUNTIME_COLLECTOR="$ROOT_DIR/network/scripts/collect_m4_runtime.py"
 CLOCK_COLLECTOR="$ROOT_DIR/network/scripts/collect_m4_clock_correlations.py"
 CAPTURE_TOOL="$ROOT_DIR/network/scripts/raw_packet_capture.py"
@@ -56,7 +57,7 @@ done
 for path in \
   "$NS3_BINARY" "$PACKET_SOURCE" "$COPIED_SOURCE" "$RECEIPT_TOOL" \
   "$NS3_RUNNER" "$ORCHESTRATOR" "$STACK_LAUNCHER" "$CONTROL_PROBE" \
-  "$ENDPOINT_AGENT" "$ADAPTER" \
+  "$ENDPOINT_AGENT" "$ADAPTER" "$GAZEBO_POSE_SOURCE" \
   "$RUNTIME_COLLECTOR" "$CLOCK_COLLECTOR" "$CAPTURE_TOOL" "$VALIDATOR" \
   "$TOPOLOGY_MONITOR" "$PROVENANCE_TOOL" "$SCENARIO" "$MATRIX"; do
   [[ -e "$path" ]] || {
@@ -92,16 +93,6 @@ terminate_group() {
   local pid="${1:-}"
   [[ -n "$pid" ]] || return 0
   kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
-}
-
-stop_group() {
-  local pid="${1:-}"
-  [[ -n "$pid" ]] || return 0
-  terminate_group "$pid"
-  local deadline=$((SECONDS + 10))
-  while kill -0 -- "-$pid" 2>/dev/null && ((SECONDS < deadline)); do sleep 0.1; done
-  if kill -0 -- "-$pid" 2>/dev/null; then kill -KILL -- "-$pid" 2>/dev/null || true; fi
-  wait "$pid" 2>/dev/null || true
 }
 
 cleanup() {
@@ -362,13 +353,6 @@ CLOCK_PID=$!
 PROCESS_GROUPS+=("$CLOCK_PID")
 wait_for_files 10 "$CLOCK_READY" || { printf 'FAIL M4 clock collector readiness timeout\n' >&2; exit 2; }
 
-setsid ros2 run ros_gz_bridge parameter_bridge \
-  '/world/map/pose/info@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V' \
-  > "$RUN_DIR/logs/world-pose-bridge.stdout" \
-  2> "$RUN_DIR/logs/world-pose-bridge.stderr" &
-WORLD_BRIDGE_PID=$!
-PROCESS_GROUPS+=("$WORLD_BRIDGE_PID")
-
 PROVIDER_READY="$RUN_DIR/raw/state/provider.ready.json"
 PROVIDER_STOP_FILE="$RUN_DIR/raw/control/provider.stop"
 setsid python3 -u "$ORCHESTRATOR" provider --run-dir "$RUN_DIR" \
@@ -562,7 +546,6 @@ for pid in "${CAPTURE_PIDS[@]}"; do kill -INT -- "-$pid" 2>/dev/null || kill -IN
 for pid in "${CAPTURE_PIDS[@]}"; do wait "$pid"; done
 CAPTURE_PIDS=()
 
-stop_group "$WORLD_BRIDGE_PID"
 TOPOLOGY_SEQUENCE=$((TOPOLOGY_SEQUENCE + 1))
 python3 "$TOPOLOGY_MONITOR" stop --run-dir "$RUN_DIR" --run-id "$RUN_ID" \
   --runtime-id "$RUNTIME_ID" --run-nonce "$RUN_NONCE" \
