@@ -3659,6 +3659,12 @@ class M3ExternalMatrixStaticTests(unittest.TestCase):
         self.assertIn(
             '[[ ! -f "$MAVPROXY_SCRIPT" || ! -x "$MAVPROXY_SCRIPT" ]]', runner
         )
+        self.assertIn('MAVLINK_PYTHON="/usr/bin/python3.10"', runner)
+        self.assertIn(
+            'MAVLINK_PYTHON_SITE="/home/ubuntu/.local/lib/python3.10/site-packages"',
+            runner,
+        )
+        self.assertIn("controlled M3 Python/pymavlink runtime is unavailable", runner)
         self.assertNotIn("${2:-{}}", runner)
         self.assertIn("details_json='{}'", runner)
         self.assertLess(

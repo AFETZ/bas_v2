@@ -28,6 +28,12 @@ class MavlinkVerticalSliceProbeTests(unittest.TestCase):
         marker = make_marker(nonce, "recovery", 10)
         self.assertIn(nonce, marker)
         self.assertLessEqual(len(marker.encode("ascii")), 50)
+        source = Path(__file__).with_name("mavlink_vertical_slice_probe.py").read_text()
+        self.assertIn("MAVLINK_CONTROL_TOS = 184", source)
+        self.assertIn(
+            "sock.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, MAVLINK_CONTROL_TOS)",
+            source,
+        )
 
     def test_marker_rejects_oversized_nonce(self) -> None:
         with self.assertRaises(ValueError):

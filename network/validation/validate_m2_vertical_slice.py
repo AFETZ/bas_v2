@@ -462,10 +462,16 @@ def _packet_engine_receipt_gate(
     if official != {
         "root": "/workspace/multiagent_simulation/.external/ns-3",
         "version": "3.40",
+        "expected_version": "3.40",
         "core_tree_files": 3764,
         "core_tree_sha256": (
             "0119836a7c79f7470f0c2c866de9c14ddc4f22349bbd194112ff2952713b64e8"
         ),
+        "expected_core_tree_files": 3764,
+        "expected_core_tree_sha256": (
+            "0119836a7c79f7470f0c2c866de9c14ddc4f22349bbd194112ff2952713b64e8"
+        ),
+        "excludes": ["build", "cmake-cache", "scratch", "src/lorawan"],
     }:
         failures.append("ns-3 receipt does not bind the canonical official 3.40 tree")
     scratch = (
@@ -769,9 +775,9 @@ def _packet_engine_gate(
         observed_config, config_failures = _load_object(config_path)
         failures.extend(config_failures)
         try:
-            config, expected_config = _engine_config_expected(run_dir, phase, epoch)
+            _, expected_config = _engine_config_expected(run_dir, phase, epoch)
         except Exception as exc:
-            config, expected_config = None, {}
+            expected_config = {}
             failures.append(f"{phase}: cannot independently derive engine config: {exc}")
         if observed_config and observed_config != expected_config:
             failures.append(f"{phase}: resolved packet-engine config/hash is not exact")

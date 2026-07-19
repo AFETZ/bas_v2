@@ -92,6 +92,12 @@ class UavMavlinkEndpointTests(unittest.TestCase):
         self.assertEqual(tail.calls, [(command, ("127.0.0.1", 41001))])
 
     def test_bidirectional_forwarding_and_exact_pid_shutdown(self) -> None:
+        source = ADAPTER.read_text(encoding="utf-8")
+        self.assertIn("MAVLINK_CONTROL_TOS = 184", source)
+        self.assertIn(
+            "radio.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, MAVLINK_CONTROL_TOS)",
+            source,
+        )
         radio_port = reserve_udp_port()
         tail_port = reserve_udp_port()
         gcs_port = reserve_udp_port()

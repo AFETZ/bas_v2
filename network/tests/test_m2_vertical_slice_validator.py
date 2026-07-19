@@ -821,8 +821,12 @@ class FixtureBuilder:
             "official_source": {
                 "root": "/workspace/multiagent_simulation/.external/ns-3",
                 "version": "3.40",
+                "expected_version": "3.40",
                 "core_tree_files": EXPECTED_CORE_TREE_FILES,
                 "core_tree_sha256": EXPECTED_CORE_TREE_SHA256,
+                "expected_core_tree_files": EXPECTED_CORE_TREE_FILES,
+                "expected_core_tree_sha256": EXPECTED_CORE_TREE_SHA256,
+                "excludes": ["build", "cmake-cache", "scratch", "src/lorawan"],
             },
             "scratch_source": {
                 "project": {
@@ -931,6 +935,13 @@ class M2VerticalSliceValidatorTests(unittest.TestCase):
         self.assertIn(
             '[[ ! -f "$MAVPROXY_SCRIPT" || ! -x "$MAVPROXY_SCRIPT" ]]', runner
         )
+        self.assertIn('MAVLINK_PYTHON="/usr/bin/python3.10"', runner)
+        self.assertIn(
+            'MAVLINK_PYTHON_SITE="/home/ubuntu/.local/lib/python3.10/site-packages"',
+            runner,
+        )
+        self.assertIn("controlled M2 Python/pymavlink runtime is unavailable", runner)
+        self.assertNotIn("/etc/hosts", runner)
         self.assertIn('UAV_COUNT=1 EVENT_EPOCH="$event_epoch"', runner)
         self.assertIn("SELF_TEST=0", runner)
         self.assertIn("SIONNA_IPC_ENABLED=0", runner)

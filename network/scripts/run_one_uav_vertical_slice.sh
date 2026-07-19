@@ -41,6 +41,8 @@ ENDPOINT_CONTRACT="$RUN_DIR/metrics/m2_endpoint_contract.json"
 RAW_CAPTURE="$ROOT_DIR/network/scripts/raw_packet_capture.py"
 PROBE="$ROOT_DIR/network/tests/mavlink_vertical_slice_probe.py"
 MAVPROXY_SCRIPT="/home/ubuntu/.local/bin/mavproxy.py"
+MAVLINK_PYTHON="/usr/bin/python3.10"
+MAVLINK_PYTHON_SITE="/home/ubuntu/.local/lib/python3.10/site-packages"
 PROCESS_IDENTITY="$RUN_DIR/logs/m2_process_identity.json"
 PROBE_EVENTS="$RUN_DIR/logs/m2_probe_events.jsonl"
 PROCESS_EVENTS="$RUN_DIR/logs/m2_process_events.jsonl"
@@ -64,7 +66,7 @@ if [[ ! -f "$SCENARIO" ]]; then
   exit 2
 fi
 
-for command in bash colcon getent ip mount python3 ros2 setsid sysctl \
+for command in bash colcon ip mount python3 ros2 setsid sysctl \
   unshare; do
   if ! command -v "$command" >/dev/null 2>&1; then
     printf 'FAIL required M2 command is missing: %s\n' "$command" >&2
@@ -76,14 +78,34 @@ if [[ ! -f "$MAVPROXY_SCRIPT" || ! -x "$MAVPROXY_SCRIPT" ]]; then
     "$MAVPROXY_SCRIPT" >&2
   exit 2
 fi
+case ":${PYTHONPATH:-}:" in
+  *":$MAVLINK_PYTHON_SITE:"*) ;;
+  *) export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}$MAVLINK_PYTHON_SITE" ;;
+esac
+mapfile -t MAVLINK_PYTHON_RUNTIME < <(
+  "$MAVLINK_PYTHON" - <<'PY'
+import pathlib
+import sys
+
+import pymavlink
+
+print(pathlib.Path(sys.executable).resolve())
+print(int(sys.flags.no_user_site))
+print(pathlib.Path(pymavlink.__file__).resolve())
+PY
+)
+if ((${#MAVLINK_PYTHON_RUNTIME[@]} != 3)) || \
+  [[ "${MAVLINK_PYTHON_RUNTIME[0]}" != "$MAVLINK_PYTHON" ]] || \
+  [[ "${MAVLINK_PYTHON_RUNTIME[1]}" != "1" ]] || \
+  [[ "${MAVLINK_PYTHON_RUNTIME[2]}" != "$MAVLINK_PYTHON_SITE/pymavlink/__init__.py" ]]; then
+  printf 'FAIL controlled M2 Python/pymavlink runtime is unavailable\n' >&2
+  exit 2
+fi
 if ((EUID != 0)); then
   printf 'FAIL formal M2 requires an already capability-bounded root process\n' >&2
   exit 2
 fi
 umask 0002
-if ! getent hosts "$(hostname)" >/dev/null 2>&1; then
-  printf '127.0.1.1 %s\n' "$(hostname)" >> /etc/hosts
-fi
 if [[ ! -c /dev/net/tun ]]; then
   printf 'FAIL /dev/net/tun is missing; run inside the privileged project container\n' >&2
   exit 2

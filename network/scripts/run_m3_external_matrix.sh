@@ -23,6 +23,8 @@ CLOCK_BEACON="$ROOT_DIR/network/bridge/runtime_clock_beacon.py"
 ACTUAL_ORCHESTRATOR="$ROOT_DIR/network/scripts/actual_sitl_endpoint_orchestrator.py"
 ACTUAL_CONTROL_PROBE="$ROOT_DIR/network/scripts/actual_sitl_control_probe.py"
 MAVPROXY_SCRIPT="/home/ubuntu/.local/bin/mavproxy.py"
+MAVLINK_PYTHON="/usr/bin/python3.10"
+MAVLINK_PYTHON_SITE="/home/ubuntu/.local/lib/python3.10/site-packages"
 MATRIX="$ROOT_DIR/network/config/endpoint_matrix_5uav.json"
 ENDPOINT_SCHEMA="$ROOT_DIR/network/config/endpoint_transaction_schema.json"
 FLIGHT_SCENARIO="$ROOT_DIR/network/config/scenario_5uav.yaml"
@@ -57,6 +59,29 @@ done
 if [[ ! -f "$MAVPROXY_SCRIPT" || ! -x "$MAVPROXY_SCRIPT" ]]; then
   printf 'FAIL pinned M3 MAVProxy script is absent or non-executable: %s\n' \
     "$MAVPROXY_SCRIPT" >&2
+  exit 2
+fi
+case ":${PYTHONPATH:-}:" in
+  *":$MAVLINK_PYTHON_SITE:"*) ;;
+  *) export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}$MAVLINK_PYTHON_SITE" ;;
+esac
+mapfile -t MAVLINK_PYTHON_RUNTIME < <(
+  "$MAVLINK_PYTHON" - <<'PY'
+import pathlib
+import sys
+
+import pymavlink
+
+print(pathlib.Path(sys.executable).resolve())
+print(int(sys.flags.no_user_site))
+print(pathlib.Path(pymavlink.__file__).resolve())
+PY
+)
+if ((${#MAVLINK_PYTHON_RUNTIME[@]} != 3)) || \
+  [[ "${MAVLINK_PYTHON_RUNTIME[0]}" != "$MAVLINK_PYTHON" ]] || \
+  [[ "${MAVLINK_PYTHON_RUNTIME[1]}" != "1" ]] || \
+  [[ "${MAVLINK_PYTHON_RUNTIME[2]}" != "$MAVLINK_PYTHON_SITE/pymavlink/__init__.py" ]]; then
+  printf 'FAIL controlled M3 Python/pymavlink runtime is unavailable\n' >&2
   exit 2
 fi
 REQUIRED_PATHS=(

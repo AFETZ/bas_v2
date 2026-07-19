@@ -27,6 +27,7 @@ from typing import Any, Iterable
 
 
 PHASES = ("good", "down", "recovery")
+MAVLINK_CONTROL_TOS = 184
 
 
 def utc_now() -> str:
@@ -528,6 +529,9 @@ def execute_phase(args: argparse.Namespace, writer: JsonlWriter) -> PhaseResult:
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, MAVLINK_CONTROL_TOS)
+    if sock.getsockopt(socket.IPPROTO_IP, socket.IP_TOS) != MAVLINK_CONTROL_TOS:
+        raise RuntimeError("M2 GCS socket did not retain the control DSCP/TOS identity")
     sock.bind(args.gcs_bind)
     sock.setblocking(False)
     destination = args.uav_endpoint

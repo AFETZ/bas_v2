@@ -24,6 +24,9 @@ if str(ROOT_DIR) not in sys.path:
 from network.bridge.opaque_udp_relay import ByteOpaqueUdpRelay, RelayError  # noqa: E402
 
 
+MAVLINK_CONTROL_TOS = 184
+
+
 def parse_endpoint(value: str) -> tuple[str, int]:
     host, separator, port_text = value.rpartition(":")
     if not separator or not host:
@@ -101,6 +104,12 @@ def main(argv: list[str] | None = None) -> int:
     selector = selectors.DefaultSelector()
     radio = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     tail = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    radio.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, MAVLINK_CONTROL_TOS)
+    if radio.getsockopt(socket.IPPROTO_IP, socket.IP_TOS) != MAVLINK_CONTROL_TOS:
+        event_log.emit("adapter_bind_failed", error="control DSCP/TOS was not retained")
+        event_log.close()
+        print("FAIL adapter control DSCP/TOS was not retained", file=sys.stderr)
+        return 2
     for sock in (radio, tail):
         sock.setblocking(False)
     try:
