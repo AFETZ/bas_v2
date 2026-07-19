@@ -160,7 +160,7 @@ m0_python_import_policy:
 # producer-supplied hash is not an executable identity proof.
 m1_runtime_identity:
   schema_version: 1
-  container_image_digest: sha256:b2c4f715ba3dabb07624e962b9b56f3255bddfc4cc31c26dfb1001bb400035f5
+  container_image_digest: sha256:bd6a4f8f78c6a384e4cd9b686c62917e2b42cbcda76db735a6363e5755547772
   executable_sha256:
     /opt/ros/humble/lib/robot_state_publisher/robot_state_publisher: 0d8f699b5266e4b68f5cb4c8d26d970506e4ffb6ae10e41fb5d1f567c993dcb2
     /opt/ros/humble/lib/topic_tools/relay: d649ae85f7331e7b02898ceff4bdfd78a8660b5da24bcf9bb132eff2b9176f38
@@ -237,13 +237,13 @@ dependencies:
     distribution: humble
     container_base: osrf/ros:humble-desktop@sha256:46efd5ebec72c5da478027890ac534cbcb0c2cf93482559e0f35a9fc3c05d47a
     project_image_reference: multiagent_simulation:latest
-    project_image_digest: sha256:b2c4f715ba3dabb07624e962b9b56f3255bddfc4cc31c26dfb1001bb400035f5
+    project_image_digest: sha256:bd6a4f8f78c6a384e4cd9b686c62917e2b42cbcda76db735a6363e5755547772
     project_image_platform: linux/amd64
     project_image_user: ubuntu
     project_image_size_bytes: 6403038378
     project_image_rootfs_layers: 37
     historical_pre_rebuild_digest: sha256:ff0a0b3b3171e51bf328ac58806afc6c1127f9aad83fee8a0727b8136bea0011
-    acceptance_note: Exact local image ID was host-inspected and matched the locked runtime manifests on 2026-07-13.
+    acceptance_note: Exact local image ID was host-inspected on 2026-07-19; its platform manifest, config, rootfs, and locked runtime manifests match the accepted runtime bytes.
   gazebo:
     release: harmonic
     version: 8.14.0
