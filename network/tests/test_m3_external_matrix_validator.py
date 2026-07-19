@@ -3682,6 +3682,8 @@ class M3ExternalMatrixStaticTests(unittest.TestCase):
             self.assertIn("SIONNA_IPC_ENABLED=0", source)
         self.assertIn("UAV_COUNT=5", runner)
         self.assertIn("UAV_COUNT=1", m2_runner)
+        self.assertIn("generate_sensor_models:=false", runner)
+        self.assertIn("generate_sensor_models:=false", m2_runner)
         self.assertIn("--no-write", runner)
         self.assertIn('RESULT_PATH="$RUN_DIR/metrics/m3_validation_results.json"', runner)
         self.assertIn('cmp "$RESULT_PATH" "$INDEPENDENT_RESULT"', runner)

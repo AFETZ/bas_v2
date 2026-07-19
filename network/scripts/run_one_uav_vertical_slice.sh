@@ -586,6 +586,7 @@ runner_log "UAV adapter ready pid=$ADAPTER_ACTUAL_PID"
     robots_config_file:="$SCENARIO" \
     robot_model:="$ROBOT_MODEL" \
     gui:=false rviz:=false headless_rendering:="$HEADLESS_RENDERING" \
+    generate_sensor_models:=false \
     use_mapping_camera:=false \
     use_navigation_camera:=false \
     use_zed_camera:=false

@@ -932,6 +932,7 @@ class M2VerticalSliceValidatorTests(unittest.TestCase):
         self.assertIn(
             'MAVPROXY_SCRIPT="/home/ubuntu/.local/bin/mavproxy.py"', runner
         )
+        self.assertIn("generate_sensor_models:=false", runner)
         self.assertIn(
             '[[ ! -f "$MAVPROXY_SCRIPT" || ! -x "$MAVPROXY_SCRIPT" ]]', runner
         )
