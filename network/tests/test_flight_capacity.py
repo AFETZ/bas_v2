@@ -10,6 +10,9 @@ from unittest import mock
 from pathlib import Path
 from typing import Any
 
+from network.scripts.collect_flight_capacity import (
+    load_profile as load_collector_profile,
+)
 from network.scripts.validate_flight_capacity import (
     EVENT_CONTRACT,
     OBSERVATION_CONTRACT,
@@ -18,6 +21,7 @@ from network.scripts.validate_flight_capacity import (
     derive_rtf_windows,
     interpolate_sim_ns,
     load_events,
+    load_profile as load_validator_profile,
     sha256_file,
     validate_run,
 )
@@ -274,6 +278,13 @@ class FlightCapacityTests(unittest.TestCase):
         )
         self.assertEqual(len(values), 300)
         self.assertTrue(all(value == 1.0 for value in values))
+
+    def test_collector_and_validator_share_the_committed_profile_contract(self) -> None:
+        profile_path = ROOT_DIR / "network/config/flight_capacity_profile.json"
+        collector_profile = load_collector_profile(profile_path)
+        validator_profile = load_validator_profile(profile_path)
+        self.assertEqual(collector_profile, validator_profile)
+        self.assertEqual(collector_profile["clock_topic"], "/uav1/clock")
 
     def test_interpolation_rejects_unbracketed_or_sparse_clock(self) -> None:
         with self.assertRaisesRegex(ValueError, "bracket"):

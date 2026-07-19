@@ -41,6 +41,7 @@
     "test_five_uav_health_v2.FiveUavHealthV2Tests.test_terrain_module_cannot_be_reintroduced",
     "test_five_uav_health_v2.FiveUavHealthV2Tests.test_two_second_measurement_process_hole_exceeds_continuity_bound",
     "test_five_uav_health_v2.FiveUavHealthV2Tests.test_zombie_required_process_fails_even_when_count_is_five",
+    "test_flight_capacity.FlightCapacityTests.test_collector_and_validator_share_the_committed_profile_contract",
     "test_flight_capacity.FlightCapacityTests.test_complete_fixture_passes",
     "test_flight_capacity.FlightCapacityTests.test_interpolation_and_exact_300_windows",
     "test_flight_capacity.FlightCapacityTests.test_interpolation_rejects_unbracketed_or_sparse_clock",

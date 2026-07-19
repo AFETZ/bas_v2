@@ -322,7 +322,7 @@ def load_profile(path: Path) -> dict[str, Any]:
         "resource_period_s": 1,
         "resource_max_gap_s": 1.5,
         "clock_sample_max_gap_s": 0.25,
-        "clock_topic": "/clock",
+        "clock_topic": "/uav1/clock",
         "scenario_path": "network/config/scenario_5uav.yaml",
         "uav_names": [f"uav{index}" for index in range(1, 6)],
         "required_mitsuba_variant": "cuda_ad_mono_polarized",
