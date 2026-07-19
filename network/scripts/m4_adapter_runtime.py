@@ -421,6 +421,7 @@ def apply_control(
     command: dict[str, Any],
     tracker: PoseTracker,
     injector: SupervisedResultFaultInjector | None,
+    fault_seed_cells: set[tuple[str, str]],
     fault_parallel_cells: set[tuple[str, str]],
 ) -> tuple[str, dict[str, Any]]:
     action = command.get("action")
@@ -438,27 +439,58 @@ def apply_control(
     if injector is None:
         raise PacketAdapterError("fault control used while fault injector is disabled")
     if action == "arm_hold_next":
-        link = str(command.get("directed_link_id"))
-        injector.arm_hold_next(link)
-        return str(action), {"directed_link_id": link}
+        directed_link_id = command.get("directed_link_id")
+        link = command.get("directed_link")
+        traffic_class = command.get("traffic_class")
+        if (
+            not isinstance(directed_link_id, str)
+            or not isinstance(link, str)
+            or DIRECTED_LINK.fullmatch(link) is None
+            or traffic_class not in TRAFFIC_CLASSES
+            or directed_link_id
+            != f"{link.replace('>', '-to-')}-{traffic_class}"
+        ):
+            raise PacketAdapterError("fault-seed control identity is invalid")
+        cell = (link, str(traffic_class))
+        if cell in fault_seed_cells or cell in fault_parallel_cells:
+            raise PacketAdapterError("fault-seed control cell is already armed")
+        if len(fault_seed_cells) >= 30:
+            raise PacketAdapterError("fault-seed armed-cell bound exceeded")
+        fault_seed_cells.add(cell)
+        return str(action), {
+            "directed_link_id": directed_link_id,
+            "directed_link": link,
+            "traffic_class": traffic_class,
+        }
     if action == "arm_fault_parallel_next":
         link = command.get("directed_link")
         traffic_class = command.get("traffic_class")
+        directed_link_id = command.get("directed_link_id")
         if (
             not isinstance(link, str)
             or DIRECTED_LINK.fullmatch(link) is None
             or traffic_class not in TRAFFIC_CLASSES
+            or not isinstance(directed_link_id, str)
+            or directed_link_id
+            != f"{link.replace('>', '-to-')}-{traffic_class}"
         ):
             raise PacketAdapterError("fault-parallel control cell is invalid")
         cell = (link, str(traffic_class))
-        if cell in fault_parallel_cells:
+        held = injector.held_query_ids_for_link(directed_link_id)
+        if len(held) != 1:
+            raise PacketAdapterError(
+                "fault-parallel control requires one confirmed held real result"
+            )
+        if cell in fault_seed_cells or cell in fault_parallel_cells:
             raise PacketAdapterError("fault-parallel control is already armed")
         if len(fault_parallel_cells) >= 30:
             raise PacketAdapterError("fault-parallel armed-cell bound exceeded")
         fault_parallel_cells.add(cell)
         return str(action), {
+            "directed_link_id": directed_link_id,
             "directed_link": link,
             "traffic_class": traffic_class,
+            "held_query_id": held[0],
         }
     if action == "release_held":
         requested = command.get("query_id")
@@ -613,6 +645,7 @@ def main() -> int:
             },
         )
         deferred: dict[Path, dict[str, Any]] = {}
+        fault_seed_cells: set[tuple[str, str]] = set()
         fault_parallel_cells: set[tuple[str, str]] = set()
         while not stop.is_set() and not args.stop_file.exists():
             started = time.monotonic_ns()
@@ -626,6 +659,7 @@ def main() -> int:
                     command,
                     tracker,
                     injector,
+                    fault_seed_cells,
                     fault_parallel_cells,
                 )
                 if action == "deferred":
@@ -637,6 +671,7 @@ def main() -> int:
                 tailer,
                 max_packet_events=64,
                 max_results=64,
+                fault_seed_cells=fault_seed_cells,
                 fault_parallel_cells=fault_parallel_cells,
             )
             remaining = 5_000_000 - (time.monotonic_ns() - started)

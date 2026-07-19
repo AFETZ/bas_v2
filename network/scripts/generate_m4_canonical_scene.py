@@ -23,6 +23,25 @@ ROOT = Path(__file__).resolve().parents[2]
 WORLD_DIR = ROOT / "src/multiagent_simulation/worlds/m4_canonical"
 BUNDLE_PATH = ROOT / "network/config/m4_canonical_scene_bundle.json"
 ZERO_SHA256 = "0" * 64
+FRAME_TRANSFORM_VERSION = "ams-m4-coordinate-frames-v1"
+GEODETIC_ORIGIN = {
+    "datum": "WGS84",
+    "elevation_m": 0.0,
+    "heading_deg": 0.0,
+    "latitude_deg": -35.3632621,
+    "longitude_deg": 149.1652374,
+}
+IDENTITY_4X4 = [
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+    [0.0, 0.0, 0.0, 1.0],
+]
+NED_DELTA_TO_ENU_DELTA_3X3 = [
+    [0.0, 1.0, 0.0],
+    [1.0, 0.0, 0.0],
+    [0.0, 0.0, -1.0],
+]
 
 X_GRID = (-10000.0, -5000.0, 0.0, 5000.0, 10000.0)
 Y_GRID = (-5000.0, -2500.0, 0.0, 2500.0, 5000.0)
@@ -255,6 +274,7 @@ scenario:
 base_simulation:
   launch_package: multiagent_simulation
   launch_file: multiagent_simulation.launch.py
+  sitl_home: "-35.3632621,149.1652374,0,0"
   recommended_launch_arguments:
     gui: false
     rviz: false
@@ -308,7 +328,7 @@ ipc: {protocol: tcp_json_lines, host: 127.0.0.1, port: 5090, log_file: logs/sion
 sionna:
   required_for_acceptance: true
   scene:
-    id: ams-m4-canonical-km-v1
+    id: ams-m4-canonical-km-v2
     source: mitsuba_xml
     path: src/multiagent_simulation/worlds/m4_canonical/sionna_scene.xml
   solver:
@@ -443,6 +463,141 @@ def pose_set(target: str, target_position: list[float], cp_position: list[float]
     return nominal
 
 
+def coordinate_frame_contract() -> dict[str, Any]:
+    """Return the exact Gazebo/ROS/ArduPilot/Sionna frame contract.
+
+    ArduPilot LOCAL_POSITION_NED has a per-vehicle estimator origin, so its
+    correspondence uses deltas from independently observed pre-arm baselines.
+    GLOBAL_POSITION_INT is additionally checked as an absolute WGS84-to-
+    Gazebo horizontal position because the scenario freezes SITL home to the
+    exact Gazebo spherical origin.
+    """
+
+    enu_common = {
+        "angle_unit": "rad",
+        "axes": ["east", "north", "up"],
+        "axis_symbols": ["x", "y", "z"],
+        "handedness": "right",
+        "position_unit": "m",
+        "quaternion_order": "xyzw",
+    }
+    return {
+        "contract": "ams.m4.coordinate-frame-contract/v1",
+        "transform_version": FRAME_TRANSFORM_VERSION,
+        "origin": {
+            "gazebo_world_enu_m": [0.0, 0.0, 0.0],
+            "geodetic": GEODETIC_ORIGIN,
+            "ardupilot_local_origin_policy": (
+                "per_uav_observed_prearm_LOCAL_POSITION_NED_baseline"
+            ),
+            "ardupilot_relative_alt_origin_policy": (
+                "per_uav_observed_prearm_GLOBAL_POSITION_INT_relative_alt_baseline"
+            ),
+        },
+        "frames": {
+            "gazebo_world": {
+                "frame_id": "world",
+                **enu_common,
+            },
+            "ros_odometry": {
+                "frame_id": "ros_odometry_world_enu",
+                "message_type": "nav_msgs/msg/Odometry",
+                "source_topic_pattern": "/uavN/odometry",
+                "linear_velocity_unit": "m/s",
+                "angular_velocity_unit": "rad/s",
+                **enu_common,
+            },
+            "sionna_scene": {
+                "frame_id": "scene",
+                **enu_common,
+            },
+            "ardupilot_local_position_ned": {
+                "frame_id": "ardupilot_local_ned",
+                "mavlink_message": "LOCAL_POSITION_NED",
+                "mavlink_message_id": 32,
+                "axes": ["north", "east", "down"],
+                "axis_symbols": ["x", "y", "z"],
+                "handedness": "right",
+                "position_unit": "m",
+                "linear_velocity_unit": "m/s",
+                "position_fields": ["x", "y", "z"],
+                "linear_velocity_fields": ["vx", "vy", "vz"],
+            },
+            "ardupilot_global_position_int": {
+                "frame_id": "ardupilot_global_wgs84",
+                "mavlink_message": "GLOBAL_POSITION_INT",
+                "mavlink_message_id": 33,
+                "datum": "WGS84",
+                "latitude_field": "lat",
+                "longitude_field": "lon",
+                "latitude_longitude_unit": "1e-7_deg",
+                "altitude_msl_field": "alt",
+                "altitude_msl_unit": "mm",
+                "relative_altitude_field": "relative_alt",
+                "relative_altitude_unit": "mm",
+                "relative_altitude_reference": "vehicle_home",
+                "linear_velocity_fields": ["vx", "vy", "vz"],
+                "linear_velocity_unit": "cm/s",
+                "heading_field": "hdg",
+                "heading_unit": "cdeg",
+            },
+        },
+        "transforms": {
+            "gazebo_world_to_ros_odometry": {
+                "kind": "homogeneous_position",
+                "matrix_4x4": IDENTITY_4X4,
+                "version": FRAME_TRANSFORM_VERSION,
+            },
+            "gazebo_world_to_sionna_scene": {
+                "kind": "homogeneous_position",
+                "matrix_4x4": IDENTITY_4X4,
+                "version": FRAME_TRANSFORM_VERSION,
+            },
+            "ardupilot_local_ned_delta_to_gazebo_enu_delta": {
+                "kind": "linear_delta",
+                "matrix_3x3": NED_DELTA_TO_ENU_DELTA_3X3,
+                "equation": "enu_delta=[ned_y,ned_x,-ned_z]",
+                "version": FRAME_TRANSFORM_VERSION,
+            },
+            "gazebo_world_enu_to_wgs84": {
+                "kind": "gazebo_spherical_coordinates",
+                "surface_model": "EARTH_WGS84",
+                "origin": GEODETIC_ORIGIN,
+                "version": FRAME_TRANSFORM_VERSION,
+            },
+            "global_relative_altitude_to_gazebo_enu_up_delta": {
+                "kind": "scaled_delta",
+                "equation": (
+                    "enu_up_delta_m=(relative_alt_mm-prearm_relative_alt_mm)/1000"
+                ),
+                "scale_m_per_input_unit": 0.001,
+                "version": FRAME_TRANSFORM_VERSION,
+            },
+        },
+        "runtime_correspondence": {
+            "comparison_interval": "[measurement_start,measurement_end)",
+            "matching_policy": "nearest_at_or_before",
+            "maximum_sample_skew_ns": 1_000_000_000,
+            "baseline_policy": "per_uav_observed_prearm_deltas",
+            "global_horizontal_max_abs_error_m": 5.0,
+            "local_position_max_abs_error_m": 3.0,
+            "relative_altitude_max_abs_error_m": 3.0,
+        },
+        "fixtures": [
+            {
+                "fixture_id": "local_ned_delta_to_enu_delta",
+                "input_local_ned_m": [10.0, 20.0, -30.0],
+                "expected_gazebo_enu_m": [20.0, 10.0, 30.0],
+            },
+            {
+                "fixture_id": "relative_altitude_mm_to_enu_up_delta",
+                "input_relative_altitude_delta_mm": 30_000,
+                "expected_gazebo_enu_up_delta_m": 30.0,
+            },
+        ],
+    }
+
+
 def make_bundle(assets: dict[str, bytes]) -> dict[str, Any]:
     material_path = "src/multiagent_simulation/worlds/m4_canonical/material_manifest.json"
     asset_records = [
@@ -480,7 +635,7 @@ def make_bundle(assets: dict[str, bytes]) -> dict[str, Any]:
         "assets": asset_records,
         "building_clusters": clusters,
         "bundle_hash_policy": "sha256-canonical-json-with-bundle_sha256-zeroed/v1",
-        "bundle_id": "ams-m4-canonical-km-v1",
+        "bundle_id": "ams-m4-canonical-km-v2",
         "bundle_sha256": ZERO_SHA256,
         "causal_scenarios": {
             "terrain_shadow": {
@@ -510,7 +665,7 @@ def make_bundle(assets: dict[str, bytes]) -> dict[str, Any]:
                 "sequence": ["off-1", "on", "off-2"],
             },
         },
-        "contract": "ams.m4.canonical-scene-bundle/v1",
+        "contract": "ams.m4.canonical-scene-bundle/v2",
         "coordinate_frame": {
             "axes": "ENU",
             "gazebo_frame": "world",
@@ -518,6 +673,7 @@ def make_bundle(assets: dict[str, bytes]) -> dict[str, Any]:
             "sionna_frame": "scene",
             "units": "m",
         },
+        "frame_contract": coordinate_frame_contract(),
         "gazebo_to_sionna_transform_matrix": [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
         "gazebo_to_sionna_transform_version": "enu-identity-v1",
         "gazebo_world": "src/multiagent_simulation/worlds/m4_canonical/m4_canonical.sdf",
@@ -543,7 +699,7 @@ def make_bundle(assets: dict[str, bytes]) -> dict[str, Any]:
         ],
         "relief": {"delta_m": 180.0, "high_fixture": {"id": "terrain_high", "position_m": [0.0, 0.0, 180.0]}, "low_fixture": {"id": "terrain_low", "position_m": [-10000.0, -5000.0, 0.0]}},
         "scene_material_manifest_sha256": sha256(assets[material_path]),
-        "schema_version": 1,
+        "schema_version": 2,
         "sionna_scene_xml": "src/multiagent_simulation/worlds/m4_canonical/sionna_scene.xml",
         "transitive_asset_policy": "all-local-regular-files-no-symlinks/v1",
     }

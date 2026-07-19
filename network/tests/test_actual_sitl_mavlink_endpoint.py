@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import os
+import socket
 import subprocess
 import tempfile
 import unittest
@@ -10,6 +11,7 @@ from pathlib import Path
 
 from network.bridge.actual_sitl_mavlink_endpoint import (
     AUTHORIZATION_CONTRACT,
+    CONTROL_TOS,
     MANIFEST_CONTRACT,
     EndpointError,
     JsonlAudit,
@@ -21,6 +23,7 @@ from network.bridge.actual_sitl_mavlink_endpoint import (
     parse_proc_stat,
     publish_json_exclusive,
     read_process_identity,
+    recv_control_datagram,
     strict_json,
     validate_authorization,
     validate_jsonl_audit,
@@ -97,6 +100,22 @@ class FakeSocket:
     def sendto(self, payload: bytes, peer: tuple[str, int]) -> int:
         self.sent.append((payload, peer))
         return len(payload)
+
+
+class FakeRecvmsgSocket:
+    def __init__(
+        self,
+        *,
+        ancillary: list[tuple[int, int, bytes]],
+        flags: int = 0,
+    ) -> None:
+        self.ancillary = ancillary
+        self.flags = flags
+
+    def recvmsg(
+        self, _payload_size: int, _ancillary_size: int
+    ) -> tuple[bytes, list[tuple[int, int, bytes]], int, tuple[str, int]]:
+        return b"actual-mavlink", self.ancillary, self.flags, ("10.71.1.10", 14601)
 
 
 class ActualSitlManifestTests(unittest.TestCase):
@@ -239,6 +258,64 @@ class OpaqueForwardingTests(unittest.TestCase):
 
 
 class ProtocolAndEvidenceTests(unittest.TestCase):
+    def test_radio_receive_requires_exact_control_tos_ancillary(self) -> None:
+        valid = FakeRecvmsgSocket(
+            ancillary=[
+                (socket.IPPROTO_IP, socket.IP_TOS, bytes([CONTROL_TOS]))
+            ]
+        )
+        payload, peer, tos = recv_control_datagram(valid)  # type: ignore[arg-type]
+        self.assertEqual(payload, b"actual-mavlink")
+        self.assertEqual(peer, ("10.71.1.10", 14601))
+        self.assertEqual(tos, CONTROL_TOS)
+
+        for ancillary in (
+            [],
+            [(socket.IPPROTO_IP, socket.IP_TOS, bytes([0]))],
+            [(socket.IPPROTO_IP, socket.IP_TOS, bytes([CONTROL_TOS, 0]))],
+            [
+                (socket.IPPROTO_IP, socket.IP_TOS, bytes([CONTROL_TOS])),
+                (socket.IPPROTO_IP, socket.IP_TOS, bytes([CONTROL_TOS])),
+            ],
+        ):
+            with self.subTest(ancillary=ancillary):
+                with self.assertRaisesRegex(EndpointError, "TOS"):
+                    recv_control_datagram(  # type: ignore[arg-type]
+                        FakeRecvmsgSocket(ancillary=ancillary)
+                    )
+
+    def test_radio_receive_rejects_truncated_datagram_before_forwarding(self) -> None:
+        for flag in (
+            getattr(socket, "MSG_TRUNC", 0x20),
+            getattr(socket, "MSG_CTRUNC", 0x08),
+        ):
+            with self.subTest(flag=flag):
+                truncated = FakeRecvmsgSocket(
+                    ancillary=[
+                        (socket.IPPROTO_IP, socket.IP_TOS, bytes([CONTROL_TOS]))
+                    ],
+                    flags=flag,
+                )
+                with self.assertRaisesRegex(EndpointError, "truncated"):
+                    recv_control_datagram(truncated)  # type: ignore[arg-type]
+
+    def test_actual_endpoint_source_locks_transmit_and_receive_tos(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "bridge"
+            / "actual_sitl_mavlink_endpoint.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "radio.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, CONTROL_TOS)",
+            source,
+        )
+        self.assertIn(
+            "tail.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, CONTROL_TOS)",
+            source,
+        )
+        self.assertIn('radio_ip_tos=CONTROL_TOS', source)
+        self.assertIn('received_tos=received_tos', source)
+
     def test_mavlink_v1_v2_and_signed_v2_sysids_are_recognized(self) -> None:
         v1 = bytes([0xFE, 0, 1, 2, 3, 4, 0, 0])
         v2 = bytes([0xFD, 0, 0, 0, 1, 4, 3, 0, 0, 0, 0, 0])

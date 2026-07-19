@@ -21,7 +21,7 @@ ipc: {protocol: tcp_json_lines, host: 127.0.0.1, port: 5090, log_file: logs/sion
 sionna:
   required_for_acceptance: true
   scene:
-    id: ams-m4-canonical-km-v1
+    id: ams-m4-canonical-km-v2
     source: mitsuba_xml
     path: src/multiagent_simulation/worlds/m4_canonical/sionna_scene.xml
   solver:

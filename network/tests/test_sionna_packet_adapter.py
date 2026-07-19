@@ -46,6 +46,10 @@ class FakeTransport:
         self.submitted: list[dict] = []
         self.results: list[bytes | ClientFault] = []
         self.accept_submissions = True
+        self.armed_hold_links: list[str] = []
+
+    def arm_hold_next(self, directed_link_id: str) -> None:
+        self.armed_hold_links.append(directed_link_id)
 
     def reserve_query_envelope(self):
         if not self.ready:
@@ -533,7 +537,7 @@ class PacketSionnaAdapterTests(unittest.TestCase):
         for record in discarded:
             self.assertRegex(record["result_wire_sha256"], r"^[0-9a-f]{64}$")
 
-    def test_run_once_consumes_fault_parallel_arm_only_on_matching_real_ingress(
+    def test_run_once_consumes_fault_seed_arm_only_on_matching_real_ingress(
         self,
     ) -> None:
         self.adapter = PacketSionnaAdapter(
@@ -553,7 +557,7 @@ class PacketSionnaAdapterTests(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
-        self.adapter.run_once(tailer, fault_parallel_cells=arm)
+        self.adapter.run_once(tailer, fault_seed_cells=arm)
         self.assertEqual(arm, {("cp>uav1", "control")})
         self.assertEqual(self.transport.submitted, [])
 
@@ -561,12 +565,13 @@ class PacketSionnaAdapterTests(unittest.TestCase):
             stream.write(
                 json.dumps(packet_event(2), separators=(",", ":")) + "\n"
             )
-        self.adapter.run_once(tailer, fault_parallel_cells=arm)
+        self.adapter.run_once(tailer, fault_seed_cells=arm)
         self.assertEqual(arm, set())
-        self.assertEqual(len(self.transport.submitted), 2)
+        self.assertEqual(len(self.transport.submitted), 1)
+        self.assertEqual(self.transport.armed_hold_links, ["cp-to-uav1-control"])
         self.assertEqual(
             [item["directed_link_id"] for item in self.transport.submitted],
-            ["cp-to-uav1-control", "cp-to-uav1-control"],
+            ["cp-to-uav1-control"],
         )
         audits = [
             json.loads(line)
@@ -580,7 +585,56 @@ class PacketSionnaAdapterTests(unittest.TestCase):
                 for item in audits
                 if item["event"] == "query_submitted"
             ],
-            ["normal", "fault_parallel"],
+            ["fault_seed"],
+        )
+
+    def test_fault_parallel_arm_forces_exact_pair_when_normal_query_is_deferred(
+        self,
+    ) -> None:
+        self.adapter = PacketSionnaAdapter(
+            dataclasses.replace(adapter_config(), fault_injection_enabled=True),
+            poses(self.now),
+            self.transport,
+            self.writer,
+            Path(self.temp.name) / "audit-fault-deferred.jsonl",
+            clock_ns=lambda: self.now,
+        )
+        cell = ("cp>uav1", "control")
+        self.adapter._next_query_due_by_cell[cell] = self.now + 1_000_000_000
+        event_path = Path(self.temp.name) / "events-fault-deferred.jsonl"
+        event_path.write_text(
+            json.dumps(packet_event(1), separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        seed_arm = {cell}
+
+        tailer = PacketEventTailer(event_path)
+        self.adapter.run_once(tailer, fault_seed_cells=seed_arm)
+        self.assertEqual(seed_arm, set())
+        self.assertEqual(len(self.transport.submitted), 1)
+        self.assertEqual(len(self.adapter._pending_by_cell[cell]), 1)
+
+        with event_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(packet_event(2), separators=(",", ":")) + "\n")
+        parallel_arm = {cell}
+        self.adapter.run_once(tailer, fault_parallel_cells=parallel_arm)
+
+        self.assertEqual(parallel_arm, set())
+        self.assertEqual(len(self.transport.submitted), 2)
+        self.assertEqual(len(self.adapter._pending_by_cell[cell]), 2)
+        audits = [
+            json.loads(line)
+            for line in (Path(self.temp.name) / "audit-fault-deferred.jsonl")
+            .read_text()
+            .splitlines()
+        ]
+        self.assertEqual(
+            [
+                item["decision"]
+                for item in audits
+                if item["event"] == "query_submitted"
+            ],
+            ["fault_seed", "fault_parallel"],
         )
 
     def test_periodic_refresh_uses_latest_atomic_pose_and_real_packet_lineage(self) -> None:

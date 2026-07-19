@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -33,6 +34,8 @@ from network.validation.validate_m4_capacity import (  # noqa: E402
     _runtime_process_samples,
     _tail_topology_evidence,
 )
+from network.scripts import actual_sitl_control_probe as control_probe  # noqa: E402
+from network.scripts import m4_capacity_airborne as airborne  # noqa: E402
 
 
 def canonical_bytes(value: object) -> bytes:
@@ -203,6 +206,8 @@ class ActualControlEventTests(unittest.TestCase):
             "actual_control_socket_ready",
             bound_socket=["10.71.0.10", 14600],
             full_run_nonce=self.run["run_nonce"],
+            transmit_ip_tos=184,
+            receive_ip_tos_enabled=1,
         )
         add("actual_control_link_ready")
         for uav in range(1, 6):
@@ -278,13 +283,54 @@ class TailTopologyTests(unittest.TestCase):
             "runtime_id": "6" * 32,
             "run_nonce": "7" * 64,
         }
+        (self.run_dir / "raw/actual_sitl").mkdir(parents=True)
+        for index in range(1, 6):
+            (self.run_dir / f"raw/actual_sitl/uav{index}.ready.json").write_bytes(
+                canonical_bytes({
+                    "mavproxy_peer": {
+                        "host": f"10.72.{index}.1",
+                        "port": 43000 + index,
+                    }
+                })
+            )
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
     def _sample(self, timestamp: int, *, uav2_prefixlen: int = 30) -> dict[str, object]:
-        def namespace(inode: int, addresses: list[dict[str, object]]) -> dict[str, object]:
-            return {"present": True, "namespace_inode": inode, "addresses": addresses}
+        rules4 = [
+            {"priority": 0, "table": "local"},
+            {"priority": 32766, "table": "main"},
+            {"priority": 32767, "table": "default"},
+        ]
+        rules6 = rules4[:2]
+
+        def namespace(
+            inode: int,
+            *,
+            links: list[dict[str, object]],
+            addresses: list[dict[str, object]],
+            routes: list[dict[str, object]],
+            sockets: list[str],
+            bridge_links: list[dict[str, object]] | None = None,
+        ) -> dict[str, object]:
+            return {
+                "present": True,
+                "namespace_inode": inode,
+                "links": links,
+                "addresses": addresses,
+                "routes_ipv4": routes,
+                "routes_ipv6": [],
+                "rules_ipv4": rules4,
+                "rules_ipv6": rules6,
+                "neighbours_ipv4": [],
+                "neighbours_ipv6": [],
+                "bridge_links": bridge_links or [],
+                "sockets": sockets,
+                "nftables": {"nftables": [{"metainfo": {}}]},
+                "iptables_ipv4": [],
+                "iptables_ipv6": [],
+            }
 
         root_addresses = [
             {
@@ -296,14 +342,77 @@ class TailTopologyTests(unittest.TestCase):
             for index in range(1, 6)
         ]
         namespaces: dict[str, object] = {
-            "container-root": namespace(100, root_addresses),
-            "ams-ns3": namespace(101, []),
-            "ams-gcs": namespace(102, []),
+            "container-root": namespace(
+                100,
+                links=[{"ifname": "lo"}]
+                + [{"ifname": f"ams-tail{index}"} for index in range(1, 6)],
+                addresses=root_addresses,
+                routes=[
+                    {"dst": f"10.72.{index}.0/30", "dev": f"ams-tail{index}"}
+                    for index in range(1, 6)
+                ],
+                sockets=[
+                    f"UNCONN 0 0 0.0.0.0:{43000 + index} 10.72.{index}.2:{14559 + index}"
+                    for index in range(1, 6)
+                ],
+            ),
+            "ams-ns3": namespace(
+                101,
+                links=[{"ifname": "lo"}]
+                + [
+                    {"ifname": f"{prefix}-{endpoint}"}
+                    for endpoint in ("gcs", "uav1", "uav2", "uav3", "uav4", "uav5")
+                    for prefix in ("br", "tap", "vp")
+                ],
+                addresses=[],
+                routes=[],
+                sockets=[],
+                bridge_links=[
+                    {"ifname": f"{prefix}-{endpoint}", "master": f"br-{endpoint}"}
+                    for endpoint in ("gcs", "uav1", "uav2", "uav3", "uav4", "uav5")
+                    for prefix in ("tap", "vp")
+                ],
+            ),
+            "ams-gcs": namespace(
+                102,
+                links=[
+                    {"ifname": "lo"},
+                    {"ifname": "eth0", "address": "02:71:00:00:10:10"},
+                ],
+                addresses=[
+                    {
+                        "ifname": "eth0",
+                        "addr_info": [
+                            {"family": "inet", "local": "10.71.0.10", "prefixlen": 24}
+                        ],
+                    }
+                ],
+                routes=[{"dst": "default", "gateway": "10.71.0.1", "dev": "eth0"}],
+                sockets=["UNCONN 0 0 10.71.0.10:14600 0.0.0.0:*"],
+            ),
         }
         for index in range(1, 6):
             namespaces[f"ams-uav{index}"] = namespace(
                 102 + index,
-                [
+                links=[
+                    {"ifname": "lo"},
+                    {
+                        "ifname": "eth0",
+                        "address": f"02:71:{index:02x}:00:10:10",
+                    },
+                    {"ifname": "tail0"},
+                ],
+                addresses=[
+                    {
+                        "ifname": "eth0",
+                        "addr_info": [
+                            {
+                                "family": "inet",
+                                "local": f"10.71.{index}.10",
+                                "prefixlen": 24,
+                            }
+                        ],
+                    },
                     {
                         "ifname": "tail0",
                         "addr_info": [
@@ -315,13 +424,133 @@ class TailTopologyTests(unittest.TestCase):
                         ],
                     }
                 ],
+                routes=[
+                    {
+                        "dst": "default",
+                        "gateway": f"10.71.{index}.1",
+                        "dev": "eth0",
+                    }
+                ],
+                sockets=[
+                    f"UNCONN 0 0 10.71.{index}.10:{14600 + index} 0.0.0.0:*",
+                    f"UNCONN 0 0 10.72.{index}.2:{14559 + index} 0.0.0.0:*",
+                ],
+            )
+        namespace_order = (
+            "container-root",
+            "ams-ns3",
+            "ams-gcs",
+            "ams-uav1",
+            "ams-uav2",
+            "ams-uav3",
+            "ams-uav4",
+            "ams-uav5",
+        )
+        processes: list[dict[str, object]] = []
+        next_pid = 200
+
+        def process(
+            namespace_name: str,
+            command: list[str],
+            *,
+            executable: str = "/usr/bin/python3",
+        ) -> tuple[int, int]:
+            nonlocal next_pid
+            next_pid += 1
+            identity = (next_pid, 10_000 + next_pid)
+            processes.append(
+                {
+                    "pid": identity[0],
+                    "start_ticks": identity[1],
+                    "namespace": namespace_name,
+                    "namespace_inode": namespaces[namespace_name][
+                        "namespace_inode"
+                    ],
+                    "executable": executable,
+                    "executable_sha256": "a" * 64,
+                    "cmdline": command,
+                    "cap_eff": "00000000a80425fb",
+                    "cgroup": ["0::/m4-topology-test"],
+                }
+            )
+            return identity
+
+        monitors: dict[str, object] = {}
+        for namespace_name in namespace_order:
+            pid, start_ticks = process(
+                namespace_name,
+                ["/usr/sbin/ip", "-ts", "monitor", "all"],
+                executable="/usr/sbin/ip",
+            )
+            monitors[namespace_name] = {
+                "pid": pid,
+                "start_ticks": start_ticks,
+                "alive": True,
+            }
+        process(
+            "ams-ns3",
+            ["/workspace/.external/ns-3/ams-tap-packet-engine"],
+            executable="/workspace/.external/ns-3/ams-tap-packet-engine",
+        )
+        for endpoint in ("gcs", "uav1", "uav2", "uav3", "uav4", "uav5"):
+            process(
+                "ams-ns3",
+                [
+                    "/usr/bin/python3",
+                    "network/scripts/raw_packet_capture.py",
+                    "--interface",
+                    f"vp-{endpoint}",
+                ],
+            )
+        process(
+            "ams-gcs",
+            [
+                "/usr/bin/python3",
+                "network/scripts/raw_packet_capture.py",
+                "--interface",
+                "eth0",
+            ],
+        )
+        process(
+            "ams-gcs",
+            [
+                "/usr/bin/python3",
+                "network/scripts/actual_sitl_control_probe.py",
+            ],
+        )
+        for index in range(1, 6):
+            namespace_name = f"ams-uav{index}"
+            for interface in ("eth0", "tail0"):
+                process(
+                    namespace_name,
+                    [
+                        "/usr/bin/python3",
+                        "network/scripts/raw_packet_capture.py",
+                        "--interface",
+                        interface,
+                    ],
+                )
+            process(
+                namespace_name,
+                [
+                    "/usr/bin/python3",
+                    "network/bridge/actual_sitl_mavlink_endpoint.py",
+                ],
             )
         return {
+            "schema": "ams.m3.topology_sample/v1",
             "run_id": self.run["run_id"],
             "runtime_id": self.run["runtime_id"],
             "run_nonce": self.run["run_nonce"],
+            "sample_sequence": 1 if timestamp == 1_000 else 2,
             "monotonic_ns": timestamp,
+            "reason": "periodic",
+            "transition_sequence": None,
+            "transition_event": None,
+            "command_sha256": None,
             "namespaces": namespaces,
+            "processes": processes,
+            "netlink_monitors": monitors,
         }
 
     def _write(self, *, uav2_prefixlen: int = 30) -> None:
@@ -344,7 +573,306 @@ class TailTopologyTests(unittest.TestCase):
         _details, failures = _tail_topology_evidence(
             self.run_dir, run=self.run, start_ns=1_000, end_ns=2_000
         )
-        self.assertTrue(any("uav2 actual-SITL /30" in failure for failure in failures))
+        self.assertTrue(
+            any("uav2 actual MAVProxy tail IPv4" in failure for failure in failures)
+        )
+
+    def test_netlink_restart_or_missing_control_process_fails(self) -> None:
+        first = self._sample(1_000)
+        second = self._sample(2_000)
+        monitor = second["netlink_monitors"]["ams-gcs"]
+        old_pid = monitor["pid"]
+        monitor["pid"] = int(old_pid) + 1_000
+        monitor["start_ticks"] = int(monitor["start_ticks"]) + 1_000
+        for process in second["processes"]:
+            if process["pid"] == old_pid:
+                process["pid"] = monitor["pid"]
+                process["start_ticks"] = monitor["start_ticks"]
+                break
+        path = self.run_dir / "raw/topology_monitor/samples.jsonl"
+        path.write_bytes(canonical_bytes(first) + canonical_bytes(second))
+        _details, failures = _tail_topology_evidence(
+            self.run_dir, run=self.run, start_ns=1_000, end_ns=2_000
+        )
+        self.assertTrue(any("netlink monitor identity changed" in item for item in failures))
+
+        second = self._sample(2_000)
+        second["processes"] = [
+            process
+            for process in second["processes"]
+            if "actual_sitl_control_probe.py" not in " ".join(process["cmdline"])
+        ]
+        path.write_bytes(canonical_bytes(first) + canonical_bytes(second))
+        _details, failures = _tail_topology_evidence(
+            self.run_dir, run=self.run, start_ns=1_000, end_ns=2_000
+        )
+        self.assertTrue(any("critical process count differs" in item for item in failures))
+
+
+class CapacityAirborneControllerTests(unittest.TestCase):
+    class Clock:
+        def __init__(self, value: int) -> None:
+            self.value = value
+
+        def now(self) -> int:
+            return self.value
+
+        def advance(self, nanoseconds: int = 50_000_000) -> None:
+            self.value += nanoseconds
+
+    class Socket:
+        def __init__(self) -> None:
+            self.sent: list[tuple[bytes, tuple[str, int]]] = []
+
+        def sendto(self, payload: bytes, destination: tuple[str, int]) -> int:
+            self.sent.append((payload, destination))
+            return len(payload)
+
+    @staticmethod
+    def gate() -> dict[str, object]:
+        schedule = {
+            "warmup_start_monotonic_ns": 900_000_000_000,
+            "measurement_start_monotonic_ns": 930_000_000_000,
+            "measurement_end_monotonic_ns": 1_530_000_000_000,
+        }
+        return airborne.airborne_gate_contract(schedule)
+
+    @staticmethod
+    def response_common(uav: int, message_id: int, digest: str) -> dict[str, object]:
+        return {
+            "uav": uav,
+            "peer_ip": f"10.71.{uav}.10",
+            "peer_udp_port": 14600 + uav,
+            "received_monotonic_ns": 0,
+            "transport_payload_sha256": digest,
+            "message_type": "COMMAND_ACK" if message_id == 77 else "TIMESYNC",
+            "message_id": message_id,
+            "source_system": uav,
+            "source_component": 1,
+            "mavlink_frame_hex": "00",
+            "mavlink_frame_sha256": "a" * 64,
+            "mavlink_frame_size": 1,
+        }
+
+    @staticmethod
+    def ack_message(command_id: int, result: int = 0) -> mock.Mock:
+        message = mock.Mock()
+        message.command = command_id
+        message.result = result
+        return message
+
+    @staticmethod
+    def timesync_message(token: int) -> mock.Mock:
+        message = mock.Mock()
+        message.tc1 = 123_456_789
+        message.ts1 = token
+        return message
+
+    def controller_with_pump(
+        self, *, drop_first_uav1: bool = False, exact_deadline_uav1: bool = False
+    ) -> tuple[
+        airborne.CapacityAirborneController,
+        "CapacityAirborneControllerTests.Clock",
+        "CapacityAirborneControllerTests.Socket",
+        mock.Mock,
+    ]:
+        clock = self.Clock(100_000_000_000)
+        sock = self.Socket()
+        writer = mock.Mock()
+        holder: dict[str, airborne.CapacityAirborneController] = {}
+
+        def pump(_timeout_s: float) -> None:
+            controller = holder["controller"]
+            clock.advance()
+            for uav, pending in list(controller.pending_by_uav.items()):
+                if drop_first_uav1 and uav == 1 and pending.attempt == 1:
+                    continue
+                if exact_deadline_uav1 and uav == 1:
+                    clock.value = pending.sent_monotonic_ns + airborne.OUTCOME_TIMEOUT_NS
+                common = self.response_common(uav, 77, f"{uav}" * 64)
+                common["received_monotonic_ns"] = clock.now()
+                controller.observe_message(
+                    message_type="COMMAND_ACK",
+                    uav=uav,
+                    message=self.ack_message(pending.command_id),
+                    received_ns=clock.now(),
+                    common=common,
+                )
+                if uav not in controller.pending_by_uav:
+                    continue
+                pending = controller.pending_by_uav[uav]
+                common = self.response_common(uav, 111, f"{uav + 5}" * 64)
+                common["received_monotonic_ns"] = clock.now()
+                controller.observe_message(
+                    message_type="TIMESYNC",
+                    uav=uav,
+                    message=self.timesync_message(pending.timesync_token),
+                    received_ns=clock.now(),
+                    common=common,
+                )
+
+        controller = airborne.CapacityAirborneController(
+            run_nonce="ab" * 32,
+            gate=self.gate(),
+            sock=sock,
+            sequencer=control_probe.MavlinkSequencer(),
+            writer=writer,
+            pump=pump,
+            now_ns=clock.now,
+        )
+        holder["controller"] = controller
+        return controller, clock, sock, writer
+
+    def test_encoder_is_exact_command_long_plus_timesync_with_unique_attempt_token(self) -> None:
+        first = airborne.encode_flight_command_datagram(
+            run_nonce="ab" * 32,
+            stage="takeoff",
+            uav=3,
+            attempt=1,
+            sequencer=control_probe.MavlinkSequencer(),
+        )
+        second = airborne.encode_flight_command_datagram(
+            run_nonce="ab" * 32,
+            stage="takeoff",
+            uav=3,
+            attempt=2,
+            sequencer=control_probe.MavlinkSequencer(),
+        )
+        self.assertEqual(
+            first["request_datagram"],
+            first["command_frame"] + first["timesync_frame"],
+        )
+        self.assertEqual(first["command_id"], airborne.MAV_CMD_NAV_TAKEOFF)
+        self.assertNotEqual(
+            first["timesync_request_ts1"], second["timesync_request_ts1"]
+        )
+        self.assertEqual(
+            control_probe.struct.unpack(
+                "<qq", first["timesync_frame"][10:-2]
+            ),
+            (0, first["timesync_request_ts1"]),
+        )
+
+    def test_reposition_is_exact_command_int_and_all_tokens_are_disjoint(self) -> None:
+        encoded = airborne.encode_flight_command_datagram(
+            run_nonce="ab" * 32,
+            stage="reposition",
+            uav=4,
+            attempt=3,
+            sequencer=control_probe.MavlinkSequencer(),
+            current_lat_e7=-353_632_621,
+            current_lon_e7=1_491_652_374,
+        )
+        self.assertEqual(encoded["command_message_id"], 75)
+        self.assertEqual(encoded["command_encoding"], "COMMAND_INT")
+        self.assertEqual(len(encoded["command_frame"]), 47)
+        fields = control_probe.struct.unpack(
+            "<4fiifHBBBBB", encoded["command_frame"][10:-2]
+        )
+        self.assertEqual(fields[4:6], (-353_632_621, 1_491_652_374))
+        self.assertEqual(fields[6], airborne.MOTION_TARGET_RELATIVE_ALT_M)
+        self.assertEqual(
+            fields[7:],
+            (
+                airborne.MAV_CMD_DO_REPOSITION,
+                4,
+                1,
+                airborne.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+                0,
+                0,
+            ),
+        )
+        tokens = {
+            airborne.flight_timesync_token(
+                run_nonce="ab" * 32,
+                stage_code=int(definition["stage_code"]),
+                uav=uav,
+                ordinal=attempt,
+            )
+            for definition in airborne.STAGE_DEFINITIONS
+            for uav in airborne.EXPECTED_UAVS
+            for attempt in range(1, 4)
+        }
+        self.assertEqual(
+            len(tokens), len(airborne.STAGE_DEFINITIONS) * 5 * 3
+        )
+        self.assertTrue(all(0 < token < 1 << 63 for token in tokens))
+
+    def test_gate_has_separate_warmup_landing_and_disarm_budgets(self) -> None:
+        gate = self.gate()
+        self.assertEqual(gate["warmup_motion_stages"], ["reposition"])
+        self.assertEqual(
+            gate["warmup_motion_deadline_monotonic_ns"]
+            - gate["warmup_start_monotonic_ns"],
+            15_000_000_000,
+        )
+        self.assertEqual(
+            gate["landing_deadline_monotonic_ns"]
+            - gate["measurement_end_monotonic_ns"],
+            130_000_000_000,
+        )
+        self.assertEqual(
+            gate["disarm_deadline_monotonic_ns"]
+            - gate["landing_deadline_monotonic_ns"],
+            60_000_000_000,
+        )
+        self.assertEqual(
+            gate["stage_timing_budget"], airborne.stage_timing_budget()
+        )
+
+    def test_stage_accepts_only_ack_and_exact_ts1_before_half_open_deadline(self) -> None:
+        controller, _clock, sock, writer = self.controller_with_pump()
+        remaining = controller._send_stage_attempt("takeoff", set(range(1, 6)), 1)
+        self.assertEqual(remaining, set())
+        self.assertEqual(len(sock.sent), 5)
+        self.assertEqual(
+            [call.args[0] for call in writer.emit.call_args_list].count(
+                "flight_command_complete"
+            ),
+            5,
+        )
+        self.assertEqual(
+            {value["outcome"] for value in controller.retired_tokens.values()},
+            {"accepted"},
+        )
+
+    def test_exact_deadline_response_times_out_and_cannot_complete(self) -> None:
+        controller, _clock, _sock, writer = self.controller_with_pump(
+            exact_deadline_uav1=True
+        )
+        remaining = controller._send_stage_attempt("takeoff", {1}, 1)
+        self.assertEqual(remaining, {1})
+        events = [call.args[0] for call in writer.emit.call_args_list]
+        self.assertIn("flight_command_outcome_timeout", events)
+        self.assertIn("late_flight_command_ack", events)
+        self.assertNotIn("flight_command_complete", events)
+
+    def test_pre_measurement_loss_retries_after_three_second_quiet_drain(self) -> None:
+        controller, _clock, sock, writer = self.controller_with_pump(
+            drop_first_uav1=True
+        )
+        controller._send_stage("takeoff")
+        self.assertEqual(len(sock.sent), 6)
+        offers = [
+            call.kwargs
+            for call in writer.emit.call_args_list
+            if call.args[0] == "flight_command_offered" and call.kwargs["uav"] == 1
+        ]
+        self.assertEqual([item["attempt"] for item in offers], [1, 2])
+        self.assertNotEqual(
+            offers[0]["timesync_request_ts1"], offers[1]["timesync_request_ts1"]
+        )
+        drains = [
+            call.kwargs
+            for call in writer.emit.call_args_list
+            if call.args[0] == "flight_command_quiet_drain"
+        ]
+        self.assertEqual(len(drains), 1)
+        self.assertGreaterEqual(
+            drains[0]["completed_monotonic_ns"]
+            - drains[0]["last_response_monotonic_ns"],
+            airborne.OUTCOME_TIMEOUT_NS,
+        )
 
 
 class FrozenRuntimeContractTests(unittest.TestCase):

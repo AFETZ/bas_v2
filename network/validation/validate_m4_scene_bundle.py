@@ -24,6 +24,25 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_BUNDLE = ROOT / "network/config/m4_canonical_scene_bundle.json"
 ZERO_SHA256 = "0" * 64
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
+FRAME_TRANSFORM_VERSION = "ams-m4-coordinate-frames-v1"
+GEODETIC_ORIGIN = {
+    "datum": "WGS84",
+    "elevation_m": 0.0,
+    "heading_deg": 0.0,
+    "latitude_deg": -35.3632621,
+    "longitude_deg": 149.1652374,
+}
+IDENTITY_4X4 = [
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+    [0.0, 0.0, 0.0, 1.0],
+]
+NED_DELTA_TO_ENU_DELTA_3X3 = [
+    [0.0, 1.0, 0.0],
+    [1.0, 0.0, 0.0],
+    [0.0, 0.0, -1.0],
+]
 EXPECTED_ASSETS = {
     "network/config/jammers_m4_canonical.yaml",
     "network/config/radio_m4_canonical.yaml",
@@ -306,18 +325,140 @@ def make_gate(failures: list[str], details: Mapping[str, Any] | None = None) -> 
     return {"passed": not failures, "failures": failures, "details": dict(details or {})}
 
 
+def expected_coordinate_frame_contract() -> dict[str, Any]:
+    """Return the independently frozen four-engine coordinate contract."""
+
+    enu_common = {
+        "angle_unit": "rad",
+        "axes": ["east", "north", "up"],
+        "axis_symbols": ["x", "y", "z"],
+        "handedness": "right",
+        "position_unit": "m",
+        "quaternion_order": "xyzw",
+    }
+    return {
+        "contract": "ams.m4.coordinate-frame-contract/v1",
+        "transform_version": FRAME_TRANSFORM_VERSION,
+        "origin": {
+            "gazebo_world_enu_m": [0.0, 0.0, 0.0],
+            "geodetic": GEODETIC_ORIGIN,
+            "ardupilot_local_origin_policy": (
+                "per_uav_observed_prearm_LOCAL_POSITION_NED_baseline"
+            ),
+            "ardupilot_relative_alt_origin_policy": (
+                "per_uav_observed_prearm_GLOBAL_POSITION_INT_relative_alt_baseline"
+            ),
+        },
+        "frames": {
+            "gazebo_world": {"frame_id": "world", **enu_common},
+            "ros_odometry": {
+                "frame_id": "ros_odometry_world_enu",
+                "message_type": "nav_msgs/msg/Odometry",
+                "source_topic_pattern": "/uavN/odometry",
+                "linear_velocity_unit": "m/s",
+                "angular_velocity_unit": "rad/s",
+                **enu_common,
+            },
+            "sionna_scene": {"frame_id": "scene", **enu_common},
+            "ardupilot_local_position_ned": {
+                "frame_id": "ardupilot_local_ned",
+                "mavlink_message": "LOCAL_POSITION_NED",
+                "mavlink_message_id": 32,
+                "axes": ["north", "east", "down"],
+                "axis_symbols": ["x", "y", "z"],
+                "handedness": "right",
+                "position_unit": "m",
+                "linear_velocity_unit": "m/s",
+                "position_fields": ["x", "y", "z"],
+                "linear_velocity_fields": ["vx", "vy", "vz"],
+            },
+            "ardupilot_global_position_int": {
+                "frame_id": "ardupilot_global_wgs84",
+                "mavlink_message": "GLOBAL_POSITION_INT",
+                "mavlink_message_id": 33,
+                "datum": "WGS84",
+                "latitude_field": "lat",
+                "longitude_field": "lon",
+                "latitude_longitude_unit": "1e-7_deg",
+                "altitude_msl_field": "alt",
+                "altitude_msl_unit": "mm",
+                "relative_altitude_field": "relative_alt",
+                "relative_altitude_unit": "mm",
+                "relative_altitude_reference": "vehicle_home",
+                "linear_velocity_fields": ["vx", "vy", "vz"],
+                "linear_velocity_unit": "cm/s",
+                "heading_field": "hdg",
+                "heading_unit": "cdeg",
+            },
+        },
+        "transforms": {
+            "gazebo_world_to_ros_odometry": {
+                "kind": "homogeneous_position",
+                "matrix_4x4": IDENTITY_4X4,
+                "version": FRAME_TRANSFORM_VERSION,
+            },
+            "gazebo_world_to_sionna_scene": {
+                "kind": "homogeneous_position",
+                "matrix_4x4": IDENTITY_4X4,
+                "version": FRAME_TRANSFORM_VERSION,
+            },
+            "ardupilot_local_ned_delta_to_gazebo_enu_delta": {
+                "kind": "linear_delta",
+                "matrix_3x3": NED_DELTA_TO_ENU_DELTA_3X3,
+                "equation": "enu_delta=[ned_y,ned_x,-ned_z]",
+                "version": FRAME_TRANSFORM_VERSION,
+            },
+            "gazebo_world_enu_to_wgs84": {
+                "kind": "gazebo_spherical_coordinates",
+                "surface_model": "EARTH_WGS84",
+                "origin": GEODETIC_ORIGIN,
+                "version": FRAME_TRANSFORM_VERSION,
+            },
+            "global_relative_altitude_to_gazebo_enu_up_delta": {
+                "kind": "scaled_delta",
+                "equation": (
+                    "enu_up_delta_m=(relative_alt_mm-prearm_relative_alt_mm)/1000"
+                ),
+                "scale_m_per_input_unit": 0.001,
+                "version": FRAME_TRANSFORM_VERSION,
+            },
+        },
+        "runtime_correspondence": {
+            "comparison_interval": "[measurement_start,measurement_end)",
+            "matching_policy": "nearest_at_or_before",
+            "maximum_sample_skew_ns": 1_000_000_000,
+            "baseline_policy": "per_uav_observed_prearm_deltas",
+            "global_horizontal_max_abs_error_m": 5.0,
+            "local_position_max_abs_error_m": 3.0,
+            "relative_altitude_max_abs_error_m": 3.0,
+        },
+        "fixtures": [
+            {
+                "fixture_id": "local_ned_delta_to_enu_delta",
+                "input_local_ned_m": [10.0, 20.0, -30.0],
+                "expected_gazebo_enu_m": [20.0, 10.0, 30.0],
+            },
+            {
+                "fixture_id": "relative_altitude_mm_to_enu_up_delta",
+                "input_relative_altitude_delta_mm": 30_000,
+                "expected_gazebo_enu_up_delta_m": 30.0,
+            },
+        ],
+    }
+
+
 def validate_scene_bundle(bundle_path: Path = DEFAULT_BUNDLE, root: Path = ROOT) -> dict[str, Any]:
     gates: dict[str, dict[str, Any]] = {}
     try:
         bundle = strict_json(bundle_path)
     except SceneValidationError as exc:
-        return {"contract": "ams.m4.scene-bundle-validation/v1", "schema_version": 1, "status": "FAIL", "failures": [str(exc)], "gates": {}}
+        return {"contract": "ams.m4.scene-bundle-validation/v2", "schema_version": 2, "status": "FAIL", "failures": [str(exc)], "gates": {}}
 
     identity_failures: list[str] = []
     expected_identity = {
-        "contract": "ams.m4.canonical-scene-bundle/v1",
-        "schema_version": 1,
-        "bundle_id": "ams-m4-canonical-km-v1",
+        "contract": "ams.m4.canonical-scene-bundle/v2",
+        "schema_version": 2,
+        "bundle_id": "ams-m4-canonical-km-v2",
         "bundle_hash_policy": "sha256-canonical-json-with-bundle_sha256-zeroed/v1",
         "transitive_asset_policy": "all-local-regular-files-no-symlinks/v1",
     }
@@ -457,12 +598,117 @@ def validate_scene_bundle(bundle_path: Path = DEFAULT_BUNDLE, root: Path = ROOT)
     frame_failures: list[str] = []
     try:
         frame = bundle.get("coordinate_frame")
-        if not isinstance(frame, dict) or frame.get("axes") != "ENU" or frame.get("units") != "m" or frame.get("gazebo_frame") != "world" or frame.get("sionna_frame") != "scene":
+        expected_legacy_frame = {
+            "axes": "ENU",
+            "gazebo_frame": "world",
+            "origin": {
+                "elevation_m": GEODETIC_ORIGIN["elevation_m"],
+                "latitude_deg": GEODETIC_ORIGIN["latitude_deg"],
+                "longitude_deg": GEODETIC_ORIGIN["longitude_deg"],
+            },
+            "sionna_frame": "scene",
+            "units": "m",
+        }
+        if frame != expected_legacy_frame:
             raise SceneValidationError("coordinate_frame is not exact shared ENU metre frame")
+        frame_contract = bundle.get("frame_contract")
+        expected_frame_contract = expected_coordinate_frame_contract()
+        if frame_contract != expected_frame_contract:
+            raise SceneValidationError(
+                "Gazebo/ROS/ArduPilot/Sionna coordinate-frame contract differs"
+            )
         matrix = bundle.get("gazebo_to_sionna_transform_matrix")
-        expected_matrix = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
-        if bundle.get("gazebo_to_sionna_transform_version") != "enu-identity-v1" or matrix != expected_matrix:
+        if bundle.get("gazebo_to_sionna_transform_version") != "enu-identity-v1" or matrix != IDENTITY_4X4:
             raise SceneValidationError("Gazebo-to-Sionna transform is not the frozen identity")
+
+        if sdf_root is None:
+            raise SceneValidationError("Gazebo SDF was not parsed for frame validation")
+        frame_world = sdf_root.find("world")
+        spherical = (
+            frame_world.find("spherical_coordinates")
+            if frame_world is not None
+            else None
+        )
+        if spherical is None:
+            raise SceneValidationError("Gazebo WGS84 spherical origin is absent")
+        spherical_values = {
+            "datum": (spherical.findtext("surface_model") or "").strip(),
+            "elevation_m": float(spherical.findtext("elevation") or "nan"),
+            "heading_deg": float(spherical.findtext("heading_deg") or "nan"),
+            "latitude_deg": float(spherical.findtext("latitude_deg") or "nan"),
+            "longitude_deg": float(spherical.findtext("longitude_deg") or "nan"),
+        }
+        if (
+            spherical_values["datum"]
+            != f"EARTH_{GEODETIC_ORIGIN['datum']}"
+            or any(
+                not close(
+                    spherical_values[field],
+                    float(GEODETIC_ORIGIN[field]),
+                    1e-9,
+                )
+                for field in (
+                    "elevation_m",
+                    "heading_deg",
+                    "latitude_deg",
+                    "longitude_deg",
+                )
+            )
+        ):
+            raise SceneValidationError(
+                "Gazebo spherical origin differs from the WGS84 frame contract"
+            )
+
+        # Independently execute the two conversion fixtures.  Exact dictionary
+        # equality above freezes labels/units/tolerances; these calculations
+        # additionally reject a self-consistent but mathematically false claim.
+        fixtures = {
+            item["fixture_id"]: item
+            for item in frame_contract["fixtures"]
+            if isinstance(item, dict) and isinstance(item.get("fixture_id"), str)
+        }
+        if set(fixtures) != {
+            "local_ned_delta_to_enu_delta",
+            "relative_altitude_mm_to_enu_up_delta",
+        }:
+            raise SceneValidationError("coordinate conversion fixture set differs")
+        ned_fixture = fixtures["local_ned_delta_to_enu_delta"]
+        ned_input = vector(
+            ned_fixture["input_local_ned_m"], "frame_fixture.local_ned"
+        )
+        derived_enu = tuple(
+            sum(row[column] * ned_input[column] for column in range(3))
+            for row in NED_DELTA_TO_ENU_DELTA_3X3
+        )
+        expected_enu = vector(
+            ned_fixture["expected_gazebo_enu_m"], "frame_fixture.enu"
+        )
+        if any(not close(actual, expected) for actual, expected in zip(derived_enu, expected_enu)):
+            raise SceneValidationError("NED-to-ENU conversion fixture is false")
+        # A proper axis transformation preserves handedness (determinant +1).
+        ned_to_enu = NED_DELTA_TO_ENU_DELTA_3X3
+        determinant = (
+            ned_to_enu[0][0]
+            * (ned_to_enu[1][1] * ned_to_enu[2][2] - ned_to_enu[1][2] * ned_to_enu[2][1])
+            - ned_to_enu[0][1]
+            * (ned_to_enu[1][0] * ned_to_enu[2][2] - ned_to_enu[1][2] * ned_to_enu[2][0])
+            + ned_to_enu[0][2]
+            * (ned_to_enu[1][0] * ned_to_enu[2][1] - ned_to_enu[1][1] * ned_to_enu[2][0])
+        )
+        if not close(determinant, 1.0):
+            raise SceneValidationError("NED-to-ENU transform is not right-handed")
+        altitude_fixture = fixtures["relative_altitude_mm_to_enu_up_delta"]
+        altitude_scale = frame_contract["transforms"][
+            "global_relative_altitude_to_gazebo_enu_up_delta"
+        ]["scale_m_per_input_unit"]
+        derived_altitude_m = (
+            altitude_fixture["input_relative_altitude_delta_mm"] * altitude_scale
+        )
+        if not close(
+            derived_altitude_m,
+            altitude_fixture["expected_gazebo_enu_up_delta_m"],
+        ):
+            raise SceneValidationError("relative-altitude conversion fixture is false")
         operating = bundle.get("operating_bounds_m")
         if not isinstance(operating, dict) or set(operating) != {"collision_usable", "rf_usable"}:
             raise SceneValidationError("operating_bounds_m fields differ")
@@ -477,9 +723,15 @@ def validate_scene_bundle(bundle_path: Path = DEFAULT_BUNDLE, root: Path = ROOT)
             terrain_bounds = meshes["terrain.obj"].all_bounds()
             if not close(terrain_bounds["x"][0], collision["x"][0]) or not close(terrain_bounds["x"][1], collision["x"][1]) or not close(terrain_bounds["y"][0], collision["y"][0]) or not close(terrain_bounds["y"][1], collision["y"][1]):
                 raise SceneValidationError("terrain mesh does not span operating x/y bounds")
-    except SceneValidationError as exc:
+    except (KeyError, TypeError, ValueError, SceneValidationError) as exc:
         frame_failures.append(str(exc))
-    gates["frames_and_bounds"] = make_gate(frame_failures)
+    gates["frames_and_bounds"] = make_gate(
+        frame_failures,
+        {
+            "frame_contract": "ams.m4.coordinate-frame-contract/v1",
+            "transform_version": FRAME_TRANSFORM_VERSION,
+        },
+    )
 
     relief_failures: list[str] = []
     try:
@@ -730,8 +982,12 @@ def validate_scene_bundle(bundle_path: Path = DEFAULT_BUNDLE, root: Path = ROOT)
             or scenario["scenario"]["map"]["size_m"] != [20000, 10000]
             or scenario["scenario"]["map"]["terrain_height_variation_m"] != 180
             or scenario["scenario"]["map"]["building_height_limit_floors"] != 15
+            or scenario["base_simulation"].get("sitl_home")
+            != "-35.3632621,149.1652374,0,0"
         ):
-            raise SceneValidationError("flight scenario does not bind final scene envelope")
+            raise SceneValidationError(
+                "flight scenario does not bind final scene envelope/WGS84 SITL home"
+            )
         robots = scenario.get("robots", [])
         if len(robots) != 5 or {item.get("name") for item in robots} != {f"uav{index}" for index in range(1, 6)} or {item.get("system_id") for item in robots} != set(range(1, 6)):
             raise SceneValidationError("flight scenario does not contain exact five UAV identities")
@@ -793,10 +1049,10 @@ def validate_scene_bundle(bundle_path: Path = DEFAULT_BUNDLE, root: Path = ROOT)
     return {
         "bundle_id": bundle.get("bundle_id"),
         "bundle_sha256": bundle.get("bundle_sha256"),
-        "contract": "ams.m4.scene-bundle-validation/v1",
+        "contract": "ams.m4.scene-bundle-validation/v2",
         "failures": failures,
         "gates": gates,
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "PASS" if not failures else "FAIL",
     }
 

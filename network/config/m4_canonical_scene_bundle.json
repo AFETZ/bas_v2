@@ -23,7 +23,7 @@
       "sha256": "7a725a48ee17607a09b7a98ecfe00abbafeb53c4efb0c843bda20fe50c7c872f"
     }
   },
-  "asset_manifest_sha256": "680391780bb72bb994837242e9987790e21d2ad4ab10f8068733cc227399b8bb",
+  "asset_manifest_sha256": "4accde640cd5f954ce9526d8f09c6c41737ab12439400bd7ee7ce30973089bf9",
   "assets": [
     {
       "mesh_bounds_m": null,
@@ -36,15 +36,15 @@
       "mesh_bounds_m": null,
       "path": "network/config/radio_m4_canonical.yaml",
       "role": "radio_provider_config",
-      "sha256": "aec319d5a4eae89e6e5528758fc91c9c076938ee9814faab20da40f20f9c15d4",
+      "sha256": "cd894114afded062ecf04e71fc794c059a7fffc46bf63cd20baae8823afe636a",
       "size_bytes": 1830
     },
     {
       "mesh_bounds_m": null,
       "path": "network/config/scenario_m4_canonical.yaml",
       "role": "six_node_flight_scenario",
-      "sha256": "13601dddb378e4ea1a1006ed637af66dae85ce0ff05965aa06136b86d141272d",
-      "size_bytes": 1847
+      "sha256": "4ec96b721b60bfa47d18a6d04304465adfd8a93441d737712a2377f86e83fbdd",
+      "size_bytes": 1890
     },
     {
       "mesh_bounds_m": {
@@ -291,8 +291,8 @@
     }
   ],
   "bundle_hash_policy": "sha256-canonical-json-with-bundle_sha256-zeroed/v1",
-  "bundle_id": "ams-m4-canonical-km-v1",
-  "bundle_sha256": "049d9f648eb82165a86f0b5758f984b38c03c5b0d979aaec18d18d361d9da245",
+  "bundle_id": "ams-m4-canonical-km-v2",
+  "bundle_sha256": "a6827f964e8fcc668a109324b2760a513577370a59784e3e4eabf4ac3c45c50e",
   "causal_scenarios": {
     "building_blocked": {
       "control_link": "cp>uav5",
@@ -585,7 +585,7 @@
       "target_link": "cp>uav1"
     }
   },
-  "contract": "ams.m4.canonical-scene-bundle/v1",
+  "contract": "ams.m4.canonical-scene-bundle/v2",
   "coordinate_frame": {
     "axes": "ENU",
     "gazebo_frame": "world",
@@ -596,6 +596,264 @@
     },
     "sionna_frame": "scene",
     "units": "m"
+  },
+  "frame_contract": {
+    "contract": "ams.m4.coordinate-frame-contract/v1",
+    "fixtures": [
+      {
+        "expected_gazebo_enu_m": [
+          20.0,
+          10.0,
+          30.0
+        ],
+        "fixture_id": "local_ned_delta_to_enu_delta",
+        "input_local_ned_m": [
+          10.0,
+          20.0,
+          -30.0
+        ]
+      },
+      {
+        "expected_gazebo_enu_up_delta_m": 30.0,
+        "fixture_id": "relative_altitude_mm_to_enu_up_delta",
+        "input_relative_altitude_delta_mm": 30000
+      }
+    ],
+    "frames": {
+      "ardupilot_global_position_int": {
+        "altitude_msl_field": "alt",
+        "altitude_msl_unit": "mm",
+        "datum": "WGS84",
+        "frame_id": "ardupilot_global_wgs84",
+        "heading_field": "hdg",
+        "heading_unit": "cdeg",
+        "latitude_field": "lat",
+        "latitude_longitude_unit": "1e-7_deg",
+        "linear_velocity_fields": [
+          "vx",
+          "vy",
+          "vz"
+        ],
+        "linear_velocity_unit": "cm/s",
+        "longitude_field": "lon",
+        "mavlink_message": "GLOBAL_POSITION_INT",
+        "mavlink_message_id": 33,
+        "relative_altitude_field": "relative_alt",
+        "relative_altitude_reference": "vehicle_home",
+        "relative_altitude_unit": "mm"
+      },
+      "ardupilot_local_position_ned": {
+        "axes": [
+          "north",
+          "east",
+          "down"
+        ],
+        "axis_symbols": [
+          "x",
+          "y",
+          "z"
+        ],
+        "frame_id": "ardupilot_local_ned",
+        "handedness": "right",
+        "linear_velocity_fields": [
+          "vx",
+          "vy",
+          "vz"
+        ],
+        "linear_velocity_unit": "m/s",
+        "mavlink_message": "LOCAL_POSITION_NED",
+        "mavlink_message_id": 32,
+        "position_fields": [
+          "x",
+          "y",
+          "z"
+        ],
+        "position_unit": "m"
+      },
+      "gazebo_world": {
+        "angle_unit": "rad",
+        "axes": [
+          "east",
+          "north",
+          "up"
+        ],
+        "axis_symbols": [
+          "x",
+          "y",
+          "z"
+        ],
+        "frame_id": "world",
+        "handedness": "right",
+        "position_unit": "m",
+        "quaternion_order": "xyzw"
+      },
+      "ros_odometry": {
+        "angle_unit": "rad",
+        "angular_velocity_unit": "rad/s",
+        "axes": [
+          "east",
+          "north",
+          "up"
+        ],
+        "axis_symbols": [
+          "x",
+          "y",
+          "z"
+        ],
+        "frame_id": "ros_odometry_world_enu",
+        "handedness": "right",
+        "linear_velocity_unit": "m/s",
+        "message_type": "nav_msgs/msg/Odometry",
+        "position_unit": "m",
+        "quaternion_order": "xyzw",
+        "source_topic_pattern": "/uavN/odometry"
+      },
+      "sionna_scene": {
+        "angle_unit": "rad",
+        "axes": [
+          "east",
+          "north",
+          "up"
+        ],
+        "axis_symbols": [
+          "x",
+          "y",
+          "z"
+        ],
+        "frame_id": "scene",
+        "handedness": "right",
+        "position_unit": "m",
+        "quaternion_order": "xyzw"
+      }
+    },
+    "origin": {
+      "ardupilot_local_origin_policy": "per_uav_observed_prearm_LOCAL_POSITION_NED_baseline",
+      "ardupilot_relative_alt_origin_policy": "per_uav_observed_prearm_GLOBAL_POSITION_INT_relative_alt_baseline",
+      "gazebo_world_enu_m": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "geodetic": {
+        "datum": "WGS84",
+        "elevation_m": 0.0,
+        "heading_deg": 0.0,
+        "latitude_deg": -35.3632621,
+        "longitude_deg": 149.1652374
+      }
+    },
+    "runtime_correspondence": {
+      "baseline_policy": "per_uav_observed_prearm_deltas",
+      "comparison_interval": "[measurement_start,measurement_end)",
+      "global_horizontal_max_abs_error_m": 5.0,
+      "local_position_max_abs_error_m": 3.0,
+      "matching_policy": "nearest_at_or_before",
+      "maximum_sample_skew_ns": 1000000000,
+      "relative_altitude_max_abs_error_m": 3.0
+    },
+    "transform_version": "ams-m4-coordinate-frames-v1",
+    "transforms": {
+      "ardupilot_local_ned_delta_to_gazebo_enu_delta": {
+        "equation": "enu_delta=[ned_y,ned_x,-ned_z]",
+        "kind": "linear_delta",
+        "matrix_3x3": [
+          [
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            -1.0
+          ]
+        ],
+        "version": "ams-m4-coordinate-frames-v1"
+      },
+      "gazebo_world_enu_to_wgs84": {
+        "kind": "gazebo_spherical_coordinates",
+        "origin": {
+          "datum": "WGS84",
+          "elevation_m": 0.0,
+          "heading_deg": 0.0,
+          "latitude_deg": -35.3632621,
+          "longitude_deg": 149.1652374
+        },
+        "surface_model": "EARTH_WGS84",
+        "version": "ams-m4-coordinate-frames-v1"
+      },
+      "gazebo_world_to_ros_odometry": {
+        "kind": "homogeneous_position",
+        "matrix_4x4": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "version": "ams-m4-coordinate-frames-v1"
+      },
+      "gazebo_world_to_sionna_scene": {
+        "kind": "homogeneous_position",
+        "matrix_4x4": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "version": "ams-m4-coordinate-frames-v1"
+      },
+      "global_relative_altitude_to_gazebo_enu_up_delta": {
+        "equation": "enu_up_delta_m=(relative_alt_mm-prearm_relative_alt_mm)/1000",
+        "kind": "scaled_delta",
+        "scale_m_per_input_unit": 0.001,
+        "version": "ams-m4-coordinate-frames-v1"
+      }
+    }
   },
   "gazebo_to_sionna_transform_matrix": [
     [
@@ -962,7 +1220,7 @@
     }
   },
   "scene_material_manifest_sha256": "34b6a81dc3b0d71e1f283d8b51a7b6768a39080112d739b1015876fab74a29ab",
-  "schema_version": 1,
+  "schema_version": 2,
   "sionna_scene_xml": "src/multiagent_simulation/worlds/m4_canonical/sionna_scene.xml",
   "transitive_asset_policy": "all-local-regular-files-no-symlinks/v1"
 }

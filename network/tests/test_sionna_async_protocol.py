@@ -660,6 +660,30 @@ class DirectedLinkStateManagerTests(unittest.TestCase):
         assert state is not None
         self.assertEqual(state.node_state_seq, 3)
 
+    def test_expiry_preserves_completed_watermark_for_old_release_and_duplicate(
+        self,
+    ) -> None:
+        old_query = self.register(query("query-old", 2, wire_sequence=4))
+        newer_query = self.register(query("query-newer", 3, wire_sequence=5))
+        newer_result = result(newer_query, wire_sequence=9)
+        self.assertEqual(self.ingest(newer_result).kind, "pending")
+        self.assertEqual(
+            self.apply(state_id="applied-newer").query_id,
+            newer_query["query_id"],
+        )
+        self.assertEqual(len(self.manager.expire(200)), 1)
+        self.assertIsNone(
+            self.manager.state_for_packet(newer_query["directed_link_id"], 201)
+        )
+
+        late_old = self.ingest(result(old_query, wire_sequence=8), now=201)
+        self.assertEqual(late_old.kind, "superseded")
+        duplicate_newer = self.ingest(newer_result, now=202)
+        self.assertEqual(duplicate_newer.kind, "duplicate")
+        self.assertIsNone(
+            self.manager.state_for_packet(newer_query["directed_link_id"], 202)
+        )
+
     def test_selection_uses_newest_node_state_then_completion_then_wire_sequence(
         self,
     ) -> None:

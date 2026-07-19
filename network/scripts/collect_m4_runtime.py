@@ -36,6 +36,8 @@ from network.validation.m4_runtime import (
 UAV_IDS = ("uav1", "uav2", "uav3", "uav4", "uav5")
 CLOCK_TOPICS = tuple(f"/{uav}/clock" for uav in UAV_IDS)
 WORLD_ENTITY_IDS = {*UAV_IDS, "cp", "jammer_m4"}
+ODOMETRY_SOURCE_FRAME = "ros_odometry_world_enu"
+COORDINATE_TRANSFORM_VERSION = "ams-m4-coordinate-frames-v1"
 
 
 def runtime_entity_name(frame: str) -> str | None:
@@ -353,9 +355,13 @@ def main() -> int:
             state["last_stamp_ns"] = stamp
             if now - state["last_emit_ns"] >= 200_000_000:
                 pose = message.pose.pose
+                twist = message.twist.twist
                 writer.emit(
                     "odometry_sample",
                     uav=uav,
+                    source_topic=f"/{uav}/odometry",
+                    source_frame=ODOMETRY_SOURCE_FRAME,
+                    transform_version=COORDINATE_TRANSFORM_VERSION,
                     source_callback_monotonic_ns=now,
                     sim_stamp_ns=stamp,
                     position_m=[pose.position.x, pose.position.y, pose.position.z],
@@ -364,6 +370,16 @@ def main() -> int:
                         pose.orientation.y,
                         pose.orientation.z,
                         pose.orientation.w,
+                    ],
+                    linear_velocity_mps=[
+                        twist.linear.x,
+                        twist.linear.y,
+                        twist.linear.z,
+                    ],
+                    angular_velocity_radps=[
+                        twist.angular.x,
+                        twist.angular.y,
+                        twist.angular.z,
                     ],
                 )
                 state["last_emit_ns"] = now

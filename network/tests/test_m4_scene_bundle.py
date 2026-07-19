@@ -119,6 +119,72 @@ class M4SceneBundleTests(unittest.TestCase):
 
         self.assert_failed_gate(self.mutate_bundle(mutation), "landmark_alignment")
 
+    def test_ros_frame_handedness_or_quaternion_mutation_is_rejected(self) -> None:
+        def mutation(bundle: dict[str, Any]) -> None:
+            frame = bundle["frame_contract"]["frames"]["ros_odometry"]
+            frame["handedness"] = "left"
+            frame["quaternion_order"] = "wxyz"
+
+        self.assert_failed_gate(self.mutate_bundle(mutation), "frames_and_bounds")
+
+    def test_ned_to_enu_axis_sign_mutation_is_rejected(self) -> None:
+        def mutation(bundle: dict[str, Any]) -> None:
+            transform = bundle["frame_contract"]["transforms"][
+                "ardupilot_local_ned_delta_to_gazebo_enu_delta"
+            ]
+            transform["matrix_3x3"][2][2] = 1.0
+            transform["equation"] = "enu_delta=[ned_y,ned_x,ned_z]"
+            bundle["frame_contract"]["fixtures"][0][
+                "expected_gazebo_enu_m"
+            ][2] = -30.0
+
+        self.assert_failed_gate(self.mutate_bundle(mutation), "frames_and_bounds")
+
+    def test_global_position_unit_or_correspondence_tolerance_mutation_fails(self) -> None:
+        def mutation(bundle: dict[str, Any]) -> None:
+            global_frame = bundle["frame_contract"]["frames"][
+                "ardupilot_global_position_int"
+            ]
+            global_frame["relative_altitude_unit"] = "m"
+            bundle["frame_contract"]["runtime_correspondence"][
+                "relative_altitude_max_abs_error_m"
+            ] = 30.0
+
+        self.assert_failed_gate(self.mutate_bundle(mutation), "frames_and_bounds")
+
+    def test_wgs84_origin_must_match_actual_gazebo_spherical_coordinates(self) -> None:
+        path = (
+            self.root
+            / "src/multiagent_simulation/worlds/m4_canonical/m4_canonical.sdf"
+        )
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                "<latitude_deg>-35.3632621</latitude_deg>",
+                "<latitude_deg>-35.0</latitude_deg>",
+            ),
+            encoding="utf-8",
+        )
+        bundle = self.load_bundle()
+        self.refresh_and_write(bundle, refresh_assets=True)
+        self.assert_failed_gate(
+            validate_scene_bundle(self.bundle_path, self.root), "frames_and_bounds"
+        )
+
+    def test_sitl_home_must_match_gazebo_wgs84_origin(self) -> None:
+        path = self.root / "network/config/scenario_m4_canonical.yaml"
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                'sitl_home: "-35.3632621,149.1652374,0,0"',
+                'sitl_home: "-35.0,149.0,0,0"',
+            ),
+            encoding="utf-8",
+        )
+        bundle = self.load_bundle()
+        self.refresh_and_write(bundle, refresh_assets=True)
+        self.assert_failed_gate(
+            validate_scene_bundle(self.bundle_path, self.root), "runtime_configs"
+        )
+
     def test_highrise_floor_convention_mutation_is_rejected(self) -> None:
         def mutation(bundle: dict[str, Any]) -> None:
             bundle["building_clusters"][1]["buildings"][1]["floors"] = 11
@@ -162,7 +228,7 @@ class M4SceneBundleTests(unittest.TestCase):
 
     def test_runtime_config_cannot_select_a_different_scene(self) -> None:
         path = self.root / "network/config/radio_m4_canonical.yaml"
-        path.write_text(path.read_text(encoding="utf-8").replace("ams-m4-canonical-km-v1", "other-scene"), encoding="utf-8")
+        path.write_text(path.read_text(encoding="utf-8").replace("ams-m4-canonical-km-v2", "other-scene"), encoding="utf-8")
         bundle = self.load_bundle()
         self.refresh_and_write(bundle, refresh_assets=True)
         self.assert_failed_gate(validate_scene_bundle(self.bundle_path, self.root), "runtime_configs")

@@ -10,6 +10,7 @@ scenario:
 base_simulation:
   launch_package: multiagent_simulation
   launch_file: multiagent_simulation.launch.py
+  sitl_home: "-35.3632621,149.1652374,0,0"
   recommended_launch_arguments:
     gui: false
     rviz: false

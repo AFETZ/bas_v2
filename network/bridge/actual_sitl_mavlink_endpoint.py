@@ -40,6 +40,7 @@ from network.bridge.opaque_udp_relay import (  # noqa: E402
 from network.bridge.runtime_clock_beacon import beacon  # noqa: E402
 
 RELAY_CORE_SOURCE = ROOT_DIR / "network" / "bridge" / "opaque_udp_relay.py"
+CONTROL_TOS = 184
 
 
 MANIFEST_CONTRACT = "ams.actual-sitl-endpoint-manifest/v1"
@@ -893,6 +894,33 @@ def _endpoint_tuple(value: dict[str, Any]) -> tuple[str, int]:
     return str(value["host"]), int(value["port"])
 
 
+def recv_control_datagram(
+    sock: socket.socket,
+) -> tuple[bytes, tuple[str, int], int]:
+    """Receive one complete radio-side UDP datagram and its IPv4 TOS."""
+
+    payload, ancillary, flags, peer = sock.recvmsg(65535, 128)
+    if flags & (
+        getattr(socket, "MSG_TRUNC", 0) | getattr(socket, "MSG_CTRUNC", 0)
+    ):
+        raise EndpointError("radio UDP datagram or ancillary data was truncated")
+    tos_payloads = [
+        data
+        for level, kind, data in ancillary
+        if level == socket.IPPROTO_IP and kind == socket.IP_TOS
+    ]
+    if len(tos_payloads) != 1 or len(tos_payloads[0]) != 1:
+        raise EndpointError(
+            "radio UDP datagram TOS ancillary is absent/duplicate/noncanonical"
+        )
+    tos_values = [tos_payloads[0][0]]
+    if tos_values != [CONTROL_TOS]:
+        raise EndpointError(
+            f"radio UDP datagram TOS differs: {tos_values!r}, expected [{CONTROL_TOS}]"
+        )
+    return payload, (str(peer[0]), int(peer[1])), tos_values[0]
+
+
 def _adapter_paths(run_dir: Path, uav: str) -> dict[str, Path]:
     evidence = run_dir / "raw" / "actual_sitl"
     return {
@@ -983,6 +1011,20 @@ def run_endpoint(args: argparse.Namespace) -> int:
     tail = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     for sock in (radio, tail):
         sock.setblocking(False)
+    radio.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, CONTROL_TOS)
+    tail.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, CONTROL_TOS)
+    radio.setsockopt(
+        socket.IPPROTO_IP, getattr(socket, "IP_RECVTOS", 13), 1
+    )
+    if (
+        radio.getsockopt(socket.IPPROTO_IP, socket.IP_TOS) != CONTROL_TOS
+        or tail.getsockopt(socket.IPPROTO_IP, socket.IP_TOS) != CONTROL_TOS
+        or radio.getsockopt(
+            socket.IPPROTO_IP, getattr(socket, "IP_RECVTOS", 13)
+        )
+        != 1
+    ):
+        raise EndpointError("radio socket TOS contract was not applied")
     counters = {
         "tail_to_gcs": 0,
         "gcs_to_tail": 0,
@@ -1057,6 +1099,9 @@ def run_endpoint(args: argparse.Namespace) -> int:
             tail_bind=channel["tail_bind"],
             tail_socket_inode=tail_inode,
             gcs_peer=channel["gcs_peer"],
+            radio_ip_tos=CONTROL_TOS,
+            radio_ip_recvtos=True,
+            tail_ip_tos=CONTROL_TOS,
         )
         deadline_ns = time.monotonic_ns() + manifest["authorization_timeout_ms"] * 1_000_000
 
@@ -1127,6 +1172,7 @@ def run_endpoint(args: argparse.Namespace) -> int:
                             bytes=len(payload),
                             sha256=hashlib.sha256(payload).hexdigest(),
                             buffered_pre_authorization=True,
+                            transmit_tos=CONTROL_TOS,
                         )
                     buffered_tail = None
 
@@ -1134,7 +1180,11 @@ def run_endpoint(args: argparse.Namespace) -> int:
             for key, _mask in selector.select(timeout=timeout):
                 sock = key.fileobj
                 try:
-                    payload, peer = sock.recvfrom(65535)
+                    if key.data == "radio":
+                        payload, peer, received_tos = recv_control_datagram(sock)
+                    else:
+                        payload, peer = sock.recvfrom(65535)
+                        received_tos = None
                 except BlockingIOError:
                     continue
                 peer = (str(peer[0]), int(peer[1]))
@@ -1234,6 +1284,7 @@ def run_endpoint(args: argparse.Namespace) -> int:
                                 bytes=len(payload),
                                 sha256=digest,
                                 buffered_pre_authorization=False,
+                                transmit_tos=CONTROL_TOS,
                             )
                 elif peer != _endpoint_tuple(channel["gcs_peer"]):
                     counters["unexpected_radio_dropped"] += 1
@@ -1244,6 +1295,7 @@ def run_endpoint(args: argparse.Namespace) -> int:
                         source={"host": peer[0], "port": peer[1]},
                         bytes=len(payload),
                         sha256=digest,
+                        received_tos=received_tos,
                     )
                 elif not authorized:
                     counters["preauthorization_radio_dropped"] += 1
@@ -1254,6 +1306,7 @@ def run_endpoint(args: argparse.Namespace) -> int:
                         source=channel["gcs_peer"],
                         bytes=len(payload),
                         sha256=digest,
+                        received_tos=received_tos,
                     )
                 elif forwarder.relay_radio(payload, peer).action == "forwarded":
                     counters["gcs_to_tail"] += 1
@@ -1268,6 +1321,7 @@ def run_endpoint(args: argparse.Namespace) -> int:
                         },
                         bytes=len(payload),
                         sha256=digest,
+                        received_tos=received_tos,
                     )
         audit.emit("adapter_stop", reason="signal", authorized=authorized, counters=counters)
         return 0

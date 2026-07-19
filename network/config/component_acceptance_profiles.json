@@ -124,12 +124,12 @@
       "prerequisite_status_contract": "ams.live-status/v4",
       "prerequisite_status_count": 4,
       "required_component_profiles": [],
-      "receipt_contract": "ams.m4-capacity.host-final-receipt/v1",
+      "receipt_contract": "ams.m4-capacity.host-final-receipt/v2",
       "receipt_name": "m4_capacity_host_final_receipt.json",
-      "result_contract": "ams.m4-capacity.validation/v1",
+      "result_contract": "ams.m4-capacity.validation/v2",
       "result_path": "metrics/m4_capacity_validation.json",
       "runner": "network/scripts/run_m4_capacity.sh",
-      "timeout_s": 900,
+      "timeout_s": 1800,
       "validator": "network/scripts/validate_m4_capacity.py",
       "validator_arguments": [
         "--run-dir",
@@ -163,12 +163,12 @@
       "required_component_profiles": [
         "m4_capacity_prerequisite"
       ],
-      "receipt_contract": "ams.m4.host-final-receipt/v1",
+      "receipt_contract": "ams.m4.host-final-receipt/v2",
       "receipt_name": "m4_host_final_receipt.json",
-      "result_contract": "ams.m4.causality-validation/v1",
+      "result_contract": "ams.m4.causality-validation/v2",
       "result_path": "metrics/m4_validation_results.json",
       "runner": "network/scripts/run_m4_causality.sh",
-      "timeout_s": 1200,
+      "timeout_s": 1500,
       "validator": "network/scripts/validate_m4_causality.py",
       "validator_arguments": [
         "--run-dir",

@@ -46,25 +46,46 @@ from network.validation.validate_m4_causality import (
     CAUSAL_MEASUREMENT_SPAN_NS,
     CAUSAL_SOURCE_PATHS,
     FINALIZATION_BUDGET_NS,
+    NS3_ENGINE_DURATION_NS,
     PRECONTRACT_SETUP_BUDGET_NS,
     REQUIRED_WRAPPER_RESERVE_NS,
     RUNTIME_READINESS_BUDGET_NS,
     WINDOW_IDS,
     WINDOW_SHAPES,
     WRAPPER_TIMEOUT_NS,
+    causal_pre_window_gap_ns,
     causal_quiet_drain_map,
     causal_response_policies,
     causal_window_plan,
     matrix_flow_group_identity,
 )
 from network.scripts.m3_external_matrix_probe import resolve_five_uav_flight_scenario
+from network.scripts.m4_capacity_airborne import airborne_gate_contract
 
 
-CAPACITY_CONTRACT = "ams.m4.capacity_run/v2"
-CAUSALITY_CONTRACT = "ams.m4.causality_run/v1"
+CAPACITY_CONTRACT = "ams.m4.capacity_run/v3"
+CAUSALITY_CONTRACT = "ams.m4.causality_run/v2"
+CAPACITY_EXECUTION_BUDGET_CONTRACT = "ams.m4.capacity-execution-budget/v1"
+CAPACITY_READINESS_RUNWAY_NS = 720_000_000_000
+CAPACITY_DECLARED_READINESS_WAITS_NS = 415_500_000_000
+CAPACITY_BOUNDED_PREFLIGHT_NS = 219_000_000_000
+CAPACITY_WARMUP_NS = 30_000_000_000
+CAPACITY_BOUNDED_WARMUP_MOTION_NS = 15_000_000_000
+CAPACITY_MEASUREMENT_NS = 600_000_000_000
+CAPACITY_POST_MEASUREMENT_CONTROL_NS = 10_000_000_000
+CAPACITY_LANDING_STATE_NS = 120_000_000_000
+CAPACITY_DISARM_NS = 60_000_000_000
+CAPACITY_NS3_ENGINE_DURATION_NS = 1_600_000_000_000
+CAPACITY_WRAPPER_TIMEOUT_NS = 1_800_000_000_000
 SAFE_PRODUCERS = set(REQUIRED_CLOCK_PRODUCERS)
 ACTUAL_ENDPOINT_MODE = "actual_m3_sitl_v1"
 TECHNICAL_ENDPOINT_MODE = "technical_synthetic_fixture_v1"
+ACTUAL_SITL_AUDIT_LOG_PATHS = frozenset(
+    {
+        "logs/actual_sitl_supervisor.jsonl",
+        *(f"logs/actual_sitl_uav{index}.jsonl" for index in range(1, 6)),
+    }
+)
 
 
 def canonical(value: Any) -> bytes:
@@ -223,7 +244,13 @@ def initialize_capacity(args: argparse.Namespace) -> int:
     unexpected_files = {
         relative
         for relative in existing_files
-        if relative not in allowed_files and not relative.startswith("runtime_overlay/")
+        if relative not in allowed_files
+        and not relative.startswith("runtime_overlay/")
+        and relative
+        not in {
+            "raw/resolved_flight_scenario.yaml",
+            "raw/resolved_flight_scenario.identity.json",
+        }
     }
     if not existing_files or unexpected_files:
         raise M4ValidationError(
@@ -255,23 +282,74 @@ def initialize_capacity(args: argparse.Namespace) -> int:
     if args.endpoint_mode not in {ACTUAL_ENDPOINT_MODE, TECHNICAL_ENDPOINT_MODE}:
         raise M4ValidationError("unknown M4 endpoint mode")
     endpoint_acceptance_eligible = args.endpoint_mode == ACTUAL_ENDPOINT_MODE
+    accepted_api: dict[str, Any] | None = None
+    api_sha256: str | None = None
     if endpoint_acceptance_eligible:
-        # The formal runner is intentionally fail-closed until the Q3-owned
-        # actual M3/SITL launcher API and its exact evidence schema are frozen.
-        raise M4ValidationError("actual M3/SITL endpoint API is not frozen")
+        m3_receipt = strict_json(run_dir / "raw/prerequisites/m3.json")
+        m3_result = m3_receipt.get("result")
+        accepted_api = (
+            m3_result.get("actual_control_api")
+            if isinstance(m3_result, dict)
+            else None
+        )
+        if (
+            m3_receipt.get("contract") != "ams.m3.host-final-receipt/v1"
+            or m3_receipt.get("profile") != "m3_component"
+            or m3_receipt.get("formal_accepted") is not True
+            or m3_receipt.get("passed") is not True
+            or m3_receipt.get("failures") != []
+            or not isinstance(m3_result, dict)
+            or m3_result.get("contract")
+            != "ams.m3.external-matrix-validation/v1"
+            or m3_result.get("passed") is not True
+            or m3_result.get("acceptance_eligible") is not True
+            or m3_result.get("failures") != []
+            or accepted_api != _expected_actual_control_api()
+        ):
+            raise M4ValidationError("M4 capacity accepted M3 API is absent/different")
+        write_exclusive(run_dir / "raw/prerequisites/m3-result.json", m3_result)
+        api_sha256 = hashlib.sha256(canonical(accepted_api)).hexdigest()
     runtime_assets = _runtime_asset_manifest(args.installed_share)
     write_exclusive(run_dir / "raw/runtime_asset_manifest.json", runtime_assets)
-    warmup_start = created + 150_000_000_000
-    measurement_start = warmup_start + 30_000_000_000
-    measurement_end = measurement_start + 600_000_000_000
+    # The formal five-UAV flight controller is admitted only after the shared
+    # SITL tail, ns-3 engine, Sionna adapter, and three-heartbeat link gate are
+    # live.  The runway covers every declared sequential readiness wait plus
+    # all bounded retry/drain, pre-arm-state, and airborne-state waits.  Keep
+    # the remaining reserve explicit so future timeout edits cannot silently
+    # make the schedule impossible.
+    readiness_reserve_ns = (
+        CAPACITY_READINESS_RUNWAY_NS
+        - CAPACITY_DECLARED_READINESS_WAITS_NS
+        - CAPACITY_BOUNDED_PREFLIGHT_NS
+    )
+    if readiness_reserve_ns != 85_500_000_000:
+        raise M4ValidationError("capacity readiness execution budget differs")
+    contract_to_clean_shutdown_ns = (
+        CAPACITY_READINESS_RUNWAY_NS
+        + CAPACITY_WARMUP_NS
+        + CAPACITY_MEASUREMENT_NS
+        + CAPACITY_POST_MEASUREMENT_CONTROL_NS
+        + CAPACITY_LANDING_STATE_NS
+        + CAPACITY_DISARM_NS
+    )
+    if (
+        CAPACITY_NS3_ENGINE_DURATION_NS - contract_to_clean_shutdown_ns
+        != 60_000_000_000
+        or CAPACITY_WRAPPER_TIMEOUT_NS - contract_to_clean_shutdown_ns
+        != 260_000_000_000
+    ):
+        raise M4ValidationError("capacity outer execution budget differs")
+    warmup_start = created + CAPACITY_READINESS_RUNWAY_NS
+    measurement_start = warmup_start + CAPACITY_WARMUP_NS
+    measurement_end = measurement_start + CAPACITY_MEASUREMENT_NS
     schedule = {
         "readiness_deadline_monotonic_ns": warmup_start,
         "warmup_start_monotonic_ns": warmup_start,
         "measurement_start_monotonic_ns": measurement_start,
         "measurement_end_monotonic_ns": measurement_end,
         "readiness_stability_ns": 10_000_000_000,
-        "warmup_ns": 30_000_000_000,
-        "measurement_ns": 600_000_000_000,
+        "warmup_ns": CAPACITY_WARMUP_NS,
+        "measurement_ns": CAPACITY_MEASUREMENT_NS,
         "rtf_window_ns": 1_000_000_000,
         "rtf_window_count": 600,
         "rtf_passing_minimum": 570,
@@ -285,7 +363,7 @@ def initialize_capacity(args: argparse.Namespace) -> int:
     except ImportError as exc:
         raise M4ValidationError(f"Sionna RT import failed before contract: {exc}") from exc
     contract = {
-        "schema_version": 2,
+        "schema_version": 3,
         "contract": CAPACITY_CONTRACT,
         "run_id": args.run_id,
         "runtime_id": args.runtime_id,
@@ -310,6 +388,34 @@ def initialize_capacity(args: argparse.Namespace) -> int:
             "hold_last_beyond_expiry": False,
         },
         "schedule": schedule,
+        "execution_budget": {
+            "contract": CAPACITY_EXECUTION_BUDGET_CONTRACT,
+            "readiness_runway_ns": CAPACITY_READINESS_RUNWAY_NS,
+            "declared_sequential_readiness_waits_ns": (
+                CAPACITY_DECLARED_READINESS_WAITS_NS
+            ),
+            "bounded_preflight_ns": CAPACITY_BOUNDED_PREFLIGHT_NS,
+            "readiness_reserve_ns": readiness_reserve_ns,
+            "warmup_ns": CAPACITY_WARMUP_NS,
+            "bounded_warmup_motion_ns": CAPACITY_BOUNDED_WARMUP_MOTION_NS,
+            "warmup_after_motion_reserve_ns": (
+                CAPACITY_WARMUP_NS - CAPACITY_BOUNDED_WARMUP_MOTION_NS
+            ),
+            "measurement_ns": CAPACITY_MEASUREMENT_NS,
+            "post_measurement_control_ns": CAPACITY_POST_MEASUREMENT_CONTROL_NS,
+            "landing_state_ns": CAPACITY_LANDING_STATE_NS,
+            "disarm_ns": CAPACITY_DISARM_NS,
+            "contract_to_clean_shutdown_bound_ns": contract_to_clean_shutdown_ns,
+            "ns3_engine_duration_ns": CAPACITY_NS3_ENGINE_DURATION_NS,
+            "ns3_unallocated_margin_ns": (
+                CAPACITY_NS3_ENGINE_DURATION_NS - contract_to_clean_shutdown_ns
+            ),
+            "wrapper_timeout_ns": CAPACITY_WRAPPER_TIMEOUT_NS,
+            "wrapper_precontract_and_finalization_reserve_ns": (
+                CAPACITY_WRAPPER_TIMEOUT_NS - contract_to_clean_shutdown_ns
+            ),
+        },
+        "airborne_gate": airborne_gate_contract(schedule),
         "workload": {
             "matrix_path": "network/config/endpoint_matrix_5uav.json",
             "matrix_sha256": sha256_file(ROOT / "network/config/endpoint_matrix_5uav.json"),
@@ -319,30 +425,31 @@ def initialize_capacity(args: argparse.Namespace) -> int:
             "accepted_m3_receipt_path": "raw/prerequisites/m3.json",
             "accepted_m3_receipt_sha256": receipt_hashes["m3"],
         },
-        "endpoint_path": {
-            "mode": args.endpoint_mode,
-            "acceptance_eligible": endpoint_acceptance_eligible,
-            "traffic_origin": (
-                "actual_ardupilot_mavproxy"
-                if endpoint_acceptance_eligible
-                else "synthetic_matrix_fixture"
-            ),
-            "lineage_contract": (
-                "ams.m4.actual_m3_sitl_lineage/v1"
-                if endpoint_acceptance_eligible
-                else "ineligible_no_sitl_lineage"
-            ),
-            "lineage_path": (
-                "raw/lineage/m3_actual_endpoint_binding.json"
-                if endpoint_acceptance_eligible
-                else None
-            ),
-            "synthetic_endpoint_agent_sha256": (
-                None
-                if endpoint_acceptance_eligible
-                else sha256_file(ROOT / "network/scripts/m4_endpoint_agent.py")
-            ),
-        },
+        "endpoint_path": (
+            {
+                "mode": accepted_api["control_endpoint_form"],
+                "acceptance_eligible": True,
+                "traffic_origin": "actual_ardupilot_mavproxy",
+                "accepted_m3_receipt_path": "raw/prerequisites/m3.json",
+                "accepted_m3_receipt_sha256": receipt_hashes["m3"],
+                "actual_control_api_contract": accepted_api["contract"],
+                "actual_control_api_sha256": api_sha256,
+                "actual_sitl_manifest_path": "raw/actual_sitl_endpoint_manifest.json",
+                "actual_sitl_ready_path": "raw/state/actual-sitl-endpoints.ready.json",
+                "actual_control_events_path": "raw/actual_control/events.jsonl",
+            }
+            if accepted_api is not None
+            else {
+                "mode": args.endpoint_mode,
+                "acceptance_eligible": False,
+                "traffic_origin": "synthetic_matrix_fixture",
+                "lineage_contract": "ineligible_no_sitl_lineage",
+                "lineage_path": None,
+                "synthetic_endpoint_agent_sha256": sha256_file(
+                    ROOT / "network/scripts/m4_endpoint_agent.py"
+                ),
+            }
+        ),
         "clock_producers": list(REQUIRED_CLOCK_PRODUCERS),
         "limits": {
             "request_queue_capacity": 64,
@@ -394,24 +501,25 @@ def initialize_capacity(args: argparse.Namespace) -> int:
     write_exclusive(contract_path, contract)
     write_exclusive(run_dir / "raw/run_contract.json", contract)
 
-    # Warm-up traffic is real but excluded.  With 421 equally spaced units
-    # over 629 seconds, exactly 400 fall in [30 s, 630 s), matching the
-    # accepted 20/30 s M3 nominal unit and byte rates.
-    command_start = warmup_start
+    # The frozen nominal workload starts exactly at the measurement boundary;
+    # warm-up is reserved for the modeled-path reposition command.  Four
+    # hundred units over the 600-second half-open interval equal the accepted
+    # M3 nominal 20-units-per-30-seconds rate without relying on excluded load.
+    command_start = measurement_start
     command_end = measurement_end
-    count = 421
+    count = 400
     command = {
         "action": "phase",
         "run_id": args.run_id,
         "runtime_id": args.runtime_id,
         "run_nonce": args.run_nonce,
         "phase": "positive",
-        "window_id": "capacity_warmup_measurement",
+        "window_id": "capacity_measurement",
         "start_monotonic_ns": command_start,
         "end_monotonic_ns": command_end,
         "offered_per_cell": count,
         "p2mp_roots": 0,
-        "send_span_ms": 629_000,
+        "send_span_ms": 598_500,
         "expected_engine_state": "up_epoch_1",
     }
     for endpoint in ("gcs", "uav1", "uav2", "uav3", "uav4", "uav5"):
@@ -427,6 +535,52 @@ def initialize_capacity(args: argparse.Namespace) -> int:
                 "runtime_id": args.runtime_id,
                 "run_nonce": args.run_nonce,
                 "not_before_monotonic_ns": measurement_end + 500_000_000,
+            },
+        )
+    if accepted_api is not None:
+        actual_control_dir = run_dir / "raw/control/actual-control"
+        actual_control_dir.mkdir(parents=True, exist_ok=True)
+        actual_control_end = measurement_end + CAPACITY_POST_MEASUREMENT_CONTROL_NS
+        flow_group_ids = {
+            f"uav{index}": accepted_api["channels"][f"uav{index}"]["matrix"][
+                "downlink_cell_id"
+            ]
+            for index in range(1, 6)
+        }
+        write_exclusive(
+            actual_control_dir / "001-capacity.json",
+            {
+                "action": "window",
+                "endpoint": "actual-control",
+                "run_id": args.run_id,
+                "runtime_id": args.runtime_id,
+                "run_nonce": args.run_nonce,
+                "profile": "m4_capacity",
+                "window_id": "capacity_measurement",
+                "transport_phase_code": 4,
+                "start_monotonic_ns": command_start,
+                "end_monotonic_ns": actual_control_end,
+                "offered_per_uav": count,
+                "send_span_ms": 598_500,
+                "expected_engine_state": "up_epoch_1",
+                "response_policies": {
+                    f"uav{index}": "ack_required" for index in range(1, 6)
+                },
+                "minimum_quiet_drain_ns_by_uav": {
+                    f"uav{index}": 0 for index in range(1, 6)
+                },
+                "flow_group_ids": flow_group_ids,
+            },
+        )
+        write_exclusive(
+            actual_control_dir / "999-shutdown.json",
+            {
+                "action": "shutdown",
+                "endpoint": "actual-control",
+                "run_id": args.run_id,
+                "runtime_id": args.runtime_id,
+                "run_nonce": args.run_nonce,
+                "not_before_monotonic_ns": actual_control_end + 500_000_000,
             },
         )
     write_exclusive(run_dir / "raw/capacity_schedule.json", schedule)
@@ -455,6 +609,7 @@ def initialize_causality(args: argparse.Namespace) -> int:
         relative
         for relative in existing_files
         if relative not in allowed_files
+        and relative not in ACTUAL_SITL_AUDIT_LOG_PATHS
         and not relative.startswith("runtime_overlay/")
         and not relative.startswith("runtime/")
         and not relative.startswith("logs/m4_causal_overlay_build.")
@@ -552,17 +707,13 @@ def initialize_causality(args: argparse.Namespace) -> int:
         or created < args.runner_start_monotonic_ns
         or created - args.runner_start_monotonic_ns > PRECONTRACT_SETUP_BUDGET_NS
     ):
-        raise M4ValidationError("causality precontract setup exceeded 90 seconds")
+        raise M4ValidationError("causality precontract setup exceeded 120 seconds")
 
     windows: list[dict[str, Any]] = []
     start = created + RUNTIME_READINESS_BUDGET_NS
     for index, window_id in enumerate(WINDOW_IDS):
-        if index and window_id in {
-            "terrain_recovery",
-            "building_recovery",
-            "expiry_recovery",
-        }:
-            start += 10_000_000_000
+        if index:
+            start += causal_pre_window_gap_ns(window_id)
         scenario, phase, target_cell, control_cell = WINDOW_SHAPES[window_id]
         target = matrix_flow_group_identity(
             target_cell,
@@ -635,12 +786,17 @@ def initialize_causality(args: argparse.Namespace) -> int:
         + FINALIZATION_BUDGET_NS
         + REQUIRED_WRAPPER_RESERVE_NS
     )
+    ns3_required_runtime = (
+        RUNTIME_READINESS_BUDGET_NS
+        + CAUSAL_MEASUREMENT_SPAN_NS
+        + FINALIZATION_BUDGET_NS
+    )
     vector = provenance.get("qualification_content_vector")
     vector_hash = hashlib.sha256(
         json.dumps(vector, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     contract = {
-        "schema_version": 1,
+        "schema_version": 2,
         "contract": CAUSALITY_CONTRACT,
         "run_id": args.run_id,
         "runtime_id": args.runtime_id,
@@ -698,6 +854,11 @@ def initialize_causality(args: argparse.Namespace) -> int:
             "required_wrapper_reserve_ns": REQUIRED_WRAPPER_RESERVE_NS,
             "planned_total_ns": planned_total,
             "unallocated_margin_ns": WRAPPER_TIMEOUT_NS - planned_total,
+            "ns3_engine_duration_ns": NS3_ENGINE_DURATION_NS,
+            "ns3_required_runtime_ns": ns3_required_runtime,
+            "ns3_unallocated_margin_ns": (
+                NS3_ENGINE_DURATION_NS - ns3_required_runtime
+            ),
         },
         "causality_statistics": {
             "paired_bootstrap_seed": 42,

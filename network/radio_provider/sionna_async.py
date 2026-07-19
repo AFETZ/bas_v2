@@ -1243,6 +1243,11 @@ class _PendingResult:
 class _LinkRecord:
     descriptor: Tuple[str, str, str]
     last_registered_node_state_seq: int = -1
+    # Monotonic completed-result ordering survives active-state expiry and all
+    # fail-closed availability transitions.  It is not hold-last state: packet
+    # lookup still returns unavailable after TTL, while a delayed older result
+    # can never resurrect a superseded snapshot.
+    completed_watermark: Optional[Tuple[int, int, int]] = None
     pending: Dict[str, _PendingResult] = field(default_factory=dict)
     active: Optional[AppliedLinkState] = None
     available: bool = False
@@ -1502,19 +1507,24 @@ class DirectedLinkStateManager:
             )
         self._result_fingerprints[query_id] = canonical_hash
         link = self._links[link_id]
-        newest_existing_seq = max(
-            ([link.active.node_state_seq] if link.active is not None else [-1])
-            + [int(item.message["node_state_seq"]) for item in link.pending.values()]
+        candidate_key = (
+            seq,
+            int(message["provider_completed_monotonic_ns"]),
+            int(message["wire_sequence"]),
         )
-        if seq < newest_existing_seq:
+        if (
+            link.completed_watermark is not None
+            and candidate_key <= link.completed_watermark
+        ):
             return StateDecision(
                 "superseded",
-                "result is older than a completed link state",
+                "result is older than the persistent completed-state watermark",
                 link_id,
                 query_id,
                 seq,
                 canonical_hash,
             )
+        link.completed_watermark = candidate_key
         if message["status"] != "ok":
             self._mark_unavailable(link_id, f"provider_{message['status']}")
             return StateDecision(
@@ -1541,11 +1551,6 @@ class DirectedLinkStateManager:
                 seq,
                 canonical_hash,
             )
-        candidate_key = (
-            seq,
-            int(message["provider_completed_monotonic_ns"]),
-            int(message["wire_sequence"]),
-        )
         active_key = (
             (
                 link.active.node_state_seq,

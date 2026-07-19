@@ -764,11 +764,22 @@ def validate_fault_audit(
     }, failures
 
 
-def decision_key(event: Mapping[str, Any]) -> tuple[str, str, str]:
+def decision_key(event: Mapping[str, Any]) -> tuple[int, int, str, str]:
+    """Return the ns-3 occurrence identity, never a payload identity.
+
+    MAVLink sequence numbers wrap during the ten-minute capacity window, so
+    byte-identical UDP payloads are legitimate.  The ns-3 epoch/UID pair is the
+    engine-owned occurrence identity; link/class keep accidental cross-route
+    reuse fail closed.
+    """
+
+    epoch = event.get("event_epoch")
+    uid = event.get("packet_uid")
     return (
+        epoch if isinstance(epoch, int) and not isinstance(epoch, bool) else -1,
+        uid if isinstance(uid, int) and not isinstance(uid, bool) else -1,
         str(event.get("directed_link")),
         str(event.get("traffic_class")),
-        str(event.get("transport_payload_sha256")),
     )
 
 
@@ -787,10 +798,12 @@ def validate_packet_events(
         return {}, [str(exc)]
     previous = 0
     by_source_sequence: dict[int, dict[str, Any]] = {}
-    decisions: dict[tuple[str, str, str], dict[str, Any]] = {}
+    decisions: dict[tuple[int, int, str, str], dict[str, Any]] = {}
     decision_cells: set[tuple[str, str]] = set()
-    downstream: set[tuple[str, str, str]] = set()
-    events_by_key: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    downstream: set[tuple[int, int, str, str]] = set()
+    events_by_key: dict[
+        tuple[int, int, str, str], list[dict[str, Any]]
+    ] = defaultdict(list)
     forbidden_statuses: list[str] = []
     state_by_hash = states.get("by_hash", {})
     for number, event in enumerate(records, start=1):
@@ -805,6 +818,17 @@ def validate_packet_events(
         cell = (event.get("directed_link"), event.get("traffic_class"))
         if cell not in EXPECTED_CELLS:
             continue
+        epoch = event.get("event_epoch")
+        uid = event.get("packet_uid")
+        if (
+            isinstance(epoch, bool)
+            or not isinstance(epoch, int)
+            or epoch <= 0
+            or isinstance(uid, bool)
+            or not isinstance(uid, int)
+            or uid < 0
+        ):
+            failures.append(f"packet event {number} occurrence identity is invalid")
         host = event.get("host_monotonic_ns")
         in_window = (
             (start_monotonic_ns is None or isinstance(host, int) and host >= start_monotonic_ns)
@@ -881,6 +905,22 @@ def validate_packet_events(
             failures.append(f"packet decision {number} state source event is absent")
         elif source.get("event") != "ingress":
             failures.append(f"packet decision {number} state source is not ingress")
+        elif (
+            isinstance(source_sequence, bool)
+            or not isinstance(source_sequence, int)
+            or source_sequence >= sequence
+            or state.get("source_packet_event_epoch") != source.get("event_epoch")
+            or state.get("source_packet_uid") != source.get("packet_uid")
+            or state.get("source_packet_causal_sha256")
+            != source.get("transport_payload_sha256")
+            or state.get("directed_link") != source.get("directed_link")
+            or state.get("traffic_class") != source.get("traffic_class")
+            or state.get("directed_link") != event.get("directed_link")
+            or state.get("traffic_class") != event.get("traffic_class")
+        ):
+            failures.append(
+                f"packet decision {number} state source lineage mismatch"
+            )
     if decision_cells != EXPECTED_CELLS:
         failures.append(f"packet decisions cover {len(decision_cells)} of 30 cells")
     for key, event in decisions.items():

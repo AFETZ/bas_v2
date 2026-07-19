@@ -3,18 +3,18 @@
 
 The validator deliberately consumes decoded actual-endpoint transactions in
 addition to ns-3 and Sionna evidence.  A packet-engine event alone cannot prove
-that ArduPilot received a command or emitted its ACK/telemetry response.
+that ArduPilot received a command and emitted the exact TIMESYNC token echo.
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import math
 import random
 import re
 import statistics
+import struct
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -24,6 +24,7 @@ from network.validation.m4_common import (
     HEX64,
     M4ValidationError,
     canonical_json,
+    deterministic_loss_sample,
     exact_keys,
     finite_number,
     gate,
@@ -45,6 +46,9 @@ from network.validation.m4_runtime import (
     REQUIRED_CLOCK_PRODUCERS,
     REQUIRED_PROCESS_COUNTS,
     VALIDITY_TTL_NS,
+    bind_actual_control_frame,
+    index_actual_control_datagrams,
+    index_exact_ns3_unicast_deliveries,
     sha256_file,
     validate_clock_correlations,
     validate_clock_process_binding,
@@ -58,8 +62,10 @@ from network.validation.validate_m4_capacity import (
 
 
 ROOT = Path(__file__).resolve().parents[2]
-RUN_CONTRACT = "ams.m4.causality_run/v1"
-RESULT_CONTRACT = "ams.m4.causality-validation/v1"
+RUN_CONTRACT = "ams.m4.causality_run/v2"
+RESULT_CONTRACT = "ams.m4.causality-validation/v2"
+CAPACITY_RECEIPT_CONTRACT = "ams.m4-capacity.host-final-receipt/v2"
+CAPACITY_RESULT_CONTRACT = "ams.m4-capacity.validation/v2"
 TRANSACTION_SCHEMA = "ams.m4.actual_endpoint_transaction/v1"
 ADAPTER_AUDIT_SCHEMA = "ams.sionna.packet_adapter_event/v1"
 CONTROL_SCHEMA = "ams.m4.adapter_control_event/v1"
@@ -157,12 +163,16 @@ CAUSAL_SOURCE_PATHS = CAPACITY_SOURCE_PATHS | {
     "network/validation/validate_m4_causality.py",
 }
 OUTCOME_TIMEOUT_NS = 3_000_000_000
+CORRELATED_TIMESYNC_POLICY = "correlated_timesync_required"
+MAX_CORRELATED_LOSS_PERCENT = 5
+CAUSAL_MAVLINK_CRC_EXTRA = {0: 50, 76: 152, 77: 143, 111: 34, 148: 178, 253: 83}
+CAUSAL_MAVLINK_MIN_PAYLOAD = {0: 9, 76: 33, 77: 3, 111: 16, 148: 60, 253: 51}
 TIMEOUT_SLOT_MARGIN_NS = 100_000_000
 QUIET_DRAIN_NS = 10_000_000_000
 POSITIVE_WINDOW_PLAN = {
     "offered_per_uav": 100,
-    "send_span_ms": 19_800,
-    "duration_ns": 23_000_000_000,
+    "send_span_ms": 26_800,
+    "duration_ns": 30_000_000_000,
 }
 DOWN_WINDOW_PLAN = {
     "offered_per_uav": 100,
@@ -175,12 +185,39 @@ EXPIRY_DOWN_WINDOW_PLAN = {
     "duration_ns": 62_100_000_000,
 }
 CAUSAL_GAP_NS = 10_000_000_000
-WRAPPER_TIMEOUT_NS = 1_200_000_000_000
-PRECONTRACT_SETUP_BUDGET_NS = 90_000_000_000
-RUNTIME_READINESS_BUDGET_NS = 30_000_000_000
-CAUSAL_MEASUREMENT_SPAN_NS = 896_100_000_000
+PHYSICAL_DOWN_SETUP_GAP_NS = 3_000_000_000
+EXPIRY_SETUP_GAP_NS = 5_000_000_000
+EXPIRY_FAULT_ARM_SETTLE_NS = 50_000_000
+CAUSAL_PIN_MODELS = ("uav1", "uav2", "uav3", "uav4", "uav5")
+CAUSAL_POSE_VECTOR_MODELS = (
+    "cp",
+    *CAUSAL_PIN_MODELS,
+    "jammer_m4",
+)
+CAUSAL_PIN_PLUGIN_NAME = "gz::sim::systems::VelocityControl"
+CAUSAL_PIN_PLUGIN_FILENAME = "gz-sim-velocity-control-system"
+CAUSAL_PIN_SYSTEM_ADD_SERVICE = "/world/map/entity/system/add"
+CAUSAL_PIN_TOPIC_PREFIX = "/ams/m4/causal_pin"
+CAUSAL_POSE_VECTOR_SERVICE = "/world/map/set_pose_vector/blocking"
+CAUSAL_PIN_PUBLISH_PERIOD_NS = 50_000_000
+CAUSAL_POSE_REFRESH_PERIOD_NS = 500_000_000
+# Match the bounded Gazebo transport timeout while remaining an order of
+# magnitude inside every three-second causal transition gap.  The phase driver
+# suppresses periodic pose refreshes around the tighter staged-fault arms.
+CAUSAL_POSE_VECTOR_MAX_LATENCY_NS = 250_000_000
+CAUSAL_OBSERVED_VELOCITY_LIMIT = 0.05
+CAUSAL_ODOMETRY_MAX_GAP_NS = 750_000_000
+CAUSAL_ODOMETRY_EDGE_NS = 750_000_000
+WRAPPER_TIMEOUT_NS = 1_500_000_000_000
+PRECONTRACT_SETUP_BUDGET_NS = 120_000_000_000
+# The formal runner's bounded sequential post-contract readiness waits total
+# 145 seconds.  The collector must then retain a ten-second stable history
+# before the first window, so the frozen budget is 160 seconds fail-closed.
+RUNTIME_READINESS_BUDGET_NS = 160_000_000_000
+CAUSAL_MEASUREMENT_SPAN_NS = 975_100_000_000
 FINALIZATION_BUDGET_NS = 40_000_000_000
 REQUIRED_WRAPPER_RESERVE_NS = 120_000_000_000
+NS3_ENGINE_DURATION_NS = 1_250_000_000_000
 TIMEOUT_REQUIRED_WINDOWS = frozenset(
     {"terrain_down", "building_down", "expiry_unavailable"}
 )
@@ -189,6 +226,57 @@ RECOVERY_DRAIN_UAV = {
     "building_recovery": "uav2",
     "expiry_recovery": "uav1",
 }
+
+
+def validate_capacity_prerequisite_version(receipt: Any) -> list[str]:
+    """Reject self-consistent legacy capacity receipts at the causal boundary."""
+
+    result = receipt.get("result") if isinstance(receipt, Mapping) else None
+    if (
+        not isinstance(receipt, Mapping)
+        or receipt.get("contract") != CAPACITY_RECEIPT_CONTRACT
+        or receipt.get("result_contract") != CAPACITY_RESULT_CONTRACT
+        or receipt.get("formal_accepted") is not True
+        or receipt.get("passed") is not True
+        or not isinstance(result, Mapping)
+        or result.get("contract") != CAPACITY_RESULT_CONTRACT
+        or result.get("passed") is not True
+        or result.get("profile") != "m4_capacity_prerequisite"
+    ):
+        return ["M4 capacity prerequisite receipt/result version differs"]
+    return []
+
+
+def causal_pre_window_gap_ns(window_id: str) -> int:
+    """Return the frozen state-settling/drain gap before one causal window."""
+
+    if window_id in RECOVERY_DRAIN_UAV:
+        return CAUSAL_GAP_NS
+    if window_id == "expiry_unavailable":
+        # One query period + one query deadline + the two-second state TTL
+        # must elapse before the first fail-closed expiry transaction.
+        return EXPIRY_SETUP_GAP_NS
+    # Every pose/jammer transition, including the first fixture, gets a full
+    # query-period/deadline/apply settling interval.  This also prevents a
+    # next-window stimulus from contaminating the preceding half-open window.
+    return PHYSICAL_DOWN_SETUP_GAP_NS
+
+
+def causal_offer_offset_ns(window_id: str, ordinal: int) -> int:
+    """Return one exact zero-based scheduled-send offset for a causal window."""
+
+    plan = causal_window_plan(window_id)
+    offered = int(plan["offered_per_uav"])
+    if isinstance(ordinal, bool) or not 1 <= ordinal <= offered:
+        raise M4ValidationError("causal offer ordinal is outside the frozen plan")
+    if offered == 1:
+        return 0
+    return (
+        (ordinal - 1)
+        * int(plan["send_span_ms"])
+        * 1_000_000
+        // (offered - 1)
+    )
 
 
 def causal_window_plan(window_id: str) -> Mapping[str, int]:
@@ -204,7 +292,9 @@ def causal_window_plan(window_id: str) -> Mapping[str, int]:
 def causal_response_policies(window_id: str) -> dict[str, str]:
     """Freeze the per-UAV outcome policy; mixed down windows stay observable."""
 
-    policies = {f"uav{index}": "ack_required" for index in range(1, 6)}
+    policies = {
+        f"uav{index}": CORRELATED_TIMESYNC_POLICY for index in range(1, 6)
+    }
     if window_id in TIMEOUT_REQUIRED_WINDOWS:
         target_cell = WINDOW_SHAPES[window_id][2]
         policies[target_cell.split(".", 1)[0]] = "timeout_required"
@@ -403,9 +493,7 @@ def validate_window_manifest(
         start = record.get("start_monotonic_ns")
         end = record.get("end_monotonic_ns")
         plan = causal_window_plan(expected_id)
-        expected_gap_ns = (
-            CAUSAL_GAP_NS if expected_id in RECOVERY_DRAIN_UAV else 0
-        )
+        expected_gap_ns = causal_pre_window_gap_ns(expected_id)
         expected_start = (
             None if index == 0 else previous_end + expected_gap_ns
         )
@@ -501,7 +589,7 @@ def validate_causal_execution_budget(
     *,
     finalization: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, int], list[str]]:
-    """Re-derive the complete 1200-s wrapper budget from frozen constants."""
+    """Re-derive the complete 1500-s wrapper budget from frozen constants."""
 
     failures: list[str] = []
     planned_total_ns = (
@@ -512,6 +600,11 @@ def validate_causal_execution_budget(
         + REQUIRED_WRAPPER_RESERVE_NS
     )
     unallocated_margin_ns = WRAPPER_TIMEOUT_NS - planned_total_ns
+    ns3_required_runtime_ns = (
+        RUNTIME_READINESS_BUDGET_NS
+        + CAUSAL_MEASUREMENT_SPAN_NS
+        + FINALIZATION_BUDGET_NS
+    )
     expected_budget = {
         "wrapper_timeout_ns": WRAPPER_TIMEOUT_NS,
         "precontract_setup_budget_ns": PRECONTRACT_SETUP_BUDGET_NS,
@@ -521,6 +614,11 @@ def validate_causal_execution_budget(
         "required_wrapper_reserve_ns": REQUIRED_WRAPPER_RESERVE_NS,
         "planned_total_ns": planned_total_ns,
         "unallocated_margin_ns": unallocated_margin_ns,
+        "ns3_engine_duration_ns": NS3_ENGINE_DURATION_NS,
+        "ns3_required_runtime_ns": ns3_required_runtime_ns,
+        "ns3_unallocated_margin_ns": (
+            NS3_ENGINE_DURATION_NS - ns3_required_runtime_ns
+        ),
     }
     budget = run.get("execution_budget")
     failures.extend(
@@ -539,12 +637,12 @@ def validate_causal_execution_budget(
         or created < runner_start
         or created - runner_start > PRECONTRACT_SETUP_BUDGET_NS
     ):
-        failures.append("M4 causal precontract setup exceeded its 90-s budget")
+        failures.append("M4 causal precontract setup exceeded its 120-s budget")
     try:
         first_start = int(windows[WINDOW_IDS[0]]["start_monotonic_ns"])
         last_end = int(windows[WINDOW_IDS[-1]]["end_monotonic_ns"])
         if first_start != int(created) + RUNTIME_READINESS_BUDGET_NS:
-            failures.append("M4 causal first window does not follow 30-s readiness")
+            failures.append("M4 causal first window does not follow frozen 160-s readiness")
         if last_end - first_start != CAUSAL_MEASUREMENT_SPAN_NS:
             failures.append("M4 causal measurement span differs")
     except (KeyError, TypeError, ValueError):
@@ -553,8 +651,12 @@ def validate_causal_execution_budget(
         planned_total_ns > WRAPPER_TIMEOUT_NS
         or REQUIRED_WRAPPER_RESERVE_NS < 120_000_000_000
         or unallocated_margin_ns < 0
+        or NS3_ENGINE_DURATION_NS < ns3_required_runtime_ns
+        or f"DURATION_MS={NS3_ENGINE_DURATION_NS // 1_000_000}" not in (
+            ROOT / "network/scripts/run_m4_causality.sh"
+        ).read_text(encoding="utf-8")
     ):
-        failures.append("M4 causal wrapper budget has insufficient reserve")
+        failures.append("M4 causal wrapper/engine budget has insufficient reserve")
     if finalization is not None:
         expected_finalization_keys = {
             "contract",
@@ -746,8 +848,12 @@ def _transaction_index(
                 failures.append(f"actual command offer {number} fields differ")
             else:
                 offers[transaction_id] = record
-        else:
+        elif event == "ardupilot_timesync_echo":
             outcomes[transaction_id].append(record)
+        else:
+            failures.append(
+                f"actual endpoint transaction {number} event type differs"
+            )
     for transaction_id, records_for_transaction in outcomes.items():
         if transaction_id not in offers:
             failures.append(f"endpoint outcome references unknown offer: {transaction_id}")
@@ -758,9 +864,294 @@ def _transaction_index(
     return offers, outcomes, failures
 
 
+def _causal_x25_crc(payload: bytes) -> int:
+    crc = 0xFFFF
+    for byte in payload:
+        temporary = byte ^ (crc & 0xFF)
+        temporary ^= (temporary << 4) & 0xFF
+        crc = (
+            (crc >> 8)
+            ^ ((temporary << 8) & 0xFFFF)
+            ^ ((temporary << 3) & 0xFFFF)
+            ^ (temporary >> 4)
+        ) & 0xFFFF
+    return crc
+
+
+def _strict_causal_hex(value: Any, label: str) -> bytes:
+    if (
+        not isinstance(value, str)
+        or re.fullmatch(r"(?:[0-9a-f]{2})+", value) is None
+    ):
+        raise M4ValidationError(f"{label} is not canonical lowercase hex")
+    return bytes.fromhex(value)
+
+
+def _parse_causal_mavlink_frame(frame: bytes) -> dict[str, Any]:
+    """Independently validate one actual MAVLink v1/v2 common-message frame."""
+
+    if not frame:
+        raise M4ValidationError("causal MAVLink frame is empty")
+    if frame[0] == 0xFD:
+        if len(frame) < 12 or frame[2] & ~0x01:
+            raise M4ValidationError("causal MAVLink v2 header is invalid")
+        body_size = frame[1]
+        signed = bool(frame[2] & 0x01)
+        expected_size = 12 + body_size + (13 if signed else 0)
+        if len(frame) != expected_size:
+            raise M4ValidationError("causal MAVLink v2 frame size differs")
+        message_id = int.from_bytes(frame[7:10], "little")
+        source_system, source_component = frame[5], frame[6]
+        body = frame[10 : 10 + body_size]
+        checksum_offset = 10 + body_size
+        crc_material = frame[1:checksum_offset]
+        sequence = frame[4]
+        version = 2
+    elif frame[0] == 0xFE:
+        if len(frame) < 8:
+            raise M4ValidationError("causal MAVLink v1 frame is truncated")
+        body_size = frame[1]
+        if len(frame) != 8 + body_size:
+            raise M4ValidationError("causal MAVLink v1 frame size differs")
+        message_id = frame[5]
+        source_system, source_component = frame[3], frame[4]
+        body = frame[6 : 6 + body_size]
+        checksum_offset = 6 + body_size
+        crc_material = frame[1:checksum_offset]
+        sequence = frame[2]
+        version = 1
+    else:
+        raise M4ValidationError("causal MAVLink magic differs")
+    extra = CAUSAL_MAVLINK_CRC_EXTRA.get(message_id)
+    if extra is None:
+        raise M4ValidationError(
+            f"causal MAVLink message {message_id} is outside contract"
+        )
+    minimum_payload = CAUSAL_MAVLINK_MIN_PAYLOAD[message_id]
+    if len(body) < minimum_payload:
+        raise M4ValidationError(
+            f"causal MAVLink message {message_id} payload is truncated"
+        )
+    if int.from_bytes(frame[checksum_offset : checksum_offset + 2], "little") != (
+        _causal_x25_crc(crc_material + bytes([extra]))
+    ):
+        raise M4ValidationError("causal MAVLink frame CRC differs")
+    return {
+        "version": version,
+        "message_id": message_id,
+        "sequence": sequence,
+        "source_system": source_system,
+        "source_component": source_component,
+        "payload": body,
+        "sha256": hashlib.sha256(frame).hexdigest(),
+        "size": len(frame),
+        "raw": frame,
+    }
+
+
+def _parse_causal_request_datagram(payload: bytes) -> list[dict[str, Any]]:
+    frames: list[dict[str, Any]] = []
+    offset = 0
+    while offset < len(payload):
+        if len(payload) - offset < 12 or payload[offset] != 0xFD:
+            raise M4ValidationError(
+                "causal request is not contiguous unsigned MAVLink v2"
+            )
+        body_size = payload[offset + 1]
+        if payload[offset + 2 : offset + 4] != b"\0\0":
+            raise M4ValidationError("causal request MAVLink flags differ")
+        frame_size = 12 + body_size
+        if offset + frame_size > len(payload):
+            raise M4ValidationError("causal request MAVLink frame is truncated")
+        frames.append(
+            _parse_causal_mavlink_frame(payload[offset : offset + frame_size])
+        )
+        offset += frame_size
+    return frames
+
+
+def _expected_causal_timesync_token(
+    run_nonce: Any, phase_code: Any, uav: Any, ordinal: Any
+) -> int:
+    if (
+        not isinstance(run_nonce, str)
+        or HEX64.fullmatch(run_nonce) is None
+        or isinstance(phase_code, bool)
+        or not isinstance(phase_code, int)
+        or not 1 <= phase_code <= 15
+        or isinstance(uav, bool)
+        or not isinstance(uav, int)
+        or not 1 <= uav <= 5
+        or isinstance(ordinal, bool)
+        or not isinstance(ordinal, int)
+        or not 1 <= ordinal <= 0xFFFF
+    ):
+        raise M4ValidationError("causal TIMESYNC token identity is invalid")
+    prefix = int.from_bytes(
+        hashlib.sha256(bytes.fromhex(run_nonce)).digest()[:5], "big"
+    )
+    return (prefix << 23) | (phase_code << 19) | (uav << 16) | ordinal
+
+
+def _validate_causal_offer_payload(
+    record: Mapping[str, Any], *, run_nonce: Any, response_policy: Any
+) -> tuple[str, int]:
+    """Bind the ns-3 packet key to the full marker+command+TIMESYNC datagram."""
+
+    full_payload = _strict_causal_hex(
+        record.get("request_transport_payload_hex"),
+        "causal request transport payload",
+    )
+    full_digest = hashlib.sha256(full_payload).hexdigest()
+    size = record.get("request_transport_payload_size")
+    if (
+        record.get("request_transport_payload_sha256") != full_digest
+        or isinstance(size, bool)
+        or not isinstance(size, int)
+        or size != len(full_payload)
+        or record.get("request_transport_send_return_size") != size
+        or record.get("correlation_kind") != "mavlink_timesync_echo_v1"
+        or record.get("response_policy") != response_policy
+    ):
+        raise M4ValidationError("causal combined request authority differs")
+    frames = _parse_causal_request_datagram(full_payload)
+    if (
+        len(frames) != 3
+        or [frame["message_id"] for frame in frames] != [253, 76, 111]
+        or any(
+            frame["version"] != 2
+            or frame["source_system"] != 255
+            or frame["source_component"] != 190
+            for frame in frames
+        )
+        or frames[1]["sequence"] != (frames[0]["sequence"] + 1) & 0xFF
+        or frames[2]["sequence"] != (frames[1]["sequence"] + 1) & 0xFF
+    ):
+        raise M4ValidationError("causal combined request frame envelope differs")
+    marker, command, timesync = frames
+    nested = (
+        ("marker_frame_hex", "marker_frame_sha256", marker),
+        ("command_frame_hex", "command_frame_sha256", command),
+        ("timesync_frame_hex", "timesync_frame_sha256", timesync),
+    )
+    for hex_key, hash_key, frame in nested:
+        if (
+            _strict_causal_hex(record.get(hex_key), hex_key) != frame["raw"]
+            or record.get(hash_key) != frame["sha256"]
+        ):
+            raise M4ValidationError(f"causal nested {hex_key} binding differs")
+    marker_text = record.get("marker_text")
+    try:
+        decoded_marker = marker["payload"][1:].decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise M4ValidationError("causal marker text is not ASCII") from exc
+    if (
+        len(marker["payload"]) != 51
+        or marker["payload"][0] != 6
+        or decoded_marker != marker_text
+        or not isinstance(marker_text, str)
+        or len(marker_text) != 50
+    ):
+        raise M4ValidationError("causal marker frame differs")
+    if len(command["payload"]) != struct.calcsize("<7fHBBB"):
+        raise M4ValidationError("causal COMMAND_LONG payload size differs")
+    command_fields = struct.unpack("<7fHBBB", command["payload"])
+    uav = record.get("uav")
+    if (
+        command_fields[0] != 148.0
+        or any(value != 0.0 for value in command_fields[1:7])
+        or command_fields[7:] != (512, uav, 1, 0)
+        or record.get("requested_message_id") != 148
+        or record.get("mavlink_command") != 512
+        or record.get("target_system") != uav
+        or record.get("target_component") != 1
+    ):
+        raise M4ValidationError("causal COMMAND_LONG request differs")
+    if len(timesync["payload"]) != 16:
+        raise M4ValidationError("causal TIMESYNC request size differs")
+    tc1, token = struct.unpack("<qq", timesync["payload"])
+    expected_token = _expected_causal_timesync_token(
+        run_nonce,
+        record.get("transport_phase_code"),
+        uav,
+        record.get("ordinal_send_slot"),
+    )
+    if (
+        tc1 != 0
+        or token != expected_token
+        or record.get("timesync_request_tc1") != 0
+        or record.get("timesync_request_ts1") != token
+    ):
+        raise M4ValidationError("causal TIMESYNC request token differs")
+    return full_digest, token
+
+
+def _validate_causal_raw_message(
+    record: Mapping[str, Any],
+    *,
+    uav: int,
+    message_type: str,
+    message_id: int,
+    datagram_index: Mapping[tuple[int, str, int], list[dict[str, Any]]],
+    consumed_occurrences: set[tuple[int, int]],
+    event_sequence: int | None = None,
+) -> tuple[int, dict[str, Any]]:
+    bound_record = dict(record)
+    if event_sequence is not None:
+        bound_record["event_sequence"] = event_sequence
+    frame, parent = bind_actual_control_frame(
+        bound_record,
+        expected_message_id=message_id,
+        datagram_index=datagram_index,
+        consumed_occurrences=consumed_occurrences,
+        frame_decoder=_parse_causal_mavlink_frame,
+    )
+    # The common parent index proves exact framing and no trailing bytes.  The
+    # causal contract additionally recomputes message CRC and minimum payload
+    # length for *every* frame in the selected UDP datagram, not only the child
+    # event's standalone frame.  This prevents an otherwise-unchecked sibling
+    # frame from turning forged concatenated bytes into a valid parent.
+    for parent_frame in parent["frames"]:
+        parsed_parent_frame = _parse_causal_mavlink_frame(parent_frame["bytes"])
+        if (
+            parsed_parent_frame["message_id"] != parent_frame["message_id"]
+            or parsed_parent_frame["source_system"] != parent_frame["system_id"]
+            or parsed_parent_frame["source_component"]
+            != parent_frame["component_id"]
+            or parsed_parent_frame["size"] != parent_frame["size"]
+            or parsed_parent_frame["sha256"] != parent_frame["sha256"]
+        ):
+            raise M4ValidationError(
+                "causal UDP parent frame reconstruction differs"
+            )
+    received_ns = record.get("received_monotonic_ns")
+    if (
+        frame["message_id"] != message_id
+        or frame["source_system"] != uav
+        or frame["source_component"] != 1
+        or record.get("message_type") != message_type
+        or record.get("message_id") != message_id
+        or record.get("source_system") != uav
+        or record.get("source_component") != 1
+        or record.get("uav") != uav
+        or record.get("peer_ip") != f"10.71.{uav}.10"
+        or record.get("peer_udp_port") != 14600 + uav
+        or isinstance(received_ns, bool)
+        or not isinstance(received_ns, int)
+        or record.get("mavlink_frame_sha256") != frame["sha256"]
+        or record.get("mavlink_frame_size") != frame["size"]
+        or not isinstance(record.get("transport_payload_sha256"), str)
+        or HEX64.fullmatch(str(record["transport_payload_sha256"])) is None
+    ):
+        raise M4ValidationError(f"raw {message_type} modeled-path envelope differs")
+    return received_ns, frame
+
+
 def normalize_actual_control_transactions(
-    records: list[dict[str, Any]], run: Mapping[str, Any]
-) -> tuple[list[dict[str, Any]], list[str]]:
+    records: list[dict[str, Any]],
+    run: Mapping[str, Any],
+    windows: Mapping[str, Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any], list[str]]:
     """Derive causal transaction records only from the Q3 actual-control audit.
 
     No M4 process is allowed to manufacture a second ACK/heartbeat transcript.
@@ -772,7 +1163,28 @@ def normalize_actual_control_transactions(
     failures: list[str] = []
     normalized: list[dict[str, Any]] = []
     offers: dict[str, dict[str, Any]] = {}
+    results_by_transaction: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    heartbeats: list[dict[str, Any]] = []
+    raw_command_acks: list[dict[str, Any]] = []
+    raw_autopilot_versions: list[dict[str, Any]] = []
+    ambient_timesync_requests: list[dict[str, Any]] = []
+    uncounted_raw_messages: list[dict[str, Any]] = []
+    phase_starts: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    phase_completes: dict[str, list[dict[str, Any]]] = defaultdict(list)
     previous_raw_sequence = 0
+    try:
+        datagram_index = index_actual_control_datagrams(
+            records,
+            expected_peers={
+                (f"10.71.{uav}.10", 14600 + uav): uav
+                for uav in range(1, 6)
+            },
+            expected_rx_tos=184,
+        )
+    except M4ValidationError as exc:
+        failures.append(f"raw actual-control UDP parent audit differs: {exc}")
+        datagram_index = {}
+    consumed_frame_occurrences: set[tuple[int, int]] = set()
 
     def append(event: str, source: Mapping[str, Any], **fields: Any) -> None:
         normalized.append(
@@ -804,10 +1216,28 @@ def normalize_actual_control_transactions(
             failures.append(f"raw actual-control causal event {number} identity/order differs")
             continue
         previous_raw_sequence = raw_sequence
-        if record.get("event") == "real_command_offered":
+        event = record.get("event")
+        if event == "real_command_offered":
             transaction_id = record.get("transaction_id")
             uav = record.get("uav")
-            digest = record.get("command_frame_sha256")
+            window = windows.get(str(record.get("window_id")))
+            response_policy = (
+                window.get("response_policies", {}).get(f"uav{uav}")
+                if isinstance(window, Mapping)
+                and isinstance(window.get("response_policies"), Mapping)
+                else None
+            )
+            try:
+                digest, _token = _validate_causal_offer_payload(
+                    record,
+                    run_nonce=run.get("run_nonce"),
+                    response_policy=response_policy,
+                )
+            except M4ValidationError as exc:
+                failures.append(
+                    f"raw actual-control causal offer {number} payload differs: {exc}"
+                )
+                continue
             if (
                 not isinstance(transaction_id, str)
                 or not transaction_id
@@ -815,8 +1245,8 @@ def normalize_actual_control_transactions(
                 or isinstance(uav, bool)
                 or not isinstance(uav, int)
                 or not 1 <= uav <= 5
-                or not isinstance(digest, str)
-                or HEX64.fullmatch(digest) is None
+                or response_policy
+                not in {CORRELATED_TIMESYNC_POLICY, "timeout_required"}
                 or record.get("endpoint_form")
                 != "actual_sitl_mavproxy_udp_tail"
                 or record.get("cell_id") != f"uav{uav}.control.downlink"
@@ -841,8 +1271,10 @@ def normalize_actual_control_transactions(
                 direction="downlink",
                 ordinal_send_slot=record.get("ordinal_send_slot"),
             )
-        elif record.get("event") == "transaction_result":
+        elif event == "transaction_result":
             transaction_id = record.get("transaction_id")
+            if isinstance(transaction_id, str):
+                results_by_transaction[transaction_id].append(record)
             offer = offers.get(str(transaction_id))
             if not isinstance(offer, dict):
                 failures.append(
@@ -853,41 +1285,119 @@ def normalize_actual_control_transactions(
                 record.get("record_nonce") != offer.get("record_nonce")
                 or record.get("command_frame_sha256")
                 != offer.get("command_frame_sha256")
+                or record.get("marker_frame_sha256")
+                != offer.get("marker_frame_sha256")
+                or record.get("timesync_request_frame_sha256")
+                != offer.get("timesync_frame_sha256")
+                or record.get("request_transport_payload_sha256")
+                != offer.get("request_transport_payload_sha256")
+                or record.get("request_transport_payload_size")
+                != offer.get("request_transport_payload_size")
+                or record.get("timesync_request_tc1") != 0
+                or record.get("timesync_request_ts1")
+                != offer.get("timesync_request_ts1")
+                or record.get("correlation_kind") != "mavlink_timesync_echo_v1"
                 or record.get("flow_group_id") != offer.get("flow_group_id")
                 or record.get("ordinal_send_slot") != offer.get("ordinal_send_slot")
                 or record.get("window_id") != offer.get("window_id")
+                or record.get("uav") != offer.get("uav")
+                or record.get("transport_phase_code")
+                != offer.get("transport_phase_code")
+                or record.get("endpoint_form") != offer.get("endpoint_form")
+                or record.get("downlink_cell_id") != offer.get("cell_id")
+                or record.get("uplink_cell_id")
+                != f"uav{offer.get('uav')}.control.uplink"
+                or record.get("sent_monotonic_ns")
+                != offer.get("sent_monotonic_ns")
+                or record.get("ack") is not None
+                or record.get("requested_telemetry") is not None
             ):
                 failures.append(f"raw actual-control causal result {number} binding differs")
                 continue
+            window = windows.get(str(offer.get("window_id")))
+            policy = (
+                window.get("response_policies", {}).get(
+                    f"uav{offer.get('uav')}"
+                )
+                if isinstance(window, Mapping)
+                and isinstance(window.get("response_policies"), Mapping)
+                else None
+            )
+            sent_ns = offer.get("sent_monotonic_ns")
+            completed_ns = record.get("completed_monotonic_ns")
+            elapsed_ms = record.get("timeout_elapsed_ms")
+            valid_times = (
+                isinstance(sent_ns, int)
+                and not isinstance(sent_ns, bool)
+                and isinstance(completed_ns, int)
+                and not isinstance(completed_ns, bool)
+                and completed_ns >= sent_ns
+                and finite_number(elapsed_ms)
+                and math.isclose(
+                    float(elapsed_ms),
+                    round((completed_ns - sent_ns) / 1_000_000, 6),
+                    rel_tol=0.0,
+                    abs_tol=1e-6,
+                )
+            )
             if record.get("success") is not True:
                 if (
-                    record.get("timed_out") is not True
-                    or record.get("ack") is not None
-                    or record.get("requested_telemetry") is not None
+                    policy
+                    not in {CORRELATED_TIMESYNC_POLICY, "timeout_required"}
+                    or record.get("success") is not False
+                    or record.get("timed_out") is not True
+                    or record.get("timesync_response") is not None
+                    or record.get("timeout_contract_satisfied") is not True
+                    or not valid_times
+                    or completed_ns - sent_ns < OUTCOME_TIMEOUT_NS
                 ):
                     failures.append(
                         f"raw actual-control causal loss {number} is not an exact timeout"
                     )
                 continue
-            ack = record.get("ack")
-            telemetry = record.get("requested_telemetry")
-            uav = offer.get("uav")
             if (
-                not isinstance(ack, dict)
-                or not isinstance(telemetry, dict)
-                or ack.get("source_system") != uav
-                or ack.get("source_component") != 1
-                or ack.get("message_type") != "COMMAND_ACK"
-                or telemetry.get("source_system") != uav
-                or telemetry.get("source_component") != 1
-                or telemetry.get("message_type") != "AUTOPILOT_VERSION"
-                or not isinstance(ack.get("received_monotonic_ns"), int)
-                or not isinstance(telemetry.get("received_monotonic_ns"), int)
-                or not isinstance(ack.get("transport_payload_sha256"), str)
-                or HEX64.fullmatch(ack["transport_payload_sha256"]) is None
+                policy != CORRELATED_TIMESYNC_POLICY
+                or record.get("timed_out") is not False
+                or record.get("timeout_contract_satisfied") is not True
+                or not valid_times
             ):
                 failures.append(
-                    f"raw actual-control causal outcome {number} is not real vehicle evidence"
+                    f"raw actual-control causal success {number} violates its response policy"
+                )
+                continue
+            response = record.get("timesync_response")
+            uav = offer.get("uav")
+            try:
+                if not isinstance(response, Mapping):
+                    raise M4ValidationError("TIMESYNC response is absent")
+                received_ns, response_frame = _validate_causal_raw_message(
+                    response,
+                    uav=int(uav),
+                    message_type="TIMESYNC",
+                    message_id=111,
+                    datagram_index=datagram_index,
+                    consumed_occurrences=consumed_frame_occurrences,
+                    event_sequence=raw_sequence,
+                )
+                if len(response_frame["payload"]) != 16:
+                    raise M4ValidationError("TIMESYNC response payload size differs")
+                response_tc1, response_ts1 = struct.unpack(
+                    "<qq", response_frame["payload"]
+                )
+                if (
+                    response.get("timesync_tc1") != response_tc1
+                    or response.get("timesync_ts1") != response_ts1
+                    or not 0 < response_tc1 < (1 << 63)
+                    or response_ts1 != offer.get("timesync_request_ts1")
+                    or received_ns != completed_ns
+                    or not sent_ns <= received_ns < sent_ns + OUTCOME_TIMEOUT_NS
+                ):
+                    raise M4ValidationError(
+                        "locked-ArduPilot TIMESYNC tc1-clock/ts1-echo differs"
+                    )
+            except (TypeError, ValueError, M4ValidationError) as exc:
+                failures.append(
+                    f"raw actual-control causal outcome {number} is not exact TIMESYNC evidence: {exc}"
                 )
                 continue
             common = {
@@ -897,7 +1407,7 @@ def normalize_actual_control_transactions(
                 "directed_link": f"cp>uav{uav}",
                 "traffic_class": "control",
                 "request_transport_payload_sha256": offer.get(
-                    "command_frame_sha256"
+                    "request_transport_payload_sha256"
                 ),
                 "flow_group_id": offer.get("flow_group_id"),
                 "matrix_cell_id": offer.get("cell_id"),
@@ -906,30 +1416,548 @@ def normalize_actual_control_transactions(
                 "ordinal_send_slot": offer.get("ordinal_send_slot"),
             }
             append(
-                "ardupilot_command_ack",
+                "ardupilot_timesync_echo",
                 record,
                 **common,
-                host_monotonic_ns=ack["received_monotonic_ns"],
-                response_transport_payload_sha256=ack[
+                host_monotonic_ns=received_ns,
+                response_transport_payload_sha256=response[
                     "transport_payload_sha256"
                 ],
-                source_system=ack.get("source_system"),
-                source_component=ack.get("source_component"),
+                source_system=response.get("source_system"),
+                source_component=response.get("source_component"),
+                timesync_tc1_vehicle_clock=response_tc1,
+                timesync_ts1_echo_token=response_ts1,
             )
-            append(
-                "requested_telemetry",
-                record,
-                **common,
-                host_monotonic_ns=telemetry["received_monotonic_ns"],
-                response_transport_payload_sha256=telemetry.get(
-                    "transport_payload_sha256"
-                ),
-                source_system=telemetry.get("source_system"),
-                source_component=telemetry.get("source_component"),
-            )
+        elif event == "real_heartbeat":
+            heartbeats.append(record)
+        elif event == "real_window_command_ack":
+            raw_command_acks.append(record)
+        elif event == "real_window_requested_telemetry":
+            raw_autopilot_versions.append(record)
+        elif event == "ambient_timesync_request":
+            ambient_timesync_requests.append(record)
+        elif event in {"late_timesync_echo", "late_unbound_window_response"}:
+            # These frames are deliberately excluded from causal outcomes and
+            # liveness counts, but their raw bytes still require the same UDP
+            # parent proof as counted responses.
+            uncounted_raw_messages.append(record)
+        elif event == "actual_control_phase_start":
+            phase_starts[str(record.get("window_id"))].append(record)
+        elif event == "actual_control_phase_complete":
+            phase_completes[str(record.get("window_id"))].append(record)
+        elif event in {
+            "foreign_control_message",
+            "control_parse_error",
+            "invalid_timesync_echo",
+            "uncorrelated_timesync_echo",
+            "duplicate_timesync_echo",
+            "forbidden_stopped_control_response",
+            "late_stopped_control_response",
+            "uncorrelated_control_response",
+            "invalid_window_command_ack",
+            "phase_ended_before_outcome_timeout",
+            "heartbeat_history_overflow",
+        }:
+            failures.append(f"raw actual-control fatal event is present: {event}")
     if not offers:
         failures.append("raw actual-control causal audit has no command offers")
-    return normalized, failures
+    valid_heartbeat_sequences: set[int] = set()
+    for number, heartbeat in enumerate(heartbeats, start=1):
+        try:
+            uav = heartbeat.get("uav")
+            if isinstance(uav, bool) or not isinstance(uav, int):
+                raise M4ValidationError("heartbeat UAV identity differs")
+            _validate_causal_raw_message(
+                heartbeat,
+                uav=uav,
+                message_type="HEARTBEAT",
+                message_id=0,
+                datagram_index=datagram_index,
+                consumed_occurrences=consumed_frame_occurrences,
+            )
+            sequence = heartbeat.get("event_sequence")
+            if isinstance(sequence, int) and not isinstance(sequence, bool):
+                valid_heartbeat_sequences.add(sequence)
+        except (TypeError, ValueError, M4ValidationError) as exc:
+            failures.append(
+                f"raw actual-control heartbeat {number} envelope differs: {exc}"
+            )
+    for number, request in enumerate(ambient_timesync_requests, start=1):
+        try:
+            uav = request.get("uav")
+            if isinstance(uav, bool) or not isinstance(uav, int):
+                raise M4ValidationError("ambient TIMESYNC UAV identity differs")
+            _received_ns, frame = _validate_causal_raw_message(
+                request,
+                uav=uav,
+                message_type="TIMESYNC",
+                message_id=111,
+                datagram_index=datagram_index,
+                consumed_occurrences=consumed_frame_occurrences,
+            )
+            if len(frame["payload"]) != 16:
+                raise M4ValidationError("ambient TIMESYNC payload size differs")
+            tc1, ts1 = struct.unpack("<qq", frame["payload"])
+            if (
+                tc1 != 0
+                or not 0 < ts1 < (1 << 63)
+                or request.get("timesync_tc1") != tc1
+                or request.get("timesync_ts1") != ts1
+            ):
+                raise M4ValidationError("ambient TIMESYNC request fields differ")
+        except (TypeError, ValueError, M4ValidationError) as exc:
+            failures.append(
+                f"raw ambient TIMESYNC request {number} envelope differs: {exc}"
+            )
+    for event_name, message_type, message_id, raw_records in (
+        (
+            "real_window_command_ack",
+            "COMMAND_ACK",
+            77,
+            raw_command_acks,
+        ),
+        (
+            "real_window_requested_telemetry",
+            "AUTOPILOT_VERSION",
+            148,
+            raw_autopilot_versions,
+        ),
+    ):
+        for number, response in enumerate(raw_records, start=1):
+            try:
+                uav = response.get("uav")
+                if isinstance(uav, bool) or not isinstance(uav, int):
+                    raise M4ValidationError("raw liveness UAV identity differs")
+                received_ns, frame = _validate_causal_raw_message(
+                    response,
+                    uav=uav,
+                    message_type=message_type,
+                    message_id=message_id,
+                    datagram_index=datagram_index,
+                    consumed_occurrences=consumed_frame_occurrences,
+                )
+                window_id = response.get("window_id")
+                window = windows.get(str(window_id))
+                policy = (
+                    window.get("response_policies", {}).get(f"uav{uav}")
+                    if isinstance(window, Mapping)
+                    and isinstance(window.get("response_policies"), Mapping)
+                    else None
+                )
+                if (
+                    not isinstance(window, Mapping)
+                    or response.get("phase") != window_id
+                    or policy != CORRELATED_TIMESYNC_POLICY
+                    or response.get("response_policy") != policy
+                    or not int(window["start_monotonic_ns"])
+                    <= received_ns
+                    < int(window["end_monotonic_ns"])
+                ):
+                    raise M4ValidationError(
+                        "raw liveness window/policy envelope differs"
+                    )
+                if message_id == 77:
+                    if (
+                        len(frame["payload"]) < 3
+                        or struct.unpack("<HB", frame["payload"][:3]) != (512, 0)
+                        or response.get("mavlink_command") != 512
+                        or response.get("mavlink_result") != 0
+                    ):
+                        raise M4ValidationError("raw COMMAND_ACK fields differ")
+            except (KeyError, TypeError, ValueError, M4ValidationError) as exc:
+                failures.append(
+                    f"raw {event_name} {number} envelope differs: {exc}"
+                )
+    for number, response in enumerate(uncounted_raw_messages, start=1):
+        try:
+            uav = response.get("uav")
+            message_type = response.get("message_type")
+            expected_message_id = {
+                "COMMAND_ACK": 77,
+                "AUTOPILOT_VERSION": 148,
+                "TIMESYNC": 111,
+            }.get(str(message_type))
+            if (
+                isinstance(uav, bool)
+                or not isinstance(uav, int)
+                or expected_message_id is None
+            ):
+                raise M4ValidationError("uncounted raw message identity differs")
+            _received_ns, frame = _validate_causal_raw_message(
+                response,
+                uav=uav,
+                message_type=str(message_type),
+                message_id=expected_message_id,
+                datagram_index=datagram_index,
+                consumed_occurrences=consumed_frame_occurrences,
+            )
+            if expected_message_id == 111:
+                tc1, ts1 = struct.unpack("<qq", frame["payload"])
+                if (
+                    response.get("timesync_tc1") != tc1
+                    or response.get("timesync_ts1") != ts1
+                ):
+                    raise M4ValidationError(
+                        "uncounted TIMESYNC decoded fields differ"
+                    )
+        except (TypeError, ValueError, struct.error, M4ValidationError) as exc:
+            failures.append(
+                f"raw actual-control uncounted response {number} envelope differs: {exc}"
+            )
+
+    required_parent_occurrences = {
+        (int(parent["event_sequence"]), int(frame["offset"]))
+        for parents in datagram_index.values()
+        for parent in parents
+        for frame in parent["frames"]
+        if frame["message_id"] in {0, 77, 111, 148}
+        and isinstance(parent.get("event_sequence"), int)
+        and not isinstance(parent.get("event_sequence"), bool)
+    }
+    unconsumed_parent_occurrences = (
+        required_parent_occurrences - consumed_frame_occurrences
+    )
+    if unconsumed_parent_occurrences:
+        failures.append(
+            "raw actual-control relevant UDP parent frame lacks exactly one "
+            f"derived event: count={len(unconsumed_parent_occurrences)}"
+        )
+    audit: dict[str, Any] = {}
+    for transaction_id in sorted(set(results_by_transaction) - set(offers)):
+        failures.append(
+            f"raw actual-control result has no accepted offer: {transaction_id}"
+        )
+    for transaction_id in sorted(offers):
+        if len(results_by_transaction.get(transaction_id, [])) != 1:
+            failures.append(
+                f"raw actual-control offer lacks exactly one result: {transaction_id}"
+            )
+
+    uav_labels = {f"uav{uav}" for uav in range(1, 6)}
+    if set(phase_starts) != set(windows) or set(phase_completes) != set(windows):
+        failures.append("raw actual-control phase window set differs")
+    for window_id, window in windows.items():
+        window_failures: list[str] = []
+        try:
+            start_ns = int(window["start_monotonic_ns"])
+            end_ns = int(window["end_monotonic_ns"])
+            offered_per_uav = int(window["offered_per_uav"])
+            send_span_ms = int(window["send_span_ms"])
+            transport_phase_code = int(window["transport_phase_code"])
+            response_policies = window["response_policies"]
+            quiet_drain = window["minimum_quiet_drain_ns_by_uav"]
+            if (
+                not isinstance(response_policies, Mapping)
+                or set(response_policies) != uav_labels
+                or not isinstance(quiet_drain, Mapping)
+                or set(quiet_drain) != uav_labels
+            ):
+                raise M4ValidationError("window policy maps differ")
+            expected_flow_groups = {
+                f"uav{uav}": matrix_flow_group_identity(
+                    f"uav{uav}.control.downlink",
+                    str(window["control_endpoint_form"]),
+                    matrix_sha256=str(window["endpoint_matrix_sha256"]),
+                )["flow_group_id"]
+                for uav in range(1, 6)
+            }
+            starts = phase_starts.get(window_id, [])
+            completes = phase_completes.get(window_id, [])
+            if len(starts) != 1 or len(completes) != 1:
+                raise M4ValidationError("phase start/complete count differs")
+            phase_start = starts[0]
+            phase_complete = completes[0]
+            policy_label = (
+                next(iter(set(response_policies.values())))
+                if len(set(response_policies.values())) == 1
+                else "mixed_per_uav"
+            )
+            phase_start_ns = phase_start.get("monotonic_ns")
+            phase_complete_ns = phase_complete.get("monotonic_ns")
+            window_result_completion_times = [
+                result.get("completed_monotonic_ns")
+                for transaction_id, offer in offers.items()
+                if offer.get("window_id") == window_id
+                for result in results_by_transaction.get(transaction_id, [])
+                if isinstance(result.get("completed_monotonic_ns"), int)
+                and not isinstance(result.get("completed_monotonic_ns"), bool)
+            ]
+            if (
+                phase_start.get("phase") != window_id
+                or phase_start.get("transport_phase_code") != transport_phase_code
+                or phase_start.get("offered_per_downlink_cell") != offered_per_uav
+                or phase_start.get("declared_start_monotonic_ns") != start_ns
+                or phase_start.get("declared_end_monotonic_ns") != end_ns
+                or phase_start.get("send_span_ms") != send_span_ms
+                or phase_start.get("expected_engine_state")
+                != window.get("expected_engine_state")
+                or phase_start.get("response_policies") != response_policies
+                or phase_start.get("response_policy") != policy_label
+                or phase_start.get("minimum_quiet_drain_ns_by_uav")
+                != quiet_drain
+                or phase_start.get("flow_group_ids") != expected_flow_groups
+                or phase_complete.get("phase") != window_id
+                or phase_complete.get("transport_phase_code")
+                != transport_phase_code
+                or phase_complete.get("expected_engine_state")
+                != window.get("expected_engine_state")
+                or phase_complete.get("response_policies") != response_policies
+                or phase_complete.get("response_policy") != policy_label
+                or phase_complete.get("offered_counts")
+                != {label: offered_per_uav for label in sorted(uav_labels)}
+                or phase_complete.get("quarantined_uavs") != []
+                or isinstance(phase_start_ns, bool)
+                or not isinstance(phase_start_ns, int)
+                or not start_ns <= phase_start_ns <= start_ns + 100_000_000
+                or isinstance(phase_complete_ns, bool)
+                or not isinstance(phase_complete_ns, int)
+                or not end_ns <= phase_complete_ns <= end_ns + 250_000_000
+                or (
+                    window_result_completion_times
+                    and phase_complete_ns < max(window_result_completion_times)
+                )
+            ):
+                raise M4ValidationError("phase declaration/completion fields differ")
+            phase_heartbeat_counts = phase_complete.get("heartbeat_counts")
+            if (
+                not isinstance(phase_heartbeat_counts, Mapping)
+                or set(phase_heartbeat_counts) != uav_labels
+                or any(
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or value < 0
+                    or (
+                        response_policies[label] == CORRELATED_TIMESYNC_POLICY
+                        and value < 3
+                    )
+                    for label, value in phase_heartbeat_counts.items()
+                )
+            ):
+                raise M4ValidationError(
+                    "phase heartbeat count is invalid for its response policy"
+                )
+            phase_raw_ack_counts = phase_complete.get("raw_command_ack_counts")
+            phase_raw_telemetry_counts = phase_complete.get(
+                "raw_autopilot_version_counts"
+            )
+            if any(
+                not isinstance(counts, Mapping)
+                or set(counts) != uav_labels
+                or any(
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or value < 0
+                    or (
+                        response_policies[label] == CORRELATED_TIMESYNC_POLICY
+                        and value < 1
+                    )
+                    or (
+                        response_policies[label] == "timeout_required"
+                        and value != 0
+                    )
+                    for label, value in counts.items()
+                )
+                for counts in (phase_raw_ack_counts, phase_raw_telemetry_counts)
+            ):
+                raise M4ValidationError(
+                    "phase raw ACK/AUTOPILOT_VERSION liveness counts differ"
+                )
+
+            window_audit: dict[str, Any] = {}
+            for uav in range(1, 6):
+                label = f"uav{uav}"
+                expected_flow_group = expected_flow_groups[label]
+                selected = sorted(
+                    [
+                        offer
+                        for offer in offers.values()
+                        if offer.get("window_id") == window_id
+                        and offer.get("uav") == uav
+                    ],
+                    key=lambda offer: int(offer.get("ordinal_send_slot", -1)),
+                )
+                ordinals = [offer.get("ordinal_send_slot") for offer in selected]
+                if (
+                    len(selected) != offered_per_uav
+                    or ordinals != list(range(1, offered_per_uav + 1))
+                ):
+                    window_failures.append(
+                        f"{label} offer cardinality/ordinals differ"
+                    )
+                correlated_losses = 0
+                for offer in selected:
+                    ordinal = offer.get("ordinal_send_slot")
+                    if isinstance(ordinal, bool) or not isinstance(ordinal, int):
+                        window_failures.append(f"{label} offer ordinal is invalid")
+                        continue
+                    scheduled_ns = start_ns + causal_offer_offset_ns(
+                        window_id, ordinal
+                    )
+                    sent_ns = offer.get("sent_monotonic_ns")
+                    expected_transaction_id = (
+                        f"{window_id}:{expected_flow_group}:{uav}:{ordinal}"
+                    )
+                    if (
+                        offer.get("transaction_id") != expected_transaction_id
+                        or offer.get("phase") != window_id
+                        or offer.get("transport_phase_code")
+                        != transport_phase_code
+                        or offer.get("flow_group_id") != expected_flow_group
+                        or offer.get("scheduled_send_monotonic_ns") != scheduled_ns
+                        or isinstance(sent_ns, bool)
+                        or not isinstance(sent_ns, int)
+                        or not scheduled_ns <= sent_ns < end_ns
+                        or offer.get("send_lateness_ns") != sent_ns - scheduled_ns
+                    ):
+                        window_failures.append(
+                            f"{label} offer {ordinal} timing/identity differs"
+                        )
+                        continue
+                    result_records = results_by_transaction.get(
+                        expected_transaction_id, []
+                    )
+                    if len(result_records) != 1:
+                        continue
+                    result = result_records[0]
+                    completed_ns = result.get("completed_monotonic_ns")
+                    if (
+                        isinstance(completed_ns, bool)
+                        or not isinstance(completed_ns, int)
+                        or not sent_ns < completed_ns <= end_ns
+                    ):
+                        window_failures.append(
+                            f"{label} offer {ordinal} completion time differs"
+                        )
+                        continue
+                    policy = response_policies[label]
+                    if policy == CORRELATED_TIMESYNC_POLICY:
+                        if result.get("success") is True:
+                            response = result.get("timesync_response")
+                            if (
+                                result.get("timed_out") is not False
+                                or not isinstance(response, Mapping)
+                                or response.get("timesync_ts1")
+                                != offer.get("timesync_request_ts1")
+                                or not sent_ns
+                                <= int(response.get("received_monotonic_ns", -1))
+                                < sent_ns + OUTCOME_TIMEOUT_NS
+                            ):
+                                window_failures.append(
+                                    f"{label} offer {ordinal} lacks exact TIMESYNC echo"
+                                )
+                        elif (
+                            result.get("success") is False
+                            and result.get("timed_out") is True
+                            and result.get("timesync_response") is None
+                            and result.get("timeout_contract_satisfied") is True
+                        ):
+                            correlated_losses += 1
+                        else:
+                            window_failures.append(
+                                f"{label} offer {ordinal} has invalid correlated outcome"
+                            )
+                    elif policy == "timeout_required":
+                        if (
+                            result.get("success") is not False
+                            or result.get("timed_out") is not True
+                            or result.get("ack") is not None
+                            or result.get("requested_telemetry") is not None
+                            or result.get("timeout_contract_satisfied") is not True
+                        ):
+                            window_failures.append(
+                                f"{label} offer {ordinal} is not an exact timeout"
+                            )
+                    else:
+                        window_failures.append(f"{label} response policy differs")
+
+                if (
+                    response_policies[label] == CORRELATED_TIMESYNC_POLICY
+                    and correlated_losses * 100
+                    > offered_per_uav * MAX_CORRELATED_LOSS_PERCENT
+                ):
+                    window_failures.append(
+                        f"{label} correlated TIMESYNC loss exceeds five percent"
+                    )
+
+                heartbeat_records = [
+                    heartbeat
+                    for heartbeat in heartbeats
+                    if heartbeat.get("uav") == uav
+                    and isinstance(heartbeat.get("received_monotonic_ns"), int)
+                    and not isinstance(heartbeat.get("received_monotonic_ns"), bool)
+                    and start_ns
+                    <= int(heartbeat["received_monotonic_ns"])
+                    < end_ns
+                ]
+                minimum_heartbeats = (
+                    3
+                    if response_policies[label] == CORRELATED_TIMESYNC_POLICY
+                    else 0
+                )
+                heartbeat_envelope_invalid = any(
+                    heartbeat.get("event_sequence")
+                    not in valid_heartbeat_sequences
+                    for heartbeat in heartbeat_records
+                )
+                if len(heartbeat_records) < minimum_heartbeats or heartbeat_envelope_invalid:
+                    window_failures.append(
+                        f"{label} has fewer than three exact modeled-path heartbeats"
+                    )
+                if phase_heartbeat_counts[label] != len(heartbeat_records):
+                    window_failures.append(
+                        f"{label} phase heartbeat summary differs from raw window records"
+                    )
+                raw_ack_records = [
+                    response
+                    for response in raw_command_acks
+                    if response.get("window_id") == window_id
+                    and response.get("uav") == uav
+                ]
+                raw_telemetry_records = [
+                    response
+                    for response in raw_autopilot_versions
+                    if response.get("window_id") == window_id
+                    and response.get("uav") == uav
+                ]
+                if (
+                    phase_raw_ack_counts[label] != len(raw_ack_records)
+                    or phase_raw_telemetry_counts[label]
+                    != len(raw_telemetry_records)
+                    or (
+                        response_policies[label] == CORRELATED_TIMESYNC_POLICY
+                        and (
+                            not raw_ack_records or not raw_telemetry_records
+                        )
+                    )
+                    or (
+                        response_policies[label] == "timeout_required"
+                        and (raw_ack_records or raw_telemetry_records)
+                    )
+                ):
+                    window_failures.append(
+                        f"{label} raw ACK/AUTOPILOT_VERSION liveness differs"
+                    )
+                window_audit[label] = {
+                    "offered": len(selected),
+                    "results": sum(
+                        len(results_by_transaction.get(str(offer.get("transaction_id")), []))
+                        for offer in selected
+                    ),
+                    "raw_heartbeats": len(heartbeat_records),
+                    "phase_heartbeat_count": phase_heartbeat_counts[label],
+                    "raw_command_acks": len(raw_ack_records),
+                    "raw_autopilot_versions": len(raw_telemetry_records),
+                    "response_policy": response_policies[label],
+                    "correlated_timesync_losses": correlated_losses,
+                }
+            audit[window_id] = window_audit
+        except (KeyError, TypeError, ValueError, M4ValidationError) as exc:
+            window_failures.append(str(exc))
+        failures.extend(
+            f"raw actual-control {window_id}: {failure}"
+            for failure in window_failures
+        )
+    return normalized, audit, failures
 
 
 def _packet_indexes(
@@ -975,6 +2003,297 @@ def _packet_indexes(
     return dict(decisions), dict(downstream), failures
 
 
+def _exact_causal_packet_lineages(
+    packet_records: list[dict[str, Any]],
+    states_by_hash: Mapping[str, Mapping[str, Any]],
+) -> tuple[
+    dict[int, dict[str, Any]],
+    dict[int, dict[str, Any]],
+    dict[tuple[str, str, str], list[dict[str, Any]]],
+    list[str],
+]:
+    """Bind every causal decision to one exact ns-3 UID-owned stage chain."""
+
+    failures: list[str] = []
+    epochs = {
+        record.get("event_epoch")
+        for record in packet_records
+        if isinstance(record.get("event_epoch"), int)
+        and not isinstance(record.get("event_epoch"), bool)
+    }
+    config_hashes = {
+        record.get("config_sha256")
+        for record in packet_records
+        if isinstance(record.get("config_sha256"), str)
+    }
+    if (
+        len(epochs) != 1
+        or len(config_hashes) != 1
+        or not config_hashes
+        or HEX64.fullmatch(str(next(iter(config_hashes)))) is None
+    ):
+        return {}, {}, {}, ["causal ns-3 event epoch/config identity differs"]
+    epoch = int(next(iter(epochs)))
+    config_hash = str(next(iter(config_hashes)))
+    try:
+        deliveries = index_exact_ns3_unicast_deliveries(
+            packet_records,
+            expected_event_epoch=epoch,
+            expected_config_sha256=config_hash,
+            states_by_hash=states_by_hash,
+        )
+    except M4ValidationError as exc:
+        return {}, {}, {}, [f"causal delivered ns-3 UID lineage differs: {exc}"]
+
+    by_sequence = {
+        int(record["event_sequence"]): record
+        for record in packet_records
+        if isinstance(record.get("event_sequence"), int)
+        and not isinstance(record.get("event_sequence"), bool)
+    }
+    by_uid: dict[tuple[int, int], list[dict[str, Any]]] = defaultdict(list)
+    for record in packet_records:
+        uid = record.get("packet_uid")
+        if isinstance(uid, int) and not isinstance(uid, bool):
+            by_uid[(epoch, uid)].append(record)
+
+    by_decision_sequence: dict[int, dict[str, Any]] = {}
+    by_route: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    for chains in deliveries.values():
+        for chain in chains:
+            sequence = int(chain["enqueue"]["event_sequence"])
+            if sequence in by_decision_sequence:
+                failures.append("causal ns-3 decision sequence owns two UID chains")
+            by_decision_sequence[sequence] = chain
+            ingress = chain["ingress"]
+            by_route[
+                (
+                    str(ingress.get("directed_link")),
+                    str(ingress.get("traffic_class")),
+                    str(ingress.get("transport_payload_sha256")),
+                )
+            ].append(chain)
+
+    immutable_fields = {
+        "event_epoch",
+        "packet_uid",
+        "tos",
+        "dscp",
+        "traffic_class",
+        "directed_link",
+        "queue_id",
+        "source_ip",
+        "destination_ip",
+        "transport_protocol",
+        "source_udp_port",
+        "destination_udp_port",
+        "transport_payload_sha256",
+        "transport_payload_size",
+        "p2mp",
+        "root_transmission",
+        "config_sha256",
+        "seed",
+        "run",
+    }
+    delivered_uid_keys = {
+        tuple(chain["uid_key"])
+        for chains in deliveries.values()
+        for chain in chains
+    }
+    for uid_key, chain in by_uid.items():
+        if uid_key in delivered_uid_keys or any(
+            record.get("p2mp") is True for record in chain
+        ):
+            continue
+        ingress = chain[0] if chain else {}
+        if ingress.get("traffic_class") != "control":
+            continue
+        kinds = [record.get("event") for record in chain]
+        if kinds != ["ingress", "drop"]:
+            failures.append(
+                f"causal dropped ns-3 UID chain shape differs: {uid_key}/{kinds}"
+            )
+            continue
+        drop = chain[1]
+        link = ingress.get("directed_link")
+        if not isinstance(link, str) or link.count(">") != 1:
+            failures.append(f"causal dropped ns-3 UID link differs: {uid_key}")
+            continue
+        source, _destination = link.split(">", 1)
+        if (
+            any(
+                drop.get(field) != ingress.get(field)
+                for field in immutable_fields
+            )
+            or [record.get("device_id") for record in chain]
+            != [f"{source}.tap.ingress", f"{source}.radio"]
+            or ingress.get("queue_id") != f"{link}.control.q0"
+            or ingress.get("tos") != 184
+            or ingress.get("dscp") != 46
+            or ingress.get("transport_protocol") != 17
+            or drop.get("radio_delivery") != "drop"
+            or drop.get("radio_intervention") != "natural"
+        ):
+            failures.append(f"causal dropped ns-3 UID identity/path differs: {uid_key}")
+            continue
+        sequence = int(drop["event_sequence"])
+        if sequence in by_decision_sequence:
+            failures.append("causal ns-3 decision sequence owns two UID chains")
+        by_decision_sequence[sequence] = {
+            "uid_key": uid_key,
+            "ingress": ingress,
+            "drop": drop,
+            "egress": None,
+        }
+    for chains in by_route.values():
+        chains.sort(
+            key=lambda chain: (
+                int(chain["ingress"]["host_monotonic_ns"]),
+                int(chain["ingress"]["event_sequence"]),
+            )
+        )
+    return by_decision_sequence, by_sequence, dict(by_route), failures
+
+
+def _validate_causal_packet_state_binding(
+    decision: Mapping[str, Any],
+    *,
+    states_by_hash: Mapping[str, Mapping[str, Any]],
+    packet_by_sequence: Mapping[int, Mapping[str, Any]],
+) -> None:
+    """Prove one causal ns-3 decision used the exact adapter-applied state."""
+
+    state = states_by_hash.get(str(decision.get("radio_state_sha256")))
+    status = decision.get("radio_state_status")
+    if not isinstance(state, Mapping) or status not in {"fresh", "unavailable"}:
+        raise M4ValidationError("causal decision state/status identity differs")
+    source_sequence = state.get("source_packet_event_sequence")
+    source = (
+        packet_by_sequence.get(source_sequence)
+        if isinstance(source_sequence, int) and not isinstance(source_sequence, bool)
+        else None
+    )
+    if (
+        not isinstance(source, Mapping)
+        or source.get("event") != "ingress"
+        or source.get("event_sequence", 1 << 63)
+        >= decision.get("event_sequence", -1)
+        or state.get("source_packet_event_epoch") != source.get("event_epoch")
+        or state.get("source_packet_uid") != source.get("packet_uid")
+        or state.get("source_packet_causal_sha256")
+        != source.get("transport_payload_sha256")
+        or state.get("directed_link") != source.get("directed_link")
+        or state.get("traffic_class") != source.get("traffic_class")
+        or state.get("directed_link") != decision.get("directed_link")
+        or state.get("traffic_class") != decision.get("traffic_class")
+    ):
+        raise M4ValidationError("causal decision applied-state parent differs")
+    if status == "unavailable":
+        if (
+            state.get("availability") != "unavailable"
+            or decision.get("radio_delivery") != "drop"
+            or decision.get("event") != "drop"
+            or decision.get("drop_reason") != "sionna_state_unavailable"
+        ):
+            raise M4ValidationError("causal unavailable decision fields differ")
+        return
+
+    effects = state.get("effects")
+    host = decision.get("host_monotonic_ns")
+    validity_start = state.get("validity_start_monotonic_ns")
+    expires = state.get("expires_monotonic_ns")
+    applied = state.get("adapter_applied_monotonic_ns")
+    if not isinstance(effects, Mapping) or state.get("availability") != "fresh":
+        raise M4ValidationError("causal fresh decision state differs")
+    if effects.get("intervention") != "natural":
+        raise M4ValidationError("causal decision intervention is not natural")
+    field_map = {
+        "radio_state_sequence": state.get("state_sequence"),
+        "radio_query_id": state.get("query_id"),
+        "radio_applied_state_id": state.get("applied_state_id"),
+        "radio_result_wire_sha256": state.get("result_wire_sha256"),
+        "radio_mapping_version": effects.get("mapping_version"),
+        "radio_mapping_seed": effects.get("mapping_seed"),
+        "radio_delay_ns": effects.get("propagation_delay_ns"),
+        "radio_service_rate_bps": effects.get("service_rate_bps"),
+        "radio_loss_probability": effects.get("loss_probability"),
+        "radio_intervention": effects.get("intervention"),
+        "radio_validity_start_monotonic_ns": validity_start,
+        "radio_adapter_applied_monotonic_ns": applied,
+        "radio_expires_monotonic_ns": expires,
+    }
+    if any(decision.get(field) != expected for field, expected in field_map.items()):
+        raise M4ValidationError("causal decision packet/state fields differ")
+    if (
+        isinstance(host, bool)
+        or not isinstance(host, int)
+        or isinstance(validity_start, bool)
+        or not isinstance(validity_start, int)
+        or isinstance(expires, bool)
+        or not isinstance(expires, int)
+        or isinstance(applied, bool)
+        or not isinstance(applied, int)
+        or not validity_start <= applied <= host < expires
+        or decision.get("radio_state_age_ns") != host - validity_start
+    ):
+        raise M4ValidationError("causal decision state validity/time differs")
+    digest = decision.get("transport_payload_sha256")
+    applied_state_id = state.get("applied_state_id")
+    mapping_seed = effects.get("mapping_seed")
+    service_rate = effects.get("service_rate_bps")
+    expected_sample = (
+        0.0
+        if service_rate == 0
+        else deterministic_loss_sample(digest, applied_state_id, mapping_seed)
+        if isinstance(digest, str)
+        and isinstance(applied_state_id, str)
+        and isinstance(mapping_seed, int)
+        and not isinstance(mapping_seed, bool)
+        else None
+    )
+    if (
+        not isinstance(digest, str)
+        or not isinstance(applied_state_id, str)
+        or isinstance(mapping_seed, bool)
+        or not isinstance(mapping_seed, int)
+        or not finite_number(decision.get("radio_loss_sample"))
+        or expected_sample is None
+        or abs(
+            float(decision["radio_loss_sample"])
+            - expected_sample
+        )
+        > 1e-15
+    ):
+        raise M4ValidationError("causal decision deterministic loss sample differs")
+    loss_probability = effects.get("loss_probability")
+    if (
+        not finite_number(loss_probability)
+        or isinstance(service_rate, bool)
+        or not isinstance(service_rate, int)
+    ):
+        raise M4ValidationError("causal decision mapped delivery inputs differ")
+    expected_delivery = (
+        "deliver"
+        if service_rate > 0
+        and float(expected_sample) >= float(loss_probability)
+        else "drop"
+    )
+    expected_event = "enqueue" if expected_delivery == "deliver" else "drop"
+    expected_drop_reason = (
+        None
+        if expected_delivery == "deliver"
+        else "sionna_service_rate_zero"
+        if service_rate == 0
+        else "sionna_loss"
+    )
+    if (
+        decision.get("radio_delivery") != expected_delivery
+        or decision.get("event") != expected_event
+        or decision.get("drop_reason") != expected_drop_reason
+    ):
+        raise M4ValidationError("causal decision deterministic delivery differs")
+
+
 def _consume_causal_packet_occurrence(
     records: list[dict[str, Any]],
     cursors: dict[tuple[Any, ...], int],
@@ -1002,6 +2321,41 @@ def _consume_causal_packet_occurrence(
     return records[cursor]
 
 
+def _consume_causal_lineage_occurrence(
+    chains: list[dict[str, Any]],
+    cursors: dict[tuple[Any, ...], int],
+    *,
+    cursor_key: tuple[Any, ...],
+    lower_ns: int,
+    upper_ns: int,
+) -> dict[str, Any] | None:
+    """Consume one exact delivered UID chain by its egress occurrence time."""
+
+    cursor = cursors.get(cursor_key, 0)
+    while cursor < len(chains):
+        timestamp = chains[cursor]["egress"].get("host_monotonic_ns")
+        if (
+            isinstance(timestamp, int)
+            and not isinstance(timestamp, bool)
+            and timestamp >= lower_ns
+        ):
+            break
+        cursor += 1
+    if cursor >= len(chains):
+        cursors[cursor_key] = cursor
+        return None
+    timestamp = chains[cursor]["egress"].get("host_monotonic_ns")
+    if (
+        isinstance(timestamp, bool)
+        or not isinstance(timestamp, int)
+        or timestamp > upper_ns
+    ):
+        cursors[cursor_key] = cursor
+        return None
+    cursors[cursor_key] = cursor + 1
+    return chains[cursor]
+
+
 def derive_causal_window_metrics(
     windows: Mapping[str, Mapping[str, Any]],
     *,
@@ -1015,10 +2369,17 @@ def derive_causal_window_metrics(
     failures: list[str] = []
     offers, outcomes, transaction_failures = _transaction_index(transaction_records, run)
     failures.extend(transaction_failures)
-    decisions, downstream, packet_failures = _packet_indexes(packet_records)
+    decisions, _downstream, packet_failures = _packet_indexes(packet_records)
     failures.extend(packet_failures)
+    (
+        lineages_by_decision_sequence,
+        packet_by_sequence,
+        delivered_lineages_by_route,
+        lineage_failures,
+    ) = _exact_causal_packet_lineages(packet_records, states_by_hash)
+    failures.extend(lineage_failures)
     decision_cursors: dict[tuple[Any, ...], int] = {}
-    downstream_cursors: dict[tuple[Any, ...], int] = {}
+    uplink_lineage_cursors: dict[tuple[Any, ...], int] = {}
     metrics: dict[str, dict[str, Any]] = {}
     assignment: dict[str, str] = {}
     for window_id in WINDOW_IDS:
@@ -1105,6 +2466,47 @@ def derive_causal_window_metrics(
                         f"{window_id}/{role} offer lacks ns-3 radio decision: {transaction_id}"
                     )
                     continue
+                decision_sequence = decision.get("event_sequence")
+                lineage = (
+                    lineages_by_decision_sequence.get(decision_sequence)
+                    if isinstance(decision_sequence, int)
+                    and not isinstance(decision_sequence, bool)
+                    else None
+                )
+                exact_decision = (
+                    lineage.get("enqueue")
+                    if isinstance(lineage, Mapping) and "enqueue" in lineage
+                    else lineage.get("drop") if isinstance(lineage, Mapping) else None
+                )
+                if not isinstance(lineage, Mapping) or exact_decision != decision:
+                    failures.append(
+                        f"{window_id}/{role} decision lacks exact ns-3 UID chain: "
+                        f"{transaction_id}"
+                    )
+                    continue
+                ingress_ns = lineage.get("ingress", {}).get("host_monotonic_ns")
+                if (
+                    isinstance(ingress_ns, bool)
+                    or not isinstance(ingress_ns, int)
+                    or not offer_ns <= ingress_ns <= int(decision["host_monotonic_ns"])
+                ):
+                    failures.append(
+                        f"{window_id}/{role} ns-3 ingress predates its actual offer: "
+                        f"{transaction_id}"
+                    )
+                    continue
+                try:
+                    _validate_causal_packet_state_binding(
+                        decision,
+                        states_by_hash=states_by_hash,
+                        packet_by_sequence=packet_by_sequence,
+                    )
+                except M4ValidationError as exc:
+                    failures.append(
+                        f"{window_id}/{role} exact ns-3 state binding differs: "
+                        f"{transaction_id}: {exc}"
+                    )
+                    continue
                 paired_sample: dict[str, Any] = {
                     "transaction_id": transaction_id,
                     "transport_payload_sha256": digest,
@@ -1163,39 +2565,85 @@ def derive_causal_window_metrics(
                         else:
                             failures.append(f"{window_id}/{role} state age is invalid")
                 outcome_records = outcomes.get(transaction_id, [])
-                ack = [item for item in outcome_records if item.get("event") == "ardupilot_command_ack"]
-                telemetry = [item for item in outcome_records if item.get("event") == "requested_telemetry"]
-                ack_ns = ack[0].get("host_monotonic_ns") if len(ack) == 1 else None
-                egress = (
-                    _consume_causal_packet_occurrence(
-                        downstream.get(key, []),
-                        downstream_cursors,
-                        cursor_key=("egress", *key),
-                        lower_ns=int(decision.get("host_monotonic_ns", offer_ns)),
-                        upper_ns=int(ack_ns) + 1 if isinstance(ack_ns, int) else end,
-                    )
-                    if len(ack) == 1 and len(telemetry) == 1
+                echoes = [
+                    item
+                    for item in outcome_records
+                    if item.get("event") == "ardupilot_timesync_echo"
+                ]
+                echo_ns = (
+                    echoes[0].get("host_monotonic_ns")
+                    if len(echoes) == 1
                     else None
                 )
-                complete = len(ack) == 1 and len(telemetry) == 1 and egress is not None
+                egress = lineage.get("egress") if len(echoes) == 1 else None
+                if isinstance(egress, Mapping) and (
+                    not isinstance(echo_ns, int)
+                    or isinstance(echo_ns, bool)
+                    or not int(decision["host_monotonic_ns"])
+                    <= int(egress.get("host_monotonic_ns", -1))
+                    <= echo_ns
+                ):
+                    failures.append(
+                        f"{window_id}/{role} exact ns-3 egress timing differs: "
+                        f"{transaction_id}"
+                    )
+                    egress = None
+                response_lineage = None
+                response_digest = (
+                    echoes[0].get("response_transport_payload_sha256")
+                    if len(echoes) == 1
+                    else None
+                )
+                response_uav = echoes[0].get("uav") if len(echoes) == 1 else None
+                if (
+                    isinstance(egress, Mapping)
+                    and isinstance(echo_ns, int)
+                    and not isinstance(echo_ns, bool)
+                    and isinstance(response_digest, str)
+                    and HEX64.fullmatch(response_digest) is not None
+                    and isinstance(response_uav, str)
+                    and re.fullmatch(r"uav[1-5]", response_uav) is not None
+                ):
+                    uplink_key = (
+                        f"{response_uav}>cp",
+                        "control",
+                        response_digest,
+                    )
+                    response_lineage = _consume_causal_lineage_occurrence(
+                        delivered_lineages_by_route.get(uplink_key, []),
+                        uplink_lineage_cursors,
+                        cursor_key=("uplink", *uplink_key),
+                        lower_ns=int(egress["host_monotonic_ns"]),
+                        upper_ns=echo_ns,
+                    )
+                complete = (
+                    len(echoes) == 1
+                    and egress is not None
+                    and response_lineage is not None
+                )
                 if complete:
                     if (
-                        not isinstance(ack_ns, int)
-                        or isinstance(ack_ns, bool)
-                        or not offer_ns < ack_ns <= offer_ns + 3_000_000_000
-                        or ack[0].get("producer_role") != "arducopter"
-                        or telemetry[0].get("producer_role") != "arducopter"
+                        not isinstance(echo_ns, int)
+                        or isinstance(echo_ns, bool)
+                        or not offer_ns <= echo_ns < offer_ns + OUTCOME_TIMEOUT_NS
+                        or echoes[0].get("producer_role") != "arducopter"
+                        or echoes[0].get("request_transport_payload_sha256")
+                        != digest
+                        or echoes[0].get("response_transport_payload_sha256")
+                        != response_lineage["ingress"].get(
+                            "transport_payload_sha256"
+                        )
                     ):
                         failures.append(
-                            f"{window_id}/{role} ACK/telemetry outcome is invalid: {transaction_id}"
+                            f"{window_id}/{role} TIMESYNC echo outcome is invalid: {transaction_id}"
                         )
                     else:
                         delivered += 1
                         paired_sample["delivery"] = 1.0
-                        latencies.append(float(ack_ns - offer_ns))
-                elif ack or telemetry:
+                        latencies.append(float(echo_ns - offer_ns))
+                elif echoes:
                     failures.append(
-                        f"{window_id}/{role} has partial/uncorrelated actual outcome: {transaction_id}"
+                        f"{window_id}/{role} has uncorrelated TIMESYNC outcome: {transaction_id}"
                     )
                 paired_samples[int(ordinal)] = paired_sample
             offered_count = len(selected)
@@ -1299,15 +2747,15 @@ def validate_concurrent_flow_groups(
             "control",
             "background",
         )]
+        minimum_slots = 20 if window_id == "expiry_unavailable" else 100
         if (
             len(set(expected_ids)) != 3
             or observed_ids != expected_ids
-            or not _positive(groups["control"])
-            or not _positive(groups["background"])
+            or not _positive(groups["control"], minimum=minimum_slots)
+            or not _positive(groups["background"], minimum=minimum_slots)
         ):
             failures.append(f"three distinct positive causal streams differ: {window_id}")
         concurrency = groups["concurrency"]
-        minimum_slots = 20 if window_id == "expiry_unavailable" else 100
         if (
             not isinstance(concurrency, Mapping)
             or set(concurrency)
@@ -1474,6 +2922,7 @@ def _paired_bootstrap(
     seed: int,
     resamples: int,
     statistic: str = "median",
+    exact_pair_counts: tuple[int, int] | None = None,
 ) -> dict[str, Any]:
     reference = metrics[reference_window][role]
     observed = metrics[observed_window][role]
@@ -1487,12 +2936,40 @@ def _paired_bootstrap(
         raise M4ValidationError("paired causal sample map is absent")
     left_keys = {int(value) for value in left}
     right_keys = {int(value) for value in right}
-    if left_keys != right_keys or len(left_keys) < 100:
-        raise M4ValidationError(
-            f"paired ordinal set differs/is below 100: {reference_window}/{observed_window}/{role}"
+    if exact_pair_counts is None:
+        if (
+            left_keys != right_keys
+            or len(left_keys) < 100
+            or left_keys != set(range(1, len(left_keys) + 1))
+        ):
+            raise M4ValidationError(
+                "paired ordinal set differs/is below 100: "
+                f"{reference_window}/{observed_window}/{role}"
+            )
+        paired_ordinals = sorted(left_keys)
+        pairing = "flow_group_id+ordinal_send_slot"
+    else:
+        reference_count, observed_count = exact_pair_counts
+        expected_left = set(range(1, reference_count + 1))
+        expected_right = set(range(1, observed_count + 1))
+        if (
+            reference_count < 20
+            or observed_count < reference_count
+            or left_keys != expected_left
+            or right_keys != expected_right
+        ):
+            raise M4ValidationError(
+                "paired ordinal contract is not exact "
+                f"{reference_count}/{observed_count}: "
+                f"{reference_window}/{observed_window}/{role}"
+            )
+        paired_ordinals = list(range(1, reference_count + 1))
+        pairing = (
+            "flow_group_id+ordinal_send_slot"
+            f"[first_{reference_count}_of_{observed_count}]"
         )
     values: list[float] = []
-    for ordinal in sorted(left_keys):
+    for ordinal in paired_ordinals:
         left_value = left[ordinal].get(field)
         right_value = right[ordinal].get(field)
         if not finite_number(left_value) or not finite_number(right_value):
@@ -1533,7 +3010,7 @@ def _paired_bootstrap(
         "upper_bound": distribution[upper_index],
         "resamples": resamples,
         "seed": seed,
-        "pairing": "flow_group_id+ordinal_send_slot",
+        "pairing": pairing,
     }
 
 
@@ -1565,6 +3042,7 @@ def validate_paired_causality(
         field: str,
         *,
         statistic: str = "median",
+        exact_pair_counts: tuple[int, int] | None = None,
     ) -> dict[str, Any]:
         value = _paired_bootstrap(
             metrics,
@@ -1575,6 +3053,7 @@ def validate_paired_causality(
             statistic=statistic,
             seed=seed,
             resamples=resamples,
+            exact_pair_counts=exact_pair_counts,
         )
         details[name] = value
         return value
@@ -1759,6 +3238,7 @@ def validate_paired_causality(
                     role,
                     field,
                     statistic=statistic,
+                    exact_pair_counts=(20, 100),
                 )
                 if not (
                     -tolerance <= expiry["lower_bound"]
@@ -1906,6 +3386,121 @@ def validate_causal_runtime(
             failures.append(f"causal socket identity changed at sample {index}")
             break
 
+    pin_records = [
+        record
+        for record in records
+        if record.get("event") == "causal_velocity_pin_ready"
+    ]
+    pin_ready: Mapping[str, Any] | None = None
+    expected_pin_topics = {
+        model: f"{CAUSAL_PIN_TOPIC_PREFIX}/{model}/cmd_vel"
+        for model in CAUSAL_PIN_MODELS
+    }
+    first_transition_ns = min(
+        (
+            int(window["start_monotonic_ns"])
+            - causal_pre_window_gap_ns(window_id)
+            for window_id, window in windows.items()
+            if isinstance(window, Mapping)
+        ),
+        default=0,
+    )
+    if len(pin_records) != 1:
+        failures.append("causal zero-velocity pin readiness cardinality differs")
+    else:
+        candidate = pin_records[0]
+        entity_ids = candidate.get("model_entity_ids")
+        attached_ns = candidate.get("attached_monotonic_ns")
+        initial_publish_count = candidate.get("initial_zero_publish_count")
+        candidate_host_ns = candidate.get("host_monotonic_ns")
+        if (
+            candidate.get("models") != list(CAUSAL_PIN_MODELS)
+            or not isinstance(entity_ids, Mapping)
+            or set(entity_ids) != set(CAUSAL_PIN_MODELS)
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value <= 0
+                for value in entity_ids.values()
+            )
+            or len(set(entity_ids.values())) != len(CAUSAL_PIN_MODELS)
+            or candidate.get("plugin_name") != CAUSAL_PIN_PLUGIN_NAME
+            or candidate.get("plugin_filename") != CAUSAL_PIN_PLUGIN_FILENAME
+            or candidate.get("system_add_service")
+            != CAUSAL_PIN_SYSTEM_ADD_SERVICE
+            or candidate.get("command_topics") != expected_pin_topics
+            or candidate.get("preexisting_subscribers")
+            != {model: False for model in CAUSAL_PIN_MODELS}
+            or candidate.get("system_add_request_models")
+            != list(CAUSAL_PIN_MODELS)
+            or candidate.get("system_add_request_count")
+            != len(CAUSAL_PIN_MODELS)
+            or candidate.get("zero_linear_velocity_mps") != [0.0, 0.0, 0.0]
+            or candidate.get("zero_angular_velocity_radps") != [0.0, 0.0, 0.0]
+            or candidate.get("publish_period_ns")
+            != CAUSAL_PIN_PUBLISH_PERIOD_NS
+            or candidate.get("all_publishers_connected") is not True
+            or isinstance(initial_publish_count, bool)
+            or not isinstance(initial_publish_count, int)
+            or initial_publish_count < len(CAUSAL_PIN_MODELS)
+            or initial_publish_count % len(CAUSAL_PIN_MODELS) != 0
+            or isinstance(attached_ns, bool)
+            or not isinstance(attached_ns, int)
+            or attached_ns <= 0
+            or isinstance(candidate_host_ns, bool)
+            or not isinstance(candidate_host_ns, int)
+            or attached_ns > candidate_host_ns
+            or candidate_host_ns >= first_transition_ns
+        ):
+            failures.append("causal zero-velocity pin readiness fields differ")
+        else:
+            pin_ready = candidate
+
+    odometry_records = [
+        record for record in records if record.get("event") == "odometry_sample"
+    ]
+    valid_odometry: list[dict[str, Any]] = []
+    for number, record in enumerate(odometry_records, start=1):
+        uav = record.get("uav")
+        source_ns = record.get("source_callback_monotonic_ns")
+        sim_ns = record.get("sim_stamp_ns")
+        host_ns = record.get("host_monotonic_ns")
+        position = record.get("position_m")
+        orientation = record.get("orientation_quat_xyzw")
+        linear = record.get("linear_velocity_mps")
+        angular = record.get("angular_velocity_radps")
+        vectors = (position, orientation, linear, angular)
+        if (
+            uav not in CAUSAL_PIN_MODELS
+            or isinstance(source_ns, bool)
+            or not isinstance(source_ns, int)
+            or isinstance(sim_ns, bool)
+            or not isinstance(sim_ns, int)
+            or sim_ns < 0
+            or not isinstance(host_ns, int)
+            or not 0 <= host_ns - source_ns <= 50_000_000
+            or any(not isinstance(value, list) for value in vectors)
+            or len(position) != 3
+            or len(orientation) != 4
+            or len(linear) != 3
+            or len(angular) != 3
+            or any(
+                not finite_number(value)
+                for vector in vectors
+                for value in vector
+            )
+            or any(
+                abs(float(value)) > CAUSAL_OBSERVED_VELOCITY_LIMIT
+                for vector in (linear, angular)
+                for value in vector
+            )
+        ):
+            failures.append(
+                f"causal observed pinned odometry sample {number} differs"
+            )
+        else:
+            valid_odometry.append(record)
+
     previous_window: str | None = None
     predicate_by_phase = {
         "good": "fresh_state_applied",
@@ -1956,6 +3551,13 @@ def validate_causal_runtime(
             if window_id == "expiry_recovery"
             else predicate_by_phase[str(window["phase"])]
         )
+        expected_stimulus_ns = start - causal_pre_window_gap_ns(window_id)
+        previous_end = (
+            int(windows[previous_window]["end_monotonic_ns"])
+            if previous_window is not None
+            and isinstance(windows.get(previous_window), Mapping)
+            else None
+        )
         if (
             start_event.get("target_monotonic_ns") != start
             or not start <= start_event["host_monotonic_ns"] <= start + 100_000_000
@@ -1966,8 +3568,51 @@ def validate_causal_runtime(
             or isinstance(stimulus.get("pose_fixture_sequence"), bool)
             or not isinstance(stimulus.get("pose_fixture_sequence"), int)
             or stimulus["pose_fixture_sequence"] < 1
+            or stimulus.get("pose_vector_service")
+            != CAUSAL_POSE_VECTOR_SERVICE
+            or stimulus.get("pose_vector_models")
+            != list(CAUSAL_POSE_VECTOR_MODELS)
+            or stimulus.get("pose_vector_size")
+            != len(CAUSAL_POSE_VECTOR_MODELS)
+            or isinstance(stimulus.get("pose_apply_started_monotonic_ns"), bool)
+            or not isinstance(
+                stimulus.get("pose_apply_started_monotonic_ns"), int
+            )
+            or isinstance(
+                stimulus.get("pose_apply_completed_monotonic_ns"), bool
+            )
+            or not isinstance(
+                stimulus.get("pose_apply_completed_monotonic_ns"), int
+            )
+            or isinstance(stimulus.get("pose_apply_latency_ns"), bool)
+            or not isinstance(stimulus.get("pose_apply_latency_ns"), int)
+            or isinstance(
+                stimulus.get("zero_velocity_published_monotonic_ns"), bool
+            )
+            or not isinstance(
+                stimulus.get("zero_velocity_published_monotonic_ns"), int
+            )
+            or not expected_stimulus_ns
+            <= stimulus["pose_apply_started_monotonic_ns"]
+            <= stimulus["pose_apply_completed_monotonic_ns"]
+            <= expected_stimulus_ns + CAUSAL_POSE_VECTOR_MAX_LATENCY_NS
+            or stimulus["pose_apply_latency_ns"]
+            != stimulus["pose_apply_completed_monotonic_ns"]
+            - stimulus["pose_apply_started_monotonic_ns"]
+            or not 0
+            <= stimulus["pose_apply_latency_ns"]
+            <= CAUSAL_POSE_VECTOR_MAX_LATENCY_NS
+            or not stimulus["pose_apply_completed_monotonic_ns"]
+            <= stimulus["zero_velocity_published_monotonic_ns"]
+            <= stimulus["host_monotonic_ns"]
+            or not expected_stimulus_ns
+            <= stimulus["host_monotonic_ns"]
+            <= expected_stimulus_ns + 500_000_000
+            or (previous_end is not None and stimulus["host_monotonic_ns"] < previous_end)
             or stimulus["host_monotonic_ns"] >= drain["host_monotonic_ns"]
-            or drain["host_monotonic_ns"] >= start
+            or not start - 100_000_000
+            <= drain["host_monotonic_ns"]
+            < start
             or drain.get("prior_window_id") != previous_window
             or drain.get("terminal_outcomes_complete") is not True
             or drain.get("queue_depths")
@@ -1996,12 +3641,39 @@ def validate_causal_runtime(
             or measurement[-1]["host_monotonic_ns"] < end - 1_500_000_000
         ):
             failures.append(f"causal 10-s readiness/measurement coverage differs: {window_id}")
+        for uav in CAUSAL_PIN_MODELS:
+            pinned = sorted(
+                (
+                    record
+                    for record in valid_odometry
+                    if record.get("uav") == uav
+                    and start <= int(record["host_monotonic_ns"]) < end
+                ),
+                key=lambda record: int(record["host_monotonic_ns"]),
+            )
+            pinned_hosts = [int(record["host_monotonic_ns"]) for record in pinned]
+            if (
+                not pinned_hosts
+                or pinned_hosts[0] > start + CAUSAL_ODOMETRY_EDGE_NS
+                or pinned_hosts[-1] < end - CAUSAL_ODOMETRY_EDGE_NS
+                or any(
+                    not 0
+                    < pinned_hosts[index] - pinned_hosts[index - 1]
+                    <= CAUSAL_ODOMETRY_MAX_GAP_NS
+                    for index in range(1, len(pinned_hosts))
+                )
+            ):
+                failures.append(
+                    f"causal observed zero-velocity coverage differs: {window_id}/{uav}"
+                )
         previous_window = window_id
     details = {
         "resource_sample_count": len(samples),
         "frozen_process_identity_count": len(frozen_processes or ()),
         "socket_identity_sha256": socket_hash,
         "validated_window_count": len(windows),
+        "velocity_pin_ready": pin_ready is not None,
+        "valid_pinned_odometry_sample_count": len(valid_odometry),
     }
     return details, failures
 
@@ -2012,6 +3684,7 @@ def validate_expiry_sequence(
     adapter_records: list[dict[str, Any]],
     control_records: list[dict[str, Any]],
     wire: Mapping[str, Any],
+    windows: Mapping[str, Mapping[str, Any]],
     target_packet_link: str,
     target_directed_link_id: str,
 ) -> tuple[dict[str, Any], list[str]]:
@@ -2032,34 +3705,111 @@ def validate_expiry_sequence(
             "inject_duplicate",
         )
         positions = []
+        control_by_action: dict[str, Mapping[str, Any]] = {}
         for action in expected_actions:
-            matches = [index for index, record in enumerate(controls) if record.get("action") == action]
+            matches = [
+                (index, record)
+                for index, record in enumerate(controls)
+                if record.get("action") == action
+            ]
             if len(matches) != 1:
                 raise M4ValidationError(f"expiry control {action} count differs")
-            positions.append(matches[0])
+            positions.append(matches[0][0])
+            control_by_action[action] = matches[0][1]
         if positions != sorted(positions):
             raise M4ValidationError("expiry controls are out of order")
 
-        required_fault_events = {
-            "hold_armed",
-            "real_result_held",
-            "held_result_released",
-            "byte_identical_duplicate_released",
-        }
-        observed = {record.get("event") for record in fault_records}
-        if not required_fault_events <= observed:
-            raise M4ValidationError("expiry fault event set is incomplete")
-        held = next(record for record in fault_records if record.get("event") == "real_result_held")
-        released = next(record for record in fault_records if record.get("event") == "held_result_released")
-        duplicate = next(
-            record
-            for record in fault_records
-            if record.get("event") == "byte_identical_duplicate_released"
+        expiry_window = windows.get("expiry_unavailable")
+        recovery_window = windows.get("expiry_recovery")
+        prearm_window = windows.get("jammer_off_2")
+        if not isinstance(expiry_window, Mapping) or not isinstance(
+            recovery_window, Mapping
+        ) or not isinstance(prearm_window, Mapping):
+            raise M4ValidationError("expiry prearm/unavailable/recovery windows are absent")
+        prearm_start = int(prearm_window["start_monotonic_ns"])
+        prearm_plan = causal_window_plan("jammer_off_2")
+        offered = int(prearm_plan["offered_per_uav"])
+        prior_seed_offer = prearm_start + causal_offer_offset_ns(
+            "jammer_off_2", offered - 2
         )
+        seed_offer = prearm_start + causal_offer_offset_ns(
+            "jammer_off_2", offered - 1
+        )
+        last_prearm_offer = prearm_start + causal_offer_offset_ns(
+            "jammer_off_2", offered
+        )
+        seed_arm_earliest = (
+            prior_seed_offer + QUERY_DEADLINE_NS + EXPIRY_FAULT_ARM_SETTLE_NS
+        )
+        parallel_arm_earliest = (
+            seed_offer + QUERY_DEADLINE_NS + EXPIRY_FAULT_ARM_SETTLE_NS
+        )
+        expiry_start = int(expiry_window["start_monotonic_ns"])
+        expiry_end = int(expiry_window["end_monotonic_ns"])
+        recovery_start = int(recovery_window["start_monotonic_ns"])
+        control_times = {
+            action: record.get("host_monotonic_ns")
+            for action, record in control_by_action.items()
+        }
+        if (
+            any(
+                isinstance(value, bool) or not isinstance(value, int)
+                for value in control_times.values()
+            )
+            or not seed_arm_earliest
+            <= int(control_times["arm_hold_next"])
+            < seed_offer
+            or not parallel_arm_earliest
+            <= int(control_times["arm_fault_parallel_next"])
+            < last_prearm_offer
+            or not expiry_end
+            <= int(control_times["release_held"])
+            < int(control_times["inject_duplicate"])
+            < recovery_start
+        ):
+            raise M4ValidationError(
+                "expiry controls are outside setup/recovery gaps"
+            )
+
+        fault_by_event = {
+            event: [record for record in fault_records if record.get("event") == event]
+            for event in (
+                "hold_armed",
+                "real_result_held",
+                "held_result_released",
+                "byte_identical_duplicate_released",
+            )
+        }
+        if any(len(records) != 1 for records in fault_by_event.values()):
+            raise M4ValidationError("expiry fault event counts differ")
+        hold_armed = fault_by_event["hold_armed"][0]
+        held = fault_by_event["real_result_held"][0]
+        released = fault_by_event["held_result_released"][0]
+        duplicate = fault_by_event["byte_identical_duplicate_released"][0]
+        if (
+            hold_armed.get("directed_link_id") != target_directed_link_id
+            or not seed_offer
+            <= int(hold_armed.get("monotonic_ns", -1))
+            < int(held.get("monotonic_ns", -1))
+            < int(control_times["arm_fault_parallel_next"])
+            or not int(control_times["arm_hold_next"])
+            < int(hold_armed.get("monotonic_ns", -1))
+        ):
+            raise M4ValidationError(
+                "expiry seed was not armed/submitted/held on its exact factual slot"
+            )
         if (
             held.get("directed_link_id") != target_directed_link_id
             or released.get("query_id") != held.get("query_id")
             or released.get("result_wire_sha256") != held.get("result_wire_sha256")
+            or not isinstance(
+                control_by_action["arm_fault_parallel_next"].get("detail"),
+                Mapping,
+            )
+            or control_by_action["arm_fault_parallel_next"]["detail"].get(
+                "held_query_id"
+            )
+            != held.get("query_id")
         ):
             raise M4ValidationError("held/released old-result identity differs")
         held_result = wire.get("message_by_hash", {}).get(held.get("result_wire_sha256"))
@@ -2072,7 +3822,52 @@ def validate_expiry_sequence(
         ):
             raise M4ValidationError("held real result was not released after its expiry")
 
-        expired = [record for record in adapter_records if record.get("event") == "state_expired"]
+        staged_queries = [
+            record
+            for record in adapter_records
+            if record.get("event") == "query_submitted"
+            and record.get("directed_link") == target_packet_link
+            and record.get("traffic_class") == "control"
+            and record.get("decision") in {"fault_seed", "fault_parallel"}
+        ]
+        seed_queries = [
+            record for record in staged_queries if record.get("decision") == "fault_seed"
+        ]
+        parallel_queries = [
+            record
+            for record in staged_queries
+            if record.get("decision") == "fault_parallel"
+        ]
+        if (
+            len(seed_queries) != 1
+            or len(parallel_queries) != 1
+            or seed_queries[0].get("query_id") != held.get("query_id")
+            or not int(hold_armed.get("monotonic_ns", -1))
+            <= int(seed_queries[0].get("monotonic_ns", -1))
+            < int(held.get("monotonic_ns", -1))
+            or not int(control_times["arm_fault_parallel_next"])
+            < int(parallel_queries[0].get("monotonic_ns", -1))
+            or int(parallel_queries[0].get("monotonic_ns", -1))
+            < last_prearm_offer
+            or not isinstance(seed_queries[0].get("packet_event_sequence"), int)
+            or not isinstance(parallel_queries[0].get("packet_event_sequence"), int)
+            or seed_queries[0]["packet_event_sequence"]
+            >= parallel_queries[0]["packet_event_sequence"]
+        ):
+            raise M4ValidationError(
+                "expiry staged queries are not two ordered factual submissions"
+            )
+
+        expired = [
+            record
+            for record in adapter_records
+            if record.get("event") == "state_expired"
+            and record.get("directed_link") == target_packet_link
+            and record.get("traffic_class") == "control"
+            and isinstance(record.get("monotonic_ns"), int)
+            and not isinstance(record.get("monotonic_ns"), bool)
+            and last_prearm_offer < record["monotonic_ns"] < expiry_start
+        ]
         applied = [
             record
             for record in adapter_records
@@ -2095,24 +3890,46 @@ def validate_expiry_sequence(
             and record.get("query_id") == duplicate.get("query_id")
             and record.get("result_wire_sha256") == duplicate.get("result_wire_sha256")
         ]
-        if not expired or len(superseded) != 1 or len(duplicate_rejections) != 1:
+        if len(expired) != 1 or len(superseded) != 1 or len(duplicate_rejections) != 1:
             raise M4ValidationError("expiry/old/duplicate adapter rejection evidence differs")
-        expiry_time = expired[-1].get("monotonic_ns")
+        expiry_time = expired[0]["monotonic_ns"]
+        if (
+            expired[0].get("query_id") != parallel_queries[0].get("query_id")
+            or not last_prearm_offer < expiry_time < expiry_start
+        ):
+            raise M4ValidationError(
+                "fault-parallel state did not expire after the last positive offer"
+            )
         newer = [
             record
             for record in applied
             if isinstance(record.get("monotonic_ns"), int)
-            and expiry_time < record["monotonic_ns"] < released["monotonic_ns"]
+            and record.get("query_id") == expired[0].get("query_id")
+            and held.get("monotonic_ns", 0)
+            < record["monotonic_ns"]
+            < expiry_time
         ]
         fresh_after_fault = [
             record
             for record in applied
             if isinstance(record.get("monotonic_ns"), int)
             and record["monotonic_ns"] > duplicate_rejections[0]["monotonic_ns"]
+            and record["monotonic_ns"] < recovery_start
             and record.get("query_id") != duplicate.get("query_id")
         ]
         if not newer:
-            raise M4ValidationError("newer real result was not applied before old release")
+            raise M4ValidationError(
+                "newer real result did not apply and expire before unavailable traffic"
+            )
+        if (
+            released.get("monotonic_ns", 0) < expiry_end
+            or released.get("monotonic_ns", 0) >= recovery_start
+            or duplicate.get("monotonic_ns", 0) <= released.get("monotonic_ns", 0)
+            or duplicate.get("monotonic_ns", 0) >= recovery_start
+        ):
+            raise M4ValidationError(
+                "old release/duplicate did not stay inside the recovery gap"
+            )
         if superseded[0].get("monotonic_ns", 0) <= released.get("monotonic_ns", 0):
             raise M4ValidationError("old result was not rejected after supervised release")
         if duplicate_rejections[0].get("monotonic_ns", 0) <= duplicate.get("monotonic_ns", 0):
@@ -2181,7 +3998,7 @@ def validate(run_dir: Path) -> dict[str, Any]:
     }
     gate_failures["run_identity"].extend(exact_keys(run, expected_run_keys, "M4 causality contract"))
     if (
-        run.get("schema_version") != 1
+        run.get("schema_version") != 2
         or run.get("contract") != RUN_CONTRACT
         or run.get("profile") != "m4_component"
         or run.get("provider_mode") != "real_sionna"
@@ -2243,6 +4060,15 @@ def validate(run_dir: Path) -> dict[str, Any]:
     )
     gate_failures["run_identity"].extend(identity_failures)
     details["run_identity"] = identity_details
+    try:
+        capacity_prerequisite = strict_json(
+            run_dir / "raw/prerequisites/m4_capacity_prerequisite.json"
+        )
+        gate_failures["run_identity"].extend(
+            validate_capacity_prerequisite_version(capacity_prerequisite)
+        )
+    except M4ValidationError as exc:
+        gate_failures["run_identity"].append(str(exc))
     endpoint_details, endpoint_failures = _validate_actual_endpoint_path(run_dir, run)
     gate_failures["actual_m3_sitl_path"].extend(endpoint_failures)
     details["actual_m3_sitl_path"] = endpoint_details
@@ -2410,17 +4236,24 @@ def validate(run_dir: Path) -> dict[str, Any]:
     except M4ValidationError as exc:
         gate_failures["pose_lineage"].append(str(exc))
     details["pose_lineage"] = poses
+    actual_control_audit: dict[str, Any] = {}
     try:
         packet_records = strict_jsonl(run_dir / "logs/ns3_packet_events.jsonl")
         actual_control_records = strict_jsonl(
             run_dir / "raw/actual_control/events.jsonl",
             max_line_bytes=2 * 1024 * 1024,
         )
-        transaction_records, normalization_failures = normalize_actual_control_transactions(
+        (
+            transaction_records,
+            actual_control_audit,
+            normalization_failures,
+        ) = normalize_actual_control_transactions(
             actual_control_records,
             run,
+            windows,
         )
-        gate_failures["causal_effects"].extend(normalization_failures)
+        gate_failures["actual_control_evidence"].extend(normalization_failures)
+        details["actual_control_evidence"] = actual_control_audit
         metrics, metric_failures = derive_causal_window_metrics(
             windows,
             packet_records=packet_records,
@@ -2460,6 +4293,9 @@ def validate(run_dir: Path) -> dict[str, Any]:
         }
     except M4ValidationError as exc:
         metrics = {}
+        gate_failures["actual_control_evidence"].append(
+            f"actual-control evidence is unavailable: {exc}"
+        )
         gate_failures["causal_effects"].append(str(exc))
         gate_failures["paired_causality"].append(
             "paired causal bootstrap inputs are unavailable"
@@ -2485,6 +4321,7 @@ def validate(run_dir: Path) -> dict[str, Any]:
             adapter_records=adapter_records,
             control_records=control_records,
             wire=wire,
+            windows=windows,
             target_packet_link=matrix_link_identity("uav1.control.downlink")[0],
             target_directed_link_id=matrix_link_identity("uav1.control.downlink")[1],
         )
@@ -2503,6 +4340,7 @@ def validate(run_dir: Path) -> dict[str, Any]:
         "real_provider_wire",
         "pose_lineage",
         "state_lineage",
+        "actual_control_evidence",
         "causal_effects",
         "paired_causality",
         "expiry_sequence",

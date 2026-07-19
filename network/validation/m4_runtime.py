@@ -9,7 +9,7 @@ import json
 import math
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from network.validation.m4_common import (
     EXPECTED_CELLS,
@@ -20,13 +20,14 @@ from network.validation.m4_common import (
     strict_json,
     strict_jsonl,
 )
+from network.radio_provider.sionna_packet_adapter import deterministic_loss_sample
 
 
 ROOT = Path(__file__).resolve().parents[2]
 FROZEN_BUNDLE_PATH = ROOT / "network/config/m4_canonical_scene_bundle.json"
-FROZEN_BUNDLE_ID = "ams-m4-canonical-km-v1"
+FROZEN_BUNDLE_ID = "ams-m4-canonical-km-v2"
 FROZEN_BUNDLE_SHA256 = (
-    "049d9f648eb82165a86f0b5758f984b38c03c5b0d979aaec18d18d361d9da245"
+    "a6827f964e8fcc668a109324b2760a513577370a59784e3e4eabf4ac3c45c50e"
 )
 QUERY_PERIOD_NS = 1_000_000_000
 VALIDITY_TTL_NS = 2_000_000_000
@@ -129,6 +130,717 @@ CLOCK_PRODUCER_PROCESS_ROLES = {
     "sionna_adapter": "sionna_adapter",
     "raw_collector": "runtime_collector",
 }
+
+
+def split_exact_mavlink_datagram(payload: bytes) -> list[dict[str, Any]]:
+    """Split one UDP payload into an exact ordered MAVLink v1/v2 frame list.
+
+    This is deliberately independent of pymavlink and has no cross-datagram
+    parser state.  Message-specific CRC validation remains the caller's job,
+    because validators intentionally lock different accepted dialect subsets.
+    """
+
+    if type(payload) is not bytes or not payload or len(payload) > 65_507:  # noqa: E721
+        raise M4ValidationError("actual-control MAVLink datagram size/type differs")
+    frames: list[dict[str, Any]] = []
+    offset = 0
+    while offset < len(payload):
+        magic = payload[offset]
+        if magic == 0xFD:
+            if offset + 12 > len(payload):
+                raise M4ValidationError("MAVLink v2 datagram frame is truncated")
+            body_size = payload[offset + 1]
+            incompat_flags = payload[offset + 2]
+            if incompat_flags & ~0x01:
+                raise M4ValidationError("MAVLink v2 incompatibility flags differ")
+            signed_size = 13 if incompat_flags & 0x01 else 0
+            frame_size = 12 + body_size + signed_size
+            sequence = payload[offset + 4]
+            system_id = payload[offset + 5]
+            component_id = payload[offset + 6]
+            message_id = int.from_bytes(payload[offset + 7 : offset + 10], "little")
+            version = 2
+        elif magic == 0xFE:
+            if offset + 8 > len(payload):
+                raise M4ValidationError("MAVLink v1 datagram frame is truncated")
+            body_size = payload[offset + 1]
+            frame_size = 8 + body_size
+            sequence = payload[offset + 2]
+            system_id = payload[offset + 3]
+            component_id = payload[offset + 4]
+            message_id = payload[offset + 5]
+            version = 1
+        else:
+            raise M4ValidationError("non-MAVLink byte occurs in actual-control datagram")
+        end = offset + frame_size
+        if end > len(payload):
+            raise M4ValidationError("MAVLink datagram ends inside a frame")
+        frame = payload[offset:end]
+        frames.append(
+            {
+                "version": version,
+                "offset": offset,
+                "size": frame_size,
+                "sequence": sequence,
+                "system_id": system_id,
+                "component_id": component_id,
+                "message_id": message_id,
+                "bytes": frame,
+                "sha256": hashlib.sha256(frame).hexdigest(),
+            }
+        )
+        offset = end
+    if not frames:
+        raise M4ValidationError("actual-control datagram contains no MAVLink frame")
+    for left, right in zip(frames, frames[1:]):
+        if right["sequence"] != (left["sequence"] + 1) & 0xFF:
+            raise M4ValidationError(
+                "MAVLink frames inside one UDP datagram are not consecutive"
+            )
+    return frames
+
+
+def index_actual_control_datagrams(
+    records: Iterable[Mapping[str, Any]],
+    *,
+    expected_peers: Mapping[tuple[str, int], int],
+    expected_rx_tos: int,
+) -> dict[tuple[int, str, int], list[dict[str, Any]]]:
+    """Recompute full inbound UDP parents for later exact frame joins."""
+
+    index: dict[tuple[int, str, int], list[dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        if record.get("event") != "control_datagram_receive":
+            continue
+        encoded = record.get("transport_payload_hex")
+        if not isinstance(encoded, str) or len(encoded) > 131_014:
+            raise M4ValidationError("control datagram lacks bounded preserved bytes")
+        try:
+            payload = bytes.fromhex(encoded)
+        except ValueError as exc:
+            raise M4ValidationError("control datagram hex differs") from exc
+        frames = split_exact_mavlink_datagram(payload)
+        peer = (record.get("peer_ip"), record.get("peer_udp_port"))
+        uav = expected_peers.get(peer)  # type: ignore[arg-type]
+        received_ns = record.get("received_monotonic_ns")
+        digest = hashlib.sha256(payload).hexdigest()
+        if (
+            uav is None
+            or isinstance(received_ns, bool)
+            or not isinstance(received_ns, int)
+            or record.get("rx_tos") != expected_rx_tos
+            or record.get("transport_payload_sha256") != digest
+            or record.get("transport_payload_size") != len(payload)
+            or record.get("decoded_message_count") != len(frames)
+            or any(
+                frame["system_id"] != uav or frame["component_id"] != 1
+                for frame in frames
+            )
+        ):
+            raise M4ValidationError("control datagram parent identity/route differs")
+        parent = {
+            "event_sequence": record.get("event_sequence"),
+            "received_monotonic_ns": received_ns,
+            "uav": uav,
+            "peer_ip": peer[0],
+            "peer_udp_port": peer[1],
+            "rx_tos": expected_rx_tos,
+            "payload": payload,
+            "sha256": digest,
+            "frames": frames,
+        }
+        index[(received_ns, digest, uav)].append(parent)
+    return dict(index)
+
+
+def bind_actual_control_frame(
+    record: Mapping[str, Any],
+    *,
+    expected_message_id: int,
+    datagram_index: Mapping[tuple[int, str, int], list[dict[str, Any]]],
+    consumed_occurrences: set[tuple[int, int]],
+    frame_decoder: Callable[[bytes], Mapping[str, Any]],
+) -> tuple[dict[str, Any], Mapping[str, Any]]:
+    """Bind a derived message event to one exact frame in one raw UDP parent."""
+
+    received_ns = record.get("received_monotonic_ns")
+    digest = record.get("transport_payload_sha256")
+    uav = record.get("uav")
+    if (
+        isinstance(received_ns, bool)
+        or not isinstance(received_ns, int)
+        or not isinstance(digest, str)
+        or isinstance(uav, bool)
+        or not isinstance(uav, int)
+    ):
+        raise M4ValidationError("derived control event parent key differs")
+    parents = datagram_index.get((received_ns, digest, uav), [])
+    if len(parents) != 1:
+        raise M4ValidationError("derived control event lacks one exact UDP parent")
+    parent = parents[0]
+    parent_sequence = parent.get("event_sequence")
+    event_sequence = record.get("event_sequence")
+    if (
+        isinstance(parent_sequence, bool)
+        or not isinstance(parent_sequence, int)
+        or isinstance(event_sequence, bool)
+        or not isinstance(event_sequence, int)
+        or event_sequence <= parent_sequence
+        or record.get("peer_ip") != parent["peer_ip"]
+        or record.get("peer_udp_port") != parent["peer_udp_port"]
+        or record.get("source_system") != uav
+        or record.get("source_component") != 1
+    ):
+        raise M4ValidationError("derived control event/UDP parent lineage differs")
+    encoded = record.get("mavlink_frame_hex")
+    if not isinstance(encoded, str) or len(encoded) > 1024:
+        raise M4ValidationError("derived control event frame bytes differ")
+    try:
+        frame_bytes = bytes.fromhex(encoded)
+    except ValueError as exc:
+        raise M4ValidationError("derived control event frame hex differs") from exc
+    matching = [
+        frame
+        for frame in parent["frames"]
+        if frame["bytes"] == frame_bytes
+        and frame["message_id"] == expected_message_id
+    ]
+    if len(matching) != 1:
+        raise M4ValidationError(
+            "derived control frame does not occur exactly once in its UDP parent"
+        )
+    if (
+        record.get("mavlink_frame_sha256") != matching[0]["sha256"]
+        or record.get("mavlink_frame_size") != matching[0]["size"]
+    ):
+        raise M4ValidationError(
+            "derived control frame hash/size differs from its raw UDP occurrence"
+        )
+    occurrence = (parent_sequence, int(matching[0]["offset"]))
+    if occurrence in consumed_occurrences:
+        raise M4ValidationError("raw control frame occurrence was consumed twice")
+    decoded = dict(frame_decoder(frame_bytes))
+    if decoded.get("message_id") != expected_message_id:
+        raise M4ValidationError("derived control frame message identity differs")
+    consumed_occurrences.add(occurrence)
+    return decoded, parent
+
+
+def index_exact_ns3_unicast_deliveries(
+    records: Iterable[Mapping[str, Any]],
+    *,
+    expected_event_epoch: int,
+    expected_config_sha256: str,
+    states_by_hash: Mapping[str, Mapping[str, Any]],
+) -> dict[tuple[str, str, str], list[dict[str, Any]]]:
+    """Validate the engine envelope and index exact UID-owned deliveries."""
+
+    packet_records = [dict(record) for record in records]
+    by_uid: dict[tuple[int, int], list[dict[str, Any]]] = defaultdict(list)
+    by_sequence: dict[int, dict[str, Any]] = {}
+    previous_host = -1
+    previous_sim = -1
+    for ordinal, record in enumerate(packet_records, start=1):
+        sequence = record.get("event_sequence")
+        host = record.get("host_monotonic_ns")
+        sim = record.get("sim_time_ns")
+        uid = record.get("packet_uid")
+        if (
+            record.get("schema") != "ams.ns3.packet_event/v1"
+            or record.get("event_epoch") != expected_event_epoch
+            or record.get("config_sha256") != expected_config_sha256
+            or sequence != ordinal
+            or isinstance(host, bool)
+            or not isinstance(host, int)
+            or host < previous_host
+            or isinstance(sim, bool)
+            or not isinstance(sim, int)
+            or sim < previous_sim
+            or isinstance(uid, bool)
+            or not isinstance(uid, int)
+            or uid < 0
+            or record.get("event")
+            not in {"ingress", "enqueue", "dequeue", "channel", "egress", "drop"}
+        ):
+            raise M4ValidationError(
+                f"ns-3 packet event envelope differs at record {ordinal}"
+            )
+        previous_host, previous_sim = host, sim
+        by_sequence[sequence] = record
+        by_uid[(expected_event_epoch, uid)].append(record)
+
+    indexed: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    stable_radio_fields = {
+        "radio_state_sequence",
+        "radio_state_sha256",
+        "radio_query_id",
+        "radio_applied_state_id",
+        "radio_result_wire_sha256",
+        "radio_mapping_version",
+        "radio_mapping_seed",
+        "radio_delay_ns",
+        "radio_service_rate_bps",
+        "radio_loss_probability",
+        "radio_loss_sample",
+        "radio_intervention",
+        "radio_validity_start_monotonic_ns",
+        "radio_adapter_applied_monotonic_ns",
+        "radio_expires_monotonic_ns",
+    }
+    immutable_fields = {
+        "event_epoch",
+        "packet_uid",
+        "tos",
+        "dscp",
+        "traffic_class",
+        "directed_link",
+        "queue_id",
+        "source_ip",
+        "destination_ip",
+        "transport_protocol",
+        "source_udp_port",
+        "destination_udp_port",
+        "transport_payload_sha256",
+        "transport_payload_size",
+        "p2mp",
+        "root_transmission",
+        "config_sha256",
+        "seed",
+        "run",
+    }
+    for uid_key, chain in by_uid.items():
+        kinds = [str(record["event"]) for record in chain]
+        if "egress" not in kinds or any(record.get("p2mp") is True for record in chain):
+            continue
+        if kinds != ["ingress", "enqueue", "dequeue", "channel", "egress"]:
+            raise M4ValidationError(
+                f"delivered ns-3 UID chain shape differs: {uid_key}/{kinds}"
+            )
+        ingress, enqueue, dequeue, channel, egress = chain
+        if ingress.get("traffic_class") != "control":
+            continue
+        if any(
+            record.get(field) != ingress.get(field)
+            for record in chain[1:]
+            for field in immutable_fields
+        ):
+            raise M4ValidationError(f"ns-3 UID immutable identity differs: {uid_key}")
+        link = str(ingress.get("directed_link"))
+        if ">" not in link:
+            raise M4ValidationError("ns-3 UID directed link differs")
+        source, destination = link.split(">", 1)
+        if [record.get("device_id") for record in chain] != [
+            f"{source}.tap.ingress",
+            f"{source}.radio",
+            f"{source}.radio",
+            f"{source}.radio",
+            f"{destination}.tap.egress",
+        ]:
+            raise M4ValidationError(f"ns-3 UID physical device path differs: {uid_key}")
+        if (
+            ingress.get("traffic_class") != "control"
+            or ingress.get("queue_id") != f"{link}.control.q0"
+            or ingress.get("tos") != 184
+            or ingress.get("dscp") != 46
+            or ingress.get("transport_protocol") != 17
+            or any(
+                record.get("radio_state_status") != "fresh"
+                or record.get("radio_delivery") != "deliver"
+                for record in chain[1:]
+            )
+            or any(
+                record.get(field) != enqueue.get(field)
+                for record in chain[2:]
+                for field in stable_radio_fields
+            )
+            or enqueue.get("packet_wire_hash") != dequeue.get("packet_wire_hash")
+            or enqueue.get("packet_wire_hash") != channel.get("packet_wire_hash")
+        ):
+            raise M4ValidationError(f"ns-3 UID radio delivery differs: {uid_key}")
+        state_hash = enqueue.get("radio_state_sha256")
+        state = states_by_hash.get(str(state_hash))
+        source_sequence = state.get("source_packet_event_sequence") if state else None
+        source_event = by_sequence.get(source_sequence) if isinstance(source_sequence, int) else None
+        if (
+            not isinstance(state, Mapping)
+            or state.get("availability") != "fresh"
+            or source_event is None
+            or source_event.get("event") != "ingress"
+            or source_event.get("event_sequence", 1 << 63)
+            >= enqueue.get("event_sequence", -1)
+            or state.get("source_packet_event_epoch")
+            != source_event.get("event_epoch")
+            or state.get("source_packet_uid") != source_event.get("packet_uid")
+            or state.get("source_packet_causal_sha256")
+            != source_event.get("transport_payload_sha256")
+            or state.get("directed_link") != source_event.get("directed_link")
+            or state.get("traffic_class") != source_event.get("traffic_class")
+            or state.get("directed_link") != link
+            or state.get("traffic_class") != "control"
+        ):
+            raise M4ValidationError(f"ns-3 UID applied-state parent differs: {uid_key}")
+        effects = state.get("effects")
+        packet_to_state = {
+            "radio_state_sequence": "state_sequence",
+            "radio_query_id": "query_id",
+            "radio_applied_state_id": "applied_state_id",
+            "radio_result_wire_sha256": "result_wire_sha256",
+        }
+        packet_to_effect = {
+            "radio_mapping_version": "mapping_version",
+            "radio_mapping_seed": "mapping_seed",
+            "radio_delay_ns": "propagation_delay_ns",
+            "radio_service_rate_bps": "service_rate_bps",
+            "radio_loss_probability": "loss_probability",
+            "radio_intervention": "intervention",
+        }
+        digest = ingress.get("transport_payload_sha256")
+        observed_loss_sample = enqueue.get("radio_loss_sample")
+        observed_loss_probability = enqueue.get("radio_loss_probability")
+        intervention = enqueue.get("radio_intervention")
+        if (
+            not isinstance(effects, Mapping)
+            or any(
+                enqueue.get(packet_key) != state.get(state_key)
+                for packet_key, state_key in packet_to_state.items()
+            )
+            or any(
+                enqueue.get(packet_key) != effects.get(effect_key)
+                for packet_key, effect_key in packet_to_effect.items()
+            )
+            or not isinstance(digest, str)
+            or HEX64.fullmatch(digest) is None
+            or not finite_number(observed_loss_sample)
+            or not finite_number(observed_loss_probability)
+            or abs(
+                float(observed_loss_sample)
+                - deterministic_loss_sample(
+                    digest,
+                    str(state.get("applied_state_id")),
+                    int(effects.get("mapping_seed", -1)),
+                )
+            )
+            > 1e-15
+            or intervention not in {"natural", "force_deliver"}
+            or (
+                intervention == "natural"
+                and float(observed_loss_sample) < float(observed_loss_probability)
+            )
+            or not isinstance(enqueue.get("host_monotonic_ns"), int)
+            or not int(state.get("validity_start_monotonic_ns", 1 << 63))
+            <= int(enqueue["host_monotonic_ns"])
+            < int(state.get("expires_monotonic_ns", -1))
+        ):
+            raise M4ValidationError(f"ns-3 UID packet/state fields differ: {uid_key}")
+        rate = channel.get("radio_service_rate_bps")
+        wire_size = channel.get("packet_wire_size")
+        if (
+            isinstance(rate, bool)
+            or not isinstance(rate, int)
+            or rate <= 0
+            or isinstance(wire_size, bool)
+            or not isinstance(wire_size, int)
+            or wire_size <= 0
+        ):
+            raise M4ValidationError(f"ns-3 UID service identity differs: {uid_key}")
+        serialization_ns = (wire_size * 8 * 1_000_000_000 + rate - 1) // rate
+        base_serialization_ns = (
+            wire_size * 8 * 1_000_000_000 + 20_000_000 - 1
+        ) // 20_000_000
+        if (
+            channel.get("radio_serialization_time_ns") != serialization_ns
+            or channel.get("radio_base_serialization_time_ns")
+            != base_serialization_ns
+            or channel.get("radio_service_padding_ns")
+            != max(0, serialization_ns - base_serialization_ns)
+            or channel.get("radio_base_channel_delay_ns") != 2_000_000
+            or channel.get("radio_effective_channel_delay_ns")
+            != int(channel.get("radio_delay_ns", -1))
+            + max(0, serialization_ns - base_serialization_ns)
+            or not isinstance(channel.get("radio_rate_applied_at_monotonic_ns"), int)
+            or channel.get("radio_delay_applied_at_monotonic_ns")
+            != channel.get("radio_rate_applied_at_monotonic_ns")
+            or channel.get("radio_applied_device_id") != f"{source}.radio"
+            or channel.get("radio_rate_applied_at_monotonic_ns")
+            > channel.get("host_monotonic_ns", -1)
+        ):
+            raise M4ValidationError(f"ns-3 UID service effects differ: {uid_key}")
+        indexed[(link, "control", digest)].append(
+            {
+                "uid_key": uid_key,
+                "ingress": ingress,
+                "enqueue": enqueue,
+                "dequeue": dequeue,
+                "channel": channel,
+                "egress": egress,
+            }
+        )
+    for chains in indexed.values():
+        chains.sort(
+            key=lambda item: (
+                int(item["ingress"]["host_monotonic_ns"]),
+                int(item["ingress"]["event_sequence"]),
+            )
+        )
+    return dict(indexed)
+
+
+def index_exact_ns3_unicast_drops(
+    records: Iterable[Mapping[str, Any]],
+    *,
+    expected_event_epoch: int,
+    expected_config_sha256: str,
+    states_by_hash: Mapping[str, Mapping[str, Any]],
+    required_intervention: str | None = None,
+) -> dict[tuple[str, str, str], list[dict[str, Any]]]:
+    """Index exact Sionna-owned unicast drops by ns-3 packet occurrence.
+
+    A packet can be rejected at enqueue by its fresh Sionna outcome, or it can
+    be admitted with a fresh state and fail closed when that state expires or
+    is superseded while queued.  Both shapes retain one UID and never egress.
+    """
+
+    packet_records = [dict(record) for record in records]
+    by_uid: dict[tuple[int, int], list[dict[str, Any]]] = defaultdict(list)
+    by_sequence: dict[int, dict[str, Any]] = {}
+    for ordinal, record in enumerate(packet_records, start=1):
+        uid = record.get("packet_uid")
+        if (
+            record.get("schema") != "ams.ns3.packet_event/v1"
+            or record.get("event_epoch") != expected_event_epoch
+            or record.get("config_sha256") != expected_config_sha256
+            or record.get("event_sequence") != ordinal
+            or isinstance(uid, bool)
+            or not isinstance(uid, int)
+            or uid < 0
+        ):
+            raise M4ValidationError(
+                f"ns-3 dropped packet envelope differs at record {ordinal}"
+            )
+        by_sequence[ordinal] = record
+        by_uid[(expected_event_epoch, uid)].append(record)
+
+    immutable_fields = {
+        "event_epoch",
+        "packet_uid",
+        "tos",
+        "dscp",
+        "traffic_class",
+        "directed_link",
+        "queue_id",
+        "source_ip",
+        "destination_ip",
+        "transport_protocol",
+        "source_udp_port",
+        "destination_udp_port",
+        "transport_payload_sha256",
+        "transport_payload_size",
+        "p2mp",
+        "root_transmission",
+        "config_sha256",
+        "seed",
+        "run",
+    }
+    stable_radio_fields = {
+        "radio_state_sequence",
+        "radio_state_sha256",
+        "radio_query_id",
+        "radio_applied_state_id",
+        "radio_result_wire_sha256",
+        "radio_mapping_version",
+        "radio_mapping_seed",
+        "radio_delay_ns",
+        "radio_service_rate_bps",
+        "radio_loss_probability",
+        "radio_loss_sample",
+        "radio_intervention",
+        "radio_validity_start_monotonic_ns",
+        "radio_adapter_applied_monotonic_ns",
+        "radio_expires_monotonic_ns",
+    }
+    indexed: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    for uid_key, chain in by_uid.items():
+        if any(record.get("p2mp") is True for record in chain):
+            continue
+        kinds = [record.get("event") for record in chain]
+        if not kinds or kinds[-1] != "drop" or "egress" in kinds:
+            continue
+        ingress = chain[0]
+        if ingress.get("traffic_class") != "control":
+            continue
+        if kinds not in (["ingress", "drop"], ["ingress", "enqueue", "drop"]):
+            raise M4ValidationError(
+                f"dropped ns-3 UID chain shape differs: {uid_key}/{kinds}"
+            )
+        drop = chain[-1]
+        decision = drop if len(chain) == 2 else chain[1]
+        link = ingress.get("directed_link")
+        if not isinstance(link, str) or link.count(">") != 1:
+            raise M4ValidationError(f"dropped ns-3 UID link differs: {uid_key}")
+        source, _destination = link.split(">", 1)
+        if (
+            any(
+                record.get(field) != ingress.get(field)
+                for record in chain[1:]
+                for field in immutable_fields
+            )
+            or [record.get("device_id") for record in chain]
+            != [f"{source}.tap.ingress", *([f"{source}.radio"] * (len(chain) - 1))]
+            or ingress.get("queue_id") != f"{link}.control.q0"
+            or ingress.get("tos") != 184
+            or ingress.get("dscp") != 46
+            or ingress.get("transport_protocol") != 17
+        ):
+            raise M4ValidationError(f"dropped ns-3 UID identity/path differs: {uid_key}")
+
+        state = states_by_hash.get(str(decision.get("radio_state_sha256")))
+        source_sequence = state.get("source_packet_event_sequence") if state else None
+        source_event = (
+            by_sequence.get(source_sequence)
+            if isinstance(source_sequence, int) and not isinstance(source_sequence, bool)
+            else None
+        )
+        effects = state.get("effects") if isinstance(state, Mapping) else None
+        digest = ingress.get("transport_payload_sha256")
+        packet_to_state = {
+            "radio_state_sequence": "state_sequence",
+            "radio_query_id": "query_id",
+            "radio_applied_state_id": "applied_state_id",
+            "radio_result_wire_sha256": "result_wire_sha256",
+        }
+        packet_to_effect = {
+            "radio_mapping_version": "mapping_version",
+            "radio_mapping_seed": "mapping_seed",
+            "radio_delay_ns": "propagation_delay_ns",
+            "radio_service_rate_bps": "service_rate_bps",
+            "radio_loss_probability": "loss_probability",
+            "radio_intervention": "intervention",
+        }
+        sample = decision.get("radio_loss_sample")
+        probability = decision.get("radio_loss_probability")
+        intervention = decision.get("radio_intervention")
+        if (
+            not isinstance(state, Mapping)
+            or state.get("availability") != "fresh"
+            or not isinstance(effects, Mapping)
+            or source_event is None
+            or source_event.get("event") != "ingress"
+            or source_event.get("event_sequence", 1 << 63)
+            >= decision.get("event_sequence", -1)
+            or state.get("source_packet_event_epoch")
+            != source_event.get("event_epoch")
+            or state.get("source_packet_uid") != source_event.get("packet_uid")
+            or state.get("source_packet_causal_sha256")
+            != source_event.get("transport_payload_sha256")
+            or state.get("directed_link") != source_event.get("directed_link")
+            or state.get("traffic_class") != source_event.get("traffic_class")
+            or state.get("directed_link") != link
+            or state.get("traffic_class") != "control"
+            or any(
+                decision.get(packet_key) != state.get(state_key)
+                for packet_key, state_key in packet_to_state.items()
+            )
+            or any(
+                decision.get(packet_key) != effects.get(effect_key)
+                for packet_key, effect_key in packet_to_effect.items()
+            )
+            or not isinstance(digest, str)
+            or HEX64.fullmatch(digest) is None
+            or not finite_number(sample)
+            or not finite_number(probability)
+            or abs(
+                float(sample)
+                - deterministic_loss_sample(
+                    digest,
+                    str(state.get("applied_state_id")),
+                    int(effects.get("mapping_seed", -1)),
+                )
+            )
+            > 1e-15
+            or intervention not in {"natural", "force_drop", "force_deliver"}
+            or (
+                required_intervention is not None
+                and intervention != required_intervention
+            )
+            or not isinstance(decision.get("host_monotonic_ns"), int)
+            or not int(state.get("validity_start_monotonic_ns", 1 << 63))
+            <= int(decision["host_monotonic_ns"])
+            < int(state.get("expires_monotonic_ns", -1))
+        ):
+            raise M4ValidationError(
+                f"dropped ns-3 UID packet/state lineage differs: {uid_key}"
+            )
+
+        if len(chain) == 2:
+            rate = int(effects.get("service_rate_bps", -1))
+            expected_drop = (
+                rate == 0
+                or intervention == "force_drop"
+                or (
+                    intervention == "natural"
+                    and float(sample) < float(probability)
+                )
+            )
+            expected_reason = (
+                "sionna_service_rate_zero" if rate == 0 else "sionna_loss"
+            )
+            if (
+                not expected_drop
+                or drop.get("radio_state_status") != "fresh"
+                or drop.get("radio_delivery") != "drop"
+                or drop.get("drop_reason") != expected_reason
+            ):
+                raise M4ValidationError(
+                    f"initial Sionna drop outcome differs: {uid_key}"
+                )
+        else:
+            enqueue = chain[1]
+            expected_delivery = (
+                int(effects.get("service_rate_bps", -1)) > 0
+                and intervention != "force_drop"
+                and (
+                    intervention == "force_deliver"
+                    or float(sample) >= float(probability)
+                )
+            )
+            status = drop.get("radio_state_status")
+            status_reason = {
+                "expired_in_queue": "sionna_state_expired_in_queue",
+                "superseded_in_queue": "sionna_state_superseded_in_queue",
+                "unavailable_in_queue": "sionna_state_unavailable_in_queue",
+            }
+            if (
+                not expected_delivery
+                or enqueue.get("radio_state_status") != "fresh"
+                or enqueue.get("radio_delivery") != "deliver"
+                or any(
+                    drop.get(field) != enqueue.get(field)
+                    for field in stable_radio_fields
+                )
+                or status not in status_reason
+                or drop.get("radio_delivery") != "drop"
+                or drop.get("drop_reason") != status_reason.get(status)
+            ):
+                raise M4ValidationError(
+                    f"queued Sionna drop outcome differs: {uid_key}"
+                )
+        indexed[(link, "control", str(digest))].append(
+            {
+                "uid_key": uid_key,
+                "ingress": ingress,
+                "decision": decision,
+                "drop": drop,
+                "egress": None,
+            }
+        )
+    for chains in indexed.values():
+        chains.sort(
+            key=lambda item: (
+                int(item["ingress"]["host_monotonic_ns"]),
+                int(item["ingress"]["event_sequence"]),
+            )
+        )
+    return dict(indexed)
 
 
 def sha256_file(path: Path) -> str:

@@ -542,6 +542,9 @@ canonical scene bundle containing:
 - Gazebo world, ROS odometry, ArduPilot NED, and Sionna frame definitions:
   origin, axes, handedness, units, quaternion convention, and transform
   version;
+- one explicit ArduPilot SITL WGS84 home equal to the Gazebo spherical origin,
+  plus synchronized raw `GLOBAL_POSITION_INT` latitude/longitude proof against
+  absolute Gazebo ENU position for every UAV throughout acceptance;
 - at least six distributed landmarks, including three non-collinear points,
   matching within 1 metre;
 - RF/collision geometry correspondence checks and usable bounds;
@@ -1157,12 +1160,28 @@ be eligible:
 2. Before M4 closure, the final six-node/jammer scene runs real Sionna queries at
    the proposed update period for exactly 600 measurement seconds while the
    external ns-3 path carries the frozen non-zero 30-cell vector at least as
-   large as the accepted M3 per-cell nominal rates. It must meet the RTF,
-   query-age, late-ratio and zero-stale-pose P0 thresholds without increasing
-   the already resolved validity deadline. Its receipt is reusable only while
-   Q0-Q4 manifests, accepted M3 rate vector, final scene/provider/mapping,
-   ns-3 topology/workload, update/validity/deadline policy, image/runtime,
-   acceptance host, resource/quota and competing-load identities remain equal.
+   large as the accepted M3 per-cell nominal rates. Before that measurement
+   interval, commands from the sole command-post socket traverse that same
+   external ns-3/Sionna path and place all five real ArduCopter instances in
+   `GUIDED`, armed, airborne flight. All five must remain simultaneously armed,
+   in `MAV_LANDED_STATE_IN_AIR`, and above the minimum relative-altitude gate for
+   every eligible sample throughout the exact 600-second interval. Independently
+   derived Gazebo odometry must prove a corresponding rise from each observed
+   ground baseline, nonzero flight motion, distinct vehicle positions and fresh
+   state. After measurement, modeled-path commands must land and disarm all five
+   vehicles cleanly. Command outcomes are accepted only from transaction-bound
+   MAVLink acknowledgements and TIMESYNC echoes that are byte-correlated with
+   ns-3 ingress, decision and egress evidence; producer pass flags are not
+   evidence. Raw `GLOBAL_POSITION_INT` coordinates must also match absolute
+   Gazebo ENU position under the frozen WGS84 origin, independently of the
+   LOCAL_POSITION_NED and relative-altitude delta checks. The profile must also
+   meet the RTF, query-age, late-ratio and
+   zero-stale-pose P0 thresholds without increasing the already resolved
+   validity deadline. Its receipt is reusable only while Q0-Q4 manifests,
+   accepted M3 rate vector, final scene/provider/mapping, ns-3
+   topology/workload, update/validity/deadline policy, flight-command contract,
+   image/runtime, acceptance host, resource/quota and competing-load identities
+   remain equal.
 
 Any change to a bound field or listed node, any host migration, or any identity
 reuse receipt that does not cover the capacity profile invalidates the capacity
@@ -1374,8 +1393,11 @@ Acceptance:
   no required-endpoint bind/open error, disabled-endpoint open attempt, crash,
   missing/stale pose, link-down, or undeclared restart occurs.
 
-M1 does not claim Gazebo/Sionna scene alignment. It records real-time factor but
-does not waive M4 or M7 timing gates.
+M1 does not claim that any vehicle is armed, airborne, commanded to take off, or
+following a flight trajectory; heartbeat and fresh odometry alone are not flight
+evidence. It also does not claim Gazebo/Sionna scene alignment. It records
+real-time factor but does not waive the flight-only capacity prerequisite or the
+M4/M7 timing and simultaneous-airborne gates.
 
 ### M2 — One-UAV External Packet Vertical Slice
 
@@ -1456,6 +1478,10 @@ real-byte path.
 
 Deliverables:
 
+- a six-node/provider capacity receipt in which the sole command-post control
+  socket flies all five real UAVs simultaneously through the unchanged external
+  ns-3/Sionna path for the exact 600-second measurement interval and then lands
+  and disarms them;
 - final kilometre-scale paired Gazebo/Sionna scene bundle and conversion
   fixture, already satisfying the M7 product-scene and range geometry contract;
 - asynchronous `sionna_async_schema=1` request/result worker;
@@ -1467,6 +1493,12 @@ Deliverables:
 
 Acceptance:
 
+- the independently derived capacity evidence proves all five UAVs are
+  simultaneously `GUIDED`, armed and `IN_AIR`, satisfy MAVLink relative-altitude
+  and Gazebo baseline-rise/motion gates throughout the exact measurement
+  interval, remain spatially distinct with fresh state, and land and disarm
+  cleanly afterward; every flight command and response is correlated with the
+  ns-3 packet path and no direct-control bypass exists;
 - canonical bundle hashes, transforms, asset/mesh bounds, and six distributed
   landmarks
   pass machine validation within 1 metre;
@@ -1487,6 +1519,11 @@ Acceptance:
   recovers with modeled state;
 - no accepted query uses mock/test/free-space/cached-only mode; and
 - all time/freshness thresholds pass.
+
+The deterministic good/down/recovery causality fixture pins vehicle pose and
+velocity to isolate radio-state causation. It is separate from, and may not be
+used as a substitute for, the preceding capacity profile's real airborne-flight
+evidence.
 
 ### M5 — Real-Byte Shared Medium and Priority
 
@@ -1819,8 +1856,10 @@ Milestones, not elapsed days, control progress. The critical path is:
    component stopped-window proof.
 5. Introduce the final kilometre-scale M4 canonical bundle and asynchronous
    versioned per-link Sionna worker, run the full six-node/provider capacity
-   prerequisite with the non-zero matrix load, then execute the deterministic
-   causal and expiry exercises required for M4 closure.
+   prerequisite with the non-zero matrix load while all five real UAVs fly
+   simultaneously through modeled-path commands for the exact 600-second
+   measurement and then land cleanly, then execute the separately pinned
+   deterministic causal and expiry exercises required for M4 closure.
 6. Drive real endpoint contention/overload through ns-3-owned M5 queues.
 7. Attach true PTY and Ethernet endpoints to that unchanged path for M6.
 8. Freeze identities, requalify M0, implement one non-interactive runner with

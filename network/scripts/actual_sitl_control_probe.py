@@ -23,7 +23,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -38,18 +38,121 @@ ENDPOINT_FORM = "actual_sitl_mavproxy_udp_tail"
 ROLE_SUBJECT = "gcs_control_probe"
 PROFILE_RUN_CONTRACTS = {
     "m3": "ams.m3.external_matrix_run/v1",
-    "m4_capacity": "ams.m4.capacity_run/v2",
-    "m4_causality": "ams.m4.causality_run/v1",
+    "m4_capacity": "ams.m4.capacity_run/v3",
+    "m4_causality": "ams.m4.causality_run/v2",
 }
 HEX_NONCE = re.compile(r"^(?:[0-9a-f]{32}|[0-9a-f]{64})$")
 SAFE_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 PHASE_CODES = {"positive": 1, "stopped": 2, "recovery": 3}
-MAVLINK_CRC_EXTRA = {0: 50, 76: 152, 77: 143, 148: 178, 253: 83}
+MAVLINK_CRC_EXTRA = {
+    0: 50,
+    75: 158,
+    76: 152,
+    77: 143,
+    111: 34,
+    148: 178,
+    253: 83,
+}
 TOS_CONTROL = 184
+MAX_HEARTBEAT_HISTORY_PER_UAV = 10_000
+MAX_RAW_RESPONSE_HISTORY_PER_UAV = 10_000
+OUTCOME_TIMEOUT_NS = 3_000_000_000
+MAX_RETIRED_TIMESYNC_TOKENS = 100_000
+CORRELATED_TIMESYNC_POLICY = "correlated_timesync_required"
 
 
 class ControlProbeError(RuntimeError):
     """The real control probe cannot continue without ambiguous evidence."""
+
+
+def heartbeat_counts_for_window(
+    history: Mapping[int, Iterable[int]], start_ns: int, end_ns: int
+) -> dict[str, int]:
+    """Count received heartbeats in the exact half-open causal window."""
+
+    expected_uavs = set(range(1, 6))
+    if (
+        isinstance(start_ns, bool)
+        or not isinstance(start_ns, int)
+        or isinstance(end_ns, bool)
+        or not isinstance(end_ns, int)
+        or start_ns >= end_ns
+        or set(history) != expected_uavs
+    ):
+        raise ControlProbeError("heartbeat window/history contract differs")
+    counts: dict[str, int] = {}
+    for uav in sorted(expected_uavs):
+        previous_ns = -1
+        count = 0
+        for received_ns in history[uav]:
+            if (
+                isinstance(received_ns, bool)
+                or not isinstance(received_ns, int)
+                or received_ns < previous_ns
+            ):
+                raise ControlProbeError("heartbeat receive history is not monotonic")
+            previous_ns = received_ns
+            if start_ns <= received_ns < end_ns:
+                count += 1
+        counts[f"uav{uav}"] = count
+    return counts
+
+
+def raw_response_counts_for_window(
+    history: Mapping[int, Iterable[int]], start_ns: int, end_ns: int
+) -> dict[str, int]:
+    """Count raw vehicle responses in the exact half-open causal window."""
+
+    try:
+        return heartbeat_counts_for_window(history, start_ns, end_ns)
+    except ControlProbeError as exc:
+        raise ControlProbeError("raw response window/history contract differs") from exc
+
+
+def validate_m4_window_liveness(
+    policy: "WindowPolicy",
+    heartbeat_counts: Mapping[str, int],
+    raw_ack_counts: Mapping[str, int],
+    raw_telemetry_counts: Mapping[str, int],
+) -> None:
+    """Require exact five-UAV liveness without treating raw replies as outcomes."""
+
+    labels = {f"uav{uav}" for uav in range(1, 6)}
+    if any(set(value) != labels for value in (
+        heartbeat_counts,
+        raw_ack_counts,
+        raw_telemetry_counts,
+    )):
+        raise ControlProbeError("M4 window liveness maps are not exact")
+    for uav in range(1, 6):
+        label = f"uav{uav}"
+        values = (
+            heartbeat_counts[label],
+            raw_ack_counts[label],
+            raw_telemetry_counts[label],
+        )
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in values
+        ):
+            raise ControlProbeError("M4 window liveness count is invalid")
+        response_policy = policy.response_policy_for(uav)
+        if response_policy == CORRELATED_TIMESYNC_POLICY:
+            if heartbeat_counts[label] < 3:
+                raise ControlProbeError(
+                    f"{policy.window_id}/{label} lacks three in-window heartbeats"
+                )
+            if raw_ack_counts[label] < 1 or raw_telemetry_counts[label] < 1:
+                raise ControlProbeError(
+                    f"{policy.window_id}/{label} lacks raw ACK/telemetry liveness"
+                )
+        elif response_policy == "timeout_required":
+            if raw_ack_counts[label] != 0 or raw_telemetry_counts[label] != 0:
+                raise ControlProbeError(
+                    f"{policy.window_id}/{label} has forbidden raw stopped responses"
+                )
+        else:
+            raise ControlProbeError("M4 window liveness policy is unsupported")
 
 
 def canonical_json(value: Any) -> bytes:
@@ -66,6 +169,34 @@ def sha256_file(path: Path) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def timesync_token(
+    *, run_nonce: str, phase_code: int, uav: int, ordinal: int
+) -> int:
+    """Derive one positive signed-63 correlation token without collisions in a run."""
+
+    if (
+        HEX_NONCE.fullmatch(run_nonce) is None
+        or len(run_nonce) != 64
+        or isinstance(phase_code, bool)
+        or not isinstance(phase_code, int)
+        or not 1 <= phase_code <= 15
+        or isinstance(uav, bool)
+        or not isinstance(uav, int)
+        or not 1 <= uav <= 5
+        or isinstance(ordinal, bool)
+        or not isinstance(ordinal, int)
+        or not 1 <= ordinal <= 0xFFFF
+    ):
+        raise ControlProbeError("M4 TIMESYNC correlation identity is invalid")
+    run_prefix = int.from_bytes(
+        hashlib.sha256(bytes.fromhex(run_nonce)).digest()[:5], "big"
+    )
+    token = (run_prefix << 23) | (phase_code << 19) | (uav << 16) | ordinal
+    if not 0 < token < (1 << 63):
+        raise ControlProbeError("M4 TIMESYNC correlation token is outside signed-63")
+    return token
 
 
 def transport_nonce32(profile: str, run_nonce: str) -> tuple[str, str]:
@@ -135,6 +266,34 @@ def socket_for_control() -> socket.socket:
     sock.setblocking(False)
     sock.bind(("10.71.0.10", 14600))
     return sock
+
+
+def require_control_rx_tos(
+    ancillary: Iterable[tuple[int, int, bytes]], flags: int
+) -> int:
+    """Fail closed unless one complete IPv4 TOS cmsg proves EF control."""
+
+    if flags & (
+        getattr(socket, "MSG_TRUNC", 0) | getattr(socket, "MSG_CTRUNC", 0)
+    ):
+        raise ControlProbeError("control UDP datagram or ancillary data was truncated")
+    values = [
+        int(data[0])
+        for level, kind, data in ancillary
+        if level == socket.IPPROTO_IP and kind == socket.IP_TOS
+        and len(data) == 1
+    ]
+    malformed_tos = any(
+        level == socket.IPPROTO_IP
+        and kind == socket.IP_TOS
+        and len(data) != 1
+        for level, kind, data in ancillary
+    )
+    if malformed_tos or values != [TOS_CONTROL]:
+        raise ControlProbeError(
+            f"control UDP datagram TOS differs: {values!r}, expected [{TOS_CONTROL}]"
+        )
+    return values[0]
 
 
 def x25_crc(payload: bytes) -> int:
@@ -235,6 +394,44 @@ def encode_actual_control_request(
     }
 
 
+def encode_m4_correlated_control_request(
+    *,
+    run_nonce: str,
+    transport_nonce: str,
+    phase_code: int,
+    uav: int,
+    sequence: int,
+    mavlink: MavlinkSequencer,
+) -> dict[str, Any]:
+    """Encode the M4-only atomic command plus token-bearing TIMESYNC datagram."""
+
+    request = encode_actual_control_request(
+        run_nonce=run_nonce,
+        transport_nonce=transport_nonce,
+        phase_code=phase_code,
+        uav=uav,
+        sequence=sequence,
+        mavlink=mavlink,
+    )
+    token = timesync_token(
+        run_nonce=run_nonce,
+        phase_code=phase_code,
+        uav=uav,
+        ordinal=sequence,
+    )
+    timesync_frame = mavlink.frame(111, struct.pack("<qq", 0, token))
+    datagram = request["marker_frame"] + request["command_frame"] + timesync_frame
+    return {
+        **request,
+        "timesync_request_tc1": 0,
+        "timesync_request_ts1": token,
+        "timesync_frame": timesync_frame,
+        "timesync_frame_sha256": sha256_bytes(timesync_frame),
+        "request_datagram": datagram,
+        "request_datagram_sha256": sha256_bytes(datagram),
+    }
+
+
 class EventWriter:
     def __init__(self, path: Path, args: argparse.Namespace) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -299,6 +496,10 @@ class PendingRequest:
     ordinal_send_slot: int
     transaction_id: str
     response_policy: str
+    timesync_token: int | None = None
+    timesync_frame_sha256: str | None = None
+    request_datagram_sha256: str | None = None
+    request_datagram_size: int | None = None
     ack: dict[str, Any] | None = None
     telemetry: dict[str, Any] | None = None
 
@@ -329,6 +530,21 @@ class WindowPolicy:
             return self.start_monotonic_ns
         numerator = (ordinal - 1) * self.send_span_ms * 1_000_000
         return self.start_monotonic_ns + numerator // (self.offered_per_uav - 1)
+
+    def correlated_pending_bound(self) -> int:
+        """Return the exact maximum number of live three-second token slots."""
+
+        if self.offered_per_uav <= 1:
+            return 1
+        minimum_gap_ns = (
+            self.send_span_ms * 1_000_000 // (self.offered_per_uav - 1)
+        )
+        if minimum_gap_ns <= 0:
+            raise ControlProbeError("correlated TIMESYNC slot gap is not positive")
+        return min(
+            self.offered_per_uav,
+            (OUTCOME_TIMEOUT_NS + minimum_gap_ns - 1) // minimum_gap_ns,
+        )
 
 
 class ActualSitlControlProbe:
@@ -399,10 +615,14 @@ class ActualSitlControlProbe:
             from pymavlink import mavutil
         except ImportError as exc:
             raise ControlProbeError(f"pymavlink is required: {exc}") from exc
-        self.parser = mavutil.mavlink.MAVLink(None)
-        self.parser.robust_parsing = True
+        # Parser state must never cross a UDP datagram or peer.  A new strict
+        # parser is created for every recvmsg below and its reconstructed frame
+        # bytes must consume the complete datagram exactly.
+        self.mavlink_dialect = mavutil.mavlink
         self.sequencer = MavlinkSequencer()
         self.pending: dict[int, PendingRequest] = {}
+        self.correlated_pending: dict[tuple[int, int], PendingRequest] = {}
+        self.retired_timesync_tokens: dict[tuple[int, int], dict[str, Any]] = {}
         self.quarantined_uavs: set[int] = set()
         self.expired_stopped_attempts: dict[int, list[dict[str, Any]]] = {
             uav: [] for uav in range(1, 6)
@@ -416,12 +636,44 @@ class ActualSitlControlProbe:
         }
         self.expected_expired_per_uav = {uav: 0 for uav in range(1, 6)}
         self.active_phase: str | None = None
+        self.active_policy: WindowPolicy | None = None
         self.processed_commands: set[str] = set()
         self.heartbeat_totals = {uav: 0 for uav in range(1, 6)}
+        self.raw_command_ack_totals = {uav: 0 for uav in range(1, 6)}
+        self.raw_autopilot_version_totals = {uav: 0 for uav in range(1, 6)}
+        self.raw_command_ack_received_monotonic_ns: dict[int, list[int]] = {
+            uav: [] for uav in range(1, 6)
+        }
+        self.raw_autopilot_version_received_monotonic_ns: dict[
+            int, list[int]
+        ] = {uav: [] for uav in range(1, 6)}
+        self.heartbeat_received_monotonic_ns: dict[int, list[int]] = {
+            uav: [] for uav in range(1, 6)
+        }
         self.link_ready_written = False
         self.expected_peers = {
             (f"10.71.{uav}.10", 14600 + uav): uav for uav in range(1, 6)
         }
+        # Q3 owns this probe.  Import the Q4-only flight helper only for the
+        # capacity profile so M3/causality cannot execute unconsumed Q4 bytes.
+        self.airborne_controller: Any | None = None
+        if args.profile == "m4_capacity":
+            from network.scripts.m4_capacity_airborne import (
+                AIRBORNE_GATE_CONTRACT,
+                CapacityAirborneController,
+            )
+
+            gate = run.get("airborne_gate")
+            if not isinstance(gate, dict) or gate.get("contract") != AIRBORNE_GATE_CONTRACT:
+                raise ControlProbeError("M4 capacity run lacks the airborne gate")
+            self.airborne_controller = CapacityAirborneController(
+                run_nonce=args.run_nonce,
+                gate=gate,
+                sock=self.sock,
+                sequencer=self.sequencer,
+                writer=self.writer,
+                pump=self.pump,
+            )
 
     @staticmethod
     def _frame_record(message: Any) -> dict[str, Any]:
@@ -463,6 +715,19 @@ class ActualSitlControlProbe:
         pending = self.pending.pop(uav)
         completed_ns = time.monotonic_ns()
         elapsed_ms = (completed_ns - pending.sent_monotonic_ns) / 1_000_000
+        m4_correlation = (
+            {}
+            if pending.timesync_token is None
+            else {
+                "correlation_kind": "mavlink_timesync_echo_v1",
+                "timesync_request_tc1": 0,
+                "timesync_request_ts1": pending.timesync_token,
+                "timesync_request_frame_sha256": pending.timesync_frame_sha256,
+                "request_transport_payload_sha256": pending.request_datagram_sha256,
+                "request_transport_payload_size": pending.request_datagram_size,
+                "timesync_response": None,
+            }
+        )
         self.writer.emit(
             "transaction_result",
             phase=pending.phase,
@@ -492,6 +757,7 @@ class ActualSitlControlProbe:
             timeout_elapsed_ms=round(elapsed_ms, 6),
             timeout_contract_satisfied=not timed_out or elapsed_ms >= 3000.0,
             success=not timed_out and pending.ack is not None and pending.telemetry is not None,
+            **m4_correlation,
         )
         if timed_out and pending.response_policy == "timeout_required":
             expired = {
@@ -514,6 +780,194 @@ class ActualSitlControlProbe:
             self.last_stopped_timeout_monotonic_ns_by_uav[uav] = completed_ns
             self.guarded_uavs.add(uav)
             self.writer.emit("stopped_attempt_quarantined", **expired)
+
+    def _ensure_correlated_state(self) -> None:
+        if not hasattr(self, "correlated_pending"):
+            self.correlated_pending = {}
+        if not hasattr(self, "retired_timesync_tokens"):
+            self.retired_timesync_tokens = {}
+
+    def _retire_timesync(
+        self, key: tuple[int, int], pending: PendingRequest, *, outcome: str
+    ) -> None:
+        self._ensure_correlated_state()
+        if key in self.retired_timesync_tokens:
+            raise ControlProbeError("TIMESYNC correlation token was retired twice")
+        if len(self.retired_timesync_tokens) >= MAX_RETIRED_TIMESYNC_TOKENS:
+            raise ControlProbeError("TIMESYNC correlation tombstone bound exceeded")
+        self.retired_timesync_tokens[key] = {
+            "outcome": outcome,
+            "transaction_id": pending.transaction_id,
+            "window_id": pending.window_id,
+            "sequence": pending.sequence,
+            "late_seen": False,
+        }
+
+    def _complete_correlated(
+        self,
+        key: tuple[int, int],
+        *,
+        timed_out: bool,
+        timesync_response: dict[str, Any] | None = None,
+        completed_ns: int | None = None,
+    ) -> None:
+        self._ensure_correlated_state()
+        pending = self.correlated_pending.pop(key)
+        completed_ns = time.monotonic_ns() if completed_ns is None else completed_ns
+        elapsed_ms = (completed_ns - pending.sent_monotonic_ns) / 1_000_000
+        if timed_out == (timesync_response is not None):
+            raise ControlProbeError("TIMESYNC outcome/result union is invalid")
+        self.writer.emit(
+            "transaction_result",
+            phase=pending.phase,
+            window_id=pending.window_id,
+            transport_phase_code=pending.transport_phase_code,
+            flow_group_id=pending.flow_group_id,
+            ordinal_send_slot=pending.ordinal_send_slot,
+            transaction_id=pending.transaction_id,
+            uav=pending.uav,
+            sequence=pending.sequence,
+            endpoint_form=ENDPOINT_FORM,
+            downlink_cell_id=f"uav{pending.uav}.control.downlink",
+            uplink_cell_id=f"uav{pending.uav}.control.uplink",
+            record_nonce=pending.record_nonce,
+            full_run_nonce=pending.full_run_nonce,
+            transport_nonce32=pending.transport_nonce32,
+            transport_nonce_derivation=pending.transport_nonce_derivation,
+            sent_monotonic_ns=pending.sent_monotonic_ns,
+            scheduled_send_monotonic_ns=pending.scheduled_send_monotonic_ns,
+            send_lateness_ns=pending.send_lateness_ns,
+            completed_monotonic_ns=completed_ns,
+            command_frame_sha256=pending.command_frame_sha256,
+            marker_frame_sha256=pending.marker_frame_sha256,
+            correlation_kind="mavlink_timesync_echo_v1",
+            timesync_request_tc1=0,
+            timesync_request_ts1=pending.timesync_token,
+            timesync_request_frame_sha256=pending.timesync_frame_sha256,
+            request_transport_payload_sha256=pending.request_datagram_sha256,
+            request_transport_payload_size=pending.request_datagram_size,
+            timesync_response=timesync_response,
+            ack=None,
+            requested_telemetry=None,
+            timed_out=timed_out,
+            timeout_elapsed_ms=round(elapsed_ms, 6),
+            timeout_contract_satisfied=not timed_out or elapsed_ms >= 3000.0,
+            success=not timed_out and timesync_response is not None,
+        )
+        self._retire_timesync(
+            key, pending, outcome="timeout" if timed_out else "success"
+        )
+
+    def _handle_timesync_response(
+        self,
+        *,
+        uav: int,
+        message: Any,
+        received_ns: int,
+        common: dict[str, Any],
+    ) -> None:
+        tc1 = getattr(message, "tc1", None)
+        ts1 = getattr(message, "ts1", None)
+        if (
+            tc1 == 0
+            and not isinstance(tc1, bool)
+            and isinstance(ts1, int)
+            and not isinstance(ts1, bool)
+            and 0 < ts1 < (1 << 63)
+        ):
+            self.writer.emit(
+                "ambient_timesync_request",
+                timesync_tc1=tc1,
+                timesync_ts1=ts1,
+                **common,
+            )
+            return
+        if (
+            isinstance(tc1, bool)
+            or not isinstance(tc1, int)
+            or tc1 <= 0
+            or isinstance(ts1, bool)
+            or not isinstance(ts1, int)
+            or not 0 < ts1 < (1 << 63)
+        ):
+            self.writer.emit("invalid_timesync_echo", **common)
+            raise ControlProbeError("TIMESYNC echo fields are invalid")
+        legacy_pending = self.pending.get(uav)
+        if (
+            legacy_pending is not None
+            and legacy_pending.response_policy == "timeout_required"
+        ):
+            self.writer.emit(
+                "forbidden_stopped_control_response",
+                phase=self.active_phase,
+                sequence=legacy_pending.sequence,
+                timesync_tc1=tc1,
+                timesync_ts1=ts1,
+                **common,
+            )
+            raise ControlProbeError(f"stopped TIMESYNC response from uav{uav}")
+        # Locked ArduPilot replies with its local clock in ``tc1`` and copies
+        # our request ``ts1`` token into response ``ts1`` exactly.
+        key = (uav, ts1)
+        self._ensure_correlated_state()
+        pending = self.correlated_pending.get(key)
+        if pending is None:
+            retired = self.retired_timesync_tokens.get(key)
+            if retired is None:
+                self.writer.emit(
+                    "uncorrelated_timesync_echo",
+                    timesync_tc1=tc1,
+                    timesync_ts1=ts1,
+                    **common,
+                )
+                raise ControlProbeError("unknown TIMESYNC correlation token")
+            if retired["outcome"] != "timeout" or retired["late_seen"] is True:
+                self.writer.emit(
+                    "duplicate_timesync_echo",
+                    transaction_id=retired["transaction_id"],
+                    timesync_tc1=tc1,
+                    timesync_ts1=ts1,
+                    **common,
+                )
+                raise ControlProbeError("duplicate TIMESYNC correlation response")
+            retired["late_seen"] = True
+            self.writer.emit(
+                "late_timesync_echo",
+                transaction_id=retired["transaction_id"],
+                window_id=retired["window_id"],
+                ordinal_send_slot=retired["sequence"],
+                timesync_tc1=tc1,
+                timesync_ts1=ts1,
+                **common,
+            )
+            return
+        response = {
+            **common,
+            "timesync_tc1": tc1,
+            "timesync_ts1": ts1,
+        }
+        if received_ns - pending.sent_monotonic_ns >= OUTCOME_TIMEOUT_NS:
+            self._complete_correlated(
+                key, timed_out=True, completed_ns=received_ns
+            )
+            retired = self.retired_timesync_tokens[key]
+            retired["late_seen"] = True
+            self.writer.emit(
+                "late_timesync_echo",
+                transaction_id=pending.transaction_id,
+                window_id=pending.window_id,
+                ordinal_send_slot=pending.ordinal_send_slot,
+                timesync_tc1=tc1,
+                timesync_ts1=ts1,
+                **common,
+            )
+            return
+        self._complete_correlated(
+            key,
+            timed_out=False,
+            timesync_response=response,
+            completed_ns=received_ns,
+        )
 
     def _handle_message(
         self,
@@ -545,13 +999,126 @@ class ActualSitlControlProbe:
             "transport_payload_sha256": datagram_sha256,
             **frame,
         }
+        airborne = getattr(self, "airborne_controller", None)
+        if airborne is not None and airborne.observe_message(
+            message_type=message_type,
+            uav=system_id,
+            message=message,
+            received_ns=received_ns,
+            common=common,
+        ):
+            return
         if message_type == "HEARTBEAT":
+            history = self.heartbeat_received_monotonic_ns[system_id]
+            if len(history) >= MAX_HEARTBEAT_HISTORY_PER_UAV:
+                self.writer.emit(
+                    "heartbeat_history_overflow",
+                    maximum_per_uav=MAX_HEARTBEAT_HISTORY_PER_UAV,
+                    **common,
+                )
+                raise ControlProbeError("heartbeat receive history exceeded its bound")
+            history.append(received_ns)
             self.heartbeat_totals[system_id] += 1
             self.writer.emit("real_heartbeat", **common)
             self._write_link_ready_if_complete()
             return
+        if message_type == "TIMESYNC":
+            self._handle_timesync_response(
+                uav=system_id,
+                message=message,
+                received_ns=received_ns,
+                common=common,
+            )
+            return
         pending = self.pending.get(system_id)
+        active_policy = getattr(self, "active_policy", None)
+        active_response_policy = (
+            active_policy.response_policy_for(system_id)
+            if active_policy is not None
+            else None
+        )
+        if (
+            pending is not None
+            and pending.response_policy == "timeout_required"
+            and message_type in {"COMMAND_ACK", "AUTOPILOT_VERSION"}
+        ):
+            self.writer.emit(
+                "forbidden_stopped_control_response",
+                phase=self.active_phase,
+                sequence=pending.sequence,
+                **common,
+            )
+            raise ControlProbeError(f"stopped response from uav{system_id}")
+        if (
+            active_response_policy == CORRELATED_TIMESYNC_POLICY
+            and message_type in {"COMMAND_ACK", "AUTOPILOT_VERSION"}
+        ):
+            if not hasattr(self, "raw_command_ack_totals"):
+                self.raw_command_ack_totals = {uav: 0 for uav in range(1, 6)}
+            if not hasattr(self, "raw_autopilot_version_totals"):
+                self.raw_autopilot_version_totals = {
+                    uav: 0 for uav in range(1, 6)
+                }
+            if not hasattr(self, "raw_command_ack_received_monotonic_ns"):
+                self.raw_command_ack_received_monotonic_ns = {
+                    uav: [] for uav in range(1, 6)
+                }
+            if not hasattr(
+                self, "raw_autopilot_version_received_monotonic_ns"
+            ):
+                self.raw_autopilot_version_received_monotonic_ns = {
+                    uav: [] for uav in range(1, 6)
+                }
+            raw_response = {
+                **common,
+                "phase": active_policy.window_id,
+                "window_id": active_policy.window_id,
+                "response_policy": active_response_policy,
+            }
+            if message_type == "COMMAND_ACK":
+                command = getattr(message, "command", None)
+                result = getattr(message, "result", None)
+                if (
+                    isinstance(command, bool)
+                    or command != 512
+                    or isinstance(result, bool)
+                    or result != 0
+                ):
+                    self.writer.emit("invalid_window_command_ack", **raw_response)
+                    raise ControlProbeError("M4 correlated window ACK is invalid")
+                history = self.raw_command_ack_received_monotonic_ns[system_id]
+                if len(history) >= MAX_RAW_RESPONSE_HISTORY_PER_UAV:
+                    raise ControlProbeError("raw command ACK history exceeded its bound")
+                history.append(received_ns)
+                self.raw_command_ack_totals[system_id] += 1
+                self.writer.emit(
+                    "real_window_command_ack",
+                    mavlink_command=command,
+                    mavlink_result=result,
+                    **raw_response,
+                )
+            else:
+                history = self.raw_autopilot_version_received_monotonic_ns[
+                    system_id
+                ]
+                if len(history) >= MAX_RAW_RESPONSE_HISTORY_PER_UAV:
+                    raise ControlProbeError(
+                        "raw AUTOPILOT_VERSION history exceeded its bound"
+                    )
+                history.append(received_ns)
+                self.raw_autopilot_version_totals[system_id] += 1
+                self.writer.emit(
+                    "real_window_requested_telemetry", **raw_response
+                )
+            return
         if pending is None and message_type in {"COMMAND_ACK", "AUTOPILOT_VERSION"}:
+            if (
+                getattr(getattr(self, "args", None), "profile", None)
+                == "m4_causality"
+                and system_id not in self.guarded_uavs
+            ):
+                self.writer.emit("late_unbound_window_response", **common)
+                return
             event = (
                 "late_stopped_control_response"
                 if system_id in self.guarded_uavs
@@ -561,17 +1128,6 @@ class ActualSitlControlProbe:
             raise ControlProbeError(f"{event} from uav{system_id}")
         if pending is None:
             return
-        if pending.response_policy == "timeout_required" and message_type in {
-            "COMMAND_ACK",
-            "AUTOPILOT_VERSION",
-        }:
-            self.writer.emit(
-                "forbidden_stopped_control_response",
-                phase=self.active_phase,
-                sequence=pending.sequence,
-                **common,
-            )
-            raise ControlProbeError(f"stopped response from uav{system_id}")
         response = {
             **common,
             "phase": pending.phase,
@@ -592,23 +1148,34 @@ class ActualSitlControlProbe:
             self._complete_pending(system_id, timed_out=False)
 
     def pump(self, timeout_s: float) -> None:
+        self._update_capacity_flight_boundaries(time.monotonic_ns())
         readable, _writable, _errors = select.select([self.sock], [], [], timeout_s)
         if not readable:
+            self._update_capacity_flight_boundaries(time.monotonic_ns())
             return
         while True:
             try:
-                payload, ancillary, _flags, peer_raw = self.sock.recvmsg(65535, 128)
+                payload, ancillary, flags, peer_raw = self.sock.recvmsg(65535, 128)
             except BlockingIOError:
                 return
             peer = (str(peer_raw[0]), int(peer_raw[1]))
             received_ns = time.monotonic_ns()
-            rx_tos: int | None = None
-            for level, kind, data in ancillary:
-                if level == socket.IPPROTO_IP and kind == getattr(socket, "IP_TOS", 1):
-                    rx_tos = int.from_bytes(data, sys.byteorder)
+            rx_tos = require_control_rx_tos(ancillary, flags)
             datagram_hash = sha256_bytes(payload)
             try:
-                parsed = self.parser.parse_buffer(payload)
+                parser = self.mavlink_dialect.MAVLink(None)
+                parser.robust_parsing = False
+                parsed = parser.parse_buffer(payload)
+                messages = [] if parsed is None else list(parsed)
+                if (
+                    not messages
+                    or any(str(message.get_type()) == "BAD_DATA" for message in messages)
+                    or b"".join(bytes(message.get_msgbuf()) for message in messages)
+                    != payload
+                ):
+                    raise ControlProbeError(
+                        "MAVLink parser did not consume the exact UDP datagram"
+                    )
             except Exception as exc:
                 self.writer.emit(
                     "control_parse_error",
@@ -622,7 +1189,6 @@ class ActualSitlControlProbe:
                     error=f"{type(exc).__name__}: {exc}",
                 )
                 raise ControlProbeError("real control MAVLink parse failure") from exc
-            messages = [] if parsed is None else list(parsed)
             self.writer.emit(
                 "control_datagram_receive",
                 peer_ip=peer[0],
@@ -632,16 +1198,27 @@ class ActualSitlControlProbe:
                 transport_payload_hex=payload.hex(),
                 transport_payload_sha256=datagram_hash,
                 transport_payload_size=len(payload),
-                decoded_message_count=sum(str(message.get_type()) != "BAD_DATA" for message in messages),
+                decoded_message_count=len(messages),
             )
             for message in messages:
-                if str(message.get_type()) != "BAD_DATA":
-                    self._handle_message(
-                        message,
-                        peer=peer,
-                        received_ns=received_ns,
-                        datagram_sha256=datagram_hash,
-                    )
+                self._handle_message(
+                    message,
+                    peer=peer,
+                    received_ns=received_ns,
+                    datagram_sha256=datagram_hash,
+                )
+            self._update_capacity_flight_boundaries(time.monotonic_ns())
+
+    def _update_capacity_flight_boundaries(self, now_ns: int) -> None:
+        airborne = getattr(self, "airborne_controller", None)
+        if airborne is None or not airborne.started:
+            return
+        start_ns = int(airborne.gate["measurement_start_monotonic_ns"])
+        end_ns = int(airborne.gate["measurement_end_monotonic_ns"])
+        if not airborne.measurement_started and now_ns >= start_ns:
+            airborne.mark_measurement_started()
+        if airborne.measurement_started and not airborne.measurement_ended and now_ns >= end_ns:
+            airborne.mark_measurement_ended()
 
     def pump_until(self, deadline_ns: int) -> None:
         while (remaining_ns := deadline_ns - time.monotonic_ns()) > 0:
@@ -652,19 +1229,81 @@ class ActualSitlControlProbe:
         for uav in [
             value
             for value, pending in self.pending.items()
-            if now_ns - pending.sent_monotonic_ns >= 3_000_000_000
+            if now_ns - pending.sent_monotonic_ns >= OUTCOME_TIMEOUT_NS
         ]:
             pending = self.pending[uav]
             self._complete_pending(uav, timed_out=True)
             if pending.response_policy != "timeout_required":
                 self.quarantined_uavs.add(uav)
+        self._ensure_correlated_state()
+        for key in [
+            value
+            for value, pending in self.correlated_pending.items()
+            if now_ns - pending.sent_monotonic_ns >= OUTCOME_TIMEOUT_NS
+        ]:
+            self._complete_correlated(
+                key, timed_out=True, completed_ns=now_ns
+            )
 
     def send_request(self, policy: WindowPolicy, uav: int, sequence: int) -> None:
-        if uav in self.pending or uav in self.quarantined_uavs:
+        response_policy = policy.response_policy_for(uav)
+        correlated_profile = (
+            getattr(self.args, "profile", None) == "m4_causality"
+        )
+        self._ensure_correlated_state()
+        if uav in self.quarantined_uavs:
             raise ControlProbeError(f"overlap/quarantine for uav{uav}")
+        if correlated_profile:
+            if response_policy == CORRELATED_TIMESYNC_POLICY:
+                if uav in self.pending:
+                    raise ControlProbeError(f"serial/correlated overlap for uav{uav}")
+                live_for_uav = sum(
+                    key[0] == uav for key in self.correlated_pending
+                )
+                if live_for_uav >= policy.correlated_pending_bound():
+                    raise ControlProbeError(
+                        f"correlated TIMESYNC pending bound exceeded for uav{uav}"
+                    )
+            elif response_policy == "timeout_required":
+                if uav in self.pending or any(
+                    key[0] == uav for key in self.correlated_pending
+                ):
+                    raise ControlProbeError(f"overlap/quarantine for uav{uav}")
+            else:
+                raise ControlProbeError("M4 causal response policy is unsupported")
+        elif uav in self.pending or any(
+            key[0] == uav for key in self.correlated_pending
+        ):
+            raise ControlProbeError(f"overlap/quarantine for uav{uav}")
+        correlated_key: tuple[int, int] | None = None
+        if correlated_profile and response_policy == CORRELATED_TIMESYNC_POLICY:
+            correlated_key = (
+                uav,
+                timesync_token(
+                    run_nonce=self.args.run_nonce,
+                    phase_code=policy.transport_phase_code,
+                    uav=uav,
+                    ordinal=sequence,
+                ),
+            )
+            if (
+                correlated_key in self.correlated_pending
+                or correlated_key in self.retired_timesync_tokens
+            ):
+                raise ControlProbeError("TIMESYNC correlation token was reused")
+            if (
+                len(self.correlated_pending) + len(self.retired_timesync_tokens)
+                >= MAX_RETIRED_TIMESYNC_TOKENS
+            ):
+                raise ControlProbeError("TIMESYNC correlation run bound exceeded")
         sent_ns = time.monotonic_ns()
         scheduled_ns = policy.slot_monotonic_ns(sequence)
-        request = encode_actual_control_request(
+        encoder = (
+            encode_m4_correlated_control_request
+            if correlated_profile
+            else encode_actual_control_request
+        )
+        request = encoder(
             run_nonce=self.args.run_nonce,
             transport_nonce=self.args.transport_nonce32,
             phase_code=policy.transport_phase_code,
@@ -673,9 +1312,38 @@ class ActualSitlControlProbe:
             mavlink=self.sequencer,
         )
         destination = (f"10.71.{uav}.10", 14600 + uav)
-        marker_size = self.sock.sendto(request["marker_frame"], destination)
-        command_size = self.sock.sendto(request["command_frame"], destination)
-        self.pending[uav] = PendingRequest(
+        if correlated_profile:
+            datagram_size = self.sock.sendto(
+                request["request_datagram"], destination
+            )
+            if datagram_size != len(request["request_datagram"]):
+                raise ControlProbeError("short M4 causal control datagram send")
+            send_evidence = {
+                "timesync_request_tc1": request["timesync_request_tc1"],
+                "timesync_request_ts1": request["timesync_request_ts1"],
+                "timesync_frame_hex": request["timesync_frame"].hex(),
+                "timesync_frame_sha256": request["timesync_frame_sha256"],
+                "request_transport_payload_hex": request[
+                    "request_datagram"
+                ].hex(),
+                "request_transport_payload_sha256": request[
+                    "request_datagram_sha256"
+                ],
+                "request_transport_payload_size": len(
+                    request["request_datagram"]
+                ),
+                "request_transport_send_return_size": datagram_size,
+                "correlation_kind": "mavlink_timesync_echo_v1",
+                "response_policy": response_policy,
+            }
+        else:
+            marker_size = self.sock.sendto(request["marker_frame"], destination)
+            command_size = self.sock.sendto(request["command_frame"], destination)
+            send_evidence = {
+                "marker_send_return_size": marker_size,
+                "command_send_return_size": command_size,
+            }
+        pending = PendingRequest(
             phase=policy.window_id,
             uav=uav,
             sequence=sequence,
@@ -695,8 +1363,25 @@ class ActualSitlControlProbe:
             transaction_id=(
                 f"{policy.window_id}:{policy.flow_group_ids[uav]}:{uav}:{sequence}"
             ),
-            response_policy=policy.response_policy_for(uav),
+            response_policy=response_policy,
+            timesync_token=request.get("timesync_request_ts1"),
+            timesync_frame_sha256=request.get("timesync_frame_sha256"),
+            request_datagram_sha256=request.get("request_datagram_sha256"),
+            request_datagram_size=(
+                len(request["request_datagram"])
+                if "request_datagram" in request
+                else None
+            ),
         )
+        if response_policy == CORRELATED_TIMESYNC_POLICY:
+            if (
+                correlated_key is None
+                or correlated_key[1] != request["timesync_request_ts1"]
+            ):
+                raise ControlProbeError("TIMESYNC encoder correlation token differs")
+            self.correlated_pending[correlated_key] = pending
+        else:
+            self.pending[uav] = pending
         self.writer.emit(
             "real_command_offered",
             phase=policy.window_id,
@@ -717,10 +1402,8 @@ class ActualSitlControlProbe:
             marker_text=request["marker_text"],
             marker_frame_hex=request["marker_frame"].hex(),
             marker_frame_sha256=request["marker_frame_sha256"],
-            marker_send_return_size=marker_size,
             command_frame_hex=request["command_frame"].hex(),
             command_frame_sha256=request["command_frame_sha256"],
-            command_send_return_size=command_size,
             source_ip="10.71.0.10",
             source_udp_port=14600,
             destination_ip=destination[0],
@@ -733,6 +1416,7 @@ class ActualSitlControlProbe:
             mavlink_command=512,
             target_system=uav,
             target_component=1,
+            **send_evidence,
         )
 
     def normalize_window(self, command: dict[str, Any]) -> WindowPolicy:
@@ -836,6 +1520,11 @@ class ActualSitlControlProbe:
                     for uav in range(1, 6)
                 },
             )
+        allowed_response_policies = (
+            {CORRELATED_TIMESYNC_POLICY, "timeout_required"}
+            if self.args.profile == "m4_causality"
+            else {"ack_required", "timeout_required"}
+        )
         if (
             not 1 <= policy.transport_phase_code <= 15
             or not 1 <= policy.offered_per_uav <= 10_000
@@ -846,7 +1535,7 @@ class ActualSitlControlProbe:
             > policy.end_monotonic_ns
             or set(policy.response_policies) != set(range(1, 6))
             or any(
-                value not in {"ack_required", "timeout_required"}
+                value not in allowed_response_policies
                 for value in policy.response_policies.values()
             )
             or set(policy.minimum_quiet_drain_ns_by_uav) != set(range(1, 6))
@@ -946,12 +1635,30 @@ class ActualSitlControlProbe:
 
     def execute_window(self, command: dict[str, Any], command_hash: str) -> None:
         policy = self.normalize_window(command)
+        airborne = getattr(self, "airborne_controller", None)
+        if airborne is not None and not airborne.started:
+            readiness_deadline = int(
+                airborne.gate["airborne_ready_deadline_monotonic_ns"]
+            )
+            while not self.link_ready_written and time.monotonic_ns() < readiness_deadline:
+                self.pump(0.05)
+            if not self.link_ready_written:
+                raise ControlProbeError(
+                    "M4 capacity flight lacks five-UAV actual-control readiness"
+                )
+            airborne.prepare()
+        if airborne is not None and not airborne.airborne_ready_confirmed:
+            self.pump_until(int(airborne.gate["warmup_start_monotonic_ns"]))
+            airborne.confirm_airborne_ready_boundary()
+            airborne.start_warmup_motion()
         self.pump_until(policy.start_monotonic_ns)
         self.active_phase = policy.window_id
+        self.active_policy = policy
         if self.quarantined_uavs:
             raise ControlProbeError("actual-control window inherited an ACK timeout")
+        if self.correlated_pending:
+            raise ControlProbeError("actual-control window inherited TIMESYNC pending state")
         self.consume_stopped_drain_guard(policy)
-        heartbeats_before = dict(self.heartbeat_totals)
         self.writer.emit(
             "actual_control_phase_start",
             phase=policy.window_id,
@@ -990,7 +1697,11 @@ class ActualSitlControlProbe:
                 scheduled_ns = policy.slot_monotonic_ns(sequence)
                 if now_ns < scheduled_ns:
                     continue
-                if uav in self.pending:
+                if (
+                    policy.response_policy_for(uav)
+                    != CORRELATED_TIMESYNC_POLICY
+                    and uav in self.pending
+                ):
                     self.writer.emit(
                         "ordinal_send_slot_overlap",
                         phase=policy.window_id,
@@ -1011,12 +1722,22 @@ class ActualSitlControlProbe:
                     for uav in range(1, 6)
                 )
                 and not self.pending
+                and not self.correlated_pending
             ):
                 self.pump_until(policy.end_monotonic_ns)
                 break
         self._expire_pending()
-        if self.pending:
+        if self.pending or self.correlated_pending:
             for uav, pending in self.pending.items():
+                self.writer.emit(
+                    "phase_ended_before_outcome_timeout",
+                    phase=policy.window_id,
+                    window_id=policy.window_id,
+                    uav=uav,
+                    sequence=pending.sequence,
+                    sent_monotonic_ns=pending.sent_monotonic_ns,
+                )
+            for (uav, _token), pending in self.correlated_pending.items():
                 self.writer.emit(
                     "phase_ended_before_outcome_timeout",
                     phase=policy.window_id,
@@ -1038,10 +1759,33 @@ class ActualSitlControlProbe:
             )
             for uav in range(1, 6)
         }
-        heartbeat_counts = {
-            f"uav{uav}": self.heartbeat_totals[uav] - heartbeats_before[uav]
-            for uav in range(1, 6)
-        }
+        heartbeat_counts = heartbeat_counts_for_window(
+            self.heartbeat_received_monotonic_ns,
+            policy.start_monotonic_ns,
+            policy.end_monotonic_ns,
+        )
+        raw_ack_counts = raw_response_counts_for_window(
+            self.raw_command_ack_received_monotonic_ns,
+            policy.start_monotonic_ns,
+            policy.end_monotonic_ns,
+        )
+        raw_telemetry_counts = raw_response_counts_for_window(
+            self.raw_autopilot_version_received_monotonic_ns,
+            policy.start_monotonic_ns,
+            policy.end_monotonic_ns,
+        )
+        m4_liveness_evidence: dict[str, Any] = {}
+        if self.args.profile == "m4_causality":
+            validate_m4_window_liveness(
+                policy,
+                heartbeat_counts,
+                raw_ack_counts,
+                raw_telemetry_counts,
+            )
+            m4_liveness_evidence = {
+                "raw_command_ack_counts": raw_ack_counts,
+                "raw_autopilot_version_counts": raw_telemetry_counts,
+            }
         offered_map = {
             f"uav{uav}": offered_counts[uav] for uav in range(1, 6)
         }
@@ -1061,6 +1805,7 @@ class ActualSitlControlProbe:
             heartbeat_counts=heartbeat_counts,
             offered_counts=offered_map,
             quarantined_uavs=quarantine,
+            **m4_liveness_evidence,
         )
         write_exclusive(
             self.args.run_dir
@@ -1076,12 +1821,29 @@ class ActualSitlControlProbe:
                 "offered_counts": offered_map,
                 "quarantined_uavs": quarantine,
                 "completed_monotonic_ns": time.monotonic_ns(),
+                **m4_liveness_evidence,
             },
         )
+        if airborne is not None:
+            self._update_capacity_flight_boundaries(time.monotonic_ns())
+            if not airborne.measurement_ended:
+                raise ControlProbeError(
+                    "M4 capacity workload ended before airborne measurement boundary"
+                )
+            airborne.land_and_disarm()
         self.active_phase = None
+        self.active_policy = None
 
     def run(self) -> None:
         start_ticks = process_start_ticks(os.getpid())
+        transmit_tos = self.sock.getsockopt(socket.IPPROTO_IP, socket.IP_TOS)
+        receive_tos_enabled = self.sock.getsockopt(
+            socket.IPPROTO_IP, getattr(socket, "IP_RECVTOS", 13)
+        )
+        if transmit_tos != TOS_CONTROL or receive_tos_enabled != 1:
+            raise ControlProbeError(
+                "actual-control socket TOS configuration differs after bind"
+            )
         self.writer.emit(
             "actual_control_socket_ready",
             pid=os.getpid(),
@@ -1089,6 +1851,8 @@ class ActualSitlControlProbe:
             namespace="ams-gcs",
             bound_socket=["10.71.0.10", 14600],
             full_run_nonce=self.args.run_nonce,
+            transmit_ip_tos=transmit_tos,
+            receive_ip_tos_enabled=receive_tos_enabled,
             receive_buffer_bytes=self.sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF),
             send_buffer_bytes=self.sock.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF),
         )
@@ -1106,6 +1870,8 @@ class ActualSitlControlProbe:
                 "pid": os.getpid(),
                 "start_ticks": start_ticks,
                 "bound_socket": ["10.71.0.10", 14600],
+                "transmit_ip_tos": transmit_tos,
+                "receive_ip_tos_enabled": receive_tos_enabled,
                 "monotonic_ns": time.monotonic_ns(),
             },
         )
@@ -1163,7 +1929,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             probe.run()
         finally:
             probe.close()
-    except (ControlProbeError, OSError, ValueError, KeyError, TypeError) as exc:
+    except (RuntimeError, OSError, ValueError, KeyError, TypeError) as exc:
         print(f"FAIL actual SITL control probe: {exc}", file=sys.stderr)
         return 2
     return 0

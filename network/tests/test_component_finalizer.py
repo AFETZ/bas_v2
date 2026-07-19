@@ -272,7 +272,7 @@ class ComponentFinalizerTests(unittest.TestCase):
                 else value
                 for value in config["Env"]
             ]
-            config["Cmd"][4] = "900s"
+            config["Cmd"][4] = f"{profile['timeout_s']}s"
             config["Cmd"][7] = "network/scripts/run_m4_capacity.sh"
             host = document["HostConfig"]
             host["NetworkMode"] = "none"

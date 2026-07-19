@@ -1159,6 +1159,7 @@ class PacketSionnaAdapter:
         event: Mapping[str, Any],
         *,
         _fault_parallel_query: bool = False,
+        _fault_decision: Optional[str] = None,
     ) -> Optional[Mapping[str, Any]]:
         packet = _validate_packet_event(event)
         if packet["event"] != "ingress":
@@ -1216,6 +1217,16 @@ class PacketSionnaAdapter:
             poses=pose_snapshot,
         )
         self._manager.register_query(query_message)
+        if _fault_decision == "fault_seed":
+            # Arm at the exact factual ingress, immediately before this exact
+            # query is submitted.  No ambient pending result or periodic
+            # refresh can consume the supervised hold.
+            arm_hold = getattr(self.transport, "arm_hold_next", None)
+            if not callable(arm_hold):
+                raise PacketAdapterError(
+                    "fault-seed transport cannot arm an exact real-result hold"
+                )
+            arm_hold(str(query_message["directed_link_id"]))
         if not self.transport.submit_query(query_message):
             return self._write_unavailable(packet, "query_queue_overflow")
         self._next_query_due_by_cell[cell] = now + self.config.query_period_ns
@@ -1234,10 +1245,25 @@ class PacketSionnaAdapter:
             "query_submitted",
             packet,
             query_id=query_id,
-            decision="fault_parallel" if _fault_parallel_query else "normal",
+            decision=(
+                _fault_decision
+                if _fault_parallel_query and _fault_decision is not None
+                else "fault_parallel" if _fault_parallel_query else "normal"
+            ),
             query_wire_sha256=self._pending_context[query_id]["query_wire_sha256"],
         )
         return query_message
+
+    def process_fault_seed_packet_event(
+        self, event: Mapping[str, Any]
+    ) -> Optional[Mapping[str, Any]]:
+        """Issue the first real-lineage query in the sequential F-expiry pair."""
+
+        return self.process_packet_event(
+            event,
+            _fault_parallel_query=True,
+            _fault_decision="fault_seed",
+        )
 
     def process_fault_exercise_packet_event(
         self, event: Mapping[str, Any]
@@ -1246,7 +1272,12 @@ class PacketSionnaAdapter:
 
         return self.process_packet_event(event, _fault_parallel_query=True)
 
-    def refresh_due_cells(self, max_cells: int = 30) -> Tuple[Mapping[str, Any], ...]:
+    def refresh_due_cells(
+        self,
+        max_cells: int = 30,
+        *,
+        excluded_cells: Optional[set[Tuple[str, str]]] = None,
+    ) -> Tuple[Mapping[str, Any], ...]:
         """Submit periodic refreshes from the latest factual ingress per cell.
 
         The method is non-blocking and bounded.  It never creates a cell from
@@ -1261,6 +1292,8 @@ class PacketSionnaAdapter:
         for cell in sorted(self._last_packet_by_cell):
             if len(output) >= max_cells:
                 break
+            if excluded_cells is not None and cell in excluded_cells:
+                continue
             if self._pending_by_cell.get(cell):
                 continue
             if now < self._next_query_due_by_cell.get(cell, 0):
@@ -1464,42 +1497,96 @@ class PacketSionnaAdapter:
         *,
         max_packet_events: int = 64,
         max_results: int = 64,
+        fault_seed_cells: Optional[MutableSet[Tuple[str, str]]] = None,
         fault_parallel_cells: Optional[MutableSet[Tuple[str, str]]] = None,
     ) -> Tuple[Mapping[str, Any], ...]:
         """Advance the adapter once without waiting on provider I/O.
 
-        ``fault_parallel_cells`` is used only by the predeclared F-expiry
-        exercise.  The first factual ingress for an armed cell submits the
-        normal query (or observes the existing held query) and then exactly one
-        bounded parallel query.  Configuration alone can never consume an arm.
+        The predeclared F-expiry exercise is sequential and deadline-aware.
+        Its seed arm leaves exactly one pending query on one factual ingress;
+        after the real result is confirmed held, its parallel arm requires that
+        old pending query and adds exactly one new query on the next factual
+        ingress.  Configuration and periodic refresh alone cannot consume an
+        arm.
         """
 
         output = list(self.expire_states())
         output.extend(self.poll_results(max_results))
         for event in tailer.poll(max_packet_events):
-            created = self.process_packet_event(event)
-            if created is not None and created.get("schema") == STATE_IPC_SCHEMA:
-                output.append(created)
-            if fault_parallel_cells:
-                link = event.get("directed_link")
-                traffic_class = event.get("traffic_class")
-                cell = (str(link), str(traffic_class))
+            link = event.get("directed_link")
+            traffic_class = event.get("traffic_class")
+            cell = (str(link), str(traffic_class))
+            factual_cell = (
+                event.get("event") == "ingress"
+                and CELL_RE.fullmatch(cell[0]) is not None
+                and cell[1] in TRAFFIC_CLASSES
+            )
+            seed_armed = bool(
+                fault_seed_cells and factual_cell and cell in fault_seed_cells
+            )
+            parallel_armed = bool(
+                fault_parallel_cells and factual_cell and cell in fault_parallel_cells
+            )
+            if seed_armed and parallel_armed:
+                raise PacketAdapterError("fault seed and parallel arms overlap one ingress")
+            if not seed_armed and not parallel_armed:
+                created = self.process_packet_event(event)
+                if created is not None and created.get("schema") == STATE_IPC_SCHEMA:
+                    output.append(created)
+            if seed_armed:
+                # Consume before submission so any exception is fail-closed
+                # and cannot silently retry on a later, unrelated packet.
+                assert fault_seed_cells is not None
+                fault_seed_cells.remove(cell)
+                if self.config.max_fault_pending_per_cell != 2:
+                    raise PacketAdapterError(
+                        "F-expiry requires an exact two-query pending bound"
+                    )
+                pending = self._pending_by_cell.get(cell, set())
+                if pending:
+                    raise PacketAdapterError(
+                        "fault-seed ingress inherited a pending query"
+                    )
+                fault_created = self.process_fault_seed_packet_event(event)
                 if (
-                    event.get("event") == "ingress"
-                    and CELL_RE.fullmatch(cell[0]) is not None
-                    and cell[1] in TRAFFIC_CLASSES
-                    and cell in fault_parallel_cells
+                    fault_created is not None
+                    and fault_created.get("schema") == STATE_IPC_SCHEMA
                 ):
-                    # Consume before submission so any exception is fail-closed
-                    # and cannot silently retry on a later, unrelated packet.
-                    fault_parallel_cells.remove(cell)
-                    fault_created = self.process_fault_exercise_packet_event(event)
-                    if (
-                        fault_created is not None
-                        and fault_created.get("schema") == STATE_IPC_SCHEMA
-                    ):
-                        output.append(fault_created)
-        for created in self.refresh_due_cells():
+                    output.append(fault_created)
+                if len(self._pending_by_cell.get(cell, set())) != 1:
+                    raise PacketAdapterError(
+                        "factual fault-seed ingress did not leave exactly one pending query"
+                    )
+            if parallel_armed:
+                # Consume before submission so any exception is fail-closed
+                # and cannot silently retry on a later, unrelated packet.
+                assert fault_parallel_cells is not None
+                fault_parallel_cells.remove(cell)
+                exact_fault_pending = 2
+                if self.config.max_fault_pending_per_cell != exact_fault_pending:
+                    raise PacketAdapterError(
+                        "F-expiry requires an exact two-query pending bound"
+                    )
+                pending = self._pending_by_cell.get(cell, set())
+                if len(pending) != 1:
+                    raise PacketAdapterError(
+                        "fault-parallel ingress lacks the one held seed query"
+                    )
+                fault_created = self.process_fault_exercise_packet_event(event)
+                if (
+                    fault_created is not None
+                    and fault_created.get("schema") == STATE_IPC_SCHEMA
+                ):
+                    output.append(fault_created)
+                if (
+                    len(self._pending_by_cell.get(cell, set()))
+                    != exact_fault_pending
+                ):
+                    raise PacketAdapterError(
+                        "factual fault ingress did not create the exact pending pair"
+                    )
+        excluded = set(fault_seed_cells or ()) | set(fault_parallel_cells or ())
+        for created in self.refresh_due_cells(excluded_cells=excluded):
             if created.get("schema") == STATE_IPC_SCHEMA:
                 output.append(created)
         return tuple(output)
