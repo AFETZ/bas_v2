@@ -4465,6 +4465,11 @@ class M3ExternalMatrixStaticTests(unittest.TestCase):
         ).read_text()
         self.assertIn('"offered_per_cell": 20', probe_source)
         self.assertIn('"p2mp_roots": 20', probe_source)
+        self.assertIn('"end_monotonic_ns": base + 65_000_000_000', probe_source)
+        self.assertIn(
+            '"end_monotonic_ns": restart_request + 75_500_000_000',
+            probe_source,
+        )
 
     def test_validator_has_an_independent_decoder_not_a_producer_import(self) -> None:
         source = (

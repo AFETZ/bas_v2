@@ -1537,7 +1537,12 @@ def create_schedule(args: argparse.Namespace) -> None:
     positive = {
         "phase": "positive",
         "start_monotonic_ns": base,
-        "end_monotonic_ns": base + 30_000_000_000,
+        # M3 control transactions are deliberately non-overlapping because
+        # legacy ACK/telemetry replies do not carry a transaction token.  Give
+        # all 20 ordinals their full three-second outcome interval plus five
+        # seconds of host-scheduling reserve; the payload workload remains in
+        # the frozen first 25 seconds.
+        "end_monotonic_ns": base + 65_000_000_000,
         "offered_per_cell": 20,
         "p2mp_roots": 0,
         "send_span_ms": 25_000,
@@ -1566,7 +1571,7 @@ def create_schedule(args: argparse.Namespace) -> None:
     recovery = {
         "phase": "recovery",
         "start_monotonic_ns": restart_request + 10_500_000_000,
-        "end_monotonic_ns": restart_request + 40_500_000_000,
+        "end_monotonic_ns": restart_request + 75_500_000_000,
         "offered_per_cell": 20,
         "p2mp_roots": 0,
         "send_span_ms": 25_000,

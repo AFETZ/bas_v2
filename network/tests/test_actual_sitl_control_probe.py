@@ -344,6 +344,30 @@ class SchedulingAndStateTests(unittest.TestCase):
         self.assertEqual(slots[-1], policy.start_monotonic_ns + 598_500_000_000)
         self.assertEqual(slots, sorted(set(slots)))
 
+    def test_m3_serial_window_requires_every_actual_timeout_interval(self) -> None:
+        instance = probe.ActualSitlControlProbe.__new__(
+            probe.ActualSitlControlProbe
+        )
+        instance.args = argparse.Namespace(profile="m3")
+        command = {
+            "action": "phase",
+            "phase": "positive",
+            "start_monotonic_ns": 10_000_000_000,
+            "end_monotonic_ns": 40_000_000_000,
+            "offered_per_cell": 20,
+            "send_span_ms": 25_000,
+            "expected_engine_state": "up_epoch_1",
+        }
+        with self.assertRaises(probe.ControlProbeError):
+            instance.normalize_window(command)
+
+        command["end_monotonic_ns"] = 75_000_000_000
+        policy = instance.normalize_window(command)
+        self.assertEqual(
+            policy.serial_outcome_deadline_ns(),
+            command["start_monotonic_ns"] + 60_000_000_000,
+        )
+
     def test_m4_combined_send_is_single_and_multi_pending_is_bounded(self) -> None:
         instance = self.correlated_instance()
         policy = self.correlated_policy()

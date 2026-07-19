@@ -541,6 +541,15 @@ class WindowPolicy:
             (OUTCOME_TIMEOUT_NS + minimum_gap_ns - 1) // minimum_gap_ns,
         )
 
+    def serial_outcome_deadline_ns(self) -> int:
+        """Return the worst-case deadline for non-overlapping outcomes."""
+
+        deadline_ns = self.start_monotonic_ns
+        for ordinal in range(1, self.offered_per_uav + 1):
+            deadline_ns = max(deadline_ns, self.slot_monotonic_ns(ordinal))
+            deadline_ns += OUTCOME_TIMEOUT_NS
+        return deadline_ns
+
 
 class ActualSitlControlProbe:
     def __init__(self, args: argparse.Namespace) -> None:
@@ -1594,6 +1603,11 @@ class ActualSitlControlProbe:
             or policy.slot_monotonic_ns(policy.offered_per_uav)
             + 3_000_000_000
             > policy.end_monotonic_ns
+            or (
+                self.args.profile == "m3"
+                and policy.serial_outcome_deadline_ns()
+                > policy.end_monotonic_ns
+            )
             or set(policy.response_policies) != set(range(1, 6))
             or any(
                 value not in allowed_response_policies
