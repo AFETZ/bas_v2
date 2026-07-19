@@ -172,6 +172,11 @@ def _runtime_security_observation() -> dict[str, object]:
         return result.returncode == 0
 
     no_new_privs = parsed.get("NoNewPrivs")
+    unshare_command = (
+        ["/usr/bin/unshare", "-n", "true"]
+        if os.getuid() == 0
+        else ["/usr/bin/unshare", "-rn", "true"]
+    )
     return {
         "uid": os.getuid(),
         "gid": os.getgid(),
@@ -184,7 +189,7 @@ def _runtime_security_observation() -> dict[str, object]:
             else None
         ),
         "dev_net_tun": Path("/dev/net/tun").is_char_device(),
-        "unshare_network_namespace": succeeds(["/usr/bin/unshare", "-rn", "true"]),
+        "unshare_network_namespace": succeeds(unshare_command),
         "passwordless_sudo": succeeds(["/usr/bin/sudo", "-n", "true"]),
     }
 

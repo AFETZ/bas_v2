@@ -474,6 +474,16 @@ def runtime_capabilities() -> dict[str, object]:
     gpu_devices = sorted(
         line.strip() for line in (gpu_output or "").splitlines() if line.strip()
     )
+    # Formal TUN profiles already run as uid 0 with one bounded capability set.
+    # Asking `unshare -r` to create an additional user namespace then attempts
+    # an unnecessary uid_map rewrite and can fail even though the required
+    # network-namespace operation is available. Non-root diagnostics retain
+    # `-r` so they cannot claim the root-only capability contract.
+    unshare_command = (
+        ["/usr/bin/unshare", "-n", "true"]
+        if os.getuid() == 0
+        else ["/usr/bin/unshare", "-rn", "true"]
+    )
     return {
         "system": platform.system(),
         "machine": platform.machine(),
@@ -494,10 +504,7 @@ def runtime_capabilities() -> dict[str, object]:
         },
         "network": {
             "dev_net_tun": Path("/dev/net/tun").is_char_device(),
-            "unshare_network_namespace": run_command(
-                ["/usr/bin/unshare", "-rn", "true"]
-            )
-            is not None,
+            "unshare_network_namespace": run_command(unshare_command) is not None,
             "passwordless_sudo": run_command(["/usr/bin/sudo", "-n", "true"])
             is not None,
             "qualification_mode": os.environ.get(
@@ -583,6 +590,16 @@ def command_manifest(args: list[str]) -> dict[str, object]:
             "lines": [],
         }
     lines = sorted(line.strip() for line in output.splitlines() if line.strip())
+    # A fresh run-local colcon overlay installs this repository's own package.
+    # Its bytes and version are already bound by the Git/Q-vector and the
+    # independently checked source/install equality gate, so it must not alter
+    # the immutable base-image dependency manifest merely because provenance is
+    # collected after the overlay is sourced. Match only the exact project
+    # distribution/package lines; similarly named third-party packages remain.
+    if args[1:] == ["-m", "pip", "freeze", "--all", "--exclude-editable"]:
+        lines = [line for line in lines if line != "multiagent_simulation==0.0.0"]
+    elif args == ["ros2", "pkg", "list"]:
+        lines = [line for line in lines if line != "multiagent_simulation"]
     normalized = "\n".join(lines) + ("\n" if lines else "")
     return {
         "command": args,

@@ -278,6 +278,29 @@ class ProvenanceV2Tests(unittest.TestCase):
             ["dpkg-query", "-W", "-f=${Package}=${Version}\\n"],
         )
         self.assertEqual(commands["ros_packages"], ["ros2", "pkg", "list"])
+        with mock.patch.object(
+            provenance_module,
+            "run_command",
+            return_value=(
+                "multiagent_simulation_tools==9.0\n"
+                "multiagent_simulation==0.0.0\n"
+                "PyYAML==6.0.2\n"
+            ),
+        ):
+            manifest = provenance_module.command_manifest(commands["pip_freeze"])
+        self.assertEqual(
+            manifest["lines"],
+            ["PyYAML==6.0.2", "multiagent_simulation_tools==9.0"],
+        )
+        with mock.patch.object(
+            provenance_module,
+            "run_command",
+            return_value="multiagent_simulation_tools\nmultiagent_simulation\nros_gz_sim\n",
+        ):
+            manifest = provenance_module.command_manifest(commands["ros_packages"])
+        self.assertEqual(
+            manifest["lines"], ["multiagent_simulation_tools", "ros_gz_sim"]
+        )
 
     def test_qualification_profile_rejects_missing_or_extra_consumed_nodes(self) -> None:
         cases = (
@@ -315,7 +338,10 @@ class ProvenanceV2Tests(unittest.TestCase):
                     build_provenance(args)
 
     def test_runtime_capabilities_record_deferred_mode_without_forging_observations(self) -> None:
+        observed_commands: list[list[str]] = []
+
         def unavailable(command: list[str], cwd: Path = ROOT_DIR) -> str | None:
+            observed_commands.append(command)
             return None
 
         security = {
@@ -330,6 +356,8 @@ class ProvenanceV2Tests(unittest.TestCase):
             provenance_module, "run_command", side_effect=unavailable
         ), mock.patch.object(
             provenance_module, "_process_security_status", return_value=security
+        ), mock.patch.object(
+            provenance_module.os, "getuid", return_value=0
         ), mock.patch.dict(
             os.environ,
             {"AMS_M0_CAPABILITY_PROBE_MODE": DEFERRED_M0_CAPABILITY_MODE},
@@ -341,6 +369,8 @@ class ProvenanceV2Tests(unittest.TestCase):
         self.assertIsInstance(network["dev_net_tun"], bool)
         self.assertFalse(network["unshare_network_namespace"])
         self.assertFalse(network["passwordless_sudo"])
+        self.assertIn(["/usr/bin/unshare", "-n", "true"], observed_commands)
+        self.assertNotIn(["/usr/bin/unshare", "-rn", "true"], observed_commands)
         for key, value in security.items():
             self.assertEqual(network[key], value)
 
