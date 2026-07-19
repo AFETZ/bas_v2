@@ -288,6 +288,7 @@ bash "$STACK_LAUNCHER" --run-dir "$RUN_DIR" --run-id "$RUN_ID" \
   --world-file m4_canonical/m4_canonical.sdf --manifest "$ACTUAL_MANIFEST" \
   --endpoint-ready "$ACTUAL_ENDPOINT_READY" --stack-ready "$ACTUAL_STACK_READY" \
   --stop-file "$ACTUAL_STACK_STOP" --stopped-file "$ACTUAL_STACK_STOPPED" \
+  --mavproxy-streamrate 1 \
   --clock-socket "$CLOCK_SOCKET" --headless-rendering false \
   > "$RUN_DIR/logs/actual-sitl-stack.stdout" \
   2> "$RUN_DIR/logs/actual-sitl-stack.stderr" &

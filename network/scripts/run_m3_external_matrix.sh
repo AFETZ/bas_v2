@@ -524,6 +524,7 @@ lifecycle endpoint_agents_started '{"endpoint_agents":6}'
     robot_model:=iris_radio_headless \
     gui:=false rviz:=false headless_rendering:="${HEADLESS_RENDERING:-false}" \
     generate_sensor_models:=false \
+    mavproxy_streamrate:=1 \
     use_mapping_camera:=false \
     use_navigation_camera:=false \
     use_zed_camera:=false

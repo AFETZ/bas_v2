@@ -138,6 +138,14 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
         "yes",
         "on",
     }
+    mavproxy_streamrate = LaunchConfiguration("mavproxy_streamrate").perform(
+        context
+    ).strip()
+    if mavproxy_streamrate and (
+        not mavproxy_streamrate.isdigit()
+        or not 1 <= int(mavproxy_streamrate) <= 50
+    ):
+        raise RuntimeError("mavproxy_streamrate must be empty or an integer in 1..50")
     gz_server_args = "-v4 -s -r"
     if headless_rendering:
         gz_server_args += " --headless-rendering"
@@ -285,23 +293,26 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
         )
         launch_actions.append(sitl)
 
+        mavproxy_cmd = [
+            "/home/ubuntu/.local/bin/mavproxy.py",
+            "--out",
+            str(robot.get("mavproxy_out", "127.0.0.1:14550")),
+            "--master",
+            f"tcp:{sim_address}:{master_port}",
+            "--sitl",
+            f"{sim_address}:{sitl_port}",
+            # M1 writes authoritative MAVLink observations through its
+            # structured collector; MAVProxy does not persist a second
+            # telemetry/state record for this component profile.
+            "--no-state",
+            "--non-interactive",
+            "--default-modules",
+            MAVPROXY_OFFLINE_DEFAULT_MODULES,
+        ]
+        if mavproxy_streamrate:
+            mavproxy_cmd.extend(["--streamrate", mavproxy_streamrate])
         mavproxy = ExecuteProcess(
-            cmd=[
-                "/home/ubuntu/.local/bin/mavproxy.py",
-                "--out",
-                str(robot.get("mavproxy_out", "127.0.0.1:14550")),
-                "--master",
-                f"tcp:{sim_address}:{master_port}",
-                "--sitl",
-                f"{sim_address}:{sitl_port}",
-                # M1 writes authoritative MAVLink observations through its
-                # structured collector; MAVProxy does not persist a second
-                # telemetry/state record for this component profile.
-                "--no-state",
-                "--non-interactive",
-                "--default-modules",
-                MAVPROXY_OFFLINE_DEFAULT_MODULES,
-            ],
+            cmd=mavproxy_cmd,
             cwd=str(mavproxy_dir),
             output="both",
             respawn=False,
@@ -481,6 +492,14 @@ def generate_launch_description():
                 description=(
                     "Attach ArduPilot SERIAL2 to a pre-created ttyROS PTY. "
                     "Keep disabled unless the launch also owns that PTY."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "mavproxy_streamrate",
+                default_value="",
+                description=(
+                    "Optional bounded MAVProxy telemetry stream rate in Hz. "
+                    "Formal modeled-network profiles set this explicitly."
                 ),
             ),
             DeclareLaunchArgument(

@@ -4470,6 +4470,12 @@ class M3ExternalMatrixStaticTests(unittest.TestCase):
             '"end_monotonic_ns": restart_request + 75_500_000_000',
             probe_source,
         )
+        launch_source = (
+            ROOT / "src/multiagent_simulation/launch/multiagent_simulation.launch.py"
+        ).read_text()
+        self.assertIn('"mavproxy_streamrate"', launch_source)
+        self.assertIn('mavproxy_cmd.extend(["--streamrate", mavproxy_streamrate])', launch_source)
+        self.assertIn("mavproxy_streamrate:=1", runner)
 
     def test_validator_has_an_independent_decoder_not_a_producer_import(self) -> None:
         source = (
