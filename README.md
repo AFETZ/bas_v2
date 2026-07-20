@@ -1,8 +1,6 @@
 # Ardupilot Multiagent Simulation
 
-<p align="center">
-  <img src="doc/portfolio-cover.svg" alt="ArduPilot multiagent simulation cover" width="100%">
-</p>
+
 
 ![Portfolio](https://img.shields.io/badge/portfolio-drone_simulation-2f6f6d?style=flat-square)
 ![ArduPilot](https://img.shields.io/badge/autopilot-ArduPilot-44546a?style=flat-square)
