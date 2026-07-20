@@ -107,6 +107,14 @@ up() {
     ip -n "$NS3_NS" link set "$interface" up
   done
 
+  # The external veth/bridge remains present while the ns-3 packet engine is
+  # stopped.  Pin its deterministic L2 next hop so every stopped-phase offer
+  # reaches that bridge and is observable in raw captures; the absent
+  # TapBridge reader still prevents any radio/UAV delivery.
+  ip -n "$GCS_NS" neigh replace 10.71.0.1 \
+    lladdr 02:71:00:00:00:01 nud permanent dev eth0
+  ip -n "$UAV_NS" neigh replace 10.71.1.1 \
+    lladdr 02:71:01:00:00:01 nud permanent dev eth0
   ip -n "$GCS_NS" route add default via 10.71.0.1 dev eth0
   ip -n "$UAV_NS" route add default via 10.71.1.1 dev eth0
   trap - ERR
@@ -131,6 +139,17 @@ status() {
   done
   if [[ "$(ip netns exec "$UAV_NS" sysctl -n net.ipv4.ip_forward)" != "0" ]]; then
     printf 'FAIL UAV namespace IP forwarding is enabled\n' >&2
+    exit 1
+  fi
+  local gcs_neighbor uav_neighbor
+  gcs_neighbor="$(ip -n "$GCS_NS" neigh show to 10.71.0.1 dev eth0)"
+  uav_neighbor="$(ip -n "$UAV_NS" neigh show to 10.71.1.1 dev eth0)"
+  if [[ "$gcs_neighbor" != *"02:71:00:00:00:01"* || "$gcs_neighbor" != *"PERMANENT"* ]]; then
+    printf 'FAIL GCS namespace lacks the permanent ns-3 external next hop\n' >&2
+    exit 1
+  fi
+  if [[ "$uav_neighbor" != *"02:71:01:00:00:01"* || "$uav_neighbor" != *"PERMANENT"* ]]; then
+    printf 'FAIL UAV namespace lacks the permanent ns-3 external next hop\n' >&2
     exit 1
   fi
   printf 'M2 namespace topology is present\n'

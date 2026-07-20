@@ -1781,6 +1781,20 @@ class M2VerticalSliceValidatorTests(unittest.TestCase):
         self.assertIn("SELF_TEST=0", runner)
         self.assertIn("SIONNA_IPC_ENABLED=0", runner)
         self.assertIn('"$NS3_NS" v-gcs-ns3', runner)
+        self.assertIn('neigh replace 10.71.0.1', setup)
+        self.assertIn('lladdr 02:71:00:00:00:01 nud permanent dev eth0', setup)
+        self.assertIn('neigh replace 10.71.1.1', setup)
+        self.assertIn('lladdr 02:71:01:00:00:01 nud permanent dev eth0', setup)
+        self.assertIn('neigh show to 10.71.0.1 dev eth0', setup)
+        self.assertIn('neigh show to 10.71.1.1 dev eth0', setup)
+        self.assertLess(
+            setup.index('link set eth0 up'),
+            setup.index('neigh replace 10.71.0.1'),
+        )
+        self.assertLess(
+            setup.index('neigh replace 10.71.0.1'),
+            setup.index('route add default via 10.71.0.1'),
+        )
         self.assertIn("start_persistent_captures", runner)
         self.assertIn('"$RUN_DIR/pcap/ns3_external_ingress.pcap"', runner)
         self.assertIn('"$RUN_DIR/pcap/ns3_external_egress.pcap"', runner)
@@ -1878,6 +1892,36 @@ class M2VerticalSliceValidatorTests(unittest.TestCase):
             self.assertEqual(
                 capture_stats["drain_batch_byte_limit"],
                 raw_packet_capture.DRAIN_BATCH_BYTE_LIMIT,
+            )
+
+    def test_cross_phase_command_hash_reuse_fails_after_reseal(self) -> None:
+        temporary, run_dir, builder = self.make_fixture()
+        with temporary:
+            path = run_dir / "logs/m2_probe_events.jsonl"
+            records = read_jsonl(path)
+            down_attempt = next(
+                record
+                for record in records
+                if record.get("phase") == "down"
+                and record.get("event") == "command_attempt"
+                and record.get("attempt") == 1
+            )
+            recovery_attempt = next(
+                record
+                for record in records
+                if record.get("phase") == "recovery"
+                and record.get("event") == "command_attempt"
+                and record.get("attempt") == 1
+            )
+            down_attempt["command_sha256"] = recovery_attempt["command_sha256"]
+            write_jsonl(path, records)
+            builder.seal()
+            result = evaluate_m2_vertical_slice(run_dir)
+            self.assertFalse(result["passed"])
+            self.assertEqual(result["gates"]["manifest"]["status"], "passed")
+            self.assertIn(
+                "command frame hashes are not globally unique across M2 phases",
+                "\n".join(result["gates"]["probe_transactions"]["failures"]),
             )
 
     def test_prewindow_heartbeat_with_three_fresh_forwards_passes(self) -> None:

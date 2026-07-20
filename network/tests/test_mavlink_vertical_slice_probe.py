@@ -18,6 +18,7 @@ from network.tests.mavlink_vertical_slice_probe import (
     DatagramWriter,
     EndpointEventWriter,
     JsonlWriter,
+    MavlinkOutboundSession,
     MIN_POSITIVE_HEARTBEATS,
     PERSISTENT_CONTROL_SCHEMA,
     PERSISTENT_ENDPOINT_EVENT_SCHEMA,
@@ -68,6 +69,64 @@ class MavlinkVerticalSliceProbeTests(unittest.TestCase):
         self.assertEqual(mavlink_frame_sequence(bytes([0xFD, 0, 0, 0, 91])), 91)
         with self.assertRaises(ValueError):
             mavlink_frame_sequence(b"bad")
+
+    def test_persistent_outbound_mavlink_session_keeps_sequence_without_wrap(self) -> None:
+        class FakeMAVLink:
+            def __init__(self, writer: object, *, srcSystem: int, srcComponent: int) -> None:
+                self.writer = writer
+                self.srcSystem = srcSystem
+                self.srcComponent = srcComponent
+                self.seq = 0
+
+        class FakeMavutil:
+            class mavlink:
+                MAVLink = FakeMAVLink
+
+        sock = object()
+        destination = ("10.71.1.10", 14601)
+        session = MavlinkOutboundSession.create(
+            FakeMavutil,
+            sock,
+            destination,
+            source_system=255,
+            source_component=190,
+        )
+        sequences = DatagramSequences()
+        for attempts in (10, 5, 10):
+            session.validate_for_phase(
+                sock=sock,
+                destination=destination,
+                source_system=255,
+                source_component=190,
+                sequences=sequences,
+                attempts=attempts,
+            )
+            session.outbound.seq += 2 * attempts
+            sequences.tx_datagram_seq += 2 * attempts
+        self.assertEqual((session.outbound.seq, sequences.tx_datagram_seq), (50, 50))
+        session.outbound.seq = 0
+        with self.assertRaisesRegex(RuntimeError, "does not continue"):
+            session.validate_for_phase(
+                sock=sock,
+                destination=destination,
+                source_system=255,
+                source_component=190,
+                sequences=sequences,
+                attempts=1,
+            )
+        session.outbound.seq = sequences.tx_datagram_seq
+        with self.assertRaisesRegex(RuntimeError, "would wrap"):
+            session.validate_for_phase(
+                sock=sock,
+                destination=destination,
+                source_system=255,
+                source_component=190,
+                sequences=sequences,
+                attempts=104,
+            )
+        source = inspect.getsource(PersistentGcsEndpoint._execute_phase)
+        self.assertIn("self._outbound_session", source)
+        self.assertIn("outbound_session=self._outbound_session", source)
 
     def test_phase_window_opens_before_gcs_socket_can_queue_packets(self) -> None:
         class Recorder:
@@ -729,7 +788,7 @@ class MavlinkVerticalSliceProbeTests(unittest.TestCase):
                     self.assertFalse(out_of_order["ok"])
 
                     good = control_request("good-phase-0001", "run_phase", phase="good")
-                    self.assertTrue(good["ok"])
+                    self.assertTrue(good["ok"], good)
                     self.assertEqual(good["result"]["next_phase"], "down")
                     duplicate = control_request("good-phase-0001", "run_phase", phase="good")
                     self.assertFalse(duplicate["ok"])

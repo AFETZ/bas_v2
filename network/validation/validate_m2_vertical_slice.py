@@ -2025,6 +2025,8 @@ def _probe_gate(
     failures.extend(window_failures)
     phase_evidence: dict[str, Any] = {}
     run_nonce = metadata.get("run_nonce") if isinstance(metadata.get("run_nonce"), str) else ""
+    all_marker_hashes: list[str] = []
+    all_command_hashes: list[str] = []
 
     for phase in PHASES:
         expected = EXPECTED_ATTEMPTS[phase]
@@ -2050,6 +2052,8 @@ def _probe_gate(
             failures.append(f"{phase}: nonce marker hashes are not unique")
         if len(command_hashes) != len(set(command_hashes)):
             failures.append(f"{phase}: command frame hashes are not unique")
+        all_marker_hashes.extend(value for value in marker_hashes if _is_sha256(value))
+        all_command_hashes.extend(value for value in command_hashes if _is_sha256(value))
 
         ack_records = [
             record for record in records if record.get("phase") == phase and record.get("event") == "command_ack"
@@ -2232,6 +2236,19 @@ def _probe_gate(
             "endpoint_health": endpoint_health,
             "raw": raw_occurrences,
         }
+
+    # The down no-bypass gate searches whole-lifecycle PCAPs.  Therefore an
+    # exact command frame from recovery must never be able to impersonate a
+    # stopped-phase offer merely because an encoder restarted at a phase
+    # boundary.  Keep every outbound frame identity unique for the complete
+    # good -> down -> recovery lifecycle.
+    if len(all_marker_hashes) != len(set(all_marker_hashes)):
+        failures.append("marker frame hashes are not globally unique across M2 phases")
+    if len(all_command_hashes) != len(set(all_command_hashes)):
+        failures.append("command frame hashes are not globally unique across M2 phases")
+    all_outbound_hashes = all_marker_hashes + all_command_hashes
+    if len(all_outbound_hashes) != len(set(all_outbound_hashes)):
+        failures.append("outbound marker/command frame hashes are not globally unique across M2 phases")
 
     details = {
         phase: {

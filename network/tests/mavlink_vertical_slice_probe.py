@@ -536,7 +536,7 @@ class DatagramWriter:
 
 @dataclass
 class DatagramSequences:
-    """Per-phase raw UDP occurrence sequence numbers."""
+    """Raw UDP occurrence sequence numbers owned by one GCS endpoint."""
 
     tx_datagram_seq: int = 0
     rx_datagram_seq: int = 0
@@ -548,6 +548,86 @@ class DatagramSequences:
     def next_rx(self) -> int:
         self.rx_datagram_seq += 1
         return self.rx_datagram_seq
+
+
+@dataclass
+class MavlinkOutboundSession:
+    """One MAVLink encoder bound to one UDP GCS endpoint.
+
+    A persistent M2 endpoint must keep its wire-level MAVLink sequence as
+    well as its UDP bind identity across good, down, and recovery.  Recreating
+    an encoder at a phase boundary makes otherwise identical COMMAND_LONG
+    frames indistinguishable in the capture evidence.
+    """
+
+    mavutil: Any
+    sock: Any
+    destination: tuple[str, int]
+    source_system: int
+    source_component: int
+    datagram_writer: DatagramWriter
+    outbound: Any
+
+    @classmethod
+    def create(
+        cls,
+        mavutil: Any,
+        sock: Any,
+        destination: tuple[str, int],
+        *,
+        source_system: int,
+        source_component: int,
+    ) -> "MavlinkOutboundSession":
+        datagram_writer = DatagramWriter(sock, destination, transmit=False)
+        outbound = mavutil.mavlink.MAVLink(
+            datagram_writer,
+            srcSystem=source_system,
+            srcComponent=source_component,
+        )
+        return cls(
+            mavutil=mavutil,
+            sock=sock,
+            destination=destination,
+            source_system=source_system,
+            source_component=source_component,
+            datagram_writer=datagram_writer,
+            outbound=outbound,
+        )
+
+    def validate_for_phase(
+        self,
+        *,
+        sock: Any,
+        destination: tuple[str, int],
+        source_system: int,
+        source_component: int,
+        sequences: DatagramSequences,
+        attempts: int,
+    ) -> None:
+        if (
+            self.sock is not sock
+            or self.destination != destination
+            or self.source_system != source_system
+            or self.source_component != source_component
+            or self.datagram_writer.sock is not sock
+            or self.datagram_writer.destination != destination
+            or self.datagram_writer.transmit is not False
+        ):
+            raise RuntimeError("persistent M2 MAVLink outbound identity changed across phases")
+        if not isinstance(attempts, int) or attempts <= 0:
+            raise RuntimeError("M2 MAVLink phase attempts are invalid")
+        sequence = getattr(self.outbound, "seq", None)
+        if not isinstance(sequence, int) or not 0 <= sequence <= 255:
+            raise RuntimeError("persistent M2 MAVLink sequence is invalid")
+        if sequence != sequences.tx_datagram_seq:
+            raise RuntimeError(
+                "persistent M2 MAVLink sequence does not continue the raw TX occurrence sequence"
+            )
+        # M2 identifies a transaction by the complete encoded MAVLink frame.
+        # Sequence wrap would recreate command bytes for this fixed command
+        # payload, so the profile refuses to run rather than weaken PCAP proof.
+        if sequence + 2 * attempts > 256:
+            raise RuntimeError("M2 MAVLink outbound sequence would wrap within the lifecycle")
 
 
 @dataclass(frozen=True)
@@ -1141,6 +1221,7 @@ def execute_phase(
     *,
     persistent_sock: Any | None = None,
     datagram_sequences: DatagramSequences | None = None,
+    outbound_session: MavlinkOutboundSession | None = None,
 ) -> PhaseResult:
     """Run one probe phase, optionally through an already-bound UDP endpoint.
 
@@ -1149,11 +1230,14 @@ def execute_phase(
     contract while allowing one UDP identity to span good/down/recovery.
     """
 
-    os.environ.setdefault("MAVLINK20", "1")
-    try:
-        from pymavlink import mavutil
-    except ImportError as exc:  # pragma: no cover - runtime dependency gate.
-        raise RuntimeError(f"pymavlink is required: {exc}") from exc
+    if outbound_session is None:
+        os.environ.setdefault("MAVLINK20", "1")
+        try:
+            from pymavlink import mavutil
+        except ImportError as exc:  # pragma: no cover - runtime dependency gate.
+            raise RuntimeError(f"pymavlink is required: {exc}") from exc
+    else:
+        mavutil = outbound_session.mavutil
 
     # This must remain before bind() in one-shot mode: see emit_phase_start().
     # The persistent service writes its endpoint-window boundary before it
@@ -1173,19 +1257,31 @@ def execute_phase(
         if sock.getsockopt(socket.IPPROTO_IP, socket.IP_TOS) != MAVLINK_CONTROL_TOS:
             raise RuntimeError("persistent M2 GCS socket lost the control DSCP/TOS identity")
     destination = args.uav_endpoint
+    sequences = datagram_sequences if datagram_sequences is not None else DatagramSequences()
     # Build each marker/command pair first, then commit the local
     # ``command_attempt`` record before emitting either datagram.  The
     # adapter's matching GCS->tail forward can therefore be causally checked
     # against a real monotonic send boundary rather than a post-send log.
-    datagram_writer = DatagramWriter(sock, destination, transmit=False)
-    outbound = mavutil.mavlink.MAVLink(
-        datagram_writer,
-        srcSystem=args.source_system,
-        srcComponent=args.source_component,
+    if outbound_session is None:
+        outbound_session = MavlinkOutboundSession.create(
+            mavutil,
+            sock,
+            destination,
+            source_system=args.source_system,
+            source_component=args.source_component,
+        )
+    outbound_session.validate_for_phase(
+        sock=sock,
+        destination=destination,
+        source_system=args.source_system,
+        source_component=args.source_component,
+        sequences=sequences,
+        attempts=args.attempts,
     )
+    datagram_writer = outbound_session.datagram_writer
+    outbound = outbound_session.outbound
     inbound = mavutil.mavlink.MAVLink(None)
     inbound.robust_parsing = True
-    sequences = datagram_sequences if datagram_sequences is not None else DatagramSequences()
 
     acknowledgements = 0
     telemetry_responses = 0
@@ -1621,6 +1717,7 @@ class PersistentGcsEndpoint:
         self._control_listener: socket.socket | None = None
         self._control_socket_inode: tuple[int, int] | None = None
         self._bound_gcs: tuple[str, int] | None = None
+        self._outbound_session: MavlinkOutboundSession | None = None
         self._sequences = DatagramSequences()
         self._completed_phases: list[str] = []
         self._seen_request_ids: set[str] = set()
@@ -1757,6 +1854,7 @@ class PersistentGcsEndpoint:
                     pass
         self._control_listener = None
         self._udp_socket = None
+        self._outbound_session = None
         if self._control_socket_inode is not None and os.path.lexists(self.control_socket):
             try:
                 current_stat = os.lstat(self.control_socket)
@@ -1915,18 +2013,32 @@ class PersistentGcsEndpoint:
             positive_heartbeat_observation_s=positive_observation_s,
         )
 
-    @staticmethod
     def _execute_phase(
+        self,
         args: argparse.Namespace,
         writer: EndpointEventWriter,
         sock: socket.socket,
         sequences: DatagramSequences,
     ) -> PhaseResult:
+        if self._outbound_session is None:
+            os.environ.setdefault("MAVLINK20", "1")
+            try:
+                from pymavlink import mavutil
+            except ImportError as exc:  # pragma: no cover - runtime dependency gate.
+                raise RuntimeError(f"pymavlink is required: {exc}") from exc
+            self._outbound_session = MavlinkOutboundSession.create(
+                mavutil,
+                sock,
+                args.uav_endpoint,
+                source_system=args.source_system,
+                source_component=args.source_component,
+            )
         return execute_phase(
             args,
             writer,
             persistent_sock=sock,
             datagram_sequences=sequences,
+            outbound_session=self._outbound_session,
         )
 
     def _phase_process_context(
