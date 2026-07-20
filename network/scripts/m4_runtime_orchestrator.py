@@ -73,6 +73,7 @@ CAPACITY_WARMUP_NS = 30_000_000_000
 CAPACITY_BOUNDED_WARMUP_MOTION_NS = 15_000_000_000
 CAPACITY_MEASUREMENT_NS = 600_000_000_000
 CAPACITY_POST_MEASUREMENT_CONTROL_NS = 10_000_000_000
+SIONNA_RT_DISTRIBUTION = "sionna-rt"
 CAPACITY_LANDING_STATE_NS = 120_000_000_000
 CAPACITY_DISARM_NS = 60_000_000_000
 CAPACITY_NS3_ENGINE_DURATION_NS = 1_600_000_000_000
@@ -994,17 +995,30 @@ def initialize_causality(args: argparse.Namespace) -> int:
     return 0
 
 
+def provider_package_versions() -> dict[str, str]:
+    """Return the installed distributions that identify the real provider.
+
+    ``sionna.rt`` is supplied by the ``sionna-rt`` distribution in the pinned
+    acceptance image.  Resolve the distribution name, rather than the Python
+    import namespace, so the provider's identity remains bound to the lock.
+    """
+
+    try:
+        return {
+            "sionna_rt_version": importlib.metadata.version(SIONNA_RT_DISTRIBUTION),
+            "mitsuba_version": importlib.metadata.version("mitsuba"),
+        }
+    except importlib.metadata.PackageNotFoundError as exc:
+        raise M4ValidationError(f"provider package identity missing: {exc}") from exc
+
+
 def run_provider(args: argparse.Namespace) -> int:
     contract_path = args.contract.resolve()
     contract = strict_json(contract_path)
     identity, _contract_hash, _config_hash = identity_for_contract(contract_path)
     bundle = strict_json(ROOT / "network/config/m4_canonical_scene_bundle.json")
     executable = Path(__file__).resolve()
-    try:
-        sionna_version = importlib.metadata.version("sionna")
-        mitsuba_version = importlib.metadata.version("mitsuba")
-    except importlib.metadata.PackageNotFoundError as exc:
-        raise M4ValidationError(f"provider package identity missing: {exc}") from exc
+    package_versions = provider_package_versions()
     config = ProviderServiceConfig(
         identity=identity,
         phase_id="m4_continuous_runtime",
@@ -1016,8 +1030,8 @@ def run_provider(args: argparse.Namespace) -> int:
         scene_manifest_sha256=str(bundle["bundle_sha256"]),
         scene_material_manifest_sha256=str(bundle["scene_material_manifest_sha256"]),
         provider_id="sionna-rt-cuda-m4",
-        sionna_rt_version=sionna_version,
-        mitsuba_version=mitsuba_version,
+        sionna_rt_version=package_versions["sionna_rt_version"],
+        mitsuba_version=package_versions["mitsuba_version"],
     )
     files = RuntimeFiles(
         scenario=ROOT / "network/config/scenario_m4_canonical.yaml",

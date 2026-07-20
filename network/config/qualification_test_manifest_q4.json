@@ -49,6 +49,7 @@
     "test_m4_capacity_validator.FrozenRuntimeContractTests.test_missing_actual_clock_producer_fails_closed",
     "test_m4_capacity_validator.FrozenRuntimeContractTests.test_more_than_256_byte_identical_frames_are_correlated_by_occurrence",
     "test_m4_capacity_validator.FrozenRuntimeContractTests.test_supervisor_restart_between_runtime_samples_fails",
+    "test_m4_capacity_validator.ProviderPackageIdentityTests.test_provider_uses_sionna_rt_distribution_metadata",
     "test_m4_capacity_validator.RealProviderWireBindingTests.test_adapter_ready_pid_not_sampled_adapter_fails",
     "test_m4_capacity_validator.RealProviderWireBindingTests.test_adapter_role_with_forged_cmdline_hash_fails",
     "test_m4_capacity_validator.RealProviderWireBindingTests.test_byte_identical_duplicate_mirrored_at_both_peers_fails_uniqueness",

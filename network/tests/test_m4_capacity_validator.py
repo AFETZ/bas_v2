@@ -18,6 +18,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from network.scripts.collect_m4_runtime import classify_process  # noqa: E402
+from network.scripts.m4_runtime_orchestrator import (  # noqa: E402
+    provider_package_versions,
+)
 from network.validation.m4_common import (  # noqa: E402
     M4ValidationError,
     validate_wire_log,
@@ -438,7 +441,7 @@ class RealProviderWireBindingTests(unittest.TestCase):
         )
 
     def _validate(self) -> tuple[dict[str, object], list[str]]:
-        versions = {"sionna": "1.2.2", "mitsuba": "3.8.0"}
+        versions = {"sionna-rt": "1.2.2", "mitsuba": "3.8.0"}
         with (
             mock.patch(
                 "network.validation.validate_m4_capacity.decode_message",
@@ -691,6 +694,23 @@ class RealProviderWireBindingTests(unittest.TestCase):
                 "network/validation/validate_m3_external_matrix.py",
                 "network/validation/validate_m4_causality.py",
             }.issubset(REQUIRED_SOURCE_PATHS)
+        )
+
+
+class ProviderPackageIdentityTests(unittest.TestCase):
+    def test_provider_uses_sionna_rt_distribution_metadata(self) -> None:
+        versions = {"sionna-rt": "1.2.2", "mitsuba": "3.8.0"}
+        with mock.patch(
+            "network.scripts.m4_runtime_orchestrator.importlib.metadata.version",
+            side_effect=lambda name: versions[name],
+        ) as version:
+            self.assertEqual(
+                provider_package_versions(),
+                {"sionna_rt_version": "1.2.2", "mitsuba_version": "3.8.0"},
+            )
+        self.assertEqual(
+            [call.args[0] for call in version.call_args_list],
+            ["sionna-rt", "mitsuba"],
         )
 
 

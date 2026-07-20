@@ -103,6 +103,7 @@ HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 IMAGE = re.compile(r"^sha256:[0-9a-f]{64}$")
 ACTUAL_CONTROL_API_CONTRACT = "ams.m3.actual-control-api/v2"
+SIONNA_RT_DISTRIBUTION = "sionna-rt"
 ACTUAL_CONTROL_ENDPOINT_FORM = "actual_sitl_mavproxy_udp_tail"
 ACTUAL_CONTROL_EVENT_SCHEMA = "ams.actual-sitl.control-event/v1"
 M3_RESULT_CONTRACT = "ams.m3.external-matrix-validation/v1"
@@ -755,7 +756,7 @@ def _validate_real_provider_wire_binding(
         details.update(correlation_details)
         failures.extend(correlation_failures)
         installed_versions = {
-            "sionna_rt_version": importlib.metadata.version("sionna"),
+            "sionna_rt_version": importlib.metadata.version(SIONNA_RT_DISTRIBUTION),
             "mitsuba_version": importlib.metadata.version("mitsuba"),
         }
         dependency_lock = yaml.safe_load(
