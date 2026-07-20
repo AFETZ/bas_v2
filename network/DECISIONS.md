@@ -131,6 +131,17 @@ Updated: 2026-07-20 UTC.
   verified official source tree, copied scratch inputs, exact modules,
   CMake/toolchain state, wrapper lock, and executable. A pre-existing binary or
   `M2_SKIP_BUILDS=1` cannot bypass that receipt.
+- The failed M2 runs `m2_jammerfix_20260720T200800Z` and
+  `m2_jammerfix_retry_20260720T201500Z` remain preserved failed evidence.  All
+  non-liveness gates passed, but historical-FIFO matching of byte-identical
+  MAVLink HEARTBEATs selected relays 62--116 seconds old despite a unique
+  current adapter relay arriving 2--40 ms before the raw GCS observation.
+  M2 therefore treats a fresh heartbeat as one unique phase-local
+  `tail_to_gcs` relay whose adapter completion precedes the raw observation by
+  at most 250 ms.  Historical occurrences remain stale and cannot satisfy the
+  three-heartbeat minimum; same-window duplicates still fail closed.  This is
+  a causal-occurrence strengthening, not a relaxation of the M2 `>=3 fresh`
+  acceptance rule.
 - Physical radio hardware is outside current P0 and must not be probed or
   configured without a separate explicit scope.
 - The failed M4 capacity attempt `m4_capacity_20260720T192847Z` is retained as

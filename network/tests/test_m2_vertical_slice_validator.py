@@ -31,9 +31,11 @@ from network.validation.validate_m2_vertical_slice import (  # noqa: E402
     ENGINE_PHASES,
     ENGINE_PROGRAM,
     EVIDENCE_CONTRACT,
+    MAX_HEARTBEAT_FORWARD_TO_RAW_NS,
     MANIFEST_CONTRACT,
     PERSISTENT_CAPTURE_SPECS,
     RESULT_CONTRACT,
+    _is_timely_heartbeat_forward,
     derive_endpoint_subset_contract,
     evaluate_m2_vertical_slice,
     main,
@@ -1608,6 +1610,39 @@ class M2VerticalSliceValidatorTests(unittest.TestCase):
         builder.build()
         return temporary, run_dir, builder
 
+    def test_heartbeat_handoff_bound_is_inclusive_and_phase_local(self) -> None:
+        start_ns = 10_000
+        end_ns = 1_000_000_000
+        complete_ns = 20_000
+        forward = {
+            "received_monotonic_ns": 15_000,
+            "send_complete_monotonic_ns": complete_ns,
+        }
+        self.assertTrue(
+            _is_timely_heartbeat_forward(
+                forward,
+                start_ns=start_ns,
+                end_ns=end_ns,
+                raw_received_ns=complete_ns + MAX_HEARTBEAT_FORWARD_TO_RAW_NS,
+            )
+        )
+        self.assertFalse(
+            _is_timely_heartbeat_forward(
+                forward,
+                start_ns=start_ns,
+                end_ns=end_ns,
+                raw_received_ns=complete_ns + MAX_HEARTBEAT_FORWARD_TO_RAW_NS + 1,
+            )
+        )
+        self.assertFalse(
+            _is_timely_heartbeat_forward(
+                {**forward, "received_monotonic_ns": start_ns - 1},
+                start_ns=start_ns,
+                end_ns=end_ns,
+                raw_received_ns=complete_ns + 1,
+            )
+        )
+
     def move_adapter_forward_before_phase_start(
         self,
         run_dir: Path,
@@ -2153,7 +2188,7 @@ class M2VerticalSliceValidatorTests(unittest.TestCase):
                 "\n".join(adapter["failures"]),
             )
 
-    def test_stale_and_fresh_heartbeat_occurrences_do_not_let_stale_prove_fresh(self) -> None:
+    def test_stale_hash_collision_does_not_mask_tightly_causal_fresh_heartbeat(self) -> None:
         temporary, run_dir, builder = self.make_fixture()
         with temporary:
             heartbeat = builder.phase_payloads["recovery"]["heartbeats"][0]
@@ -2165,20 +2200,15 @@ class M2VerticalSliceValidatorTests(unittest.TestCase):
             )
             builder.seal()
             result = evaluate_m2_vertical_slice(run_dir)
-            self.assertFalse(result["passed"])
+            self.assertTrue(result["passed"], result)
             adapter = result["gates"]["adapter_path"]
-            self.assertEqual(adapter["status"], "failed")
-            self.assertIn(
-                "adapter/recovery: fresh heartbeat forwards 2, expected at least 3",
-                "\n".join(adapter["failures"]),
-            )
-            self.assertNotIn("ambiguous stale/fresh", "\n".join(adapter["failures"]))
+            self.assertEqual(adapter["status"], "passed")
             self.assertEqual(
                 adapter["details"]["heartbeat_forwards"]["recovery"],
-                {"observed": 3, "causal": 3, "fresh": 2, "stale": 1},
+                {"observed": 3, "causal": 3, "fresh": 3, "stale": 0},
             )
 
-    def test_stale_and_fresh_heartbeat_occurrences_pass_with_three_other_fresh_pairs(self) -> None:
+    def test_stale_hash_collisions_do_not_reduce_fresh_pair_count(self) -> None:
         temporary, run_dir, builder = self.make_fixture(positive_heartbeat_count=4)
         with temporary:
             heartbeat = builder.phase_payloads["recovery"]["heartbeats"][0]
@@ -2192,7 +2222,7 @@ class M2VerticalSliceValidatorTests(unittest.TestCase):
             result = evaluate_m2_vertical_slice(run_dir)
             self.assertTrue(result["passed"], result)
             adapter = result["gates"]["adapter_path"]
-            expected = {"observed": 4, "causal": 4, "fresh": 3, "stale": 1}
+            expected = {"observed": 4, "causal": 4, "fresh": 4, "stale": 0}
             self.assertEqual(adapter["details"]["heartbeat_forwards"]["recovery"], expected)
             self.assertEqual(
                 adapter["details"]["raw_occurrences"]["liveness_pairs"]["recovery"],

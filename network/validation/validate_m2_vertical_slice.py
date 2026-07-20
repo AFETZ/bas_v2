@@ -50,8 +50,10 @@ Required probe event fields beyond the common envelope are:
 ``heartbeat``
     ``packet_sha256`` and ``source_system``. Positive windows require at least
     three fresh heartbeats: each is causally bound to a unique adapter
-    ``tail_to_gcs`` forward in that same window. Older continuous-liveness
-    forwards are retained as stale evidence but cannot satisfy the minimum.
+    ``tail_to_gcs`` forward in that same window which reaches the raw GCS
+    observation within the bounded handoff interval. Older
+    continuous-liveness forwards are retained as stale evidence but cannot
+    satisfy the minimum.
 ``heartbeat_timeout``
     finite ``timeout_s`` of at least one second.
 
@@ -145,6 +147,11 @@ UAV1_CELL_IDS = tuple(
 PHASES = ("good", "down", "recovery")
 EXPECTED_ATTEMPTS = {"good": 10, "down": 5, "recovery": 10}
 MIN_POSITIVE_HEARTBEATS = 3
+# A current adapter relay must reach the independently observed GCS UDP socket
+# promptly.  The bound is the M2 control ceiling (250 ms) and avoids letting a
+# byte-identical MAVLink heartbeat from an earlier sequence-wrap epoch mask a
+# real current relay.  It is deliberately a maximum, not a producer claim.
+MAX_HEARTBEAT_FORWARD_TO_RAW_NS = 250_000_000
 PROBE_RAW_EVENT_SCHEMA = "ams.m2.probe-event/v2"
 PERSISTENT_ENDPOINT_EVENT_SCHEMA = "ams.m2.persistent-gcs-endpoint/v1"
 LIFECYCLE_SCHEMA = "ams.m2.lifecycle/v1"
@@ -2664,6 +2671,25 @@ def _capture_stats_gate(
     return _result(failures, captures=details)
 
 
+def _is_timely_heartbeat_forward(
+    forward: dict[str, Any],
+    *,
+    start_ns: int,
+    end_ns: int,
+    raw_received_ns: int,
+) -> bool:
+    """Return whether one adapter relay is a fresh raw-heartbeat occurrence."""
+    adapter_received = forward.get("received_monotonic_ns")
+    adapter_complete = forward.get("send_complete_monotonic_ns")
+    return (
+        _is_int(adapter_received)
+        and _is_int(adapter_complete)
+        and start_ns <= adapter_received <= adapter_complete < end_ns
+        and adapter_complete <= raw_received_ns
+        and raw_received_ns - adapter_complete <= MAX_HEARTBEAT_FORWARD_TO_RAW_NS
+    )
+
+
 def _adapter_raw_occurrence_gate(
     records: list[dict[str, Any]],
     *,
@@ -2895,52 +2921,69 @@ def _adapter_raw_occurrence_gate(
                 candidates.sort(key=lambda forward: forward["adapter_datagram_seq"])
                 selected: dict[str, Any] | None = None
                 selection_failed = False
-                if shared_sequence is not None:
-                    if len(candidates) == 1:
-                        selected = candidates[0]
-                else:
-                    # MAVLink HEARTBEAT byte strings can recur after the
-                    # 8-bit MAVLink sequence wraps.  A historical relay with
-                    # the same bytes must never be discarded in favour of a
-                    # later phase-local relay: that would let queued stale
-                    # liveness prove a fresh phase.  Consume the earliest
-                    # unused historical occurrence (FIFO) instead.  If no
-                    # historical occurrence exists, require exactly one
-                    # current-phase relay; two such relays remain a
-                    # fail-closed duplicate/ambiguity.
-                    stale_candidates = [
-                        forward
-                        for forward in candidates
-                        if forward["send_complete_monotonic_ns"] < start_ns
-                    ]
-                    fresh_candidates = [
-                        forward
-                        for forward in candidates
-                        if start_ns
-                        <= forward["send_complete_monotonic_ns"]
-                        < end_ns
-                    ]
-                    out_of_window_candidates = [
-                        forward
-                        for forward in candidates
-                        if forward not in stale_candidates and forward not in fresh_candidates
-                    ]
-                    if stale_candidates:
-                        selected = stale_candidates[0]
-                    elif len(fresh_candidates) == 1:
-                        selected = fresh_candidates[0]
-                    elif len(fresh_candidates) > 1:
-                        failures.append(
-                            f"adapter/{phase}/rx{rx_sequence}: liveness raw RX has "
-                            f"{len(fresh_candidates)} current-phase tail_to_gcs occurrence(s), expected one"
-                        )
-                        selection_failed = True
-                    elif out_of_window_candidates:
-                        failures.append(
-                            f"adapter/{phase}/rx{rx_sequence}: liveness raw RX has "
-                            f"{len(out_of_window_candidates)} tail_to_gcs occurrence(s) outside its phase window"
-                        )
-                        selection_failed = True
+                # MAVLink HEARTBEAT byte strings recur after the 8-bit
+                # sequence wraps.  FIFO over all historical byte-identical
+                # relays is not a causal discriminator: it can assign a raw
+                # RX to a 60-second-old occurrence even when one unique
+                # current relay completed milliseconds before that same RX.
+                # A fresh pair must therefore be phase-local *and* satisfy a
+                # bounded adapter-to-raw handoff.  A historical occurrence
+                # remains stale evidence only when no unique timely current
+                # occurrence exists, so it can never satisfy the fresh
+                # heartbeat minimum by itself.
+                stale_candidates = [
+                    forward
+                    for forward in candidates
+                    if forward["send_complete_monotonic_ns"] < start_ns
+                ]
+                fresh_candidates = [
+                    forward
+                    for forward in candidates
+                    if _is_int(forward.get("received_monotonic_ns"))
+                    and start_ns <= forward["received_monotonic_ns"]
+                    <= forward["send_complete_monotonic_ns"] < end_ns
+                ]
+                timely_fresh_candidates = [
+                    forward
+                    for forward in fresh_candidates
+                    if _is_timely_heartbeat_forward(
+                        forward,
+                        start_ns=start_ns,
+                        end_ns=end_ns,
+                        raw_received_ns=received,
+                    )
+                ]
+                out_of_window_candidates = [
+                    forward
+                    for forward in candidates
+                    if forward not in stale_candidates and forward not in fresh_candidates
+                ]
+                if len(timely_fresh_candidates) == 1:
+                    selected = timely_fresh_candidates[0]
+                elif len(timely_fresh_candidates) > 1:
+                    failures.append(
+                        f"adapter/{phase}/rx{rx_sequence}: liveness raw RX has "
+                        f"{len(timely_fresh_candidates)} current-phase tail_to_gcs occurrence(s), expected one"
+                    )
+                    selection_failed = True
+                elif stale_candidates:
+                    # A pre-window liveness datagram is allowed to remain in
+                    # the persistent endpoint receive queue, but is recorded
+                    # as stale and cannot contribute to fresh liveness.
+                    selected = stale_candidates[0]
+                elif fresh_candidates:
+                    failures.append(
+                        f"adapter/{phase}/rx{rx_sequence}: liveness raw RX has no timely "
+                        f"current-phase tail_to_gcs occurrence within "
+                        f"{MAX_HEARTBEAT_FORWARD_TO_RAW_NS // 1_000_000} ms"
+                    )
+                    selection_failed = True
+                elif out_of_window_candidates:
+                    failures.append(
+                        f"adapter/{phase}/rx{rx_sequence}: liveness raw RX has "
+                        f"{len(out_of_window_candidates)} tail_to_gcs occurrence(s) outside its phase window"
+                    )
+                    selection_failed = True
                 if selected is None:
                     if not selection_failed:
                         failures.append(
