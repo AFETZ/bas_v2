@@ -151,6 +151,7 @@
     "test_m4_scene_bundle.M4SceneBundleTests.test_agl_under_20m_is_rejected_after_all_hashes_are_rebound",
     "test_m4_scene_bundle.M4SceneBundleTests.test_asset_byte_substitution_is_rejected",
     "test_m4_scene_bundle.M4SceneBundleTests.test_bundle_self_hash_substitution_is_rejected",
+    "test_m4_scene_bundle.M4SceneBundleTests.test_capacity_baseline_requires_jammer_disabled",
     "test_m4_scene_bundle.M4SceneBundleTests.test_duplicate_bundle_key_is_rejected_before_semantics",
     "test_m4_scene_bundle.M4SceneBundleTests.test_generator_check_proves_deterministic_tracked_bytes",
     "test_m4_scene_bundle.M4SceneBundleTests.test_global_position_unit_or_correspondence_tolerance_mutation_fails",
