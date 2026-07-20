@@ -38,6 +38,7 @@ from network.validation.m4_runtime import (  # noqa: E402
 )
 from network.validation.validate_m4_capacity import (  # noqa: E402
     ADAPTER_SCRIPT_PATH,
+    ACTUAL_CONTROL_API_CONTRACT,
     PROVIDER_SCRIPT_PATH,
     REQUIRED_SOURCE_PATHS,
     _accepted_m3_actual_control_api,
@@ -50,6 +51,9 @@ from network.validation.validate_m4_capacity import (  # noqa: E402
     _tail_capture_evidence,
     _tail_topology_evidence,
     _validate_real_provider_wire_binding,
+)
+from network.validation.validate_m3_external_matrix import (  # noqa: E402
+    m3_actual_control_api,
 )
 from network.scripts import actual_sitl_control_probe as control_probe  # noqa: E402
 from network.scripts import m4_capacity_airborne as airborne  # noqa: E402
@@ -706,7 +710,7 @@ class AcceptedActualControlApiTests(unittest.TestCase):
             "identity": {"source_commit": "4" * 40},
             "workload": {},
         }
-        self._publish(_expected_actual_control_api())
+        self._publish(self._producer_api())
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -740,7 +744,7 @@ class AcceptedActualControlApiTests(unittest.TestCase):
             "traffic_origin": "actual_ardupilot_mavproxy",
             "accepted_m3_receipt_path": "raw/prerequisites/m3.json",
             "accepted_m3_receipt_sha256": receipt_sha256,
-            "actual_control_api_contract": "ams.m3.actual-control-api/v1",
+            "actual_control_api_contract": ACTUAL_CONTROL_API_CONTRACT,
             "actual_control_api_sha256": api_sha256,
             "actual_sitl_manifest_path": "raw/actual_sitl_endpoint_manifest.json",
             "actual_sitl_ready_path": "raw/state/actual-sitl-endpoints.ready.json",
@@ -773,13 +777,35 @@ class AcceptedActualControlApiTests(unittest.TestCase):
             )
         )
 
+    def _producer_api(self) -> dict[str, object]:
+        matrix_sha256 = _expected_actual_control_api()["matrix_sha256"]
+        return m3_actual_control_api(matrix_sha256)
+
     def test_exact_host_final_api_passes(self) -> None:
         api, details, failures = _accepted_m3_actual_control_api(self.run_dir, self.run)
         self.assertEqual(failures, [])
+        self.assertEqual(self._producer_api(), _expected_actual_control_api())
         self.assertEqual(api, _expected_actual_control_api())
         self.assertEqual(details["tail_prefixlen"], 30)
         self.assertEqual(details["tail_ports"], [14560, 14561, 14562, 14563, 14564])
         self.assertNotEqual("3" * 40, self.run["identity"]["source_commit"])
+
+    def test_missing_m4_window_command_fails_even_when_all_outer_hashes_are_recomputed(self) -> None:
+        api = self._producer_api()
+        api.pop("m4_window_command")
+        self._publish(api)
+        _api, _details, failures = _accepted_m3_actual_control_api(self.run_dir, self.run)
+        self.assertTrue(any("frozen Q3 API" in failure for failure in failures))
+
+    def test_causality_pending_contract_mutation_fails_even_when_all_outer_hashes_are_recomputed(self) -> None:
+        api = self._producer_api()
+        command = api["m4_window_command"]
+        command["pending_per_uav"]["correlated_timesync_required"][
+            "maximum_formula"
+        ] = "single pending transaction"
+        self._publish(api)
+        _api, _details, failures = _accepted_m3_actual_control_api(self.run_dir, self.run)
+        self.assertTrue(any("frozen Q3 API" in failure for failure in failures))
 
     def test_uav2_tail_port_mutation_fails_even_when_all_outer_hashes_are_recomputed(self) -> None:
         api = copy.deepcopy(_expected_actual_control_api())

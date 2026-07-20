@@ -102,7 +102,7 @@ DEFAULT_OUTPUT = Path("metrics/m4_capacity_validation.json")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 IMAGE = re.compile(r"^sha256:[0-9a-f]{64}$")
-ACTUAL_CONTROL_API_CONTRACT = "ams.m3.actual-control-api/v1"
+ACTUAL_CONTROL_API_CONTRACT = "ams.m3.actual-control-api/v2"
 ACTUAL_CONTROL_ENDPOINT_FORM = "actual_sitl_mavproxy_udp_tail"
 ACTUAL_CONTROL_EVENT_SCHEMA = "ams.actual-sitl.control-event/v1"
 M3_RESULT_CONTRACT = "ams.m3.external-matrix-validation/v1"
@@ -1126,6 +1126,57 @@ def _expected_actual_control_api() -> dict[str, Any]:
                 "run_nonce_hex_length": 64,
                 "transport_nonce32_derivation": "sha256(raw_full_run_nonce64)[:32]",
             },
+        },
+        "m4_window_command": {
+            "contract": "ams.actual-sitl.control-window-command/v1",
+            "action": "window",
+            "exact_keys": [
+                "action",
+                "endpoint",
+                "run_id",
+                "runtime_id",
+                "run_nonce",
+                "profile",
+                "window_id",
+                "transport_phase_code",
+                "start_monotonic_ns",
+                "end_monotonic_ns",
+                "offered_per_uav",
+                "send_span_ms",
+                "expected_engine_state",
+                "response_policies",
+                "minimum_quiet_drain_ns_by_uav",
+                "flow_group_ids",
+            ],
+            "endpoint": "actual-control",
+            "per_uav_keys": ["uav1", "uav2", "uav3", "uav4", "uav5"],
+            "response_policy_values_by_profile": {
+                "m3": ["ack_required", "timeout_required"],
+                "m4_capacity": ["ack_required", "timeout_required"],
+                "m4_causality": [
+                    "correlated_timesync_required",
+                    "timeout_required",
+                ],
+            },
+            "send_slot_formula": (
+                "start_monotonic_ns + "
+                "((ordinal_send_slot - 1) * send_span_ms * 1000000) // "
+                "max(1, offered_per_uav - 1)"
+            ),
+            "pending_per_uav": {
+                "ack_required": {"mode": "single", "maximum": 1},
+                "timeout_required": {"mode": "single", "maximum": 1},
+                "correlated_timesync_required": {
+                    "mode": "bounded",
+                    "maximum_formula": (
+                        "offered_per_uav == 1 ? 1 : min(offered_per_uav, "
+                        "ceil(timeout_ns / ((send_span_ms * 1000000) // "
+                        "(offered_per_uav - 1))))"
+                    ),
+                },
+            },
+            "timeout_ns": 3_000_000_000,
+            "guard_scope": "per_uav_active_timeout_batch_with_append_only_history",
         },
         "channels": {
             f"uav{index}": {

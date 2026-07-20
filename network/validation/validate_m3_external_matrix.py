@@ -3310,6 +3310,162 @@ def validate_actual_sitl_control(
     return failures, details, offered, received
 
 
+def m3_actual_control_api(matrix_sha256: str | None) -> dict[str, Any]:
+    """Return the frozen actual-SITL control API consumed by formal M4.
+
+    The M3 receipt is the authority for this API, while M4 independently
+    derives and compares the same shape from its clean source.  Keep the
+    control-window semantics explicit here: M4 capacity is serial per UAV,
+    whereas M4 causality permits a bounded set of correlated TIMESYNC tokens.
+    """
+
+    return {
+        "contract": "ams.m3.actual-control-api/v2",
+        "control_endpoint_form": ACTUAL_CONTROL_ENDPOINT_FORM,
+        "matrix_path": "network/config/endpoint_matrix_5uav.json",
+        "matrix_sha256": matrix_sha256,
+        "endpoint_schema_path": "network/config/endpoint_transaction_schema.json",
+        "endpoint_schema_sha256": sha256_file(
+            ROOT / "network/config/endpoint_transaction_schema.json"
+        ),
+        "event_schema": "ams.actual-sitl.control-event/v1",
+        "probe_source": {
+            "path": "network/scripts/actual_sitl_control_probe.py",
+            "sha256": sha256_file(ROOT / "network/scripts/actual_sitl_control_probe.py"),
+        },
+        "adapter_source": {
+            "path": "network/bridge/actual_sitl_mavlink_endpoint.py",
+            "sha256": sha256_file(
+                ROOT / "network/bridge/actual_sitl_mavlink_endpoint.py"
+            ),
+        },
+        "relay_core_source": {
+            "path": "network/bridge/opaque_udp_relay.py",
+            "sha256": sha256_file(ROOT / "network/bridge/opaque_udp_relay.py"),
+        },
+        "process_role_ids": {
+            "gcs": "gcs_control_probe",
+            "adapters": {
+                f"uav{index}": f"uav_control_adapter_uav{index}"
+                for index in range(1, 6)
+            },
+            "supervisor": "actual_endpoint_supervisor",
+        },
+        "profile_contracts": {
+            "m3": {
+                "run_contract": RUN_CONTRACT,
+                "run_nonce_hex_length": 32,
+                "transport_nonce32_derivation": "identity/full_run_nonce32",
+            },
+            "m4_capacity": {
+                "run_contract": "ams.m4.capacity_run/v3",
+                "run_nonce_hex_length": 64,
+                "transport_nonce32_derivation": "sha256(raw_full_run_nonce64)[:32]",
+            },
+            "m4_causality": {
+                "run_contract": "ams.m4.causality_run/v2",
+                "run_nonce_hex_length": 64,
+                "transport_nonce32_derivation": "sha256(raw_full_run_nonce64)[:32]",
+            },
+        },
+        "m4_window_command": {
+            "contract": "ams.actual-sitl.control-window-command/v1",
+            "action": "window",
+            "exact_keys": [
+                "action",
+                "endpoint",
+                "run_id",
+                "runtime_id",
+                "run_nonce",
+                "profile",
+                "window_id",
+                "transport_phase_code",
+                "start_monotonic_ns",
+                "end_monotonic_ns",
+                "offered_per_uav",
+                "send_span_ms",
+                "expected_engine_state",
+                "response_policies",
+                "minimum_quiet_drain_ns_by_uav",
+                "flow_group_ids",
+            ],
+            "endpoint": "actual-control",
+            "per_uav_keys": ["uav1", "uav2", "uav3", "uav4", "uav5"],
+            "response_policy_values_by_profile": {
+                "m3": ["ack_required", "timeout_required"],
+                "m4_capacity": ["ack_required", "timeout_required"],
+                "m4_causality": [
+                    "correlated_timesync_required",
+                    "timeout_required",
+                ],
+            },
+            "send_slot_formula": (
+                "start_monotonic_ns + "
+                "((ordinal_send_slot - 1) * send_span_ms * 1000000) // "
+                "max(1, offered_per_uav - 1)"
+            ),
+            "pending_per_uav": {
+                "ack_required": {"mode": "single", "maximum": 1},
+                "timeout_required": {"mode": "single", "maximum": 1},
+                "correlated_timesync_required": {
+                    "mode": "bounded",
+                    "maximum_formula": (
+                        "offered_per_uav == 1 ? 1 : min(offered_per_uav, "
+                        "ceil(timeout_ns / ((send_span_ms * 1000000) // "
+                        "(offered_per_uav - 1))))"
+                    ),
+                },
+            },
+            "timeout_ns": 3_000_000_000,
+            "guard_scope": "per_uav_active_timeout_batch_with_append_only_history",
+        },
+        "channels": {
+            f"uav{index}": {
+                "system_id": index,
+                "instance": index - 1,
+                "radio_bind": {"host": f"10.71.{index}.10", "port": 14600 + index},
+                "gcs_peer": {"host": "10.71.0.10", "port": 14600},
+                "tail_root": {"host": f"10.72.{index}.1", "prefixlen": 30},
+                "tail_uav": {
+                    "host": f"10.72.{index}.2",
+                    "prefixlen": 30,
+                    "port": 14559 + index,
+                },
+                "master": {"host": "127.0.0.1", "port": 5760 + 10 * (index - 1)},
+                "tail_pcap_roles": {
+                    "root": f"tail-root-uav{index}",
+                    "uav": f"tail-uav{index}",
+                },
+                "matrix": {
+                    "downlink_cell_id": f"uav{index}.control.downlink",
+                    "downlink_directed_link_id": f"cp>uav{index}",
+                    "uplink_cell_id": f"uav{index}.control.uplink",
+                    "uplink_directed_link_id": f"uav{index}>cp",
+                },
+            }
+            for index in range(1, 6)
+        },
+        "capture_role_mapping": {
+            "downlink": [
+                "endpoint-gcs",
+                "ns3-external-gcs",
+                "ns3-external-uavN",
+                "endpoint-uavN",
+                "tail-uavN",
+                "tail-root-uavN",
+            ],
+            "uplink": [
+                "tail-root-uavN",
+                "tail-uavN",
+                "endpoint-uavN",
+                "ns3-external-uavN",
+                "ns3-external-gcs",
+                "endpoint-gcs",
+            ],
+        },
+    }
+
+
 def validate(
     run_dir: Path,
     matrix_path: Path = DEFAULT_MATRIX,
@@ -5658,143 +5814,12 @@ def validate(
         for name in all_gate_names
         for failure in gate_failures[name]
     ]
-    matrix_sha256 = run.get("matrix", {}).get("sha256") if isinstance(run.get("matrix"), dict) else None
-    actual_control_api = {
-        "contract": "ams.m3.actual-control-api/v1",
-        "control_endpoint_form": ACTUAL_CONTROL_ENDPOINT_FORM,
-        "matrix_path": "network/config/endpoint_matrix_5uav.json",
-        "matrix_sha256": matrix_sha256,
-        "endpoint_schema_path": "network/config/endpoint_transaction_schema.json",
-        "endpoint_schema_sha256": sha256_file(
-            ROOT / "network/config/endpoint_transaction_schema.json"
-        ),
-        "event_schema": "ams.actual-sitl.control-event/v1",
-        "probe_source": {
-            "path": "network/scripts/actual_sitl_control_probe.py",
-            "sha256": sha256_file(ROOT / "network/scripts/actual_sitl_control_probe.py"),
-        },
-        "adapter_source": {
-            "path": "network/bridge/actual_sitl_mavlink_endpoint.py",
-            "sha256": sha256_file(
-                ROOT / "network/bridge/actual_sitl_mavlink_endpoint.py"
-            ),
-        },
-        "relay_core_source": {
-            "path": "network/bridge/opaque_udp_relay.py",
-            "sha256": sha256_file(ROOT / "network/bridge/opaque_udp_relay.py"),
-        },
-        "process_role_ids": {
-            "gcs": "gcs_control_probe",
-            "adapters": {
-                f"uav{index}": f"uav_control_adapter_uav{index}"
-                for index in range(1, 6)
-            },
-            "supervisor": "actual_endpoint_supervisor",
-        },
-        "profile_contracts": {
-            "m3": {
-                "run_contract": RUN_CONTRACT,
-                "run_nonce_hex_length": 32,
-                "transport_nonce32_derivation": "identity/full_run_nonce32",
-            },
-            "m4_capacity": {
-                "run_contract": "ams.m4.capacity_run/v3",
-                "run_nonce_hex_length": 64,
-                "transport_nonce32_derivation": "sha256(raw_full_run_nonce64)[:32]",
-            },
-            "m4_causality": {
-                "run_contract": "ams.m4.causality_run/v2",
-                "run_nonce_hex_length": 64,
-                "transport_nonce32_derivation": "sha256(raw_full_run_nonce64)[:32]",
-            },
-        },
-        "m4_window_command": {
-            "contract": "ams.actual-sitl.control-window-command/v1",
-            "action": "window",
-            "exact_keys": [
-                "action",
-                "endpoint",
-                "run_id",
-                "runtime_id",
-                "run_nonce",
-                "profile",
-                "window_id",
-                "transport_phase_code",
-                "start_monotonic_ns",
-                "end_monotonic_ns",
-                "offered_per_uav",
-                "send_span_ms",
-                "expected_engine_state",
-                "response_policies",
-                "minimum_quiet_drain_ns_by_uav",
-                "flow_group_ids",
-            ],
-            "endpoint": "actual-control",
-            "per_uav_keys": [
-                "uav1",
-                "uav2",
-                "uav3",
-                "uav4",
-                "uav5",
-            ],
-            "response_policy_values": [
-                "ack_required",
-                "timeout_required",
-            ],
-            "send_slot_formula": (
-                "start_monotonic_ns + "
-                "((ordinal_send_slot - 1) * send_span_ms * 1000000) // "
-                "max(1, offered_per_uav - 1)"
-            ),
-            "single_pending_transaction_per_uav": True,
-            "timeout_ns": 3_000_000_000,
-            "guard_scope": "per_uav_active_timeout_batch_with_append_only_history",
-        },
-        "channels": {
-            f"uav{index}": {
-                "system_id": index,
-                "instance": index - 1,
-                "radio_bind": {"host": f"10.71.{index}.10", "port": 14600 + index},
-                "gcs_peer": {"host": "10.71.0.10", "port": 14600},
-                "tail_root": {"host": f"10.72.{index}.1", "prefixlen": 30},
-                "tail_uav": {
-                    "host": f"10.72.{index}.2",
-                    "prefixlen": 30,
-                    "port": 14559 + index,
-                },
-                "master": {"host": "127.0.0.1", "port": 5760 + 10 * (index - 1)},
-                "tail_pcap_roles": {
-                    "root": f"tail-root-uav{index}",
-                    "uav": f"tail-uav{index}",
-                },
-                "matrix": {
-                    "downlink_cell_id": f"uav{index}.control.downlink",
-                    "downlink_directed_link_id": f"cp>uav{index}",
-                    "uplink_cell_id": f"uav{index}.control.uplink",
-                    "uplink_directed_link_id": f"uav{index}>cp",
-                },
-            }
-            for index in range(1, 6)
-        },
-        "capture_role_mapping": {
-            "downlink": [
-                "endpoint-gcs",
-                "ns3-external-gcs",
-                "ns3-external-uavN",
-                "endpoint-uavN",
-                "tail-uavN",
-                "tail-root-uavN",
-            ],
-            "uplink": [
-                "tail-root-uavN",
-                "tail-uavN",
-                "endpoint-uavN",
-                "ns3-external-uavN",
-                "ns3-external-gcs",
-                "endpoint-gcs",
-            ],
-        },
-    }
+    matrix_sha256 = (
+        run.get("matrix", {}).get("sha256")
+        if isinstance(run.get("matrix"), dict)
+        else None
+    )
+    actual_control_api = m3_actual_control_api(matrix_sha256)
     return {
         "contract": RESULT_CONTRACT,
         "run_id": run_id,
