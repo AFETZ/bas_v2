@@ -2749,6 +2749,10 @@ def _adapter_raw_occurrence_gate(
     response_matches = 0
     heartbeat_matches: dict[str, int] = {}
     stale_heartbeat_matches: dict[str, int] = {}
+    liveness_pairs: dict[str, dict[str, int]] = {
+        phase: {"observed": 0, "causal": 0, "fresh": 0, "stale": 0}
+        for phase in PHASES
+    }
     for phase in PHASES:
         evidence = phase_evidence.get(phase, {})
         raw = evidence.get("raw") if isinstance(evidence.get("raw"), dict) else {}
@@ -2858,6 +2862,7 @@ def _adapter_raw_occurrence_gate(
                 record for record in heartbeat_semantics if record.get("liveness_observation") is True
             ]
             if observed_liveness:
+                liveness_pairs[phase]["observed"] += 1
                 received = rx.get("received_monotonic_ns")
                 candidates: list[dict[str, Any]] = []
                 payload_hash = rx.get("transport_payload_sha256")
@@ -2887,27 +2892,74 @@ def _adapter_raw_occurrence_gate(
                         ):
                             continue
                         candidates.append(forward)
-                if len(candidates) != 1:
-                    failures.append(
-                        f"adapter/{phase}/rx{rx_sequence}: liveness raw RX has "
-                        f"{len(candidates)} exact causal tail_to_gcs occurrence(s), expected one"
-                    )
+                candidates.sort(key=lambda forward: forward["adapter_datagram_seq"])
+                selected: dict[str, Any] | None = None
+                selection_failed = False
+                if shared_sequence is not None:
+                    if len(candidates) == 1:
+                        selected = candidates[0]
                 else:
-                    sequence = candidates[0].get("adapter_datagram_seq")
+                    # MAVLink HEARTBEAT byte strings can recur after the
+                    # 8-bit MAVLink sequence wraps.  A historical relay with
+                    # the same bytes must never be discarded in favour of a
+                    # later phase-local relay: that would let queued stale
+                    # liveness prove a fresh phase.  Consume the earliest
+                    # unused historical occurrence (FIFO) instead.  If no
+                    # historical occurrence exists, require exactly one
+                    # current-phase relay; two such relays remain a
+                    # fail-closed duplicate/ambiguity.
+                    stale_candidates = [
+                        forward
+                        for forward in candidates
+                        if forward["send_complete_monotonic_ns"] < start_ns
+                    ]
+                    fresh_candidates = [
+                        forward
+                        for forward in candidates
+                        if start_ns
+                        <= forward["send_complete_monotonic_ns"]
+                        < end_ns
+                    ]
+                    out_of_window_candidates = [
+                        forward
+                        for forward in candidates
+                        if forward not in stale_candidates and forward not in fresh_candidates
+                    ]
+                    if stale_candidates:
+                        selected = stale_candidates[0]
+                    elif len(fresh_candidates) == 1:
+                        selected = fresh_candidates[0]
+                    elif len(fresh_candidates) > 1:
+                        failures.append(
+                            f"adapter/{phase}/rx{rx_sequence}: liveness raw RX has "
+                            f"{len(fresh_candidates)} current-phase tail_to_gcs occurrence(s), expected one"
+                        )
+                        selection_failed = True
+                    elif out_of_window_candidates:
+                        failures.append(
+                            f"adapter/{phase}/rx{rx_sequence}: liveness raw RX has "
+                            f"{len(out_of_window_candidates)} tail_to_gcs occurrence(s) outside its phase window"
+                        )
+                        selection_failed = True
+                if selected is None:
+                    if not selection_failed:
+                        failures.append(
+                            f"adapter/{phase}/rx{rx_sequence}: liveness raw RX has "
+                            f"{len(candidates)} exact causal tail_to_gcs occurrence(s), expected one"
+                        )
+                else:
+                    sequence = selected.get("adapter_datagram_seq")
                     assert _is_int(sequence)
                     used_sequences.add(sequence)
-                    forward_complete = candidates[0].get("send_complete_monotonic_ns")
+                    liveness_pairs[phase]["causal"] += 1
+                    forward_complete = selected.get("send_complete_monotonic_ns")
                     assert _is_int(forward_complete)
                     if start_ns <= forward_complete < end_ns:
                         heartbeat_matches[phase] = heartbeat_matches.get(phase, 0) + 1
+                        liveness_pairs[phase]["fresh"] += 1
                     else:
                         stale_heartbeat_matches[phase] = stale_heartbeat_matches.get(phase, 0) + 1
-
-        if phase in ("good", "recovery") and heartbeat_matches.get(phase, 0) < MIN_POSITIVE_HEARTBEATS:
-            failures.append(
-                f"adapter/{phase}: fresh liveness raw occurrence pairs {heartbeat_matches.get(phase, 0)}, "
-                f"expected at least {MIN_POSITIVE_HEARTBEATS}"
-            )
+                        liveness_pairs[phase]["stale"] += 1
 
     return _result(
         failures,
@@ -2915,6 +2967,7 @@ def _adapter_raw_occurrence_gate(
         response_matches=response_matches,
         fresh_liveness_pairs=heartbeat_matches,
         stale_liveness_pairs=stale_heartbeat_matches,
+        liveness_pairs=liveness_pairs,
     )
 
 
@@ -2951,14 +3004,6 @@ def _adapter_gate(
         phase: {"gcs_to_tail": defaultdict(list), "tail_to_gcs": defaultdict(list)}
         for phase in PHASES
     }
-    # A heartbeat is continuous liveness traffic, not the result of one of the
-    # phase-local commands.  It can therefore have been accepted by the
-    # persistent UAV adapter before a stopped ns-3 epoch is restarted, then
-    # reach the newly bound GCS probe later from the TAP backlog.  Preserve
-    # that evidence, but bind every decoded heartbeat to one unique causal
-    # tail->GCS adapter forward and count only forwards within the current
-    # positive window as fresh liveness.
-    tail_forwards_by_hash: dict[str, list[dict[str, Any]]] = defaultdict(list)
     counted = {
         "gcs_to_tail": 0,
         "tail_to_gcs": 0,
@@ -2988,8 +3033,6 @@ def _adapter_gate(
             failures.append(f"adapter forward event_seq {record.get('event_seq')} has invalid byte count")
         counted[direction] += 1
         monotonic_ns = record.get("monotonic_ns")
-        if direction == "tail_to_gcs" and _is_int(monotonic_ns):
-            tail_forwards_by_hash[payload_hash].append(record)
         matching_phases = [
             phase
             for phase, (start_ns, end_ns) in windows.items()
@@ -3004,7 +3047,15 @@ def _adapter_gate(
     heartbeat_details: dict[str, dict[str, int]] = {}
     used_request_forward_sequences: set[int] = set()
     used_response_forward_sequences: set[int] = set()
-    used_tail_forward_sequences: set[int] = set()
+    raw_occurrence_result = _adapter_raw_occurrence_gate(
+        records,
+        windows=windows,
+        phase_evidence=phase_evidence,
+    )
+    failures.extend(raw_occurrence_result["failures"])
+    raw_liveness_pairs = raw_occurrence_result["details"].get("liveness_pairs", {})
+    if not isinstance(raw_liveness_pairs, dict):
+        raw_liveness_pairs = {}
     for phase in ("good", "recovery"):
         request_required: Counter[str] = Counter()
         response_required: Counter[str] = Counter()
@@ -3126,62 +3177,21 @@ def _adapter_gate(
             "causal_response_datagrams": causal_response_datagrams,
         }
 
-        start_ns, end_ns = windows.get(phase, (0, -1))
-        fresh_heartbeats = 0
-        causal_heartbeats = 0
-        stale_heartbeats = 0
-        for heartbeat in sorted(
-            evidence.get("heartbeats", []), key=lambda record: record.get("monotonic_ns", -1)
-        ):
-            payload_hash = heartbeat.get("packet_sha256")
-            heartbeat_ns = heartbeat.get("monotonic_ns")
-            if not _is_sha256(payload_hash) or not _is_int(heartbeat_ns):
-                continue
-            candidates = [
-                record
-                for record in tail_forwards_by_hash.get(payload_hash, [])
-                if _is_int(record.get("event_seq"))
-                and record["event_seq"] not in used_tail_forward_sequences
-                and _is_int(record.get("monotonic_ns"))
-                and record["monotonic_ns"] <= heartbeat_ns
-            ]
-            if not candidates:
-                failures.append(
-                    f"adapter/{phase}: heartbeat payload {payload_hash} has no causally prior tail_to_gcs forward"
-                )
-                continue
-            candidate_freshness = {
-                start_ns <= record["monotonic_ns"] < end_ns for record in candidates
-            }
-            if len(candidate_freshness) > 1:
-                failures.append(
-                    f"adapter/{phase}: heartbeat payload {payload_hash} has ambiguous "
-                    "stale/fresh adapter-forward occurrences"
-                )
-                continue
-            # Identical packet bytes are occurrence-matched FIFO.  MAVLink
-            # frame sequence numbers make a repeated heartbeat hash within an
-            # M2 window exceptional, and consuming each adapter event once
-            # prevents one forward from proving several decoded heartbeats.
-            forward = candidates[0]
-            used_tail_forward_sequences.add(forward["event_seq"])
-            causal_heartbeats += 1
-            forward_ns = forward["monotonic_ns"]
-            if start_ns <= forward_ns < end_ns:
-                fresh_heartbeats += 1
-            else:
-                stale_heartbeats += 1
+        raw_pair = raw_liveness_pairs.get(phase, {})
+        if not isinstance(raw_pair, dict):
+            raw_pair = {}
+        fresh_heartbeats = raw_pair.get("fresh") if _is_int(raw_pair.get("fresh")) else 0
+        heartbeat_details[phase] = {
+            "observed": len(evidence.get("heartbeats", [])),
+            "causal": raw_pair.get("causal") if _is_int(raw_pair.get("causal")) else 0,
+            "fresh": fresh_heartbeats,
+            "stale": raw_pair.get("stale") if _is_int(raw_pair.get("stale")) else 0,
+        }
         if fresh_heartbeats < MIN_POSITIVE_HEARTBEATS:
             failures.append(
                 f"adapter/{phase}: fresh heartbeat forwards {fresh_heartbeats}, "
                 f"expected at least {MIN_POSITIVE_HEARTBEATS}"
             )
-        heartbeat_details[phase] = {
-            "observed": len(evidence.get("heartbeats", [])),
-            "causal": causal_heartbeats,
-            "fresh": fresh_heartbeats,
-            "stale": stale_heartbeats,
-        }
 
     down_evidence = phase_evidence.get("down", {})
     down_request_hashes = {
@@ -3212,12 +3222,6 @@ def _adapter_gate(
         phase: {direction: sum(counter.values()) for direction, counter in directions.items()}
         for phase, directions in forward_by_phase.items()
     }
-    raw_occurrence_result = _adapter_raw_occurrence_gate(
-        records,
-        windows=windows,
-        phase_evidence=phase_evidence,
-    )
-    failures.extend(raw_occurrence_result["failures"])
     return _result(
         failures,
         forwards=details,

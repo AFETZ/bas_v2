@@ -163,9 +163,13 @@ def resequence(records: list[dict[str, Any]]) -> None:
 def resequence_adapter(records: list[dict[str, Any]]) -> None:
     """Restore the adapter log's monotonic/event-sequence invariants after a mutation."""
     records.sort(key=lambda record: record["monotonic_ns"])
+    adapter_datagram_seq = 0
     for sequence, record in enumerate(records, start=1):
         record["event_seq"] = sequence
         record["wall_utc"] = utc_for(1_000 + sequence)
+        if record.get("event") == "forward":
+            adapter_datagram_seq += 1
+            record["adapter_datagram_seq"] = adapter_datagram_seq
 
 
 def refresh_adapter_stop_counters(records: list[dict[str, Any]]) -> None:
@@ -1703,8 +1707,42 @@ class M2VerticalSliceValidatorTests(unittest.TestCase):
             and record.get("sha256") == payload_hash
         )
         stale = dict(original)
-        stale["monotonic_ns"] = builder.phase_payloads[phase]["window"][0] - 1
+        phase_start = builder.phase_payloads[phase]["window"][0]
+        stale["received_monotonic_ns"] = phase_start - 300
+        stale["send_start_monotonic_ns"] = phase_start - 200
+        stale["send_complete_monotonic_ns"] = phase_start - 100
+        stale["monotonic_ns"] = phase_start - 1
         records.append(stale)
+        refresh_adapter_stop_counters(records)
+        resequence_adapter(records)
+        write_jsonl(path, records)
+
+    def duplicate_adapter_forward_within_phase(
+        self,
+        run_dir: Path,
+        *,
+        payload: bytes,
+    ) -> None:
+        """Create a second same-phase relay for one raw liveness occurrence."""
+        path = run_dir / "logs/uav_adapter.jsonl"
+        records = read_jsonl(path)
+        payload_hash = digest(payload)
+        original = next(
+            record
+            for record in records
+            if record.get("event") == "forward"
+            and record.get("direction") == "tail_to_gcs"
+            and record.get("sha256") == payload_hash
+        )
+        duplicate = dict(original)
+        for key in (
+            "received_monotonic_ns",
+            "send_start_monotonic_ns",
+            "send_complete_monotonic_ns",
+            "monotonic_ns",
+        ):
+            duplicate[key] += 1
+        records.append(duplicate)
         refresh_adapter_stop_counters(records)
         resequence_adapter(records)
         write_jsonl(path, records)
@@ -2046,8 +2084,7 @@ class M2VerticalSliceValidatorTests(unittest.TestCase):
             adapter = result["gates"]["adapter_path"]
             self.assertEqual(adapter["status"], "failed")
             self.assertIn(
-                "adapter/recovery: heartbeat payload "
-                f"{digest(missing_heartbeat)} has no causally prior tail_to_gcs forward",
+                "liveness raw RX has 0 exact causal tail_to_gcs occurrence(s), expected one",
                 "\n".join(adapter["failures"]),
             )
 
@@ -2116,7 +2153,7 @@ class M2VerticalSliceValidatorTests(unittest.TestCase):
                 "\n".join(adapter["failures"]),
             )
 
-    def test_ambiguous_stale_and_fresh_heartbeat_occurrences_fail_closed(self) -> None:
+    def test_stale_and_fresh_heartbeat_occurrences_do_not_let_stale_prove_fresh(self) -> None:
         temporary, run_dir, builder = self.make_fixture()
         with temporary:
             heartbeat = builder.phase_payloads["recovery"]["heartbeats"][0]
@@ -2132,8 +2169,48 @@ class M2VerticalSliceValidatorTests(unittest.TestCase):
             adapter = result["gates"]["adapter_path"]
             self.assertEqual(adapter["status"], "failed")
             self.assertIn(
-                "adapter/recovery: heartbeat payload "
-                f"{digest(heartbeat)} has ambiguous stale/fresh adapter-forward occurrences",
+                "adapter/recovery: fresh heartbeat forwards 2, expected at least 3",
+                "\n".join(adapter["failures"]),
+            )
+            self.assertNotIn("ambiguous stale/fresh", "\n".join(adapter["failures"]))
+            self.assertEqual(
+                adapter["details"]["heartbeat_forwards"]["recovery"],
+                {"observed": 3, "causal": 3, "fresh": 2, "stale": 1},
+            )
+
+    def test_stale_and_fresh_heartbeat_occurrences_pass_with_three_other_fresh_pairs(self) -> None:
+        temporary, run_dir, builder = self.make_fixture(positive_heartbeat_count=4)
+        with temporary:
+            heartbeat = builder.phase_payloads["recovery"]["heartbeats"][0]
+            self.duplicate_adapter_forward_before_phase_start(
+                run_dir,
+                builder,
+                phase="recovery",
+                payload=heartbeat,
+            )
+            builder.seal()
+            result = evaluate_m2_vertical_slice(run_dir)
+            self.assertTrue(result["passed"], result)
+            adapter = result["gates"]["adapter_path"]
+            expected = {"observed": 4, "causal": 4, "fresh": 3, "stale": 1}
+            self.assertEqual(adapter["details"]["heartbeat_forwards"]["recovery"], expected)
+            self.assertEqual(
+                adapter["details"]["raw_occurrences"]["liveness_pairs"]["recovery"],
+                expected,
+            )
+
+    def test_two_same_phase_fresh_heartbeat_forwards_fail_closed(self) -> None:
+        temporary, run_dir, builder = self.make_fixture()
+        with temporary:
+            heartbeat = builder.phase_payloads["recovery"]["heartbeats"][0]
+            self.duplicate_adapter_forward_within_phase(run_dir, payload=heartbeat)
+            builder.seal()
+            result = evaluate_m2_vertical_slice(run_dir)
+            self.assertFalse(result["passed"])
+            adapter = result["gates"]["adapter_path"]
+            self.assertEqual(adapter["status"], "failed")
+            self.assertIn(
+                "liveness raw RX has 2 current-phase tail_to_gcs occurrence(s), expected one",
                 "\n".join(adapter["failures"]),
             )
 
