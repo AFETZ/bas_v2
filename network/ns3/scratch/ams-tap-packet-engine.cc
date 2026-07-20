@@ -679,11 +679,20 @@ class RadioStateTable
                     {
                         input.seekg(static_cast<std::streamoff>(m_offset));
                         std::string line;
+                        uint64_t cursor = m_offset;
                         uint32_t processed = 0;
                         while (processed < m_maxUpdatesPerPoll && std::getline(input, line))
                         {
-                            m_offset += line.size() + 1;
-                            ++processed;
+                            // The adapter appends a record and its delimiter concurrently
+                            // with this realtime reader.  A getline that reaches the
+                            // snapshot boundary without a delimiter is an unfinished
+                            // append, not a malformed state record.  Do not advance the
+                            // durable cursor: the next poll must retry that exact tail.
+                            const uint64_t recordEnd = cursor + line.size() + 1;
+                            if (recordEnd > size)
+                            {
+                                break;
+                            }
                             if (line.size() > MAX_SIONNA_LINE_BYTES)
                             {
                                 FailClosed("state_ipc_line_too_large");
@@ -694,7 +703,10 @@ class RadioStateTable
                                 FailClosed("state_ipc_invalid_record");
                                 break;
                             }
+                            cursor = recordEnd;
+                            ++processed;
                         }
+                        m_offset = cursor;
                     }
                 }
             }

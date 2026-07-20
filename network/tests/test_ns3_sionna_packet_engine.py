@@ -438,6 +438,53 @@ class SionnaPacketEngineCompiledTests(unittest.TestCase):
                         )
                     )
 
+    def test_unterminated_append_tail_is_retried_not_faulted(self) -> None:
+        """A concurrent adapter write must not poison the whole state table.
+
+        The first thirty records are complete and usable.  The final bytes
+        intentionally model a writer observed between its JSON payload and
+        trailing newline; the engine must leave that tail for a later poll.
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state_file = root / "partial-tail.states.jsonl"
+            write_fresh_states(state_file)
+            with state_file.open("ab") as stream:
+                stream.write(b'{"schema":"ams.sionna.packet_state/v1"')
+                stream.flush()
+            events_file = root / "partial-tail.events.jsonl"
+            result = run_engine(
+                enabled_config(state_file, "force_deliver"), events_file
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            events = read_events(events_file)
+
+        modeled = [
+            event
+            for event in events
+            if not event["p2mp"]
+        ]
+        self.assertEqual(
+            len(
+                [event for event in modeled if event["event"] == "channel"]
+            ),
+            31,
+        )
+        self.assertFalse(
+            any(
+                event["event"] == "drop"
+                and event["drop_reason"] == "sionna_state_ipc_fault"
+                for event in modeled
+            )
+        )
+        self.assertTrue(
+            all(
+                event["radio_state_status"] == "fresh"
+                for event in modeled
+                if event["event"] == "channel"
+            )
+        )
+
     def test_packet_waiting_in_queue_is_dropped_when_its_state_expires(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

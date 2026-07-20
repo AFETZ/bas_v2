@@ -170,6 +170,14 @@ Updated: 2026-07-20 UTC.
   query slot ahead of newly tailed uplinks only during preflight.  The
   fixed-grid boundary ordering remains unchanged; no bootstrap packet,
   bypass, validator relaxation, or capacity-budget change is introduced.
+- The failed M4 capacity attempt `m4_capacity_20260720T232449Z` is retained
+  without a formal receipt.  Its Sionna provider and adapter remained live,
+  but the ns-3 reader observed a concurrently appended, unterminated JSONL
+  state tail as an invalid record and permanently fail-closed the entire radio
+  table.  The reader now consumes only newline-terminated records wholly
+  inside its file-size snapshot and retries an incomplete tail on the next
+  poll.  A malformed newline-terminated record still fail-closes; this is an
+  IPC atomicity repair, not a hold-last, bypass, or validator relaxation.
 
 ## Open Decisions Requiring External Input
 
