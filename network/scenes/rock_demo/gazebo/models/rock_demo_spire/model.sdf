@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <model name="rock_demo_spire">
+    <static>true</static>
+    <pose>0 0 0 0 0 0</pose>
+    <link name="rock_demo_spire_link">
+      <pose>0 0 0 0 0 0</pose>
+      <collision name="rock_demo_spire_collision">
+        <geometry>
+          <mesh>
+            <uri>model://rock_demo_spire/meshes/rock_demo_spire.obj</uri>
+            <scale>1 1 1</scale>
+          </mesh>
+        </geometry>
+      </collision>
+      <visual name="rock_demo_spire_visual">
+        <geometry>
+          <mesh>
+            <uri>model://rock_demo_spire/meshes/rock_demo_spire.obj</uri>
+            <scale>1 1 1</scale>
+          </mesh>
+        </geometry>
+        <material>
+          <ambient>0.26 0.24 0.22 1</ambient>
+          <diffuse>0.42 0.39 0.35 1</diffuse>
+          <specular>0.08 0.08 0.07 1</specular>
+        </material>
+      </visual>
+    </link>
+  </model>
+</sdf>

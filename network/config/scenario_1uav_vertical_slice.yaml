@@ -1,0 +1,56 @@
+schema_version: 2
+
+scenario:
+  name: scenario_1uav_vertical_slice
+  purpose: M2 external-packet isolation and recovery proof
+  map:
+    world_file: modelflughafen/model.sdf
+    bounds_m: {xmin: -50.0, ymin: -100.0, xmax: 150.0, ymax: 50.0}
+
+base_simulation:
+  launch_package: multiagent_simulation
+  launch_file: multiagent_simulation.launch.py
+  sitl_home: "46.607213,14.278461,446,10"
+
+robots:
+  - name: uav1
+    role: uav
+    instance: 0
+    system_id: 1
+    dds_udp_port: 2019
+    position: [0.0, -40.0, 2.0, 0.0, 0.0, 0.0]
+    nominal_radio_position_m: [0.0, -40.0, 2.0]
+    mavproxy_out: 10.72.1.2:14560
+
+network:
+  namespaces: {gcs: ams-gcs, ns3: ams-ns3, uav: ams-uav1}
+  gcs:
+    address: 10.71.0.10/24
+    gateway: 10.71.0.1
+    mac: "02:71:00:00:10:10"
+  router:
+    gcs_address: 10.71.0.1/24
+    gcs_mac: "02:71:00:00:00:01"
+    uav_address: 10.71.1.1/24
+    uav_mac: "02:71:01:00:00:01"
+  uav:
+    address: 10.71.1.10/24
+    gateway: 10.71.1.1
+    mac: "02:71:01:00:10:10"
+  tail:
+    root_address: 10.72.1.1/30
+    uav_address: 10.72.1.2/30
+  taps: {gcs: tap-gcs, uav: tap-uav}
+  bridges: {gcs: br-gcs, uav: br-uav}
+
+endpoints:
+  gcs_radio: 10.71.0.10:14600
+  uav_radio: 10.71.1.10:14601
+  uav_tail: 10.72.1.2:14560
+
+acceptance:
+  component_only: true
+  p0_eligible: false
+  good_attempts: 10
+  down_attempts: 5
+  recovery_attempts: 10

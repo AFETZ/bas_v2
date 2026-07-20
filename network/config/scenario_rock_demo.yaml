@@ -1,0 +1,78 @@
+# Launch-compatible five-UAV rock-obstruction scenario.
+schema_version: 1
+
+scenario:
+  name: scenario_rock_demo
+  description: uav2 flies from a clear segment into radio shadow behind the shared Gazebo/Sionna blocker.
+  map:
+    world_file: rock_demo/rock_demo.sdf
+    size_m: [2000, 600]
+    terrain_height_variation_m: 0
+    building_height_limit_floors: 1
+
+base_simulation:
+  launch_package: multiagent_simulation
+  launch_file: multiagent_simulation.launch.py
+  recommended_launch_arguments:
+    gui: false
+    rviz: false
+    use_mapping_camera: false
+    use_navigation_camera: false
+    use_zed_camera: false
+    robots_config_file: network/config/scenario_rock_demo.yaml
+
+command_post:
+  id: cp
+  role: command_post
+  position_m: [-500.0, -220.0, 20.0]
+  orientation_quat_xyzw: [0.0, 0.0, 0.0, 1.0]
+  antenna: omni
+
+robots:
+  - name: uav1
+    role: uav
+    instance: 0
+    system_id: 1
+    position: [-400.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    nominal_radio_position_m: [-400.0, 0.0, 80.0]
+    antenna: omni
+  - name: uav2
+    role: uav
+    instance: 1
+    system_id: 2
+    position: [-300.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    nominal_radio_position_m: [-300.0, 0.0, 80.0]
+    antenna: omni
+  - name: uav3
+    role: uav
+    instance: 2
+    system_id: 3
+    position: [-300.0, 180.0, 0.0, 0.0, 0.0, 0.0]
+    nominal_radio_position_m: [-300.0, 180.0, 80.0]
+    antenna: omni
+  - name: uav4
+    role: uav
+    instance: 3
+    system_id: 4
+    position: [500.0, -220.0, 0.0, 0.0, 0.0, 0.0]
+    nominal_radio_position_m: [500.0, -220.0, 90.0]
+    antenna: omni
+  - name: uav5
+    role: uav
+    instance: 4
+    system_id: 5
+    position: [800.0, 220.0, 0.0, 0.0, 0.0, 0.0]
+    nominal_radio_position_m: [800.0, 220.0, 90.0]
+    antenna: omni
+
+radio:
+  carrier_hz: 2400000000
+  bandwidth_hz: 20000000
+  tx_power_dbm_default: 33.0
+  tx_power_w_range: [1.0, 2.0]
+  service_tiers_file: network/config/service_tiers.yaml
+
+traffic_classes:
+  - control
+  - payload
+  - additional_data

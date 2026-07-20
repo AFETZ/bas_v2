@@ -1,0 +1,406 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "network/config/provenance_schema.json",
+  "title": "Network/radio run provenance",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_id",
+    "generated_utc",
+    "git_commit",
+    "git_dirty",
+    "git_status",
+    "git_diff_sha256",
+    "source_hash",
+    "source_files",
+    "source_manifest",
+    "qualification_content_vector",
+    "qualification_consumption",
+    "qualification_checkout",
+    "plan_contract",
+    "config_hashes",
+    "dependency_versions",
+    "container_image",
+    "implementation",
+    "dependency_lock_status",
+    "acceptance_blockers",
+    "acceptance_eligible"
+  ],
+  "properties": {
+    "schema_version": {"const": 2},
+    "run_id": {"type": "string", "minLength": 1},
+    "generated_utc": {"type": "string", "minLength": 1},
+    "git_commit": {"type": "string", "minLength": 7},
+    "git_dirty": {"type": "boolean"},
+    "git_status": {"type": "array", "items": {"type": "string"}},
+    "git_diff_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_files": {"type": "integer", "minimum": 1},
+    "source_manifest": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+    },
+    "qualification_content_vector": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "contract",
+        "git_commit",
+        "policy_id",
+        "policy_path",
+        "policy_sha256",
+        "mutable_status_exclusions",
+        "default_owner",
+        "selective_reuse",
+        "assignments_sha256",
+        "entry_manifest",
+        "assignments",
+        "records",
+        "node_hashes",
+        "vector_sha256"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "contract": {"const": "ams.qualification-content-vector/v1"},
+        "git_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "policy_id": {"const": "q0_q1_q2_granular/v1"},
+        "policy_path": {"const": "network/config/qualification_path_ownership.json"},
+        "policy_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "mutable_status_exclusions": {
+          "type": "array",
+          "prefixItems": [
+            {"const": "network/NEXT_TASK.md"},
+            {"const": "network/PROGRESS.md"},
+            {"const": "network/VALIDATION_REPORT.md"}
+          ],
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "default_owner": {"const": "Q0"},
+        "selective_reuse": {"const": true},
+        "assignments_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "entry_manifest": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "path",
+              "git_mode",
+              "object_type",
+              "git_object_id",
+              "kind",
+              "blob_size",
+              "blob_sha256",
+              "owner"
+            ],
+            "properties": {
+              "path": {"type": "string", "minLength": 1},
+              "git_mode": {"enum": ["100644", "100755", "120000", "160000"]},
+              "object_type": {"enum": ["blob", "commit"]},
+              "git_object_id": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+              "kind": {"enum": ["regular", "symlink", "gitlink"]},
+              "blob_size": {"type": ["integer", "null"], "minimum": 0},
+              "blob_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+              "owner": {"enum": ["Q0", "Q1", "Q2", "Q3", "Q4", "Q5", "Q6", "Q7", "Q8"]}
+            },
+            "additionalProperties": false
+          }
+        },
+        "assignments": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {"enum": ["Q0", "Q1", "Q2", "Q3", "Q4", "Q5", "Q6", "Q7", "Q8"]}
+        },
+        "records": {
+          "type": "array",
+          "minItems": 9,
+          "maxItems": 9,
+          "items": {
+            "type": "object",
+            "required": ["owner", "path_count", "content_sha256"],
+            "properties": {
+              "owner": {"enum": ["Q0", "Q1", "Q2", "Q3", "Q4", "Q5", "Q6", "Q7", "Q8"]},
+              "path_count": {"type": "integer", "minimum": 0},
+              "content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            },
+            "additionalProperties": false
+          }
+        },
+        "node_hashes": {
+          "type": "object",
+          "required": ["Q0", "Q1", "Q2", "Q3", "Q4", "Q5", "Q6", "Q7", "Q8"],
+          "properties": {
+            "Q0": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "Q1": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "Q2": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "Q3": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "Q4": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "Q5": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "Q6": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "Q7": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "Q8": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          },
+          "additionalProperties": false
+        },
+        "vector_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "qualification_consumption": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "contract",
+        "profile",
+        "consumed_nodes",
+        "consumed_node_sha256",
+        "vector_sha256",
+        "policy_sha256",
+        "git_commit"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "contract": {"const": "ams.qualification-consumption/v1"},
+        "profile": {
+          "enum": [
+            "diagnostic",
+            "m0",
+            "m1_component",
+            "flight_capacity_prerequisite",
+            "m2_component",
+            "m3_component",
+            "m4_capacity_prerequisite",
+            "m4_component"
+          ]
+        },
+        "consumed_nodes": {
+          "type": "array",
+          "items": {"enum": ["Q0", "Q1", "Q2", "Q3", "Q4", "Q5", "Q6", "Q7", "Q8"]},
+          "uniqueItems": true
+        },
+        "consumed_node_sha256": {
+          "type": "object",
+          "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        },
+        "vector_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "policy_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "git_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"profile": {"const": "diagnostic"}}},
+          "then": {
+            "properties": {
+              "consumed_nodes": {"maxItems": 0},
+              "consumed_node_sha256": {"maxProperties": 0}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"profile": {"const": "m0"}}},
+          "then": {
+            "properties": {
+              "consumed_nodes": {"const": ["Q0"]},
+              "consumed_node_sha256": {
+                "required": ["Q0"],
+                "properties": {"Q0": {"type": "string", "pattern": "^[0-9a-f]{64}$"}},
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"profile": {"const": "m1_component"}}},
+          "then": {
+            "properties": {
+              "consumed_nodes": {"const": ["Q0", "Q1"]},
+              "consumed_node_sha256": {
+                "required": ["Q0", "Q1"],
+                "properties": {
+                  "Q0": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "Q1": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"profile": {"const": "flight_capacity_prerequisite"}}},
+          "then": {
+            "properties": {
+              "consumed_nodes": {"const": ["Q0", "Q1"]},
+              "consumed_node_sha256": {
+                "required": ["Q0", "Q1"],
+                "properties": {
+                  "Q0": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "Q1": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"profile": {"const": "m2_component"}}},
+          "then": {
+            "properties": {
+              "consumed_nodes": {"const": ["Q0", "Q1", "Q2"]},
+              "consumed_node_sha256": {
+                "required": ["Q0", "Q1", "Q2"],
+                "properties": {
+                  "Q0": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "Q1": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "Q2": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"profile": {"const": "m3_component"}}},
+          "then": {
+            "properties": {
+              "consumed_nodes": {"const": ["Q0", "Q1", "Q2", "Q3"]},
+              "consumed_node_sha256": {
+                "required": ["Q0", "Q1", "Q2", "Q3"],
+                "properties": {
+                  "Q0": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "Q1": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "Q2": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "Q3": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"profile": {"const": "m4_capacity_prerequisite"}}},
+          "then": {
+            "properties": {
+              "consumed_nodes": {"const": ["Q0", "Q1", "Q2", "Q3", "Q4"]},
+              "consumed_node_sha256": {
+                "required": ["Q0", "Q1", "Q2", "Q3", "Q4"],
+                "properties": {
+                  "Q0": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "Q1": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "Q2": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "Q3": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "Q4": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"profile": {"const": "m4_component"}}},
+          "then": {
+            "properties": {
+              "consumed_nodes": {"const": ["Q0", "Q1", "Q2", "Q3", "Q4"]},
+              "consumed_node_sha256": {
+                "required": ["Q0", "Q1", "Q2", "Q3", "Q4"],
+                "properties": {
+                  "Q0": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "Q1": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "Q2": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "Q3": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "Q4": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "qualification_checkout": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "contract",
+        "expected_commit",
+        "head_commit",
+        "git_status",
+        "checked_entry_count",
+        "submodule_count",
+        "tree_objects_equal",
+        "submodules_clean",
+        "checkout_equal",
+        "failures"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "contract": {"const": "ams.qualification-checkout/v1"},
+        "expected_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "head_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "git_status": {"type": "array", "items": {"type": "string"}},
+        "checked_entry_count": {"type": "integer", "minimum": 1},
+        "submodule_count": {"type": "integer", "minimum": 0},
+        "tree_objects_equal": {"type": "boolean"},
+        "submodules_clean": {"type": "boolean"},
+        "checkout_equal": {"type": "boolean"},
+        "failures": {"type": "array", "items": {"type": "string"}}
+      },
+      "additionalProperties": false
+    },
+    "plan_contract": {
+      "type": "object",
+      "required": ["plan_version", "path", "contract_sha256"],
+      "properties": {
+        "plan_version": {"const": 3},
+        "path": {"const": "doc/network_radio_integration_plan_v3.md"},
+        "contract_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "config_hashes": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+    },
+    "dependency_versions": {"type": "object", "minProperties": 1},
+    "container_image": {
+      "type": "object",
+      "required": ["reference", "digest", "digest_source", "runtime_container_id", "runtime_container_id_source"],
+      "properties": {
+        "reference": {"type": "string"},
+        "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "digest_source": {"const": "docker_image_inspect_host"},
+        "runtime_container_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "runtime_container_id_source": {"const": "host_bind_mount"}
+      }
+    },
+    "implementation": {
+      "type": "object",
+      "required": [
+        "packet_ingress_mode",
+        "medium_model",
+        "radio_provider_id",
+        "radio_provider_runtime_consumed",
+        "runtime_provider_id",
+        "reason"
+      ],
+      "properties": {
+        "packet_ingress_mode": {"type": "string", "minLength": 1},
+        "medium_model": {"type": "string", "minLength": 1},
+        "radio_provider_id": {"type": "string", "minLength": 1},
+        "radio_provider_runtime_consumed": {"type": "boolean"},
+        "runtime_provider_id": {"type": "string", "minLength": 1},
+        "reason": {
+          "enum": ["profile_pre_m4", "profile_m4_runtime", "diagnostic_full_path"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "dependency_lock_status": {"type": "string"},
+    "acceptance_blockers": {"type": "array", "items": {"type": "string"}},
+    "acceptance_eligible": {"type": "boolean"}
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,283 @@
+schema_version: 1
+scenario: scenario_5uav
+radio_backend_config: network/config/radio_backend.yaml
+default_radio_backend: sim_2_4ghz
+
+ipc:
+  sionna_provider:
+    protocol: tcp_json_lines
+    host: 127.0.0.1
+    port: 5090
+
+backend_selection:
+  environment_variable: AMS_RADIO_BACKEND
+  default: sim_2_4ghz
+  allowed:
+    - sim_2_4ghz
+    - real_modem_2_4ghz
+  current_acceptance_backend: sim_2_4ghz
+  requirement: The simulated 2.4 GHz backend is the current P0 target; the physical modem backend must remain switchable but inactive unless explicitly selected in a future run.
+
+isolation:
+  namespace_prefix: ams
+  ground_namespace: ams-gcs
+  ns3_namespace: ams-ns3
+  uav_namespaces:
+    - ams-uav1
+    - ams-uav2
+    - ams-uav3
+    - ams-uav4
+    - ams-uav5
+  model: linux_netns_veth_tap_ns3
+  requirement: Ground-side tools must not reach direct SITL or legacy MAVLink localhost ports when ns-3 is stopped.
+
+command_post:
+  id: cp
+  namespace: ams-gcs
+  node_ip: 10.71.0.10
+  bridge_ip: 10.71.0.1
+  ports:
+    control_udp_base: 14600
+    payload_udp_base: 14700
+    additional_data_udp_base: 14800
+
+bridge:
+  status: day4_adapter
+  mavlink_router:
+    executable: mavlink-routerd
+    config_generator: network/bridge/bridge_config.py
+    upstream_project: https://github.com/mavlink-router/mavlink-router
+    role: Route MAVLink messages between configured UDP/TCP endpoints; local bridge code treats datagrams as opaque packets.
+  ground_control:
+    default_uav: uav1
+    endpoint_env: AMS_MAVLINK_ENDPOINT
+    endpoint_arg: --endpoint
+    default_connection: udp:127.0.0.1:14600
+    bind_host: 127.0.0.1
+    manual_gcs:
+      default_uav: uav2
+      connection: tcp:127.0.0.1:14600
+      bind_host: 127.0.0.1
+      tcp_port: 14600
+      traffic_class: control
+      helper: network/bridge/manual_gcs_bridge.py
+      log: logs/manual_gcs_bridge.jsonl
+      summary: metrics/manual_gcs_bridge_summary.json
+      ns3_trace: metrics/ns3_sionna_rt_live.csv
+      require_modeled_path: true
+      max_trace_age_s: 5
+      link_down_snr_db: -120
+      requirement: Manual GCS/QGC sessions must use this bridge endpoint for P0 packet-path evidence; it mirrors manual MAVLink bytes into the priority bridge/ns-3 ingress and gates forwarding on fresh ns-3/Sionna link evidence.
+      direct_sitl_convenience:
+        enabled_by_default: false
+        enable_arg: --allow-direct-gcs
+        alias_arg: --allow-direct-sitl-ports
+        p0_eligible_when_enabled: false
+        label: NON-P0 convenience only
+    ports:
+      control_udp: 14600
+      payload_udp: 14700
+      additional_data_udp: 14800
+    requirement: Ground-control tools must use this configurable bridge endpoint or an isolated namespace endpoint, never the legacy udp:127.0.0.1:14550 shortcut.
+  ns3:
+    ingress_host: 10.71.0.1
+    uav_egress_host: 10.71.0.10
+    port_offset_from_bridge: 1000
+    requirement: These are handoff sockets for the ns-3 emulation bridge; stopping ns-3 must leave them disconnected from UAV-side SITL endpoints.
+  queues:
+    control:
+      priority: 0
+      max_packets: 256
+      byte_pacing_bps: 115200
+      deadline_ms: 250
+      drop_policy: deadline_drop_oldest
+    payload:
+      priority: 1
+      max_packets: 128
+      byte_pacing_bps: 57600
+      deadline_ms: 1000
+      drop_policy: bounded_drop_tail
+    additional_data:
+      priority: 2
+      max_packets: 128
+      byte_pacing_bps: 57600
+      deadline_ms: 2000
+      drop_policy: bounded_drop_tail
+  pcap_hooks:
+    control:
+      file: pcap/control.pcap
+      filter: udp and (portrange 14600-14605 or portrange 15600-15605 or portrange 16600-16605)
+    payload:
+      file: pcap/payload.pcap
+      filter: udp and (portrange 14700-14705 or portrange 15700-15705 or portrange 16700-16705)
+    additional_data:
+      file: pcap/additional_data.pcap
+      filter: udp and (portrange 14800-14805 or portrange 15800-15805 or portrange 16800-16805)
+
+uavs:
+  - name: uav1
+    system_id: 1
+    instance: 0
+    ros_namespace: uav1
+    isolation_namespace: ams-uav1
+    node_ip: 10.71.1.10
+    bridge_ip: 10.71.1.1
+    direct_sitl:
+      master_tcp: {host: 127.0.0.1, port: 5760}
+      sitl_udp: {host: 127.0.0.1, port: 5501}
+      gazebo_fdm_udp: {host: 127.0.0.1, port: 9002}
+      tty0: ./dev/ttyROS0
+      tty1: ./dev/ttyROS1
+    bridge_ports:
+      control_udp: 14601
+      payload_udp: 14701
+      additional_data_udp: 14801
+    ns3_ports:
+      control_ingress_udp: 15601
+      payload_ingress_udp: 15701
+      additional_data_ingress_udp: 15801
+      control_egress_udp: 16601
+      payload_egress_udp: 16701
+      additional_data_egress_udp: 16801
+  - name: uav2
+    system_id: 2
+    instance: 1
+    ros_namespace: uav2
+    isolation_namespace: ams-uav2
+    node_ip: 10.71.2.10
+    bridge_ip: 10.71.2.1
+    direct_sitl:
+      master_tcp: {host: 127.0.0.1, port: 5770}
+      sitl_udp: {host: 127.0.0.1, port: 5511}
+      gazebo_fdm_udp: {host: 127.0.0.1, port: 9012}
+      tty0: ./dev/ttyROS10
+      tty1: ./dev/ttyROS11
+    bridge_ports:
+      control_udp: 14602
+      payload_udp: 14702
+      additional_data_udp: 14802
+    ns3_ports:
+      control_ingress_udp: 15602
+      payload_ingress_udp: 15702
+      additional_data_ingress_udp: 15802
+      control_egress_udp: 16602
+      payload_egress_udp: 16702
+      additional_data_egress_udp: 16802
+  - name: uav3
+    system_id: 3
+    instance: 2
+    ros_namespace: uav3
+    isolation_namespace: ams-uav3
+    node_ip: 10.71.3.10
+    bridge_ip: 10.71.3.1
+    direct_sitl:
+      master_tcp: {host: 127.0.0.1, port: 5780}
+      sitl_udp: {host: 127.0.0.1, port: 5521}
+      gazebo_fdm_udp: {host: 127.0.0.1, port: 9022}
+      tty0: ./dev/ttyROS20
+      tty1: ./dev/ttyROS21
+    bridge_ports:
+      control_udp: 14603
+      payload_udp: 14703
+      additional_data_udp: 14803
+    ns3_ports:
+      control_ingress_udp: 15603
+      payload_ingress_udp: 15703
+      additional_data_ingress_udp: 15803
+      control_egress_udp: 16603
+      payload_egress_udp: 16703
+      additional_data_egress_udp: 16803
+  - name: uav4
+    system_id: 4
+    instance: 3
+    ros_namespace: uav4
+    isolation_namespace: ams-uav4
+    node_ip: 10.71.4.10
+    bridge_ip: 10.71.4.1
+    direct_sitl:
+      master_tcp: {host: 127.0.0.1, port: 5790}
+      sitl_udp: {host: 127.0.0.1, port: 5531}
+      gazebo_fdm_udp: {host: 127.0.0.1, port: 9032}
+      tty0: ./dev/ttyROS30
+      tty1: ./dev/ttyROS31
+    bridge_ports:
+      control_udp: 14604
+      payload_udp: 14704
+      additional_data_udp: 14804
+    ns3_ports:
+      control_ingress_udp: 15604
+      payload_ingress_udp: 15704
+      additional_data_ingress_udp: 15804
+      control_egress_udp: 16604
+      payload_egress_udp: 16704
+      additional_data_egress_udp: 16804
+  - name: uav5
+    system_id: 5
+    instance: 4
+    ros_namespace: uav5
+    isolation_namespace: ams-uav5
+    node_ip: 10.71.5.10
+    bridge_ip: 10.71.5.1
+    direct_sitl:
+      master_tcp: {host: 127.0.0.1, port: 5800}
+      sitl_udp: {host: 127.0.0.1, port: 5541}
+      gazebo_fdm_udp: {host: 127.0.0.1, port: 9042}
+      tty0: ./dev/ttyROS40
+      tty1: ./dev/ttyROS41
+    bridge_ports:
+      control_udp: 14605
+      payload_udp: 14705
+      additional_data_udp: 14805
+    ns3_ports:
+      control_ingress_udp: 15605
+      payload_ingress_udp: 15705
+      additional_data_ingress_udp: 15805
+      control_egress_udp: 16605
+      payload_egress_udp: 16705
+      additional_data_egress_udp: 16805
+
+traffic_classes:
+  control:
+    channel: mavlink_control
+    priority: 0
+  payload:
+    channel: mavlink_payload
+    priority: 1
+  additional_data:
+    channel: point_to_multipoint_data
+    priority: 2
+
+no_bypass:
+  check_script: network/tests/check_no_bypass.sh
+  full_p0_note: This smoke check does not replace the later active namespace/TAP/ns-3 stopped proof.
+  forbidden_direct_endpoints:
+    - id: legacy_move_drone_hardcoded_udp
+      protocol: udp
+      host: 127.0.0.1
+      port: 14550
+      reason: Legacy direct GCS endpoint; move_drone.py must not default to or accept this endpoint in packet-in-the-loop runs.
+    - id: uav1_sitl_master_tcp
+      protocol: tcp
+      host: 127.0.0.1
+      port: 5760
+      reason: Direct ArduPilot SITL master port must remain UAV-side only.
+    - id: uav2_sitl_master_tcp
+      protocol: tcp
+      host: 127.0.0.1
+      port: 5770
+      reason: Direct ArduPilot SITL master port must remain UAV-side only.
+    - id: uav3_sitl_master_tcp
+      protocol: tcp
+      host: 127.0.0.1
+      port: 5780
+      reason: Direct ArduPilot SITL master port must remain UAV-side only.
+    - id: uav4_sitl_master_tcp
+      protocol: tcp
+      host: 127.0.0.1
+      port: 5790
+      reason: Direct ArduPilot SITL master port must remain UAV-side only.
+    - id: uav5_sitl_master_tcp
+      protocol: tcp
+      host: 127.0.0.1
+      port: 5800
+      reason: Direct ArduPilot SITL master port must remain UAV-side only.

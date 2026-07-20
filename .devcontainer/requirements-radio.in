@@ -1,0 +1,18 @@
+# Direct Python requirements for the accepted ROS/Gazebo/ArduPilot/Sionna RT
+# runtime.  The generated requirements-radio.lock is authoritative for image
+# installation; regenerate it only with the command embedded in that file.
+black==21.12b0
+cffi==1.17.1
+customtkinter==5.2.2
+future==1.0.0
+matplotlib==3.10.9
+MAVProxy==1.8.74
+mitsuba==3.8.0
+numpy==1.26.4
+pexpect==4.8.0
+pymavlink==2.4.49
+PyNaCl==1.5.0
+PyYAML==6.0.2
+setuptools==79.0.1
+sionna-rt==1.2.2
+uvloop==0.17.0

@@ -1,0 +1,67 @@
+schema_version: 1
+radio_backend_config: network/config/radio_backend.yaml
+endpoints_config: network/config/endpoints.yaml
+service_tiers_config: network/config/service_tiers.yaml
+
+backend_selection:
+  environment_variable: AMS_RADIO_BACKEND
+  default: sim_2_4ghz
+  current_acceptance_backend: sim_2_4ghz
+  future_physical_backend: real_modem_2_4ghz
+  fail_closed: true
+
+virtual_loopback:
+  path_mode: hitl_virtual_loopback
+  purpose: Exercise serial and Ethernet endpoint shims, bounded queues, deadline drops, and timing log correlation without touching physical radio hardware.
+  customer_ready: false
+  actual_modeled_path_required_components:
+    - network/bridge
+    - network/ns3
+    - network/radio_provider
+  serial:
+    enabled: true
+    baud_bps: 57600
+    framing_overhead_bits_per_byte: 10
+    read_timeout_s: 1.0
+  ethernet:
+    enabled: true
+    protocol: udp
+    bind_host: 127.0.0.1
+    bind_port: 0
+    read_timeout_s: 1.0
+  validation:
+    packets_per_class: 2
+    payload_bytes: 96
+    inject_deadline_drop: true
+
+queue_policy:
+  max_queue_packets_per_class: 64
+  max_queue_bytes_per_class: 65536
+  stale_channel_update_action: log_and_continue_degraded
+
+timing_model:
+  source: deterministic_virtual_loopback
+  note: These delays only exercise adapter timing and log correlation. They do not replace ns-3 packet behavior or online Sionna RT radio state.
+  virtual_sionna_latency_ms:
+    control: 4.0
+    payload: 6.0
+    additional_data: 8.0
+  virtual_ns3_base_delay_ms:
+    control: 8.0
+    payload: 15.0
+    additional_data: 20.0
+  service_tier_floor_bps:
+    control: 1000
+    payload: 100000
+    additional_data: 10000
+
+physical_hardware:
+  enabled_by_default: false
+  current_run_policy: Do not probe, configure, or require physical radio hardware in this workstream.
+  future_backend: real_modem_2_4ghz
+  required_future_inputs:
+    - modem serial device or Ethernet interface identity
+    - regulatory/channel authorization
+    - safe RF power and antenna setup
+    - namespace or bridge placement that preserves the same endpoint contract
+    - PCAP/timing capture points equivalent to the simulated backend

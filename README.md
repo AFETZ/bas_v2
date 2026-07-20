@@ -30,6 +30,7 @@ Maintainer: [Gilbert Tanner](mailto:gilbert.tanner@aau.at)
 - [Multiagent simulation](#multiagent-simulation)
 - [Drone configuration](#drone-configuration)
 - [Custom worlds](#custom-worlds)
+- [Network and radio integration plan](#network-and-radio-integration-plan)
 - [Fly the drone via position control](#fly-the-drone-via-position-control)
 - [Feeding in external odometry](#feeding-in-external-odometry)
 - [Limitations](#limitations)
@@ -126,6 +127,14 @@ The xacro is then converted to SDF inside the [multiagent_simulation.launch.py](
 ## Custom worlds
 
 For creating custom worlds please refer to the [Create custom world](doc/Create_custom_world.md) guide.
+
+## Network and radio integration plan
+
+The authoritative staged ns-3, Sionna, and packet-in-the-loop execution
+contract is [Network and radio integration plan v3](doc/network_radio_integration_plan_v3.md).
+The [v2 plan](doc/network_radio_integration_plan_v2.md) and
+[original plan](doc/network_radio_integration_plan.md) are retained as
+superseded historical context only.
 
 ## Fly the drone via position control
 

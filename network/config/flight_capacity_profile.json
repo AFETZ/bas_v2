@@ -1,0 +1,32 @@
+{
+  "clock_sample_max_gap_s": 0.25,
+  "clock_topic": "/uav1/clock",
+  "competing_load_policy": "exclusive_simulation_and_gpu",
+  "consumed_nodes": [
+    "Q0",
+    "Q1"
+  ],
+  "contract": "ams.flight-capacity-profile/v1",
+  "measurement_s": 300,
+  "qualification_profile": "flight_capacity_prerequisite",
+  "readiness_stability_s": 10,
+  "readiness_timeout_s": 120,
+  "required_mitsuba_variant": "cuda_ad_mono_polarized",
+  "resource_max_gap_s": 1.5,
+  "resource_period_s": 1,
+  "rtf_max": 1.05,
+  "rtf_min": 0.95,
+  "scenario_path": "network/config/scenario_5uav.yaml",
+  "schema_version": 1,
+  "uav_names": [
+    "uav1",
+    "uav2",
+    "uav3",
+    "uav4",
+    "uav5"
+  ],
+  "warmup_s": 30,
+  "window_count": 300,
+  "window_s": 1,
+  "window_success_minimum": 285
+}

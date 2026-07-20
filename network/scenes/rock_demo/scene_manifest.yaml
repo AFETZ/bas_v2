@@ -1,0 +1,40 @@
+schema_version: 1
+scene_id: rock_demo
+coordinate_frame: ENU_m
+canonical_authoring_tool: Blender
+converter_policy: no_sdf_to_sionna_converter
+validated_runtime:
+  run_dir: runs/rock_scene_live_ns3_20260706T090100Z
+  scenario_config: network/config/scenario_rock_demo.yaml
+  radio_config: network/config/radio_24ghz_rock_demo.yaml
+  jammers_config: network/config/jammers_rock_demo.yaml
+  gazebo_world: src/multiagent_simulation/worlds/rock_demo/rock_demo.sdf
+  sionna_scene: src/multiagent_simulation/worlds/rock_demo/sionna_scene.xml
+  shared_mesh: src/multiagent_simulation/worlds/rock_demo/radio_blocker.obj
+  live_sinr_samples: 130
+  first_down_elapsed_s: 26.021
+common_mesh:
+  obj: network/scenes/rock_demo/gazebo/models/rock_demo_spire/meshes/rock_demo_spire.obj
+  mtl: network/scenes/rock_demo/gazebo/models/rock_demo_spire/meshes/rock_demo_spire.mtl
+gazebo:
+  model: network/scenes/rock_demo/gazebo/models/rock_demo_spire/model.sdf
+  model_config: network/scenes/rock_demo/gazebo/models/rock_demo_spire/model.config
+  world: network/scenes/rock_demo/gazebo/worlds/rock_demo.world
+  include_snippet: network/scenes/rock_demo/gazebo/include/rock_demo_spire.include.sdf
+sionna:
+  scene_xml: network/scenes/rock_demo/sionna/rock_demo.xml
+obstacles:
+  - id: rock_demo_spire
+    mesh: network/scenes/rock_demo/gazebo/models/rock_demo_spire/meshes/rock_demo_spire.obj
+    material:
+      gazebo_mtl: basalt_rock
+      sionna_itu_type: concrete
+      sionna_thickness_m: 2.0
+    local_bounds_m:
+      x: [-32.0, 30.0]
+      y: [-28.0, 28.0]
+      z: [0.0, 78.0]
+    transform:
+      translation_m: [125.0, -80.0, 0.0]
+      rotation_rpy_rad: [0.0, 0.0, 0.0]
+      scale: [1.0, 1.0, 1.0]

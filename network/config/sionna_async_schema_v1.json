@@ -1,0 +1,1064 @@
+{
+  "$id": "https://ams.invalid/schema/sionna_async_schema_v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Strict asynchronous Sionna RT wire protocol for AMS M4 and later profiles.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/hello"
+    },
+    {
+      "$ref": "#/$defs/ready"
+    },
+    {
+      "$ref": "#/$defs/query"
+    },
+    {
+      "$ref": "#/$defs/result"
+    },
+    {
+      "$ref": "#/$defs/error"
+    },
+    {
+      "$ref": "#/$defs/disconnect"
+    }
+  ],
+  "$defs": {
+    "antenna_assumptions": {
+      "additionalProperties": false,
+      "properties": {
+        "orientation_effects_claimed": {
+          "type": "boolean"
+        },
+        "polarization": {
+          "$ref": "#/$defs/nonempty_text"
+        },
+        "rx_pattern": {
+          "$ref": "#/$defs/safe_id"
+        },
+        "tx_pattern": {
+          "$ref": "#/$defs/safe_id"
+        }
+      },
+      "required": [
+        "tx_pattern",
+        "rx_pattern",
+        "polarization",
+        "orientation_effects_claimed"
+      ],
+      "type": "object"
+    },
+    "capabilities": {
+      "additionalProperties": false,
+      "properties": {
+        "max_message_bytes": {
+          "maximum": 1048576,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "supported_message_types": {
+          "items": {
+            "enum": [
+              "hello",
+              "ready",
+              "query",
+              "result",
+              "error",
+              "disconnect"
+            ]
+          },
+          "maxItems": 6,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "supported_message_types",
+        "max_message_bytes"
+      ],
+      "type": "object"
+    },
+    "common": {
+      "properties": {
+        "bundle_id": {
+          "$ref": "#/$defs/safe_id"
+        },
+        "config_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "contract_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "emitted_monotonic_ns": {
+          "$ref": "#/$defs/nonnegative_integer"
+        },
+        "message_type": {
+          "enum": [
+            "hello",
+            "ready",
+            "query",
+            "result",
+            "error",
+            "disconnect"
+          ]
+        },
+        "phase_id": {
+          "$ref": "#/$defs/safe_id"
+        },
+        "profile": {
+          "$ref": "#/$defs/safe_id"
+        },
+        "reconnect_generation": {
+          "$ref": "#/$defs/nonnegative_integer"
+        },
+        "run_id": {
+          "$ref": "#/$defs/safe_id"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "sender_clock_domain": {
+          "$ref": "#/$defs/safe_id"
+        },
+        "sender_id": {
+          "$ref": "#/$defs/safe_id"
+        },
+        "wire_sequence": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "message_type",
+        "wire_sequence",
+        "sender_id",
+        "run_id",
+        "profile",
+        "phase_id",
+        "contract_hash",
+        "config_hash",
+        "bundle_id",
+        "reconnect_generation",
+        "sender_clock_domain",
+        "emitted_monotonic_ns"
+      ],
+      "type": "object"
+    },
+    "disconnect": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/common"
+        },
+        {
+          "properties": {
+            "disconnect_kind": {
+              "const": "disconnected"
+            },
+            "lifecycle_monotonic_ns": {
+              "$ref": "#/$defs/nonnegative_integer"
+            },
+            "message_type": {
+              "const": "disconnect"
+            },
+            "owned_directed_link_ids": {
+              "items": {
+                "$ref": "#/$defs/safe_id"
+              },
+              "maxItems": 64,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "reason": {
+              "$ref": "#/$defs/reason"
+            }
+          },
+          "required": [
+            "disconnect_kind",
+            "reason",
+            "lifecycle_monotonic_ns"
+          ],
+          "type": "object"
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "entity_pose": {
+      "additionalProperties": false,
+      "properties": {
+        "freshness_age_ns": {
+          "$ref": "#/$defs/nonnegative_integer"
+        },
+        "node_id": {
+          "$ref": "#/$defs/safe_id"
+        },
+        "orientation_quat_xyzw": {
+          "$ref": "#/$defs/quaternion"
+        },
+        "pose_monotonic_ns": {
+          "$ref": "#/$defs/nonnegative_integer"
+        },
+        "position_m": {
+          "$ref": "#/$defs/vector3"
+        },
+        "role": {
+          "$ref": "#/$defs/safe_id"
+        },
+        "source_frame": {
+          "$ref": "#/$defs/safe_id"
+        },
+        "source_topic": {
+          "$ref": "#/$defs/nonempty_text"
+        },
+        "stale": {
+          "type": "boolean"
+        },
+        "transform_version": {
+          "$ref": "#/$defs/safe_id"
+        }
+      },
+      "required": [
+        "node_id",
+        "role",
+        "pose_monotonic_ns",
+        "source_topic",
+        "source_frame",
+        "transform_version",
+        "position_m",
+        "orientation_quat_xyzw",
+        "freshness_age_ns",
+        "stale"
+      ],
+      "type": "object"
+    },
+    "error": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/common"
+        },
+        {
+          "properties": {
+            "error_kind": {
+              "const": "invalid_request"
+            },
+            "lifecycle_monotonic_ns": {
+              "$ref": "#/$defs/nonnegative_integer"
+            },
+            "message_type": {
+              "const": "error"
+            },
+            "reason": {
+              "$ref": "#/$defs/reason"
+            },
+            "rejected_request_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "rejected_wire_sequence": {
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "error_kind",
+            "reason",
+            "lifecycle_monotonic_ns"
+          ],
+          "type": "object"
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "error_body": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "enum": [
+            "stale_pose",
+            "scene_mismatch",
+            "provider_error",
+            "deadline_missed"
+          ]
+        },
+        "detail": {
+          "$ref": "#/$defs/reason"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "detail",
+        "retryable"
+      ],
+      "type": "object"
+    },
+    "executable_identity": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "pattern": "^/",
+          "type": "string"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "hello": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/common"
+        },
+        {
+          "properties": {
+            "accepted_bundle_id": {
+              "$ref": "#/$defs/safe_id"
+            },
+            "accepted_config_hash": {
+              "$ref": "#/$defs/sha256"
+            },
+            "accepted_run_id": {
+              "$ref": "#/$defs/safe_id"
+            },
+            "capabilities": {
+              "$ref": "#/$defs/capabilities"
+            },
+            "executable_identity": {
+              "$ref": "#/$defs/executable_identity"
+            },
+            "message_type": {
+              "const": "hello"
+            },
+            "protocol_name": {
+              "const": "sionna_async"
+            },
+            "protocol_version": {
+              "const": 1
+            },
+            "provider_identity": {
+              "$ref": "#/$defs/provider_identity"
+            },
+            "readiness_state": {
+              "enum": [
+                "initializing",
+                "not_ready",
+                "ready"
+              ]
+            },
+            "sender_role": {
+              "enum": [
+                "adapter",
+                "provider",
+                "fault_injector"
+              ]
+            }
+          },
+          "required": [
+            "protocol_name",
+            "protocol_version",
+            "sender_role",
+            "executable_identity",
+            "capabilities",
+            "accepted_run_id",
+            "accepted_config_hash",
+            "accepted_bundle_id",
+            "readiness_state"
+          ],
+          "type": "object"
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "jammer_pose": {
+      "additionalProperties": false,
+      "properties": {
+        "antenna_pattern": {
+          "$ref": "#/$defs/safe_id"
+        },
+        "bandwidth_hz": {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        "center_frequency_hz": {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        "duty_cycle": {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "freshness_age_ns": {
+          "$ref": "#/$defs/nonnegative_integer"
+        },
+        "jammer_id": {
+          "$ref": "#/$defs/safe_id"
+        },
+        "orientation_quat_xyzw": {
+          "$ref": "#/$defs/quaternion"
+        },
+        "pose_monotonic_ns": {
+          "$ref": "#/$defs/nonnegative_integer"
+        },
+        "position_m": {
+          "$ref": "#/$defs/vector3"
+        },
+        "power_dbm": {
+          "type": "number"
+        },
+        "source_frame": {
+          "$ref": "#/$defs/safe_id"
+        },
+        "source_topic": {
+          "$ref": "#/$defs/nonempty_text"
+        },
+        "stale": {
+          "type": "boolean"
+        },
+        "transform_version": {
+          "$ref": "#/$defs/safe_id"
+        }
+      },
+      "required": [
+        "jammer_id",
+        "pose_monotonic_ns",
+        "source_topic",
+        "source_frame",
+        "transform_version",
+        "position_m",
+        "orientation_quat_xyzw",
+        "freshness_age_ns",
+        "stale",
+        "enabled",
+        "center_frequency_hz",
+        "bandwidth_hz",
+        "power_dbm",
+        "duty_cycle",
+        "antenna_pattern"
+      ],
+      "type": "object"
+    },
+    "material_assumptions": {
+      "additionalProperties": false,
+      "properties": {
+        "material_model_id": {
+          "$ref": "#/$defs/safe_id"
+        },
+        "scene_material_manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "required": [
+        "material_model_id",
+        "scene_material_manifest_sha256"
+      ],
+      "type": "object"
+    },
+    "nonempty_text": {
+      "maxLength": 256,
+      "minLength": 1,
+      "type": "string"
+    },
+    "nonnegative_integer": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "physical_outputs": {
+      "additionalProperties": false,
+      "properties": {
+        "geometry_state": {
+          "enum": [
+            "los",
+            "nlos",
+            "blocked_no_path"
+          ]
+        },
+        "interference_power_dbm": {
+          "type": "number"
+        },
+        "js_db": {
+          "type": "number"
+        },
+        "noise_power_dbm": {
+          "type": "number"
+        },
+        "pathloss_db": {
+          "type": "number"
+        },
+        "path_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path_type_counts": {
+          "additionalProperties": false,
+          "properties": {
+            "diffracted": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "diffuse": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "los": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "mixed": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "refracted": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "specular": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "los",
+            "specular",
+            "diffuse",
+            "refracted",
+            "diffracted",
+            "mixed"
+          ],
+          "type": "object"
+        },
+        "propagation_delay_ns": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "rssi_dbm": {
+          "type": "number"
+        },
+        "signal_power_dbm": {
+          "type": "number"
+        },
+        "sinr_db": {
+          "type": "number"
+        },
+        "units": {
+          "additionalProperties": false,
+          "properties": {
+            "interference_power": {
+              "const": "dBm"
+            },
+            "j_over_s": {
+              "const": "dB"
+            },
+            "noise_power": {
+              "const": "dBm"
+            },
+            "pathloss": {
+              "const": "dB"
+            },
+            "propagation_delay": {
+              "const": "ns"
+            },
+            "rssi": {
+              "const": "dBm"
+            },
+            "signal_power": {
+              "const": "dBm"
+            },
+            "sinr": {
+              "const": "dB"
+            }
+          },
+          "required": [
+            "pathloss",
+            "propagation_delay",
+            "rssi",
+            "signal_power",
+            "interference_power",
+            "noise_power",
+            "sinr",
+            "j_over_s"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "pathloss_db",
+        "propagation_delay_ns",
+        "rssi_dbm",
+        "signal_power_dbm",
+        "interference_power_dbm",
+        "noise_power_dbm",
+        "sinr_db",
+        "js_db",
+        "geometry_state",
+        "path_count",
+        "path_type_counts",
+        "units"
+      ],
+      "type": "object"
+    },
+    "provider_identity": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptance_eligible": {
+          "type": "boolean"
+        },
+        "mitsuba_version": {
+          "$ref": "#/$defs/nonempty_text"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/safe_id"
+        },
+        "provider_mode": {
+          "$ref": "#/$defs/safe_id"
+        },
+        "sionna_rt_version": {
+          "$ref": "#/$defs/nonempty_text"
+        }
+      },
+      "required": [
+        "provider_id",
+        "provider_mode",
+        "acceptance_eligible",
+        "sionna_rt_version",
+        "mitsuba_version"
+      ],
+      "type": "object"
+    },
+    "quaternion": {
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 4,
+      "minItems": 4,
+      "type": "array"
+    },
+    "query": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/common"
+        },
+        {
+          "properties": {
+            "antenna_assumptions": {
+              "$ref": "#/$defs/antenna_assumptions"
+            },
+            "directed_link_id": {
+              "$ref": "#/$defs/safe_id"
+            },
+            "deadline_monotonic_ns": {
+              "$ref": "#/$defs/nonnegative_integer"
+            },
+            "jammers": {
+              "items": {
+                "$ref": "#/$defs/jammer_pose"
+              },
+              "maxItems": 16,
+              "type": "array"
+            },
+            "mapping_version": {
+              "$ref": "#/$defs/safe_id"
+            },
+            "material_assumptions": {
+              "$ref": "#/$defs/material_assumptions"
+            },
+            "message_type": {
+              "const": "query"
+            },
+            "node_state_seq": {
+              "$ref": "#/$defs/nonnegative_integer"
+            },
+            "node_state_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "node_state_snapshot_monotonic_ns": {
+              "$ref": "#/$defs/nonnegative_integer"
+            },
+            "nodes": {
+              "items": {
+                "$ref": "#/$defs/entity_pose"
+              },
+              "maxItems": 64,
+              "minItems": 2,
+              "type": "array"
+            },
+            "provider_seed": {
+              "$ref": "#/$defs/nonnegative_integer"
+            },
+            "query_id": {
+              "$ref": "#/$defs/safe_id"
+            },
+            "radio_assumptions": {
+              "$ref": "#/$defs/radio_assumptions"
+            },
+            "request_generated_monotonic_ns": {
+              "$ref": "#/$defs/nonnegative_integer"
+            },
+            "request_sent_monotonic_ns": {
+              "$ref": "#/$defs/nonnegative_integer"
+            },
+            "rx_node_id": {
+              "$ref": "#/$defs/safe_id"
+            },
+            "source_frame": {
+              "$ref": "#/$defs/safe_id"
+            },
+            "source_pose_monotonic_ns": {
+              "$ref": "#/$defs/nonnegative_integer"
+            },
+            "traffic_class": {
+              "$ref": "#/$defs/safe_id"
+            },
+            "transform_version": {
+              "$ref": "#/$defs/safe_id"
+            },
+            "tx_node_id": {
+              "$ref": "#/$defs/safe_id"
+            }
+          },
+          "required": [
+            "query_id",
+            "node_state_seq",
+            "node_state_sha256",
+            "node_state_snapshot_monotonic_ns",
+            "directed_link_id",
+            "deadline_monotonic_ns",
+            "traffic_class",
+            "tx_node_id",
+            "rx_node_id",
+            "source_pose_monotonic_ns",
+            "source_frame",
+            "transform_version",
+            "request_generated_monotonic_ns",
+            "request_sent_monotonic_ns",
+            "nodes",
+            "jammers",
+            "radio_assumptions",
+            "antenna_assumptions",
+            "material_assumptions",
+            "mapping_version",
+            "provider_seed"
+          ],
+          "type": "object"
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "radio_assumptions": {
+      "additionalProperties": false,
+      "properties": {
+        "bandwidth_hz": {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        "carrier_frequency_hz": {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        "receiver_noise_figure_db": {
+          "type": "number"
+        },
+        "receiver_sensitivity_dbm": {
+          "type": "number"
+        },
+        "tx_power_dbm": {
+          "type": "number"
+        },
+        "units": {
+          "additionalProperties": false,
+          "properties": {
+            "bandwidth": {
+              "const": "Hz"
+            },
+            "carrier_frequency": {
+              "const": "Hz"
+            },
+            "receiver_noise_figure": {
+              "const": "dB"
+            },
+            "receiver_sensitivity": {
+              "const": "dBm"
+            },
+            "tx_power": {
+              "const": "dBm"
+            }
+          },
+          "required": [
+            "carrier_frequency",
+            "bandwidth",
+            "tx_power",
+            "receiver_noise_figure",
+            "receiver_sensitivity"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "carrier_frequency_hz",
+        "bandwidth_hz",
+        "tx_power_dbm",
+        "receiver_noise_figure_db",
+        "receiver_sensitivity_dbm",
+        "units"
+      ],
+      "type": "object"
+    },
+    "ready": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/common"
+        },
+        {
+          "properties": {
+            "accepted_bundle_id": {
+              "$ref": "#/$defs/safe_id"
+            },
+            "accepted_config_hash": {
+              "$ref": "#/$defs/sha256"
+            },
+            "accepted_run_id": {
+              "$ref": "#/$defs/safe_id"
+            },
+            "capabilities": {
+              "$ref": "#/$defs/capabilities"
+            },
+            "executable_identity": {
+              "$ref": "#/$defs/executable_identity"
+            },
+            "message_type": {
+              "const": "ready"
+            },
+            "protocol_name": {
+              "const": "sionna_async"
+            },
+            "protocol_version": {
+              "const": 1
+            },
+            "provider_identity": {
+              "$ref": "#/$defs/provider_identity"
+            },
+            "readiness_state": {
+              "const": "ready"
+            },
+            "scene_identity": {
+              "$ref": "#/$defs/scene_identity"
+            },
+            "sender_role": {
+              "enum": [
+                "adapter",
+                "provider",
+                "fault_injector"
+              ]
+            }
+          },
+          "required": [
+            "protocol_name",
+            "protocol_version",
+            "sender_role",
+            "executable_identity",
+            "capabilities",
+            "accepted_run_id",
+            "accepted_config_hash",
+            "accepted_bundle_id",
+            "readiness_state",
+            "scene_identity"
+          ],
+          "type": "object"
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "reason": {
+      "maxLength": 1024,
+      "minLength": 1,
+      "type": "string"
+    },
+    "result": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/result_ok"
+        },
+        {
+          "$ref": "#/$defs/result_failure"
+        }
+      ]
+    },
+    "result_common": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/common"
+        },
+        {
+          "properties": {
+            "directed_link_id": {
+              "$ref": "#/$defs/safe_id"
+            },
+            "message_type": {
+              "const": "result"
+            },
+            "node_state_seq": {
+              "$ref": "#/$defs/nonnegative_integer"
+            },
+            "provider_clock_domain": {
+              "$ref": "#/$defs/safe_id"
+            },
+            "provider_completed_monotonic_ns": {
+              "$ref": "#/$defs/nonnegative_integer"
+            },
+            "provider_received_monotonic_ns": {
+              "$ref": "#/$defs/nonnegative_integer"
+            },
+            "provider_sent_monotonic_ns": {
+              "$ref": "#/$defs/nonnegative_integer"
+            },
+            "provider_started_monotonic_ns": {
+              "$ref": "#/$defs/nonnegative_integer"
+            },
+            "query_id": {
+              "$ref": "#/$defs/safe_id"
+            },
+            "rx_node_id": {
+              "$ref": "#/$defs/safe_id"
+            },
+            "traffic_class": {
+              "$ref": "#/$defs/safe_id"
+            },
+            "tx_node_id": {
+              "$ref": "#/$defs/safe_id"
+            }
+          },
+          "required": [
+            "query_id",
+            "node_state_seq",
+            "directed_link_id",
+            "traffic_class",
+            "tx_node_id",
+            "rx_node_id",
+            "provider_clock_domain",
+            "provider_received_monotonic_ns",
+            "provider_started_monotonic_ns",
+            "provider_completed_monotonic_ns",
+            "provider_sent_monotonic_ns"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "result_failure": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/result_common"
+        },
+        {
+          "properties": {
+            "error_body": {
+              "$ref": "#/$defs/error_body"
+            },
+            "status": {
+              "enum": [
+                "stale_pose",
+                "scene_mismatch",
+                "provider_error",
+                "deadline_missed"
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "error_body"
+          ],
+          "type": "object"
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "result_ok": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/result_common"
+        },
+        {
+          "properties": {
+            "expires_monotonic_ns": {
+              "$ref": "#/$defs/nonnegative_integer"
+            },
+            "physical": {
+              "$ref": "#/$defs/physical_outputs"
+            },
+            "status": {
+              "const": "ok"
+            },
+            "validity_clock_domain": {
+              "$ref": "#/$defs/safe_id"
+            },
+            "validity_start_monotonic_ns": {
+              "$ref": "#/$defs/nonnegative_integer"
+            }
+          },
+          "required": [
+            "status",
+            "validity_clock_domain",
+            "validity_start_monotonic_ns",
+            "expires_monotonic_ns",
+            "physical"
+          ],
+          "type": "object"
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "safe_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/+\\-]*$",
+      "type": "string"
+    },
+    "scene_identity": {
+      "additionalProperties": false,
+      "properties": {
+        "bundle_id": {
+          "$ref": "#/$defs/safe_id"
+        },
+        "scene_manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "scene_path": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "pattern": "^/",
+          "type": "string"
+        }
+      },
+      "required": [
+        "bundle_id",
+        "scene_manifest_sha256",
+        "scene_path"
+      ],
+      "type": "object"
+    },
+    "sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "vector3": {
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    }
+  },
+  "title": "AMS Sionna asynchronous protocol v1"
+}

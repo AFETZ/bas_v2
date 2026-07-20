@@ -1,0 +1,15 @@
+<scene version="2.1.0">
+  <bsdf type="itu-radio-material" id="rock-demo-stone">
+    <string name="type" value="concrete"/>
+    <float name="thickness" value="2.0"/>
+  </bsdf>
+
+  <shape type="obj" id="rock-demo-spire">
+    <string name="filename" value="../gazebo/models/rock_demo_spire/meshes/rock_demo_spire.obj"/>
+    <boolean name="face_normals" value="true"/>
+    <transform name="to_world">
+      <translate x="125.0" y="-80.0" z="0.0"/>
+    </transform>
+    <ref id="rock-demo-stone" name="bsdf"/>
+  </shape>
+</scene>

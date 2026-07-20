@@ -1,0 +1,332 @@
+schema_version: 2
+status: complete
+
+# Captured from the rebuilt image after independent exact-ID inspection.
+# The normalization algorithm is the sorted, newline-terminated output used by
+# network/scripts/write_run_provenance.py::command_manifest. Editable packages
+# and the run-local project package are excluded from dependency manifests
+# because their source/commit identity is bound by the independent Git,
+# Q-vector, source/install-equality, and external-source records.
+runtime_manifest_sha256:
+  pip_freeze: 36941db39413d66f80191197d8df8d771221dce3a440cbe98f9078cca012b70e
+  dpkg: a15632deb743e50e6ca7f5807382db896a2f69cf854bedc9dbc8a9d47067ae88
+  ros_packages: 0b1d47e01d3f92b96a85cb04dd867e13579d23caf933092a8113a94fec5503da
+
+# The complete ordered M0 unittest identity is a tracked, hash-locked
+# acceptance input. Discovery must match it byte-for-byte; counts alone never
+# qualify a suite.
+m0_test_manifest:
+  path: network/config/m0_test_manifest.json
+  sha256: e3bc769f46b0b0e56b7aee5efc5ed50a09958e1119744add057849c267a7227a
+  ordered_test_count: 185
+
+# Exact command-resolution and Python import boundary used by both M0 suite
+# executions. Source scripts are content-bound by Q0; immutable image and host
+# executables are additionally locked here because they are outside Git.
+m0_execution_policy:
+  schema_version: 1
+  container_path: /opt/ros/humble/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  host_final_path: /usr/bin:/bin
+  allowed_container_executable_roots:
+    - /usr/local/sbin
+    - /usr/local/bin
+    - /usr/sbin
+    - /usr/bin
+    - /sbin
+    - /bin
+    - /opt/ros/humble/bin
+    - /workspace/multiagent_simulation
+  critical_command_resolution:
+    awk: /usr/bin/gawk
+    bash: /usr/bin/bash
+    colcon: /usr/bin/colcon
+    date: /usr/bin/date
+    env: /usr/bin/env
+    find: /usr/bin/find
+    findmnt: /usr/bin/findmnt
+    git: /usr/bin/git
+    mkdir: /usr/bin/mkdir
+    python3: /usr/bin/python3.10
+    sudo: /usr/bin/sudo
+    unshare: /usr/bin/unshare
+  critical_image_executable_sha256:
+    /ros_entrypoint.sh: 32c3f27954ff2cf727598ed74c2b5dbfe2ebed40bd9e44a2e7113a527999a6ec
+    /usr/bin/bash: 59474588a312b6b6e73e5a42a59bf71e62b55416b6c9d5e4a6e1c630c2a9ecd4
+    /usr/bin/colcon: 5dd3c92f3a593114a03bbfc844651c7d2f101fc605ebf051d451c382f5813f44
+    /usr/bin/date: e32b49f1a2e4335ea7742a9cf0cf8832fd4b25af30f2c066ac5cdbe2eb9a1319
+    /usr/bin/env: 854a8d7f147ff1bf3562edd1aa0b2f2ac28ef432811533f03c43dc9162fe3af3
+    /usr/bin/find: 791b89c8bffb8101fd7d4d212b80af66a2332834b05a42721104eb47e8fa2eb1
+    /usr/bin/findmnt: 0218be2029f3a4378b60262c346d080418e91640f9381ec8358f3fba54119ceb
+    /usr/bin/git: 587ef21868c948b883993e23209b86a72a6ddc06aab1545c697ffc31075acd4a
+    /usr/bin/gawk: b78fdf4db4aea83cc644ef1b3a1bab43600d3f5acec16fe7b529dcc309d4f5b2
+    /usr/bin/mkdir: 1bf979d8d0ec5a3b64f24806668b738940c8735790098c96e0bb2a16d81fe516
+    /usr/bin/python3.10: d6bca2b84e73c7775a0dd5e6a76899cfe4ee62863d7c8f88513811d1fda23f49
+    /usr/bin/sudo: 1e000f41739201f030cdc588fbe50d5438570f5386104c9521543824827fb985
+    /usr/bin/unshare: 72a34e6ba98a59f1da0c7b4d8c9722b746b5ade54e4d7e8de8e519c2993858ad
+  critical_source_executables:
+    - scripts/run_acceptance_container.sh
+    - scripts/acceptance_entrypoint.sh
+    - network/scripts/run_m0_baseline.sh
+    - network/scripts/run_m0_host_final.sh
+    - network/scripts/run_m0_host_reexecution.sh
+    - network/scripts/run_status_validation.sh
+    - network/scripts/m0_bin/python3
+    - network/scripts/check_deps.sh
+    - network/scripts/verify_m0_runtime_lock.py
+    - network/scripts/run_m0_validation_suite.py
+    - network/scripts/validate_m0_baseline.py
+    - network/scripts/write_run_provenance.py
+  host_final_executable_sha256:
+    /usr/bin/bash: 59474588a312b6b6e73e5a42a59bf71e62b55416b6c9d5e4a6e1c630c2a9ecd4
+    /usr/bin/docker: 87bb910f051879cdf2a4a38e01748cbebeb27f3de962122dfdcbd0a4fbeea4ff
+    /usr/bin/env: 85036540673319c6c2f54233fd2b9e45a8a71246b51cc96c4e6ab8ee6c419eb0
+    /usr/bin/git: 587ef21868c948b883993e23209b86a72a6ddc06aab1545c697ffc31075acd4a
+    /usr/bin/python3.10: 7d51cd6b48b521277f5caa4610a82126e315fa2be4df069823a8b1eeb5bd4a86
+  host_final_python_sys_path:
+    - <repository_root>/network/scripts
+    - <repository_root>
+    - /usr/local/lib/python3.10/dist-packages
+    - /usr/lib/python3/dist-packages
+    - /usr/lib/python310.zip
+    - /usr/lib/python3.10
+    - /usr/lib/python3.10/lib-dynload
+  host_final_python_imports:
+    yaml: {path: /usr/lib/python3/dist-packages/yaml/__init__.py, bytes: 13170, sha256: 81fa7609b4558739278219228890f697a674a48fa6bff8991cf489e1a8f4fa76}
+    yaml._yaml: {path: /usr/lib/python3/dist-packages/yaml/_yaml.cpython-310-x86_64-linux-gnu.so, bytes: 246624, sha256: 20132734995d829a8831c79b786c87c52aafbc9b62bf2e7e4d721f2a912d2988}
+    yaml.composer: {path: /usr/lib/python3/dist-packages/yaml/composer.py, bytes: 4883, sha256: fcaa37d16afa783594794a5ab94193dcb720f503c19ce3d59539c8311189f453}
+    yaml.constructor: {path: /usr/lib/python3/dist-packages/yaml/constructor.py, bytes: 28639, sha256: 90d8247da78b524c10618fd0e857f54f3d97570fe91b5c5513d024ef3faf88b0}
+    yaml.cyaml: {path: /usr/lib/python3/dist-packages/yaml/cyaml.py, bytes: 3851, sha256: e99ac01bd7c062f7557b614aff0d21997a06ed962ca185306a91bc0a20bbd87d}
+    yaml.dumper: {path: /usr/lib/python3/dist-packages/yaml/dumper.py, bytes: 2837, sha256: 3cb72d66563064ba7b5e679477046ebf89d8399d940670c8532f3e94a7cb17ea}
+    yaml.emitter: {path: /usr/lib/python3/dist-packages/yaml/emitter.py, bytes: 43006, sha256: 8e086d694ede170837d5b1b407b45979aff6f40762f422a65eafd08e04290a44}
+    yaml.error: {path: /usr/lib/python3/dist-packages/yaml/error.py, bytes: 2533, sha256: 021f73fada072546c4f63f8cf18a7181244ce4280b09cc15cc980b2d1176171a}
+    yaml.events: {path: /usr/lib/python3/dist-packages/yaml/events.py, bytes: 2445, sha256: e74fd392c810884e2ea7e94aa3f57e9c1cbeb402319083d0c58e6a0e1282787c}
+    yaml.loader: {path: /usr/lib/python3/dist-packages/yaml/loader.py, bytes: 2061, sha256: 5156becc8aa6905482218abf3e04869b835226db4763645fff3438fdbd5f1cdd}
+    yaml.nodes: {path: /usr/lib/python3/dist-packages/yaml/nodes.py, bytes: 1440, sha256: 80f28d8fca4a09d87677882bde021820d9cf39a3b11a12405226211919cf13ce}
+    yaml.parser: {path: /usr/lib/python3/dist-packages/yaml/parser.py, bytes: 25495, sha256: 8a55a9e6fbe0a07146cef3990c8b45a068c3e83e369e1959ad9ca30306b4a09a}
+    yaml.reader: {path: /usr/lib/python3/dist-packages/yaml/reader.py, bytes: 6794, sha256: d1d9b38ab3a20c6e17a38d519ee412ecaf6b918df18c78956ac7c330d4ea08dc}
+    yaml.representer: {path: /usr/lib/python3/dist-packages/yaml/representer.py, bytes: 14184, sha256: f3650cdd9c5440aaac28017896d58ec424ba8c63c816d5e91acee6beacafe17b}
+    yaml.resolver: {path: /usr/lib/python3/dist-packages/yaml/resolver.py, bytes: 8999, sha256: 6755bc00e300e8fae8cb88083b63a150ee083d2fdb14d025d026b7af00a1a4f8}
+    yaml.scanner: {path: /usr/lib/python3/dist-packages/yaml/scanner.py, bytes: 51277, sha256: 29e4082863654b23c4f100f08a89c7c72f4281ba84e6d789133d39151f7e9c08}
+    yaml.serializer: {path: /usr/lib/python3/dist-packages/yaml/serializer.py, bytes: 4165, sha256: 0a1b85826854d35863e31808f0668abfabdf33606e8f06bd8bb7761401e3edc0}
+    yaml.tokens: {path: /usr/lib/python3/dist-packages/yaml/tokens.py, bytes: 2573, sha256: 953408cd2570f0c83dc2fe39f7e4e388e41eeb05738aa69196a5f6ffcf6ba79e}
+  incidental_transitive_policy:
+    require_immutable_allowed_root: true
+    require_dpkg_or_pip_manifest_owner: true
+    forbid_host_or_run_writable_resolution: true
+
+m0_python_import_policy:
+  schema_version: 1
+  mode: isolated_explicit_path
+  interpreter: /usr/bin/python3.10
+  interpreter_sha256: d6bca2b84e73c7775a0dd5e6a76899cfe4ee62863d7c8f88513811d1fda23f49
+  parent_flags: [-S]
+  exact_base_pythonpath:
+    - /workspace/multiagent_simulation/network/scripts/m0_python_guard
+    - /workspace/multiagent_simulation
+    - /workspace/ardu_ws/install/ros_gz_interfaces/local/lib/python3.10/dist-packages
+    - /workspace/ardu_ws/build/ardupilot_dds_tests
+    - /workspace/ardu_ws/install/ardupilot_dds_tests/lib/python3.10/site-packages
+    - /workspace/ardu_ws/install/ardupilot_sitl/local/lib/python3.10/dist-packages
+    - /workspace/ardu_ws/install/ardupilot_msgs/local/lib/python3.10/dist-packages
+    - /opt/ros/humble/lib/python3.10/site-packages
+    - /opt/ros/humble/local/lib/python3.10/dist-packages
+    - /home/ubuntu/.local/lib/python3.10/site-packages
+    - /usr/local/lib/python3.10/dist-packages
+    - /usr/lib/python3/dist-packages
+  overlay_pythonpath_template: /tmp/ams-m0-overlay-{run_id}/install/multiagent_simulation/lib/python3.10/site-packages
+  interpreter_suffix:
+    - /usr/lib/python310.zip
+    - /usr/lib/python3.10
+    - /usr/lib/python3.10/lib-dynload
+  customization:
+    parent_sitecustomize_loaded: false
+    parent_usercustomize_loaded: false
+    child_guard_path: /workspace/multiagent_simulation/network/scripts/m0_python_guard/sitecustomize.py
+    child_guard_sha256: 9875bea48966264bdfb0a3b6eebda45b48166b55099601ebc963686fb2bf1213
+  pth_policy: inventory_only_not_processed_under_no_site
+  cleared_environment:
+    - PYTHONHOME
+    - PYTHONSTARTUP
+    - PYTHONINSPECT
+    - PYTHONUSERBASE
+    - PYTEST_ADDOPTS
+    - PYTEST_PLUGINS
+    - PYTEST_DISABLE_PLUGIN_AUTOLOAD
+  python_no_user_site: true
+  bytecode_root_template: /tmp/ams-m0-pycache-{run_id}
+
+# Canonical process bytes for the accepted M1 launch in the exact project
+# image.  Raw /proc identities must match this manifest; a basename or a
+# producer-supplied hash is not an executable identity proof.
+m1_runtime_identity:
+  schema_version: 1
+  container_image_digest: sha256:bd6a4f8f78c6a384e4cd9b686c62917e2b42cbcda76db735a6363e5755547772
+  executable_sha256:
+    /opt/ros/humble/lib/robot_state_publisher/robot_state_publisher: 0d8f699b5266e4b68f5cb4c8d26d970506e4ffb6ae10e41fb5d1f567c993dcb2
+    /opt/ros/humble/lib/topic_tools/relay: d649ae85f7331e7b02898ceff4bdfd78a8660b5da24bcf9bb132eff2b9176f38
+    /usr/bin/dash: 4f291296e89b784cd35479fca606f228126e3641f5bcaee68dee36583d7c9483
+    /usr/bin/python3.10: d6bca2b84e73c7775a0dd5e6a76899cfe4ee62863d7c8f88513811d1fda23f49
+    /usr/bin/ruby3.0: 4bacb7cc7f4a345bf2cd0cea3d9e087899c17185700da54021b941eed11d172d
+    /workspace/ardu_ws/build/micro_ros_agent/micro_ros_agent: 7d1b59803f419fd15fc1b79ae9b5386a5b70216e1d4170229cb7aa8dc88d465b
+    /workspace/ardu_ws/build/ros_gz_bridge/parameter_bridge: bef8821f5a437cc8252c90b4d62755a90d5556d5623831d74bbcc0874c7073bf
+    /workspace/ardu_ws/src/ardupilot/build/sitl/bin/arducopter: 80081862d5e9be8064abb17b66eff4ac7c93de9dbd1835eb920723067ac24772
+  role_executable_path:
+    arducopter: /workspace/ardu_ws/src/ardupilot/build/sitl/bin/arducopter
+    gazebo_server: /usr/bin/ruby3.0
+    mavproxy: /usr/bin/python3.10
+    micro_ros_agent: /workspace/ardu_ws/build/micro_ros_agent/micro_ros_agent
+  invoked_file_sha256:
+    /home/ubuntu/.local/bin/mavproxy.py: 428174c55331f4565df2bcb7821a3404630b4b62f262443e6ed6617f871ce6de
+  role_invoked_file_path:
+    mavproxy: /home/ubuntu/.local/bin/mavproxy.py
+
+python_lock:
+  input: .devcontainer/requirements-radio.in
+  input_sha256: 7c0bf57854a1c1abd4ddd14f1c9e7559b21b3e5f7bc4ffbae7be4a3124907e84
+  lock: .devcontainer/requirements-radio.lock
+  lock_sha256: 15204b43c4077ed1371d411480630749a15165a7ee82c92377201af6783e619a
+  python_version: "3.10"
+  platform: x86_64-manylinux_2_35
+  only_binary: true
+  exclude_newer_utc: "2026-07-12T00:00:00Z"
+
+# A host operator must provision an Ed25519 key pair outside the repository,
+# commit only its public key at public_key_path, and replace the placeholders.
+# The private key and the append-only ledger must never be mounted into a run
+# container.  Until then the artifact gate intentionally fails closed.
+evidence_attestation:
+  required: true
+  status: complete
+  key_id: ams-evidence-2026-07-13
+  public_key_path: network/config/evidence_attestation_public.pem
+  public_key_sha256: sha256:e5807a01ac1c9b54c36f5c87b8714c555ff90bc36e3c83658cb087f8341ca462
+  ledger_directory: /var/lib/ams/evidence-ledger
+
+container_build_inputs:
+  platform: linux/amd64
+  user_uid: 1000
+  user_gid: 1000
+  ardupilot_ros_manifest_sha256: b4a5229b2697bef6450119c45d3029fce9f8d657b70231b4437d345279c356c0
+  ardupilot_gz_manifest_sha256: 7770603209b99d394cc920e02e459c98910873d22752e3bf9b41d4af3b07208f
+  osrf_rosdep_revision: c03e070902e188ea1cfc50edc1fe5158c02a234f
+  osrf_rosdep_list_sha256: 311c2b285185ab9f1106bd1887f9fcdab6e815f343e07418ce27a8221b6882b8
+  mpl_toolkits_namespace_shim_sha256: 6d83a9bb7af4f395e74354dc13c22ac6916184100eef959dd58bff8ba714e969
+  removed_base_file: /usr/lib/python3/dist-packages/matplotlib-3.5.1-nspkg.pth
+  gazebo_gpg_sha256: 15d0300460e0c9c0efb21fa9770c0bf228988a07d71c4fac985c2161954a25a4
+  gradle_wrapper_jar_sha256: c5a643cf80162e665cc228f7b16f343fef868e47d3a4836f62e18b7e17ac018a
+  gradle_7_6_distribution_sha256: 7ba68c54029790ab444b39d7e293d3236b2632631fb5f2e012bb28b4ff669e4b
+
+accepted_p0_path:
+  packet_ingress: tap_bridge_external
+  medium_model: csma_surrogate
+  radio_provider: tcp_jsonl_real_sionna
+  alternate_pybind_path_acceptance_eligible: false
+
+dependencies:
+  canonical_runtime_source_paths:
+    ardupilot_standalone: /workspace/ardupilot
+    ardupilot_ros2: /workspace/ardu_ws/src/ardupilot
+    micro_ros_agent: /workspace/ardu_ws/src/micro_ros_agent
+    ardupilot_gazebo: /workspace/ardu_ws/src/ardupilot_gazebo
+    ardupilot_gz: /workspace/ardu_ws/src/ardupilot_gz
+    ardupilot_sitl_models: /workspace/ardu_ws/src/ardupilot_sitl_models
+    ros_gz: /workspace/ardu_ws/src/ros_gz
+    sdformat_urdf: /workspace/ardu_ws/src/sdformat_urdf
+    micro_xrce_dds_gen: /workspace/ardu_ws/Micro-XRCE-DDS-Gen
+  ros:
+    distribution: humble
+    container_base: osrf/ros:humble-desktop@sha256:46efd5ebec72c5da478027890ac534cbcb0c2cf93482559e0f35a9fc3c05d47a
+    project_image_reference: multiagent_simulation:latest
+    project_image_digest: sha256:bd6a4f8f78c6a384e4cd9b686c62917e2b42cbcda76db735a6363e5755547772
+    project_image_platform: linux/amd64
+    project_image_user: ubuntu
+    project_image_size_bytes: 6403038378
+    project_image_rootfs_layers: 37
+    historical_pre_rebuild_digest: sha256:ff0a0b3b3171e51bf328ac58806afc6c1127f9aad83fee8a0727b8136bea0011
+    acceptance_note: Exact local image ID was host-inspected on 2026-07-19; its platform manifest, config, rootfs, and locked runtime manifests match the accepted runtime bytes.
+  gazebo:
+    release: harmonic
+    version: 8.14.0
+    ros_gz_revision: 9d7f8c721c233a9ac8b43950129d51e67905523e
+  ardupilot:
+    revision: 3c073f9a09590307e99f49f960dd0f4dac7fc5bb
+  ardupilot_ros_repos:
+    manifest: .devcontainer/ardupilot_ros2_exact.repos
+    revisions:
+      ardupilot: 3c073f9a09590307e99f49f960dd0f4dac7fc5bb
+      micro_ros_agent: 4f363a79ae96aed39dcc5269f53f73f6a70d3a2c
+  ardupilot_gz_repos:
+    manifest: .devcontainer/ardupilot_gz_exact.repos
+    revisions:
+      ardupilot_gazebo: cc0290d964dfa373531963a8fc39093a0836af0a
+      ardupilot_gz: 8df4dc1726e37504e6fc8b952d02e554cfa3176f
+      ardupilot_sitl_models: d5d6017367a509b77886379c91207edc66f77652
+      ros_gz: 9d7f8c721c233a9ac8b43950129d51e67905523e
+      sdformat_urdf: 4be22a54e48562323f3e9deecbe1bde894eb7508
+  micro_xrce_dds_gen:
+    revision: 4bc7ec2c7f77ae89cd216432f05470ad99f7faa1
+  ns3:
+    version: "3.40"
+    source_kind: official_release_archive
+    archive_url: https://www.nsnam.org/releases/ns-allinone-3.40.tar.bz2
+    archive_sha256: c0ba395b6fcb084c4d43d6117b28932f716b26aebb54498ce2f44c0c39be3e60
+    core_tree_sha256: 0119836a7c79f7470f0c2c866de9c14ddc4f22349bbd194112ff2952713b64e8
+    core_tree_excludes: [build, cmake-cache, scratch, src/lorawan]
+    path: .external/ns-3
+    required_modules:
+      - core
+      - network
+      - internet
+      - csma
+      - bridge
+      - flow-monitor
+      - mobility
+      - stats
+      - traffic-control
+      - applications
+      - tap-bridge
+  sionna_rt:
+    version: 1.2.2
+    provider: network/radio_provider/provider.py
+  mitsuba:
+    version: 3.8.0
+  numpy:
+    version: 1.26.4
+  python:
+    version_constraint: ">=3.10,<3.13"
+  python_packages:
+    PyYAML: 6.0.2
+    matplotlib: 3.10.9
+    numpy: 1.26.4
+    pymavlink: 2.4.49
+    sionna-rt: 1.2.2
+    mitsuba: 3.8.0
+
+runtime_policy:
+  system: Linux
+  machine: x86_64
+  mitsuba_variant: cuda_ad_mono_polarized
+  gpu_required: true
+  required_network_commands:
+    bridge: iproute2
+    ip: iproute2
+    ip6tables-save: iptables
+    iptables-save: iptables
+    nft: nftables
+    ss: iproute2
+  required_network_capabilities:
+    dev_net_tun: true
+    unshare_network_namespace: true
+    passwordless_sudo: true
+
+diagnostic_only:
+  ns3_sionna_pybind:
+    path: .external/ns-3-sionna
+    commit: 3d0643e7858edcf22da3deebb0d2e423ecfe2961
+    acceptance_eligible: false
+    python_packages:
+      pybind11: 2.11.1
+      cppyy: 3.5.0
+  full_sionna_phy_tensorflow:
+    acceptance_eligible: false
+    note: The accepted provider imports sionna.rt only; TensorFlow is not part of P0.

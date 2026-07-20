@@ -1,0 +1,64 @@
+{
+  "contract": "ams.sionna_packet_effects/v2",
+  "deterministic_loss": {
+    "hash_algorithm": "sha256",
+    "sample_domain": "packet_transport_payload_sha256+applied_state_id+mapping_seed",
+    "sample_precision_bits": 53
+  },
+  "max_effect_delay_ns": 100000000,
+  "engineering_basis": {
+    "calibration_note": "Deterministic integration profile only; thresholds and PER proxies are not calibrated modem or PHY performance claims.",
+    "channel_capacity_bps": 20000000,
+    "limitations": [
+      "No coding, MCS, HARQ, fading, Doppler, antenna-pattern gain, or receiver implementation is inferred.",
+      "Selected service rate never exceeds the configured shared-medium channel capacity.",
+      "PER curves are traffic-class engineering proxies applied to independent deterministic packet samples."
+    ],
+    "loss_probability_units": "1",
+    "propagation_delay_units": "ns",
+    "service_rate_source": "network/config/service_tiers.yaml frozen M4 engineering thresholds",
+    "service_rate_units": "bit/s",
+    "sinr_units": "dB"
+  },
+  "mapping_version": "sinr-rate-per-v2",
+  "service_rate_mapping": {
+    "basis": "sinr_db",
+    "boundary_policy": "descending_first_match_inclusive_lower_bound",
+    "tiers_descending": [
+      [20.0, 20000000],
+      [11.0, 2000000],
+      [6.0, 500000],
+      [0.0, 100000],
+      [-4.0, 10000],
+      [-8.0, 1000],
+      [-999.0, 0]
+    ],
+    "units": {"rate": "bit/s", "sinr": "dB"}
+  },
+  "traffic_classes": {
+    "additional_data": [
+      [-10.0, 1.0],
+      [-2.0, 0.9],
+      [4.0, 0.45],
+      [10.0, 0.08],
+      [16.0, 0.005],
+      [24.0, 0.0001]
+    ],
+    "control": [
+      [-10.0, 1.0],
+      [-2.0, 0.75],
+      [4.0, 0.18],
+      [10.0, 0.015],
+      [16.0, 0.001],
+      [24.0, 0.00001]
+    ],
+    "payload": [
+      [-10.0, 1.0],
+      [-2.0, 0.95],
+      [4.0, 0.55],
+      [10.0, 0.12],
+      [16.0, 0.01],
+      [24.0, 0.0002]
+    ]
+  }
+}

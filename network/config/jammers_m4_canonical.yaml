@@ -1,0 +1,14 @@
+schema_version: 1
+scenario: scenario_m4_canonical
+jammers:
+  - id: jammer_m4
+    enabled: true
+    role: jammer
+    position_m: [2000.0, -3000.0, 100.0]
+    orientation_quat_xyzw: [0.0, 0.0, 0.0, 1.0]
+    center_hz: 2400000000
+    bandwidth_hz: 20000000
+    power_dbm: 40.0
+    duty_cycle: 1.0
+    antenna: omni
+    time_behavior: runtime_off_on_off

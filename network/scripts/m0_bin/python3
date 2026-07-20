@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# M0 Python must not import site.py, sitecustomize, usercustomize, a user site,
+# or an adjacent host __pycache__.  The acceptance entrypoint supplies the
+# explicit exact-image/source/temporary-overlay PYTHONPATH.
+exec /usr/bin/python3.10 -S "$@"

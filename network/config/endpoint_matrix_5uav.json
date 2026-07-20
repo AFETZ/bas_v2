@@ -1,0 +1,2286 @@
+{
+  "cells": [
+    {
+      "capture_points": {
+        "ns3_external_egress": "ns3.uav1.egress",
+        "ns3_external_ingress": "ns3.cp.ingress",
+        "remote_after_adapter": "uav1.mavproxy.tail",
+        "source_before_adapter": "cp.source.eth0"
+      },
+      "cell_id": "uav1.control.downlink",
+      "destination": {
+        "interface": "eth0",
+        "ip": "10.71.1.10",
+        "mavlink_component_id": 1,
+        "mavlink_system_id": 1,
+        "namespace": "ams-uav1",
+        "role": "uav1",
+        "udp_port": 14601
+      },
+      "direction": "downlink",
+      "identity": {
+        "flow_id": "uav1.control.downlink",
+        "hash_domains": {
+          "application_unit_sha256": true,
+          "mavlink_frame_sha256": true,
+          "transport_payload_sha256": true,
+          "wire_frame_sha256": true
+        },
+        "nonce_domain": "ams/v1/uav1/control/downlink",
+        "sequence_policy": "strictly_monotonic_per_flow"
+      },
+      "ns3_path": {
+        "directed_link_id": "cp>uav1",
+        "dscp_tos": 184,
+        "egress_device_id": "uav1.tap.egress",
+        "egress_udp_port": 16601,
+        "ingress_device_id": "cp.tap.ingress",
+        "ingress_udp_port": 15601,
+        "priority": 0,
+        "queue_id": "cp>uav1.control.q0"
+      },
+      "outcome": {
+        "correlation": "request_hash_command_source_target_window",
+        "response_kind": "command_ack_and_requested_telemetry",
+        "timeout_ms": 3000
+      },
+      "protocol": {
+        "channel": "mavlink_control",
+        "classification_source": "decoded_bytes_port_nonce",
+        "kind": "mavlink_v2",
+        "message_family": "STATUSTEXT_MARKER_PLUS_COMMAND_LONG"
+      },
+      "source": {
+        "interface": "eth0",
+        "ip": "10.71.0.10",
+        "mavlink_component_id": 190,
+        "mavlink_system_id": 255,
+        "namespace": "ams-gcs",
+        "role": "command_post",
+        "udp_port": 14600
+      },
+      "traffic_class": "control",
+      "transport_ports": {
+        "command_post_udp": 14600,
+        "ns3_ground_handoff_udp": 15601,
+        "ns3_uav_handoff_udp": 16601,
+        "uav_udp": 14601
+      },
+      "uav": {
+        "instance": 0,
+        "name": "uav1",
+        "system_id": 1
+      }
+    },
+    {
+      "capture_points": {
+        "ns3_external_egress": "ns3.cp.egress",
+        "ns3_external_ingress": "ns3.uav1.ingress",
+        "remote_after_adapter": "cp.sink.eth0",
+        "source_before_adapter": "uav1.mavproxy.tail"
+      },
+      "cell_id": "uav1.control.uplink",
+      "destination": {
+        "interface": "eth0",
+        "ip": "10.71.0.10",
+        "mavlink_component_id": 190,
+        "mavlink_system_id": 255,
+        "namespace": "ams-gcs",
+        "role": "command_post",
+        "udp_port": 14600
+      },
+      "direction": "uplink",
+      "identity": {
+        "flow_id": "uav1.control.uplink",
+        "hash_domains": {
+          "application_unit_sha256": true,
+          "mavlink_frame_sha256": true,
+          "transport_payload_sha256": true,
+          "wire_frame_sha256": true
+        },
+        "nonce_domain": "ams/v1/uav1/control/uplink",
+        "sequence_policy": "strictly_monotonic_per_flow"
+      },
+      "ns3_path": {
+        "directed_link_id": "uav1>cp",
+        "dscp_tos": 184,
+        "egress_device_id": "cp.tap.egress",
+        "egress_udp_port": 15601,
+        "ingress_device_id": "uav1.tap.ingress",
+        "ingress_udp_port": 16601,
+        "priority": 0,
+        "queue_id": "uav1>cp.control.q0"
+      },
+      "outcome": {
+        "correlation": "request_hash_command_source_target_window",
+        "response_kind": "correlated_delivery_at_command_post",
+        "timeout_ms": 3000
+      },
+      "protocol": {
+        "channel": "mavlink_control",
+        "classification_source": "decoded_bytes_port_nonce",
+        "kind": "mavlink_v2",
+        "message_family": "COMMAND_ACK_HEARTBEAT_REQUESTED_TELEMETRY"
+      },
+      "source": {
+        "interface": "eth0",
+        "ip": "10.71.1.10",
+        "mavlink_component_id": 1,
+        "mavlink_system_id": 1,
+        "namespace": "ams-uav1",
+        "role": "uav1",
+        "udp_port": 14601
+      },
+      "traffic_class": "control",
+      "transport_ports": {
+        "command_post_udp": 14600,
+        "ns3_ground_handoff_udp": 15601,
+        "ns3_uav_handoff_udp": 16601,
+        "uav_udp": 14601
+      },
+      "uav": {
+        "instance": 0,
+        "name": "uav1",
+        "system_id": 1
+      }
+    },
+    {
+      "capture_points": {
+        "ns3_external_egress": "ns3.uav1.egress",
+        "ns3_external_ingress": "ns3.cp.ingress",
+        "remote_after_adapter": "uav1.sink.eth0",
+        "source_before_adapter": "cp.source.eth0"
+      },
+      "cell_id": "uav1.payload.downlink",
+      "destination": {
+        "interface": "eth0",
+        "ip": "10.71.1.10",
+        "mavlink_component_id": 191,
+        "mavlink_system_id": 1,
+        "namespace": "ams-uav1",
+        "role": "uav1",
+        "udp_port": 14701
+      },
+      "direction": "downlink",
+      "identity": {
+        "flow_id": "uav1.payload.downlink",
+        "hash_domains": {
+          "application_unit_sha256": true,
+          "mavlink_frame_sha256": true,
+          "transport_payload_sha256": true,
+          "wire_frame_sha256": true
+        },
+        "nonce_domain": "ams/v1/uav1/payload/downlink",
+        "sequence_policy": "strictly_monotonic_per_flow"
+      },
+      "ns3_path": {
+        "directed_link_id": "cp>uav1",
+        "dscp_tos": 40,
+        "egress_device_id": "uav1.tap.egress",
+        "egress_udp_port": 16701,
+        "ingress_device_id": "cp.tap.ingress",
+        "ingress_udp_port": 15701,
+        "priority": 1,
+        "queue_id": "cp>uav1.payload.q1"
+      },
+      "outcome": {
+        "correlation": "run_nonce_flow_direction_sequence_payload_hash",
+        "response_kind": "decoded_tunnel_delivery_at_uav_companion",
+        "timeout_ms": 3000
+      },
+      "protocol": {
+        "channel": "mavlink_payload",
+        "classification_source": "decoded_bytes_port_nonce",
+        "kind": "mavlink_v2",
+        "message_family": "MAVLINK_TUNNEL_V2"
+      },
+      "source": {
+        "interface": "eth0",
+        "ip": "10.71.0.10",
+        "mavlink_component_id": 190,
+        "mavlink_system_id": 255,
+        "namespace": "ams-gcs",
+        "role": "command_post",
+        "udp_port": 14700
+      },
+      "traffic_class": "payload",
+      "transport_ports": {
+        "command_post_udp": 14700,
+        "ns3_ground_handoff_udp": 15701,
+        "ns3_uav_handoff_udp": 16701,
+        "uav_udp": 14701
+      },
+      "uav": {
+        "instance": 0,
+        "name": "uav1",
+        "system_id": 1
+      }
+    },
+    {
+      "capture_points": {
+        "ns3_external_egress": "ns3.cp.egress",
+        "ns3_external_ingress": "ns3.uav1.ingress",
+        "remote_after_adapter": "cp.sink.eth0",
+        "source_before_adapter": "uav1.source.eth0"
+      },
+      "cell_id": "uav1.payload.uplink",
+      "destination": {
+        "interface": "eth0",
+        "ip": "10.71.0.10",
+        "mavlink_component_id": 190,
+        "mavlink_system_id": 255,
+        "namespace": "ams-gcs",
+        "role": "command_post",
+        "udp_port": 14700
+      },
+      "direction": "uplink",
+      "identity": {
+        "flow_id": "uav1.payload.uplink",
+        "hash_domains": {
+          "application_unit_sha256": true,
+          "mavlink_frame_sha256": true,
+          "transport_payload_sha256": true,
+          "wire_frame_sha256": true
+        },
+        "nonce_domain": "ams/v1/uav1/payload/uplink",
+        "sequence_policy": "strictly_monotonic_per_flow"
+      },
+      "ns3_path": {
+        "directed_link_id": "uav1>cp",
+        "dscp_tos": 40,
+        "egress_device_id": "cp.tap.egress",
+        "egress_udp_port": 15701,
+        "ingress_device_id": "uav1.tap.ingress",
+        "ingress_udp_port": 16701,
+        "priority": 1,
+        "queue_id": "uav1>cp.payload.q1"
+      },
+      "outcome": {
+        "correlation": "run_nonce_flow_direction_sequence_payload_hash",
+        "response_kind": "decoded_tunnel_delivery_at_command_post",
+        "timeout_ms": 3000
+      },
+      "protocol": {
+        "channel": "mavlink_payload",
+        "classification_source": "decoded_bytes_port_nonce",
+        "kind": "mavlink_v2",
+        "message_family": "MAVLINK_TUNNEL_V2"
+      },
+      "source": {
+        "interface": "eth0",
+        "ip": "10.71.1.10",
+        "mavlink_component_id": 191,
+        "mavlink_system_id": 1,
+        "namespace": "ams-uav1",
+        "role": "uav1",
+        "udp_port": 14701
+      },
+      "traffic_class": "payload",
+      "transport_ports": {
+        "command_post_udp": 14700,
+        "ns3_ground_handoff_udp": 15701,
+        "ns3_uav_handoff_udp": 16701,
+        "uav_udp": 14701
+      },
+      "uav": {
+        "instance": 0,
+        "name": "uav1",
+        "system_id": 1
+      }
+    },
+    {
+      "capture_points": {
+        "ns3_external_egress": "ns3.uav1.egress",
+        "ns3_external_ingress": "ns3.cp.ingress",
+        "remote_after_adapter": "uav1.sink.eth0",
+        "source_before_adapter": "cp.source.eth0"
+      },
+      "cell_id": "uav1.additional_data.downlink",
+      "destination": {
+        "interface": "eth0",
+        "ip": "10.71.1.10",
+        "mavlink_component_id": null,
+        "mavlink_system_id": null,
+        "namespace": "ams-uav1",
+        "role": "uav1",
+        "udp_port": 14801
+      },
+      "direction": "downlink",
+      "identity": {
+        "flow_id": "uav1.additional_data.downlink",
+        "hash_domains": {
+          "application_unit_sha256": true,
+          "mavlink_frame_sha256": false,
+          "transport_payload_sha256": true,
+          "wire_frame_sha256": true
+        },
+        "nonce_domain": "ams/v1/uav1/additional_data/downlink",
+        "sequence_policy": "strictly_monotonic_per_flow"
+      },
+      "ns3_path": {
+        "directed_link_id": "cp>uav1",
+        "dscp_tos": 0,
+        "egress_device_id": "uav1.tap.egress",
+        "egress_udp_port": 16801,
+        "ingress_device_id": "cp.tap.ingress",
+        "ingress_udp_port": 15801,
+        "priority": 2,
+        "queue_id": "cp>uav1.additional_data.q2"
+      },
+      "outcome": {
+        "correlation": "run_nonce_flow_direction_sequence_payload_hash",
+        "response_kind": "decoded_record_delivery_at_uav",
+        "timeout_ms": 3000
+      },
+      "protocol": {
+        "channel": "point_to_multipoint_data",
+        "classification_source": "decoded_bytes_port_nonce",
+        "kind": "udp_framed",
+        "message_family": "AMS_ADDITIONAL_DATA_V1"
+      },
+      "source": {
+        "interface": "eth0",
+        "ip": "10.71.0.10",
+        "mavlink_component_id": null,
+        "mavlink_system_id": null,
+        "namespace": "ams-gcs",
+        "role": "command_post",
+        "udp_port": 14800
+      },
+      "traffic_class": "additional_data",
+      "transport_ports": {
+        "command_post_udp": 14800,
+        "ns3_ground_handoff_udp": 15801,
+        "ns3_uav_handoff_udp": 16801,
+        "uav_udp": 14801
+      },
+      "uav": {
+        "instance": 0,
+        "name": "uav1",
+        "system_id": 1
+      }
+    },
+    {
+      "capture_points": {
+        "ns3_external_egress": "ns3.cp.egress",
+        "ns3_external_ingress": "ns3.uav1.ingress",
+        "remote_after_adapter": "cp.sink.eth0",
+        "source_before_adapter": "uav1.source.eth0"
+      },
+      "cell_id": "uav1.additional_data.uplink",
+      "destination": {
+        "interface": "eth0",
+        "ip": "10.71.0.10",
+        "mavlink_component_id": null,
+        "mavlink_system_id": null,
+        "namespace": "ams-gcs",
+        "role": "command_post",
+        "udp_port": 14800
+      },
+      "direction": "uplink",
+      "identity": {
+        "flow_id": "uav1.additional_data.uplink",
+        "hash_domains": {
+          "application_unit_sha256": true,
+          "mavlink_frame_sha256": false,
+          "transport_payload_sha256": true,
+          "wire_frame_sha256": true
+        },
+        "nonce_domain": "ams/v1/uav1/additional_data/uplink",
+        "sequence_policy": "strictly_monotonic_per_flow"
+      },
+      "ns3_path": {
+        "directed_link_id": "uav1>cp",
+        "dscp_tos": 0,
+        "egress_device_id": "cp.tap.egress",
+        "egress_udp_port": 15801,
+        "ingress_device_id": "uav1.tap.ingress",
+        "ingress_udp_port": 16801,
+        "priority": 2,
+        "queue_id": "uav1>cp.additional_data.q2"
+      },
+      "outcome": {
+        "correlation": "run_nonce_flow_direction_sequence_payload_hash",
+        "response_kind": "decoded_record_delivery_at_command_post",
+        "timeout_ms": 3000
+      },
+      "protocol": {
+        "channel": "point_to_multipoint_data",
+        "classification_source": "decoded_bytes_port_nonce",
+        "kind": "udp_framed",
+        "message_family": "AMS_ADDITIONAL_DATA_V1"
+      },
+      "source": {
+        "interface": "eth0",
+        "ip": "10.71.1.10",
+        "mavlink_component_id": null,
+        "mavlink_system_id": null,
+        "namespace": "ams-uav1",
+        "role": "uav1",
+        "udp_port": 14801
+      },
+      "traffic_class": "additional_data",
+      "transport_ports": {
+        "command_post_udp": 14800,
+        "ns3_ground_handoff_udp": 15801,
+        "ns3_uav_handoff_udp": 16801,
+        "uav_udp": 14801
+      },
+      "uav": {
+        "instance": 0,
+        "name": "uav1",
+        "system_id": 1
+      }
+    },
+    {
+      "capture_points": {
+        "ns3_external_egress": "ns3.uav2.egress",
+        "ns3_external_ingress": "ns3.cp.ingress",
+        "remote_after_adapter": "uav2.mavproxy.tail",
+        "source_before_adapter": "cp.source.eth0"
+      },
+      "cell_id": "uav2.control.downlink",
+      "destination": {
+        "interface": "eth0",
+        "ip": "10.71.2.10",
+        "mavlink_component_id": 1,
+        "mavlink_system_id": 2,
+        "namespace": "ams-uav2",
+        "role": "uav2",
+        "udp_port": 14602
+      },
+      "direction": "downlink",
+      "identity": {
+        "flow_id": "uav2.control.downlink",
+        "hash_domains": {
+          "application_unit_sha256": true,
+          "mavlink_frame_sha256": true,
+          "transport_payload_sha256": true,
+          "wire_frame_sha256": true
+        },
+        "nonce_domain": "ams/v1/uav2/control/downlink",
+        "sequence_policy": "strictly_monotonic_per_flow"
+      },
+      "ns3_path": {
+        "directed_link_id": "cp>uav2",
+        "dscp_tos": 184,
+        "egress_device_id": "uav2.tap.egress",
+        "egress_udp_port": 16602,
+        "ingress_device_id": "cp.tap.ingress",
+        "ingress_udp_port": 15602,
+        "priority": 0,
+        "queue_id": "cp>uav2.control.q0"
+      },
+      "outcome": {
+        "correlation": "request_hash_command_source_target_window",
+        "response_kind": "command_ack_and_requested_telemetry",
+        "timeout_ms": 3000
+      },
+      "protocol": {
+        "channel": "mavlink_control",
+        "classification_source": "decoded_bytes_port_nonce",
+        "kind": "mavlink_v2",
+        "message_family": "STATUSTEXT_MARKER_PLUS_COMMAND_LONG"
+      },
+      "source": {
+        "interface": "eth0",
+        "ip": "10.71.0.10",
+        "mavlink_component_id": 190,
+        "mavlink_system_id": 255,
+        "namespace": "ams-gcs",
+        "role": "command_post",
+        "udp_port": 14600
+      },
+      "traffic_class": "control",
+      "transport_ports": {
+        "command_post_udp": 14600,
+        "ns3_ground_handoff_udp": 15602,
+        "ns3_uav_handoff_udp": 16602,
+        "uav_udp": 14602
+      },
+      "uav": {
+        "instance": 1,
+        "name": "uav2",
+        "system_id": 2
+      }
+    },
+    {
+      "capture_points": {
+        "ns3_external_egress": "ns3.cp.egress",
+        "ns3_external_ingress": "ns3.uav2.ingress",
+        "remote_after_adapter": "cp.sink.eth0",
+        "source_before_adapter": "uav2.mavproxy.tail"
+      },
+      "cell_id": "uav2.control.uplink",
+      "destination": {
+        "interface": "eth0",
+        "ip": "10.71.0.10",
+        "mavlink_component_id": 190,
+        "mavlink_system_id": 255,
+        "namespace": "ams-gcs",
+        "role": "command_post",
+        "udp_port": 14600
+      },
+      "direction": "uplink",
+      "identity": {
+        "flow_id": "uav2.control.uplink",
+        "hash_domains": {
+          "application_unit_sha256": true,
+          "mavlink_frame_sha256": true,
+          "transport_payload_sha256": true,
+          "wire_frame_sha256": true
+        },
+        "nonce_domain": "ams/v1/uav2/control/uplink",
+        "sequence_policy": "strictly_monotonic_per_flow"
+      },
+      "ns3_path": {
+        "directed_link_id": "uav2>cp",
+        "dscp_tos": 184,
+        "egress_device_id": "cp.tap.egress",
+        "egress_udp_port": 15602,
+        "ingress_device_id": "uav2.tap.ingress",
+        "ingress_udp_port": 16602,
+        "priority": 0,
+        "queue_id": "uav2>cp.control.q0"
+      },
+      "outcome": {
+        "correlation": "request_hash_command_source_target_window",
+        "response_kind": "correlated_delivery_at_command_post",
+        "timeout_ms": 3000
+      },
+      "protocol": {
+        "channel": "mavlink_control",
+        "classification_source": "decoded_bytes_port_nonce",
+        "kind": "mavlink_v2",
+        "message_family": "COMMAND_ACK_HEARTBEAT_REQUESTED_TELEMETRY"
+      },
+      "source": {
+        "interface": "eth0",
+        "ip": "10.71.2.10",
+        "mavlink_component_id": 1,
+        "mavlink_system_id": 2,
+        "namespace": "ams-uav2",
+        "role": "uav2",
+        "udp_port": 14602
+      },
+      "traffic_class": "control",
+      "transport_ports": {
+        "command_post_udp": 14600,
+        "ns3_ground_handoff_udp": 15602,
+        "ns3_uav_handoff_udp": 16602,
+        "uav_udp": 14602
+      },
+      "uav": {
+        "instance": 1,
+        "name": "uav2",
+        "system_id": 2
+      }
+    },
+    {
+      "capture_points": {
+        "ns3_external_egress": "ns3.uav2.egress",
+        "ns3_external_ingress": "ns3.cp.ingress",
+        "remote_after_adapter": "uav2.sink.eth0",
+        "source_before_adapter": "cp.source.eth0"
+      },
+      "cell_id": "uav2.payload.downlink",
+      "destination": {
+        "interface": "eth0",
+        "ip": "10.71.2.10",
+        "mavlink_component_id": 191,
+        "mavlink_system_id": 2,
+        "namespace": "ams-uav2",
+        "role": "uav2",
+        "udp_port": 14702
+      },
+      "direction": "downlink",
+      "identity": {
+        "flow_id": "uav2.payload.downlink",
+        "hash_domains": {
+          "application_unit_sha256": true,
+          "mavlink_frame_sha256": true,
+          "transport_payload_sha256": true,
+          "wire_frame_sha256": true
+        },
+        "nonce_domain": "ams/v1/uav2/payload/downlink",
+        "sequence_policy": "strictly_monotonic_per_flow"
+      },
+      "ns3_path": {
+        "directed_link_id": "cp>uav2",
+        "dscp_tos": 40,
+        "egress_device_id": "uav2.tap.egress",
+        "egress_udp_port": 16702,
+        "ingress_device_id": "cp.tap.ingress",
+        "ingress_udp_port": 15702,
+        "priority": 1,
+        "queue_id": "cp>uav2.payload.q1"
+      },
+      "outcome": {
+        "correlation": "run_nonce_flow_direction_sequence_payload_hash",
+        "response_kind": "decoded_tunnel_delivery_at_uav_companion",
+        "timeout_ms": 3000
+      },
+      "protocol": {
+        "channel": "mavlink_payload",
+        "classification_source": "decoded_bytes_port_nonce",
+        "kind": "mavlink_v2",
+        "message_family": "MAVLINK_TUNNEL_V2"
+      },
+      "source": {
+        "interface": "eth0",
+        "ip": "10.71.0.10",
+        "mavlink_component_id": 190,
+        "mavlink_system_id": 255,
+        "namespace": "ams-gcs",
+        "role": "command_post",
+        "udp_port": 14700
+      },
+      "traffic_class": "payload",
+      "transport_ports": {
+        "command_post_udp": 14700,
+        "ns3_ground_handoff_udp": 15702,
+        "ns3_uav_handoff_udp": 16702,
+        "uav_udp": 14702
+      },
+      "uav": {
+        "instance": 1,
+        "name": "uav2",
+        "system_id": 2
+      }
+    },
+    {
+      "capture_points": {
+        "ns3_external_egress": "ns3.cp.egress",
+        "ns3_external_ingress": "ns3.uav2.ingress",
+        "remote_after_adapter": "cp.sink.eth0",
+        "source_before_adapter": "uav2.source.eth0"
+      },
+      "cell_id": "uav2.payload.uplink",
+      "destination": {
+        "interface": "eth0",
+        "ip": "10.71.0.10",
+        "mavlink_component_id": 190,
+        "mavlink_system_id": 255,
+        "namespace": "ams-gcs",
+        "role": "command_post",
+        "udp_port": 14700
+      },
+      "direction": "uplink",
+      "identity": {
+        "flow_id": "uav2.payload.uplink",
+        "hash_domains": {
+          "application_unit_sha256": true,
+          "mavlink_frame_sha256": true,
+          "transport_payload_sha256": true,
+          "wire_frame_sha256": true
+        },
+        "nonce_domain": "ams/v1/uav2/payload/uplink",
+        "sequence_policy": "strictly_monotonic_per_flow"
+      },
+      "ns3_path": {
+        "directed_link_id": "uav2>cp",
+        "dscp_tos": 40,
+        "egress_device_id": "cp.tap.egress",
+        "egress_udp_port": 15702,
+        "ingress_device_id": "uav2.tap.ingress",
+        "ingress_udp_port": 16702,
+        "priority": 1,
+        "queue_id": "uav2>cp.payload.q1"
+      },
+      "outcome": {
+        "correlation": "run_nonce_flow_direction_sequence_payload_hash",
+        "response_kind": "decoded_tunnel_delivery_at_command_post",
+        "timeout_ms": 3000
+      },
+      "protocol": {
+        "channel": "mavlink_payload",
+        "classification_source": "decoded_bytes_port_nonce",
+        "kind": "mavlink_v2",
+        "message_family": "MAVLINK_TUNNEL_V2"
+      },
+      "source": {
+        "interface": "eth0",
+        "ip": "10.71.2.10",
+        "mavlink_component_id": 191,
+        "mavlink_system_id": 2,
+        "namespace": "ams-uav2",
+        "role": "uav2",
+        "udp_port": 14702
+      },
+      "traffic_class": "payload",
+      "transport_ports": {
+        "command_post_udp": 14700,
+        "ns3_ground_handoff_udp": 15702,
+        "ns3_uav_handoff_udp": 16702,
+        "uav_udp": 14702
+      },
+      "uav": {
+        "instance": 1,
+        "name": "uav2",
+        "system_id": 2
+      }
+    },
+    {
+      "capture_points": {
+        "ns3_external_egress": "ns3.uav2.egress",
+        "ns3_external_ingress": "ns3.cp.ingress",
+        "remote_after_adapter": "uav2.sink.eth0",
+        "source_before_adapter": "cp.source.eth0"
+      },
+      "cell_id": "uav2.additional_data.downlink",
+      "destination": {
+        "interface": "eth0",
+        "ip": "10.71.2.10",
+        "mavlink_component_id": null,
+        "mavlink_system_id": null,
+        "namespace": "ams-uav2",
+        "role": "uav2",
+        "udp_port": 14802
+      },
+      "direction": "downlink",
+      "identity": {
+        "flow_id": "uav2.additional_data.downlink",
+        "hash_domains": {
+          "application_unit_sha256": true,
+          "mavlink_frame_sha256": false,
+          "transport_payload_sha256": true,
+          "wire_frame_sha256": true
+        },
+        "nonce_domain": "ams/v1/uav2/additional_data/downlink",
+        "sequence_policy": "strictly_monotonic_per_flow"
+      },
+      "ns3_path": {
+        "directed_link_id": "cp>uav2",
+        "dscp_tos": 0,
+        "egress_device_id": "uav2.tap.egress",
+        "egress_udp_port": 16802,
+        "ingress_device_id": "cp.tap.ingress",
+        "ingress_udp_port": 15802,
+        "priority": 2,
+        "queue_id": "cp>uav2.additional_data.q2"
+      },
+      "outcome": {
+        "correlation": "run_nonce_flow_direction_sequence_payload_hash",
+        "response_kind": "decoded_record_delivery_at_uav",
+        "timeout_ms": 3000
+      },
+      "protocol": {
+        "channel": "point_to_multipoint_data",
+        "classification_source": "decoded_bytes_port_nonce",
+        "kind": "udp_framed",
+        "message_family": "AMS_ADDITIONAL_DATA_V1"
+      },
+      "source": {
+        "interface": "eth0",
+        "ip": "10.71.0.10",
+        "mavlink_component_id": null,
+        "mavlink_system_id": null,
+        "namespace": "ams-gcs",
+        "role": "command_post",
+        "udp_port": 14800
+      },
+      "traffic_class": "additional_data",
+      "transport_ports": {
+        "command_post_udp": 14800,
+        "ns3_ground_handoff_udp": 15802,
+        "ns3_uav_handoff_udp": 16802,
+        "uav_udp": 14802
+      },
+      "uav": {
+        "instance": 1,
+        "name": "uav2",
+        "system_id": 2
+      }
+    },
+    {
+      "capture_points": {
+        "ns3_external_egress": "ns3.cp.egress",
+        "ns3_external_ingress": "ns3.uav2.ingress",
+        "remote_after_adapter": "cp.sink.eth0",
+        "source_before_adapter": "uav2.source.eth0"
+      },
+      "cell_id": "uav2.additional_data.uplink",
+      "destination": {
+        "interface": "eth0",
+        "ip": "10.71.0.10",
+        "mavlink_component_id": null,
+        "mavlink_system_id": null,
+        "namespace": "ams-gcs",
+        "role": "command_post",
+        "udp_port": 14800
+      },
+      "direction": "uplink",
+      "identity": {
+        "flow_id": "uav2.additional_data.uplink",
+        "hash_domains": {
+          "application_unit_sha256": true,
+          "mavlink_frame_sha256": false,
+          "transport_payload_sha256": true,
+          "wire_frame_sha256": true
+        },
+        "nonce_domain": "ams/v1/uav2/additional_data/uplink",
+        "sequence_policy": "strictly_monotonic_per_flow"
+      },
+      "ns3_path": {
+        "directed_link_id": "uav2>cp",
+        "dscp_tos": 0,
+        "egress_device_id": "cp.tap.egress",
+        "egress_udp_port": 15802,
+        "ingress_device_id": "uav2.tap.ingress",
+        "ingress_udp_port": 16802,
+        "priority": 2,
+        "queue_id": "uav2>cp.additional_data.q2"
+      },
+      "outcome": {
+        "correlation": "run_nonce_flow_direction_sequence_payload_hash",
+        "response_kind": "decoded_record_delivery_at_command_post",
+        "timeout_ms": 3000
+      },
+      "protocol": {
+        "channel": "point_to_multipoint_data",
+        "classification_source": "decoded_bytes_port_nonce",
+        "kind": "udp_framed",
+        "message_family": "AMS_ADDITIONAL_DATA_V1"
+      },
+      "source": {
+        "interface": "eth0",
+        "ip": "10.71.2.10",
+        "mavlink_component_id": null,
+        "mavlink_system_id": null,
+        "namespace": "ams-uav2",
+        "role": "uav2",
+        "udp_port": 14802
+      },
+      "traffic_class": "additional_data",
+      "transport_ports": {
+        "command_post_udp": 14800,
+        "ns3_ground_handoff_udp": 15802,
+        "ns3_uav_handoff_udp": 16802,
+        "uav_udp": 14802
+      },
+      "uav": {
+        "instance": 1,
+        "name": "uav2",
+        "system_id": 2
+      }
+    },
+    {
+      "capture_points": {
+        "ns3_external_egress": "ns3.uav3.egress",
+        "ns3_external_ingress": "ns3.cp.ingress",
+        "remote_after_adapter": "uav3.mavproxy.tail",
+        "source_before_adapter": "cp.source.eth0"
+      },
+      "cell_id": "uav3.control.downlink",
+      "destination": {
+        "interface": "eth0",
+        "ip": "10.71.3.10",
+        "mavlink_component_id": 1,
+        "mavlink_system_id": 3,
+        "namespace": "ams-uav3",
+        "role": "uav3",
+        "udp_port": 14603
+      },
+      "direction": "downlink",
+      "identity": {
+        "flow_id": "uav3.control.downlink",
+        "hash_domains": {
+          "application_unit_sha256": true,
+          "mavlink_frame_sha256": true,
+          "transport_payload_sha256": true,
+          "wire_frame_sha256": true
+        },
+        "nonce_domain": "ams/v1/uav3/control/downlink",
+        "sequence_policy": "strictly_monotonic_per_flow"
+      },
+      "ns3_path": {
+        "directed_link_id": "cp>uav3",
+        "dscp_tos": 184,
+        "egress_device_id": "uav3.tap.egress",
+        "egress_udp_port": 16603,
+        "ingress_device_id": "cp.tap.ingress",
+        "ingress_udp_port": 15603,
+        "priority": 0,
+        "queue_id": "cp>uav3.control.q0"
+      },
+      "outcome": {
+        "correlation": "request_hash_command_source_target_window",
+        "response_kind": "command_ack_and_requested_telemetry",
+        "timeout_ms": 3000
+      },
+      "protocol": {
+        "channel": "mavlink_control",
+        "classification_source": "decoded_bytes_port_nonce",
+        "kind": "mavlink_v2",
+        "message_family": "STATUSTEXT_MARKER_PLUS_COMMAND_LONG"
+      },
+      "source": {
+        "interface": "eth0",
+        "ip": "10.71.0.10",
+        "mavlink_component_id": 190,
+        "mavlink_system_id": 255,
+        "namespace": "ams-gcs",
+        "role": "command_post",
+        "udp_port": 14600
+      },
+      "traffic_class": "control",
+      "transport_ports": {
+        "command_post_udp": 14600,
+        "ns3_ground_handoff_udp": 15603,
+        "ns3_uav_handoff_udp": 16603,
+        "uav_udp": 14603
+      },
+      "uav": {
+        "instance": 2,
+        "name": "uav3",
+        "system_id": 3
+      }
+    },
+    {
+      "capture_points": {
+        "ns3_external_egress": "ns3.cp.egress",
+        "ns3_external_ingress": "ns3.uav3.ingress",
+        "remote_after_adapter": "cp.sink.eth0",
+        "source_before_adapter": "uav3.mavproxy.tail"
+      },
+      "cell_id": "uav3.control.uplink",
+      "destination": {
+        "interface": "eth0",
+        "ip": "10.71.0.10",
+        "mavlink_component_id": 190,
+        "mavlink_system_id": 255,
+        "namespace": "ams-gcs",
+        "role": "command_post",
+        "udp_port": 14600
+      },
+      "direction": "uplink",
+      "identity": {
+        "flow_id": "uav3.control.uplink",
+        "hash_domains": {
+          "application_unit_sha256": true,
+          "mavlink_frame_sha256": true,
+          "transport_payload_sha256": true,
+          "wire_frame_sha256": true
+        },
+        "nonce_domain": "ams/v1/uav3/control/uplink",
+        "sequence_policy": "strictly_monotonic_per_flow"
+      },
+      "ns3_path": {
+        "directed_link_id": "uav3>cp",
+        "dscp_tos": 184,
+        "egress_device_id": "cp.tap.egress",
+        "egress_udp_port": 15603,
+        "ingress_device_id": "uav3.tap.ingress",
+        "ingress_udp_port": 16603,
+        "priority": 0,
+        "queue_id": "uav3>cp.control.q0"
+      },
+      "outcome": {
+        "correlation": "request_hash_command_source_target_window",
+        "response_kind": "correlated_delivery_at_command_post",
+        "timeout_ms": 3000
+      },
+      "protocol": {
+        "channel": "mavlink_control",
+        "classification_source": "decoded_bytes_port_nonce",
+        "kind": "mavlink_v2",
+        "message_family": "COMMAND_ACK_HEARTBEAT_REQUESTED_TELEMETRY"
+      },
+      "source": {
+        "interface": "eth0",
+        "ip": "10.71.3.10",
+        "mavlink_component_id": 1,
+        "mavlink_system_id": 3,
+        "namespace": "ams-uav3",
+        "role": "uav3",
+        "udp_port": 14603
+      },
+      "traffic_class": "control",
+      "transport_ports": {
+        "command_post_udp": 14600,
+        "ns3_ground_handoff_udp": 15603,
+        "ns3_uav_handoff_udp": 16603,
+        "uav_udp": 14603
+      },
+      "uav": {
+        "instance": 2,
+        "name": "uav3",
+        "system_id": 3
+      }
+    },
+    {
+      "capture_points": {
+        "ns3_external_egress": "ns3.uav3.egress",
+        "ns3_external_ingress": "ns3.cp.ingress",
+        "remote_after_adapter": "uav3.sink.eth0",
+        "source_before_adapter": "cp.source.eth0"
+      },
+      "cell_id": "uav3.payload.downlink",
+      "destination": {
+        "interface": "eth0",
+        "ip": "10.71.3.10",
+        "mavlink_component_id": 191,
+        "mavlink_system_id": 3,
+        "namespace": "ams-uav3",
+        "role": "uav3",
+        "udp_port": 14703
+      },
+      "direction": "downlink",
+      "identity": {
+        "flow_id": "uav3.payload.downlink",
+        "hash_domains": {
+          "application_unit_sha256": true,
+          "mavlink_frame_sha256": true,
+          "transport_payload_sha256": true,
+          "wire_frame_sha256": true
+        },
+        "nonce_domain": "ams/v1/uav3/payload/downlink",
+        "sequence_policy": "strictly_monotonic_per_flow"
+      },
+      "ns3_path": {
+        "directed_link_id": "cp>uav3",
+        "dscp_tos": 40,
+        "egress_device_id": "uav3.tap.egress",
+        "egress_udp_port": 16703,
+        "ingress_device_id": "cp.tap.ingress",
+        "ingress_udp_port": 15703,
+        "priority": 1,
+        "queue_id": "cp>uav3.payload.q1"
+      },
+      "outcome": {
+        "correlation": "run_nonce_flow_direction_sequence_payload_hash",
+        "response_kind": "decoded_tunnel_delivery_at_uav_companion",
+        "timeout_ms": 3000
+      },
+      "protocol": {
+        "channel": "mavlink_payload",
+        "classification_source": "decoded_bytes_port_nonce",
+        "kind": "mavlink_v2",
+        "message_family": "MAVLINK_TUNNEL_V2"
+      },
+      "source": {
+        "interface": "eth0",
+        "ip": "10.71.0.10",
+        "mavlink_component_id": 190,
+        "mavlink_system_id": 255,
+        "namespace": "ams-gcs",
+        "role": "command_post",
+        "udp_port": 14700
+      },
+      "traffic_class": "payload",
+      "transport_ports": {
+        "command_post_udp": 14700,
+        "ns3_ground_handoff_udp": 15703,
+        "ns3_uav_handoff_udp": 16703,
+        "uav_udp": 14703
+      },
+      "uav": {
+        "instance": 2,
+        "name": "uav3",
+        "system_id": 3
+      }
+    },
+    {
+      "capture_points": {
+        "ns3_external_egress": "ns3.cp.egress",
+        "ns3_external_ingress": "ns3.uav3.ingress",
+        "remote_after_adapter": "cp.sink.eth0",
+        "source_before_adapter": "uav3.source.eth0"
+      },
+      "cell_id": "uav3.payload.uplink",
+      "destination": {
+        "interface": "eth0",
+        "ip": "10.71.0.10",
+        "mavlink_component_id": 190,
+        "mavlink_system_id": 255,
+        "namespace": "ams-gcs",
+        "role": "command_post",
+        "udp_port": 14700
+      },
+      "direction": "uplink",
+      "identity": {
+        "flow_id": "uav3.payload.uplink",
+        "hash_domains": {
+          "application_unit_sha256": true,
+          "mavlink_frame_sha256": true,
+          "transport_payload_sha256": true,
+          "wire_frame_sha256": true
+        },
+        "nonce_domain": "ams/v1/uav3/payload/uplink",
+        "sequence_policy": "strictly_monotonic_per_flow"
+      },
+      "ns3_path": {
+        "directed_link_id": "uav3>cp",
+        "dscp_tos": 40,
+        "egress_device_id": "cp.tap.egress",
+        "egress_udp_port": 15703,
+        "ingress_device_id": "uav3.tap.ingress",
+        "ingress_udp_port": 16703,
+        "priority": 1,
+        "queue_id": "uav3>cp.payload.q1"
+      },
+      "outcome": {
+        "correlation": "run_nonce_flow_direction_sequence_payload_hash",
+        "response_kind": "decoded_tunnel_delivery_at_command_post",
+        "timeout_ms": 3000
+      },
+      "protocol": {
+        "channel": "mavlink_payload",
+        "classification_source": "decoded_bytes_port_nonce",
+        "kind": "mavlink_v2",
+        "message_family": "MAVLINK_TUNNEL_V2"
+      },
+      "source": {
+        "interface": "eth0",
+        "ip": "10.71.3.10",
+        "mavlink_component_id": 191,
+        "mavlink_system_id": 3,
+        "namespace": "ams-uav3",
+        "role": "uav3",
+        "udp_port": 14703
+      },
+      "traffic_class": "payload",
+      "transport_ports": {
+        "command_post_udp": 14700,
+        "ns3_ground_handoff_udp": 15703,
+        "ns3_uav_handoff_udp": 16703,
+        "uav_udp": 14703
+      },
+      "uav": {
+        "instance": 2,
+        "name": "uav3",
+        "system_id": 3
+      }
+    },
+    {
+      "capture_points": {
+        "ns3_external_egress": "ns3.uav3.egress",
+        "ns3_external_ingress": "ns3.cp.ingress",
+        "remote_after_adapter": "uav3.sink.eth0",
+        "source_before_adapter": "cp.source.eth0"
+      },
+      "cell_id": "uav3.additional_data.downlink",
+      "destination": {
+        "interface": "eth0",
+        "ip": "10.71.3.10",
+        "mavlink_component_id": null,
+        "mavlink_system_id": null,
+        "namespace": "ams-uav3",
+        "role": "uav3",
+        "udp_port": 14803
+      },
+      "direction": "downlink",
+      "identity": {
+        "flow_id": "uav3.additional_data.downlink",
+        "hash_domains": {
+          "application_unit_sha256": true,
+          "mavlink_frame_sha256": false,
+          "transport_payload_sha256": true,
+          "wire_frame_sha256": true
+        },
+        "nonce_domain": "ams/v1/uav3/additional_data/downlink",
+        "sequence_policy": "strictly_monotonic_per_flow"
+      },
+      "ns3_path": {
+        "directed_link_id": "cp>uav3",
+        "dscp_tos": 0,
+        "egress_device_id": "uav3.tap.egress",
+        "egress_udp_port": 16803,
+        "ingress_device_id": "cp.tap.ingress",
+        "ingress_udp_port": 15803,
+        "priority": 2,
+        "queue_id": "cp>uav3.additional_data.q2"
+      },
+      "outcome": {
+        "correlation": "run_nonce_flow_direction_sequence_payload_hash",
+        "response_kind": "decoded_record_delivery_at_uav",
+        "timeout_ms": 3000
+      },
+      "protocol": {
+        "channel": "point_to_multipoint_data",
+        "classification_source": "decoded_bytes_port_nonce",
+        "kind": "udp_framed",
+        "message_family": "AMS_ADDITIONAL_DATA_V1"
+      },
+      "source": {
+        "interface": "eth0",
+        "ip": "10.71.0.10",
+        "mavlink_component_id": null,
+        "mavlink_system_id": null,
+        "namespace": "ams-gcs",
+        "role": "command_post",
+        "udp_port": 14800
+      },
+      "traffic_class": "additional_data",
+      "transport_ports": {
+        "command_post_udp": 14800,
+        "ns3_ground_handoff_udp": 15803,
+        "ns3_uav_handoff_udp": 16803,
+        "uav_udp": 14803
+      },
+      "uav": {
+        "instance": 2,
+        "name": "uav3",
+        "system_id": 3
+      }
+    },
+    {
+      "capture_points": {
+        "ns3_external_egress": "ns3.cp.egress",
+        "ns3_external_ingress": "ns3.uav3.ingress",
+        "remote_after_adapter": "cp.sink.eth0",
+        "source_before_adapter": "uav3.source.eth0"
+      },
+      "cell_id": "uav3.additional_data.uplink",
+      "destination": {
+        "interface": "eth0",
+        "ip": "10.71.0.10",
+        "mavlink_component_id": null,
+        "mavlink_system_id": null,
+        "namespace": "ams-gcs",
+        "role": "command_post",
+        "udp_port": 14800
+      },
+      "direction": "uplink",
+      "identity": {
+        "flow_id": "uav3.additional_data.uplink",
+        "hash_domains": {
+          "application_unit_sha256": true,
+          "mavlink_frame_sha256": false,
+          "transport_payload_sha256": true,
+          "wire_frame_sha256": true
+        },
+        "nonce_domain": "ams/v1/uav3/additional_data/uplink",
+        "sequence_policy": "strictly_monotonic_per_flow"
+      },
+      "ns3_path": {
+        "directed_link_id": "uav3>cp",
+        "dscp_tos": 0,
+        "egress_device_id": "cp.tap.egress",
+        "egress_udp_port": 15803,
+        "ingress_device_id": "uav3.tap.ingress",
+        "ingress_udp_port": 16803,
+        "priority": 2,
+        "queue_id": "uav3>cp.additional_data.q2"
+      },
+      "outcome": {
+        "correlation": "run_nonce_flow_direction_sequence_payload_hash",
+        "response_kind": "decoded_record_delivery_at_command_post",
+        "timeout_ms": 3000
+      },
+      "protocol": {
+        "channel": "point_to_multipoint_data",
+        "classification_source": "decoded_bytes_port_nonce",
+        "kind": "udp_framed",
+        "message_family": "AMS_ADDITIONAL_DATA_V1"
+      },
+      "source": {
+        "interface": "eth0",
+        "ip": "10.71.3.10",
+        "mavlink_component_id": null,
+        "mavlink_system_id": null,
+        "namespace": "ams-uav3",
+        "role": "uav3",
+        "udp_port": 14803
+      },
+      "traffic_class": "additional_data",
+      "transport_ports": {
+        "command_post_udp": 14800,
+        "ns3_ground_handoff_udp": 15803,
+        "ns3_uav_handoff_udp": 16803,
+        "uav_udp": 14803
+      },
+      "uav": {
+        "instance": 2,
+        "name": "uav3",
+        "system_id": 3
+      }
+    },
+    {
+      "capture_points": {
+        "ns3_external_egress": "ns3.uav4.egress",
+        "ns3_external_ingress": "ns3.cp.ingress",
+        "remote_after_adapter": "uav4.mavproxy.tail",
+        "source_before_adapter": "cp.source.eth0"
+      },
+      "cell_id": "uav4.control.downlink",
+      "destination": {
+        "interface": "eth0",
+        "ip": "10.71.4.10",
+        "mavlink_component_id": 1,
+        "mavlink_system_id": 4,
+        "namespace": "ams-uav4",
+        "role": "uav4",
+        "udp_port": 14604
+      },
+      "direction": "downlink",
+      "identity": {
+        "flow_id": "uav4.control.downlink",
+        "hash_domains": {
+          "application_unit_sha256": true,
+          "mavlink_frame_sha256": true,
+          "transport_payload_sha256": true,
+          "wire_frame_sha256": true
+        },
+        "nonce_domain": "ams/v1/uav4/control/downlink",
+        "sequence_policy": "strictly_monotonic_per_flow"
+      },
+      "ns3_path": {
+        "directed_link_id": "cp>uav4",
+        "dscp_tos": 184,
+        "egress_device_id": "uav4.tap.egress",
+        "egress_udp_port": 16604,
+        "ingress_device_id": "cp.tap.ingress",
+        "ingress_udp_port": 15604,
+        "priority": 0,
+        "queue_id": "cp>uav4.control.q0"
+      },
+      "outcome": {
+        "correlation": "request_hash_command_source_target_window",
+        "response_kind": "command_ack_and_requested_telemetry",
+        "timeout_ms": 3000
+      },
+      "protocol": {
+        "channel": "mavlink_control",
+        "classification_source": "decoded_bytes_port_nonce",
+        "kind": "mavlink_v2",
+        "message_family": "STATUSTEXT_MARKER_PLUS_COMMAND_LONG"
+      },
+      "source": {
+        "interface": "eth0",
+        "ip": "10.71.0.10",
+        "mavlink_component_id": 190,
+        "mavlink_system_id": 255,
+        "namespace": "ams-gcs",
+        "role": "command_post",
+        "udp_port": 14600
+      },
+      "traffic_class": "control",
+      "transport_ports": {
+        "command_post_udp": 14600,
+        "ns3_ground_handoff_udp": 15604,
+        "ns3_uav_handoff_udp": 16604,
+        "uav_udp": 14604
+      },
+      "uav": {
+        "instance": 3,
+        "name": "uav4",
+        "system_id": 4
+      }
+    },
+    {
+      "capture_points": {
+        "ns3_external_egress": "ns3.cp.egress",
+        "ns3_external_ingress": "ns3.uav4.ingress",
+        "remote_after_adapter": "cp.sink.eth0",
+        "source_before_adapter": "uav4.mavproxy.tail"
+      },
+      "cell_id": "uav4.control.uplink",
+      "destination": {
+        "interface": "eth0",
+        "ip": "10.71.0.10",
+        "mavlink_component_id": 190,
+        "mavlink_system_id": 255,
+        "namespace": "ams-gcs",
+        "role": "command_post",
+        "udp_port": 14600
+      },
+      "direction": "uplink",
+      "identity": {
+        "flow_id": "uav4.control.uplink",
+        "hash_domains": {
+          "application_unit_sha256": true,
+          "mavlink_frame_sha256": true,
+          "transport_payload_sha256": true,
+          "wire_frame_sha256": true
+        },
+        "nonce_domain": "ams/v1/uav4/control/uplink",
+        "sequence_policy": "strictly_monotonic_per_flow"
+      },
+      "ns3_path": {
+        "directed_link_id": "uav4>cp",
+        "dscp_tos": 184,
+        "egress_device_id": "cp.tap.egress",
+        "egress_udp_port": 15604,
+        "ingress_device_id": "uav4.tap.ingress",
+        "ingress_udp_port": 16604,
+        "priority": 0,
+        "queue_id": "uav4>cp.control.q0"
+      },
+      "outcome": {
+        "correlation": "request_hash_command_source_target_window",
+        "response_kind": "correlated_delivery_at_command_post",
+        "timeout_ms": 3000
+      },
+      "protocol": {
+        "channel": "mavlink_control",
+        "classification_source": "decoded_bytes_port_nonce",
+        "kind": "mavlink_v2",
+        "message_family": "COMMAND_ACK_HEARTBEAT_REQUESTED_TELEMETRY"
+      },
+      "source": {
+        "interface": "eth0",
+        "ip": "10.71.4.10",
+        "mavlink_component_id": 1,
+        "mavlink_system_id": 4,
+        "namespace": "ams-uav4",
+        "role": "uav4",
+        "udp_port": 14604
+      },
+      "traffic_class": "control",
+      "transport_ports": {
+        "command_post_udp": 14600,
+        "ns3_ground_handoff_udp": 15604,
+        "ns3_uav_handoff_udp": 16604,
+        "uav_udp": 14604
+      },
+      "uav": {
+        "instance": 3,
+        "name": "uav4",
+        "system_id": 4
+      }
+    },
+    {
+      "capture_points": {
+        "ns3_external_egress": "ns3.uav4.egress",
+        "ns3_external_ingress": "ns3.cp.ingress",
+        "remote_after_adapter": "uav4.sink.eth0",
+        "source_before_adapter": "cp.source.eth0"
+      },
+      "cell_id": "uav4.payload.downlink",
+      "destination": {
+        "interface": "eth0",
+        "ip": "10.71.4.10",
+        "mavlink_component_id": 191,
+        "mavlink_system_id": 4,
+        "namespace": "ams-uav4",
+        "role": "uav4",
+        "udp_port": 14704
+      },
+      "direction": "downlink",
+      "identity": {
+        "flow_id": "uav4.payload.downlink",
+        "hash_domains": {
+          "application_unit_sha256": true,
+          "mavlink_frame_sha256": true,
+          "transport_payload_sha256": true,
+          "wire_frame_sha256": true
+        },
+        "nonce_domain": "ams/v1/uav4/payload/downlink",
+        "sequence_policy": "strictly_monotonic_per_flow"
+      },
+      "ns3_path": {
+        "directed_link_id": "cp>uav4",
+        "dscp_tos": 40,
+        "egress_device_id": "uav4.tap.egress",
+        "egress_udp_port": 16704,
+        "ingress_device_id": "cp.tap.ingress",
+        "ingress_udp_port": 15704,
+        "priority": 1,
+        "queue_id": "cp>uav4.payload.q1"
+      },
+      "outcome": {
+        "correlation": "run_nonce_flow_direction_sequence_payload_hash",
+        "response_kind": "decoded_tunnel_delivery_at_uav_companion",
+        "timeout_ms": 3000
+      },
+      "protocol": {
+        "channel": "mavlink_payload",
+        "classification_source": "decoded_bytes_port_nonce",
+        "kind": "mavlink_v2",
+        "message_family": "MAVLINK_TUNNEL_V2"
+      },
+      "source": {
+        "interface": "eth0",
+        "ip": "10.71.0.10",
+        "mavlink_component_id": 190,
+        "mavlink_system_id": 255,
+        "namespace": "ams-gcs",
+        "role": "command_post",
+        "udp_port": 14700
+      },
+      "traffic_class": "payload",
+      "transport_ports": {
+        "command_post_udp": 14700,
+        "ns3_ground_handoff_udp": 15704,
+        "ns3_uav_handoff_udp": 16704,
+        "uav_udp": 14704
+      },
+      "uav": {
+        "instance": 3,
+        "name": "uav4",
+        "system_id": 4
+      }
+    },
+    {
+      "capture_points": {
+        "ns3_external_egress": "ns3.cp.egress",
+        "ns3_external_ingress": "ns3.uav4.ingress",
+        "remote_after_adapter": "cp.sink.eth0",
+        "source_before_adapter": "uav4.source.eth0"
+      },
+      "cell_id": "uav4.payload.uplink",
+      "destination": {
+        "interface": "eth0",
+        "ip": "10.71.0.10",
+        "mavlink_component_id": 190,
+        "mavlink_system_id": 255,
+        "namespace": "ams-gcs",
+        "role": "command_post",
+        "udp_port": 14700
+      },
+      "direction": "uplink",
+      "identity": {
+        "flow_id": "uav4.payload.uplink",
+        "hash_domains": {
+          "application_unit_sha256": true,
+          "mavlink_frame_sha256": true,
+          "transport_payload_sha256": true,
+          "wire_frame_sha256": true
+        },
+        "nonce_domain": "ams/v1/uav4/payload/uplink",
+        "sequence_policy": "strictly_monotonic_per_flow"
+      },
+      "ns3_path": {
+        "directed_link_id": "uav4>cp",
+        "dscp_tos": 40,
+        "egress_device_id": "cp.tap.egress",
+        "egress_udp_port": 15704,
+        "ingress_device_id": "uav4.tap.ingress",
+        "ingress_udp_port": 16704,
+        "priority": 1,
+        "queue_id": "uav4>cp.payload.q1"
+      },
+      "outcome": {
+        "correlation": "run_nonce_flow_direction_sequence_payload_hash",
+        "response_kind": "decoded_tunnel_delivery_at_command_post",
+        "timeout_ms": 3000
+      },
+      "protocol": {
+        "channel": "mavlink_payload",
+        "classification_source": "decoded_bytes_port_nonce",
+        "kind": "mavlink_v2",
+        "message_family": "MAVLINK_TUNNEL_V2"
+      },
+      "source": {
+        "interface": "eth0",
+        "ip": "10.71.4.10",
+        "mavlink_component_id": 191,
+        "mavlink_system_id": 4,
+        "namespace": "ams-uav4",
+        "role": "uav4",
+        "udp_port": 14704
+      },
+      "traffic_class": "payload",
+      "transport_ports": {
+        "command_post_udp": 14700,
+        "ns3_ground_handoff_udp": 15704,
+        "ns3_uav_handoff_udp": 16704,
+        "uav_udp": 14704
+      },
+      "uav": {
+        "instance": 3,
+        "name": "uav4",
+        "system_id": 4
+      }
+    },
+    {
+      "capture_points": {
+        "ns3_external_egress": "ns3.uav4.egress",
+        "ns3_external_ingress": "ns3.cp.ingress",
+        "remote_after_adapter": "uav4.sink.eth0",
+        "source_before_adapter": "cp.source.eth0"
+      },
+      "cell_id": "uav4.additional_data.downlink",
+      "destination": {
+        "interface": "eth0",
+        "ip": "10.71.4.10",
+        "mavlink_component_id": null,
+        "mavlink_system_id": null,
+        "namespace": "ams-uav4",
+        "role": "uav4",
+        "udp_port": 14804
+      },
+      "direction": "downlink",
+      "identity": {
+        "flow_id": "uav4.additional_data.downlink",
+        "hash_domains": {
+          "application_unit_sha256": true,
+          "mavlink_frame_sha256": false,
+          "transport_payload_sha256": true,
+          "wire_frame_sha256": true
+        },
+        "nonce_domain": "ams/v1/uav4/additional_data/downlink",
+        "sequence_policy": "strictly_monotonic_per_flow"
+      },
+      "ns3_path": {
+        "directed_link_id": "cp>uav4",
+        "dscp_tos": 0,
+        "egress_device_id": "uav4.tap.egress",
+        "egress_udp_port": 16804,
+        "ingress_device_id": "cp.tap.ingress",
+        "ingress_udp_port": 15804,
+        "priority": 2,
+        "queue_id": "cp>uav4.additional_data.q2"
+      },
+      "outcome": {
+        "correlation": "run_nonce_flow_direction_sequence_payload_hash",
+        "response_kind": "decoded_record_delivery_at_uav",
+        "timeout_ms": 3000
+      },
+      "protocol": {
+        "channel": "point_to_multipoint_data",
+        "classification_source": "decoded_bytes_port_nonce",
+        "kind": "udp_framed",
+        "message_family": "AMS_ADDITIONAL_DATA_V1"
+      },
+      "source": {
+        "interface": "eth0",
+        "ip": "10.71.0.10",
+        "mavlink_component_id": null,
+        "mavlink_system_id": null,
+        "namespace": "ams-gcs",
+        "role": "command_post",
+        "udp_port": 14800
+      },
+      "traffic_class": "additional_data",
+      "transport_ports": {
+        "command_post_udp": 14800,
+        "ns3_ground_handoff_udp": 15804,
+        "ns3_uav_handoff_udp": 16804,
+        "uav_udp": 14804
+      },
+      "uav": {
+        "instance": 3,
+        "name": "uav4",
+        "system_id": 4
+      }
+    },
+    {
+      "capture_points": {
+        "ns3_external_egress": "ns3.cp.egress",
+        "ns3_external_ingress": "ns3.uav4.ingress",
+        "remote_after_adapter": "cp.sink.eth0",
+        "source_before_adapter": "uav4.source.eth0"
+      },
+      "cell_id": "uav4.additional_data.uplink",
+      "destination": {
+        "interface": "eth0",
+        "ip": "10.71.0.10",
+        "mavlink_component_id": null,
+        "mavlink_system_id": null,
+        "namespace": "ams-gcs",
+        "role": "command_post",
+        "udp_port": 14800
+      },
+      "direction": "uplink",
+      "identity": {
+        "flow_id": "uav4.additional_data.uplink",
+        "hash_domains": {
+          "application_unit_sha256": true,
+          "mavlink_frame_sha256": false,
+          "transport_payload_sha256": true,
+          "wire_frame_sha256": true
+        },
+        "nonce_domain": "ams/v1/uav4/additional_data/uplink",
+        "sequence_policy": "strictly_monotonic_per_flow"
+      },
+      "ns3_path": {
+        "directed_link_id": "uav4>cp",
+        "dscp_tos": 0,
+        "egress_device_id": "cp.tap.egress",
+        "egress_udp_port": 15804,
+        "ingress_device_id": "uav4.tap.ingress",
+        "ingress_udp_port": 16804,
+        "priority": 2,
+        "queue_id": "uav4>cp.additional_data.q2"
+      },
+      "outcome": {
+        "correlation": "run_nonce_flow_direction_sequence_payload_hash",
+        "response_kind": "decoded_record_delivery_at_command_post",
+        "timeout_ms": 3000
+      },
+      "protocol": {
+        "channel": "point_to_multipoint_data",
+        "classification_source": "decoded_bytes_port_nonce",
+        "kind": "udp_framed",
+        "message_family": "AMS_ADDITIONAL_DATA_V1"
+      },
+      "source": {
+        "interface": "eth0",
+        "ip": "10.71.4.10",
+        "mavlink_component_id": null,
+        "mavlink_system_id": null,
+        "namespace": "ams-uav4",
+        "role": "uav4",
+        "udp_port": 14804
+      },
+      "traffic_class": "additional_data",
+      "transport_ports": {
+        "command_post_udp": 14800,
+        "ns3_ground_handoff_udp": 15804,
+        "ns3_uav_handoff_udp": 16804,
+        "uav_udp": 14804
+      },
+      "uav": {
+        "instance": 3,
+        "name": "uav4",
+        "system_id": 4
+      }
+    },
+    {
+      "capture_points": {
+        "ns3_external_egress": "ns3.uav5.egress",
+        "ns3_external_ingress": "ns3.cp.ingress",
+        "remote_after_adapter": "uav5.mavproxy.tail",
+        "source_before_adapter": "cp.source.eth0"
+      },
+      "cell_id": "uav5.control.downlink",
+      "destination": {
+        "interface": "eth0",
+        "ip": "10.71.5.10",
+        "mavlink_component_id": 1,
+        "mavlink_system_id": 5,
+        "namespace": "ams-uav5",
+        "role": "uav5",
+        "udp_port": 14605
+      },
+      "direction": "downlink",
+      "identity": {
+        "flow_id": "uav5.control.downlink",
+        "hash_domains": {
+          "application_unit_sha256": true,
+          "mavlink_frame_sha256": true,
+          "transport_payload_sha256": true,
+          "wire_frame_sha256": true
+        },
+        "nonce_domain": "ams/v1/uav5/control/downlink",
+        "sequence_policy": "strictly_monotonic_per_flow"
+      },
+      "ns3_path": {
+        "directed_link_id": "cp>uav5",
+        "dscp_tos": 184,
+        "egress_device_id": "uav5.tap.egress",
+        "egress_udp_port": 16605,
+        "ingress_device_id": "cp.tap.ingress",
+        "ingress_udp_port": 15605,
+        "priority": 0,
+        "queue_id": "cp>uav5.control.q0"
+      },
+      "outcome": {
+        "correlation": "request_hash_command_source_target_window",
+        "response_kind": "command_ack_and_requested_telemetry",
+        "timeout_ms": 3000
+      },
+      "protocol": {
+        "channel": "mavlink_control",
+        "classification_source": "decoded_bytes_port_nonce",
+        "kind": "mavlink_v2",
+        "message_family": "STATUSTEXT_MARKER_PLUS_COMMAND_LONG"
+      },
+      "source": {
+        "interface": "eth0",
+        "ip": "10.71.0.10",
+        "mavlink_component_id": 190,
+        "mavlink_system_id": 255,
+        "namespace": "ams-gcs",
+        "role": "command_post",
+        "udp_port": 14600
+      },
+      "traffic_class": "control",
+      "transport_ports": {
+        "command_post_udp": 14600,
+        "ns3_ground_handoff_udp": 15605,
+        "ns3_uav_handoff_udp": 16605,
+        "uav_udp": 14605
+      },
+      "uav": {
+        "instance": 4,
+        "name": "uav5",
+        "system_id": 5
+      }
+    },
+    {
+      "capture_points": {
+        "ns3_external_egress": "ns3.cp.egress",
+        "ns3_external_ingress": "ns3.uav5.ingress",
+        "remote_after_adapter": "cp.sink.eth0",
+        "source_before_adapter": "uav5.mavproxy.tail"
+      },
+      "cell_id": "uav5.control.uplink",
+      "destination": {
+        "interface": "eth0",
+        "ip": "10.71.0.10",
+        "mavlink_component_id": 190,
+        "mavlink_system_id": 255,
+        "namespace": "ams-gcs",
+        "role": "command_post",
+        "udp_port": 14600
+      },
+      "direction": "uplink",
+      "identity": {
+        "flow_id": "uav5.control.uplink",
+        "hash_domains": {
+          "application_unit_sha256": true,
+          "mavlink_frame_sha256": true,
+          "transport_payload_sha256": true,
+          "wire_frame_sha256": true
+        },
+        "nonce_domain": "ams/v1/uav5/control/uplink",
+        "sequence_policy": "strictly_monotonic_per_flow"
+      },
+      "ns3_path": {
+        "directed_link_id": "uav5>cp",
+        "dscp_tos": 184,
+        "egress_device_id": "cp.tap.egress",
+        "egress_udp_port": 15605,
+        "ingress_device_id": "uav5.tap.ingress",
+        "ingress_udp_port": 16605,
+        "priority": 0,
+        "queue_id": "uav5>cp.control.q0"
+      },
+      "outcome": {
+        "correlation": "request_hash_command_source_target_window",
+        "response_kind": "correlated_delivery_at_command_post",
+        "timeout_ms": 3000
+      },
+      "protocol": {
+        "channel": "mavlink_control",
+        "classification_source": "decoded_bytes_port_nonce",
+        "kind": "mavlink_v2",
+        "message_family": "COMMAND_ACK_HEARTBEAT_REQUESTED_TELEMETRY"
+      },
+      "source": {
+        "interface": "eth0",
+        "ip": "10.71.5.10",
+        "mavlink_component_id": 1,
+        "mavlink_system_id": 5,
+        "namespace": "ams-uav5",
+        "role": "uav5",
+        "udp_port": 14605
+      },
+      "traffic_class": "control",
+      "transport_ports": {
+        "command_post_udp": 14600,
+        "ns3_ground_handoff_udp": 15605,
+        "ns3_uav_handoff_udp": 16605,
+        "uav_udp": 14605
+      },
+      "uav": {
+        "instance": 4,
+        "name": "uav5",
+        "system_id": 5
+      }
+    },
+    {
+      "capture_points": {
+        "ns3_external_egress": "ns3.uav5.egress",
+        "ns3_external_ingress": "ns3.cp.ingress",
+        "remote_after_adapter": "uav5.sink.eth0",
+        "source_before_adapter": "cp.source.eth0"
+      },
+      "cell_id": "uav5.payload.downlink",
+      "destination": {
+        "interface": "eth0",
+        "ip": "10.71.5.10",
+        "mavlink_component_id": 191,
+        "mavlink_system_id": 5,
+        "namespace": "ams-uav5",
+        "role": "uav5",
+        "udp_port": 14705
+      },
+      "direction": "downlink",
+      "identity": {
+        "flow_id": "uav5.payload.downlink",
+        "hash_domains": {
+          "application_unit_sha256": true,
+          "mavlink_frame_sha256": true,
+          "transport_payload_sha256": true,
+          "wire_frame_sha256": true
+        },
+        "nonce_domain": "ams/v1/uav5/payload/downlink",
+        "sequence_policy": "strictly_monotonic_per_flow"
+      },
+      "ns3_path": {
+        "directed_link_id": "cp>uav5",
+        "dscp_tos": 40,
+        "egress_device_id": "uav5.tap.egress",
+        "egress_udp_port": 16705,
+        "ingress_device_id": "cp.tap.ingress",
+        "ingress_udp_port": 15705,
+        "priority": 1,
+        "queue_id": "cp>uav5.payload.q1"
+      },
+      "outcome": {
+        "correlation": "run_nonce_flow_direction_sequence_payload_hash",
+        "response_kind": "decoded_tunnel_delivery_at_uav_companion",
+        "timeout_ms": 3000
+      },
+      "protocol": {
+        "channel": "mavlink_payload",
+        "classification_source": "decoded_bytes_port_nonce",
+        "kind": "mavlink_v2",
+        "message_family": "MAVLINK_TUNNEL_V2"
+      },
+      "source": {
+        "interface": "eth0",
+        "ip": "10.71.0.10",
+        "mavlink_component_id": 190,
+        "mavlink_system_id": 255,
+        "namespace": "ams-gcs",
+        "role": "command_post",
+        "udp_port": 14700
+      },
+      "traffic_class": "payload",
+      "transport_ports": {
+        "command_post_udp": 14700,
+        "ns3_ground_handoff_udp": 15705,
+        "ns3_uav_handoff_udp": 16705,
+        "uav_udp": 14705
+      },
+      "uav": {
+        "instance": 4,
+        "name": "uav5",
+        "system_id": 5
+      }
+    },
+    {
+      "capture_points": {
+        "ns3_external_egress": "ns3.cp.egress",
+        "ns3_external_ingress": "ns3.uav5.ingress",
+        "remote_after_adapter": "cp.sink.eth0",
+        "source_before_adapter": "uav5.source.eth0"
+      },
+      "cell_id": "uav5.payload.uplink",
+      "destination": {
+        "interface": "eth0",
+        "ip": "10.71.0.10",
+        "mavlink_component_id": 190,
+        "mavlink_system_id": 255,
+        "namespace": "ams-gcs",
+        "role": "command_post",
+        "udp_port": 14700
+      },
+      "direction": "uplink",
+      "identity": {
+        "flow_id": "uav5.payload.uplink",
+        "hash_domains": {
+          "application_unit_sha256": true,
+          "mavlink_frame_sha256": true,
+          "transport_payload_sha256": true,
+          "wire_frame_sha256": true
+        },
+        "nonce_domain": "ams/v1/uav5/payload/uplink",
+        "sequence_policy": "strictly_monotonic_per_flow"
+      },
+      "ns3_path": {
+        "directed_link_id": "uav5>cp",
+        "dscp_tos": 40,
+        "egress_device_id": "cp.tap.egress",
+        "egress_udp_port": 15705,
+        "ingress_device_id": "uav5.tap.ingress",
+        "ingress_udp_port": 16705,
+        "priority": 1,
+        "queue_id": "uav5>cp.payload.q1"
+      },
+      "outcome": {
+        "correlation": "run_nonce_flow_direction_sequence_payload_hash",
+        "response_kind": "decoded_tunnel_delivery_at_command_post",
+        "timeout_ms": 3000
+      },
+      "protocol": {
+        "channel": "mavlink_payload",
+        "classification_source": "decoded_bytes_port_nonce",
+        "kind": "mavlink_v2",
+        "message_family": "MAVLINK_TUNNEL_V2"
+      },
+      "source": {
+        "interface": "eth0",
+        "ip": "10.71.5.10",
+        "mavlink_component_id": 191,
+        "mavlink_system_id": 5,
+        "namespace": "ams-uav5",
+        "role": "uav5",
+        "udp_port": 14705
+      },
+      "traffic_class": "payload",
+      "transport_ports": {
+        "command_post_udp": 14700,
+        "ns3_ground_handoff_udp": 15705,
+        "ns3_uav_handoff_udp": 16705,
+        "uav_udp": 14705
+      },
+      "uav": {
+        "instance": 4,
+        "name": "uav5",
+        "system_id": 5
+      }
+    },
+    {
+      "capture_points": {
+        "ns3_external_egress": "ns3.uav5.egress",
+        "ns3_external_ingress": "ns3.cp.ingress",
+        "remote_after_adapter": "uav5.sink.eth0",
+        "source_before_adapter": "cp.source.eth0"
+      },
+      "cell_id": "uav5.additional_data.downlink",
+      "destination": {
+        "interface": "eth0",
+        "ip": "10.71.5.10",
+        "mavlink_component_id": null,
+        "mavlink_system_id": null,
+        "namespace": "ams-uav5",
+        "role": "uav5",
+        "udp_port": 14805
+      },
+      "direction": "downlink",
+      "identity": {
+        "flow_id": "uav5.additional_data.downlink",
+        "hash_domains": {
+          "application_unit_sha256": true,
+          "mavlink_frame_sha256": false,
+          "transport_payload_sha256": true,
+          "wire_frame_sha256": true
+        },
+        "nonce_domain": "ams/v1/uav5/additional_data/downlink",
+        "sequence_policy": "strictly_monotonic_per_flow"
+      },
+      "ns3_path": {
+        "directed_link_id": "cp>uav5",
+        "dscp_tos": 0,
+        "egress_device_id": "uav5.tap.egress",
+        "egress_udp_port": 16805,
+        "ingress_device_id": "cp.tap.ingress",
+        "ingress_udp_port": 15805,
+        "priority": 2,
+        "queue_id": "cp>uav5.additional_data.q2"
+      },
+      "outcome": {
+        "correlation": "run_nonce_flow_direction_sequence_payload_hash",
+        "response_kind": "decoded_record_delivery_at_uav",
+        "timeout_ms": 3000
+      },
+      "protocol": {
+        "channel": "point_to_multipoint_data",
+        "classification_source": "decoded_bytes_port_nonce",
+        "kind": "udp_framed",
+        "message_family": "AMS_ADDITIONAL_DATA_V1"
+      },
+      "source": {
+        "interface": "eth0",
+        "ip": "10.71.0.10",
+        "mavlink_component_id": null,
+        "mavlink_system_id": null,
+        "namespace": "ams-gcs",
+        "role": "command_post",
+        "udp_port": 14800
+      },
+      "traffic_class": "additional_data",
+      "transport_ports": {
+        "command_post_udp": 14800,
+        "ns3_ground_handoff_udp": 15805,
+        "ns3_uav_handoff_udp": 16805,
+        "uav_udp": 14805
+      },
+      "uav": {
+        "instance": 4,
+        "name": "uav5",
+        "system_id": 5
+      }
+    },
+    {
+      "capture_points": {
+        "ns3_external_egress": "ns3.cp.egress",
+        "ns3_external_ingress": "ns3.uav5.ingress",
+        "remote_after_adapter": "cp.sink.eth0",
+        "source_before_adapter": "uav5.source.eth0"
+      },
+      "cell_id": "uav5.additional_data.uplink",
+      "destination": {
+        "interface": "eth0",
+        "ip": "10.71.0.10",
+        "mavlink_component_id": null,
+        "mavlink_system_id": null,
+        "namespace": "ams-gcs",
+        "role": "command_post",
+        "udp_port": 14800
+      },
+      "direction": "uplink",
+      "identity": {
+        "flow_id": "uav5.additional_data.uplink",
+        "hash_domains": {
+          "application_unit_sha256": true,
+          "mavlink_frame_sha256": false,
+          "transport_payload_sha256": true,
+          "wire_frame_sha256": true
+        },
+        "nonce_domain": "ams/v1/uav5/additional_data/uplink",
+        "sequence_policy": "strictly_monotonic_per_flow"
+      },
+      "ns3_path": {
+        "directed_link_id": "uav5>cp",
+        "dscp_tos": 0,
+        "egress_device_id": "cp.tap.egress",
+        "egress_udp_port": 15805,
+        "ingress_device_id": "uav5.tap.ingress",
+        "ingress_udp_port": 16805,
+        "priority": 2,
+        "queue_id": "uav5>cp.additional_data.q2"
+      },
+      "outcome": {
+        "correlation": "run_nonce_flow_direction_sequence_payload_hash",
+        "response_kind": "decoded_record_delivery_at_command_post",
+        "timeout_ms": 3000
+      },
+      "protocol": {
+        "channel": "point_to_multipoint_data",
+        "classification_source": "decoded_bytes_port_nonce",
+        "kind": "udp_framed",
+        "message_family": "AMS_ADDITIONAL_DATA_V1"
+      },
+      "source": {
+        "interface": "eth0",
+        "ip": "10.71.5.10",
+        "mavlink_component_id": null,
+        "mavlink_system_id": null,
+        "namespace": "ams-uav5",
+        "role": "uav5",
+        "udp_port": 14805
+      },
+      "traffic_class": "additional_data",
+      "transport_ports": {
+        "command_post_udp": 14800,
+        "ns3_ground_handoff_udp": 15805,
+        "ns3_uav_handoff_udp": 16805,
+        "uav_udp": 14805
+      },
+      "uav": {
+        "instance": 4,
+        "name": "uav5",
+        "system_id": 5
+      }
+    }
+  ],
+  "contract": "endpoint_transaction_schema=1",
+  "directions": [
+    "downlink",
+    "uplink"
+  ],
+  "matrix_id": "ams.endpoint_matrix.5uav/v1",
+  "profiles": {
+    "m2_one_uav_control": {
+      "cell_ids": [
+        "uav1.control.downlink",
+        "uav1.control.uplink"
+      ],
+      "expected_cell_count": 2,
+      "phase_contract": {
+        "good": {
+          "correlated_receive_exact": 10,
+          "fresh_heartbeats_min": 3,
+          "offered_exact": 10
+        },
+        "recovery": {
+          "correlated_receive_exact": 10,
+          "fresh_heartbeats_min": 3,
+          "offered_exact": 10
+        },
+        "stopped": {
+          "loss_exact": 1.0,
+          "offered_exact": 5,
+          "remote_receive_exact": 0
+        }
+      },
+      "profile_id": "m2_one_uav_control"
+    },
+    "m3_full": {
+      "cell_ids": [
+        "uav1.control.downlink",
+        "uav1.control.uplink",
+        "uav1.payload.downlink",
+        "uav1.payload.uplink",
+        "uav1.additional_data.downlink",
+        "uav1.additional_data.uplink",
+        "uav2.control.downlink",
+        "uav2.control.uplink",
+        "uav2.payload.downlink",
+        "uav2.payload.uplink",
+        "uav2.additional_data.downlink",
+        "uav2.additional_data.uplink",
+        "uav3.control.downlink",
+        "uav3.control.uplink",
+        "uav3.payload.downlink",
+        "uav3.payload.uplink",
+        "uav3.additional_data.downlink",
+        "uav3.additional_data.uplink",
+        "uav4.control.downlink",
+        "uav4.control.uplink",
+        "uav4.payload.downlink",
+        "uav4.payload.uplink",
+        "uav4.additional_data.downlink",
+        "uav4.additional_data.uplink",
+        "uav5.control.downlink",
+        "uav5.control.uplink",
+        "uav5.payload.downlink",
+        "uav5.payload.uplink",
+        "uav5.additional_data.downlink",
+        "uav5.additional_data.uplink"
+      ],
+      "expected_cell_count": 30,
+      "phase_contract": {
+        "point_to_multipoint": {
+          "delivery_ratio_per_receiver_min": 0.95,
+          "direction": "downlink",
+          "intended_receivers": [
+            "uav1",
+            "uav2",
+            "uav3",
+            "uav4",
+            "uav5"
+          ],
+          "ns3_ingress_per_root_exact": 1,
+          "root_nonce_domain": "ams/v1/p2mp/additional_data/downlink",
+          "root_records_min": 20,
+          "shared_medium_service_per_root_exact": 1,
+          "traffic_class": "additional_data"
+        },
+        "positive": {
+          "delivery_ratio_per_cell_min": 0.95,
+          "offered_unique_per_cell_min": 20,
+          "window_min_s": 30
+        },
+        "stopped": {
+          "loss_per_cell_exact": 1.0,
+          "offered_unique_per_cell_min": 5,
+          "remote_receive_per_cell_exact": 0
+        }
+      },
+      "profile_id": "m3_full"
+    }
+  },
+  "resolved_cells_sha256": "61379ca0adc550a2cc7a762381b4cd5e2ae5956622099db6d22f3e5c6b1f71d1",
+  "schema_version": 1,
+  "source_configs": {
+    "endpoints": {
+      "path": "network/config/endpoints.yaml",
+      "sha256": "7b95c6aa5004066efe1e3c3a66eb759d98a653b3bfc0f9167046ed2a4d1ef128"
+    },
+    "radio": {
+      "path": "network/config/radio_24ghz.yaml",
+      "sha256": "a9fa548b6051b312c24acc861eda08e9a0dee135b91a90d592e30dfa02e3cc1c"
+    },
+    "scenario": {
+      "path": "network/config/scenario_5uav.yaml",
+      "sha256": "057e69a25bc06848038aad2c86904ac98acc9cd79ee0f6f2d7b80caef12beb7a"
+    },
+    "schema": {
+      "path": "network/config/endpoint_transaction_schema.json",
+      "sha256": "04896d54b344f9c02bda0d6272e130c8052aefd73070f8ea444cf7d7a80f5695"
+    }
+  },
+  "traffic_classes": [
+    "control",
+    "payload",
+    "additional_data"
+  ]
+}

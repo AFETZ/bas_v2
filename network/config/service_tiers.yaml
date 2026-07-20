@@ -1,0 +1,49 @@
+schema_version: 1
+scenario: scenario_5uav
+
+service_tiers:
+  - name: critical_commands
+    target_bps: 1000
+    label: 1 Kbit/s
+    intended_use: Critical commands and low-rate telemetry.
+  - name: target_forms
+    target_bps: 10000
+    label: 10 Kbit/s
+    intended_use: Target forms.
+  - name: object_situation_updates
+    target_bps: 100000
+    label: 100 Kbit/s
+    intended_use: Object situation updates.
+  - name: images_and_portraits
+    target_bps: 500000
+    label: 500 Kbit/s
+    intended_use: Images and target portraits.
+  - name: video_fragments
+    target_bps: 2000000
+    label: 2 Mbit/s
+    intended_use: Video fragments.
+  - name: full_sync_near_ideal
+    target_bps: 20000000
+    label: 20+ Mbit/s
+    intended_use: Full synchronization in near or ideal conditions only.
+
+traffic_class_policy:
+  control:
+    minimum_tier: critical_commands
+    queue_priority: 0
+    drop_policy: deadline_drop_oldest
+    deadline_ms: 250
+  payload:
+    minimum_tier: object_situation_updates
+    queue_priority: 1
+    drop_policy: bounded_drop_tail
+    deadline_ms: 1000
+  additional_data:
+    minimum_tier: target_forms
+    queue_priority: 2
+    drop_policy: bounded_drop_tail
+    deadline_ms: 2000
+
+selection_policy:
+  source: Online Sionna RT provider returns service_tier_bps; ns-3 consumes it for rate/PER behavior.
+  no_custom_mac: true
