@@ -343,6 +343,12 @@ for endpoint in "${ENDPOINTS[@]}"; do
   ip -n "$endpoint_ns" link set eth0 txqueuelen 1000
   ip -n "$endpoint_ns" address add "10.71.$index.10/24" dev eth0
   ip -n "$endpoint_ns" link set eth0 up
+  # The external veth/bridge is intentionally persistent while the ns-3
+  # packet engine is stopped.  Pin its L2 next hop so every offered stopped-
+  # phase datagram reaches that bridge and is observable in raw captures;
+  # the absent TapBridge reader still prevents radio delivery.
+  ip -n "$endpoint_ns" neigh replace "10.71.$index.1" \
+    lladdr "02:71:$(printf '%02x' "$index"):00:00:01" nud permanent dev eth0
   ip -n "$endpoint_ns" route add default via "10.71.$index.1" dev eth0
 
   if [[ "$endpoint" != "gcs" ]]; then

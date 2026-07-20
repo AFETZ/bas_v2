@@ -4543,6 +4543,12 @@ class M3ExternalMatrixStaticTests(unittest.TestCase):
             runner.index("link set eth0 up"),
             runner.index("route add default via"),
         )
+        self.assertIn('neigh replace "10.71.$index.1"', runner)
+        self.assertIn(
+            'lladdr "02:71:$(printf \'%02x\' "$index"):00:00:01" '
+            "nud permanent dev eth0",
+            runner,
+        )
         self.assertIn('chown -R 1000:1000 "$RUN_DIR"', runner)
         self.assertNotIn(" tcpdump ", runner)
         self.assertIn('python3 -u "$CAPTURE_TOOL"', runner)
