@@ -919,6 +919,148 @@ class PacketSionnaAdapterTests(unittest.TestCase):
         self.assertEqual(len(refreshed), 1)
         self.assertEqual(refreshed[0]["directed_link_id"], "cp-to-uav2-control")
 
+    def test_capacity_preflight_refresh_prioritizes_cached_downlinks(
+        self,
+    ) -> None:
+        """A fresh uplink cannot starve five factual CP control refreshes.
+
+        Capacity uses one globally spaced Sionna query lane.  Before the
+        fixed measurement grid starts, existing CP-to-UAV state must win that
+        lane over a newly tailed uplink so the first bounded control retry
+        receives a fresh state for every aircraft.
+        """
+
+        schedule_start = self.now + 20_000_000_000
+        self.adapter = PacketSionnaAdapter(
+            dataclasses.replace(
+                adapter_config(),
+                query_deadline_ns=100_000_000,
+                global_query_spacing_ns=33_333_333,
+                fixed_query_schedule_start_ns=schedule_start,
+                fixed_query_schedule_end_ns=(
+                    schedule_start
+                    + FIXED_QUERY_SLOT_COUNT_PER_CELL * 1_000_000_000
+                ),
+            ),
+            poses(self.now),
+            self.transport,
+            self.writer,
+            Path(self.temp.name) / "audit-capacity-preflight-priority.jsonl",
+            clock_ns=lambda: self.now,
+        )
+
+        # Establish real lineage and a successfully applied state for each
+        # downlink.  They become due for refresh together one period later.
+        for uav in range(1, 6):
+            if uav > 1:
+                self.now += 33_333_333
+            created = self.adapter.process_packet_event(
+                packet_event(uav, link=f"cp>uav{uav}", traffic_class="control")
+            )
+            self.assertIsNotNone(created)
+            self.complete(self.transport.submitted[-1], 100 + uav)
+            self.assertEqual(len(self.adapter.poll_results()), 1)
+
+        baseline_submissions = len(self.transport.submitted)
+        self.now += 1_000_000_000
+        event_path = Path(self.temp.name) / "events-capacity-preflight-priority.jsonl"
+        event_path.write_text("", encoding="utf-8")
+        tailer = PacketEventTailer(event_path)
+
+        for uav in range(1, 6):
+            with event_path.open("a", encoding="utf-8") as stream:
+                stream.write(
+                    json.dumps(
+                        packet_event(
+                            100 + uav,
+                            link=f"uav{uav}>cp",
+                            traffic_class="control",
+                        ),
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                )
+            self.adapter.run_once(tailer)
+            submitted = self.transport.submitted[baseline_submissions + uav - 1]
+            self.assertEqual(
+                submitted["directed_link_id"], f"cp-to-uav{uav}-control"
+            )
+            self.complete(submitted, 200 + uav)
+            self.assertEqual(len(self.adapter.poll_results()), 1)
+            self.now += 33_333_333
+
+        self.assertEqual(
+            [
+                item["directed_link_id"]
+                for item in self.transport.submitted[baseline_submissions:]
+            ],
+            [f"cp-to-uav{uav}-control" for uav in range(1, 6)],
+        )
+
+    def test_capacity_preflight_refreshes_all_deferred_downlinks_before_grid(
+        self,
+    ) -> None:
+        """Preflight states retain factual lineage before the fixed grid starts.
+
+        The first real CP-to-UAV command may be dropped while its Sionna
+        state is learned.  Its bounded retry is viable only if the existing
+        factual lineage can be refreshed before the measurement grid begins.
+        In particular, a future fixed-grid end must not suppress that
+        preflight refresh interval.
+        """
+
+        schedule_start = self.now + 10_000_000_000
+        self.adapter = PacketSionnaAdapter(
+            dataclasses.replace(
+                adapter_config(),
+                query_deadline_ns=100_000_000,
+                global_query_spacing_ns=33_333_333,
+                fixed_query_schedule_start_ns=schedule_start,
+                fixed_query_schedule_end_ns=(
+                    schedule_start
+                    + FIXED_QUERY_SLOT_COUNT_PER_CELL * 1_000_000_000
+                ),
+            ),
+            poses(self.now),
+            self.transport,
+            self.writer,
+            Path(self.temp.name) / "audit-capacity-preflight-refresh.jsonl",
+            clock_ns=lambda: self.now,
+        )
+        downlinks = [
+            packet_event(uav, link=f"cp>uav{uav}", traffic_class="control")
+            for uav in range(1, 6)
+        ]
+        self.assertIsNotNone(self.adapter.process_packet_event(downlinks[0]))
+        for event in downlinks[1:]:
+            self.assertIsNone(self.adapter.process_packet_event(event))
+        self.complete(self.transport.submitted[0], 100)
+        self.assertEqual(len(self.adapter.poll_results()), 1)
+
+        for expected_uav in range(2, 6):
+            self.now += 33_333_333
+            refreshed = self.adapter.refresh_due_cells(max_cells=1)
+            self.assertEqual(len(refreshed), 1)
+            self.assertEqual(
+                refreshed[0]["directed_link_id"],
+                f"cp-to-uav{expected_uav}-control",
+            )
+            self.complete(refreshed[0], 100 + expected_uav)
+            self.assertEqual(len(self.adapter.poll_results()), 1)
+
+        self.assertEqual(
+            [item["directed_link_id"] for item in self.transport.submitted],
+            [f"cp-to-uav{uav}-control" for uav in range(1, 6)],
+        )
+
+        # The first cell also has to be refreshed before the fixed grid
+        # begins, rather than merely surviving its one initial query.
+        self.now += 1_000_000_000
+        refreshed = self.adapter.refresh_due_cells(max_cells=1)
+        self.assertEqual(len(refreshed), 1)
+        self.assertEqual(refreshed[0]["directed_link_id"], "cp-to-uav1-control")
+        self.assertNotIn(".slot", refreshed[0]["query_id"])
+
         # Capacity mode owns an immutable 600-ordinal grid.  A five-ms late
         # first send must not move the second ordinal by five ms, and cells
         # without factual lineage still consume (miss) their declared slots.

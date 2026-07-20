@@ -160,6 +160,16 @@ Updated: 2026-07-20 UTC.
   runtime smoke checker derives the same pin from that single source of truth,
   and an adversarial tracked-bundle test prevents a future regenerated bundle
   from silently diverging from the M4 runtime contract.
+- The failed M4 capacity attempt `m4_capacity_m4pin_20260720T220948Z` is
+  retained without a formal receipt.  Its real Sionna/ns-3 and SITL stack
+  reached the first bounded control probe, but an absolute fixed-grid guard
+  incorrectly suppressed ordinary factual state refreshes throughout the
+  preceding preflight.  The initial CP-to-UAV state therefore expired before
+  the permitted retry.  Ordinary refresh is now blocked only inside the fixed
+  measurement interval, and cached factual CP-to-UAV cells take each shared
+  query slot ahead of newly tailed uplinks only during preflight.  The
+  fixed-grid boundary ordering remains unchanged; no bootstrap packet,
+  bypass, validator relaxation, or capacity-budget change is introduced.
 
 ## Open Decisions Requiring External Input
 

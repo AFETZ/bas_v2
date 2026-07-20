@@ -1527,7 +1527,15 @@ class PacketSionnaAdapter:
                 and not self._fixed_query_schedule_complete()
             ):
                 return ()
-            if fixed_end is not None and now < fixed_end:
+            # The absolute measurement grid owns its cells only from its
+            # declared start.  Before that start, the capacity preflight must
+            # keep states created by factual control ingress fresh; otherwise
+            # the first bounded control retry can outlive the two-second
+            # state TTL even though an accepted real result was available.
+            # Once the fixed grid has completed early, keep ordinary refresh
+            # blocked until the declared end so it cannot alter measurement
+            # slot ownership.
+            if fixed_end is not None and fixed_start <= now < fixed_end:
                 return ()
         output: List[Mapping[str, Any]] = []
         for cell in sorted(self._last_packet_by_cell):
@@ -1915,6 +1923,25 @@ class PacketSionnaAdapter:
 
         output = list(self.expire_states())
         output.extend(self.poll_results(max_results))
+        excluded = set(fault_seed_cells or ()) | set(fault_parallel_cells or ())
+
+        # In the capacity preflight, prioritise refreshes of cells whose
+        # lineage was already observed over a newly tailed uplink.  The
+        # single global query slot is shared by all cells; without this small
+        # pre-pass a continuous uplink can indefinitely take the next slot
+        # before a CP-to-UAV control state is refreshed.  Do not change the
+        # post-tailer ordering in the fixed-grid blackout or measurement
+        # window: the first fixed slot must see ingress observed by this poll
+        # before it is assessed for a slot miss.
+        fixed_start = self.config.fixed_query_schedule_start_ns
+        if (
+            fixed_start is not None
+            and self._clock_ns()
+            < fixed_start - self.config.query_deadline_ns
+        ):
+            for created in self.refresh_due_cells(excluded_cells=excluded):
+                if created.get("schema") == STATE_IPC_SCHEMA:
+                    output.append(created)
         for event in tailer.poll(max_packet_events):
             link = event.get("directed_link")
             traffic_class = event.get("traffic_class")
@@ -1988,7 +2015,6 @@ class PacketSionnaAdapter:
                     raise PacketAdapterError(
                         "factual fault ingress did not create the exact pending pair"
                     )
-        excluded = set(fault_seed_cells or ()) | set(fault_parallel_cells or ())
         for created in self.refresh_due_cells(excluded_cells=excluded):
             if created.get("schema") == STATE_IPC_SCHEMA:
                 output.append(created)
