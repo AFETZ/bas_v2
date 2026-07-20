@@ -83,6 +83,20 @@ class M4SceneBundleTests(unittest.TestCase):
         )
         self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
 
+    def test_capacity_baseline_requires_jammer_disabled(self) -> None:
+        jammer_path = self.root / "network/config/jammers_m4_canonical.yaml"
+        jammer_path.write_text(
+            jammer_path.read_text(encoding="utf-8").replace(
+                "enabled: false", "enabled: true", 1
+            ),
+            encoding="utf-8",
+        )
+        bundle = self.load_bundle()
+        self.refresh_and_write(bundle, refresh_assets=True)
+        self.assert_failed_gate(
+            validate_scene_bundle(self.bundle_path, self.root), "runtime_configs"
+        )
+
     def test_bundle_self_hash_substitution_is_rejected(self) -> None:
         bundle = self.load_bundle()
         bundle["bundle_id"] = "substituted"

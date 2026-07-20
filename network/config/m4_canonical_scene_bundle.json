@@ -23,14 +23,14 @@
       "sha256": "7a725a48ee17607a09b7a98ecfe00abbafeb53c4efb0c843bda20fe50c7c872f"
     }
   },
-  "asset_manifest_sha256": "4accde640cd5f954ce9526d8f09c6c41737ab12439400bd7ee7ce30973089bf9",
+  "asset_manifest_sha256": "55c7eb230b872e1c8d4f077d1a420560c62e929599ede0ad9f28703db12491a1",
   "assets": [
     {
       "mesh_bounds_m": null,
       "path": "network/config/jammers_m4_canonical.yaml",
       "role": "jammer_config",
-      "sha256": "0f0aa9294b6447e72f685155003f6e6b358d0181eb7ce661c0e33a03d16bacbe",
-      "size_bytes": 350
+      "sha256": "1fc88731e90d373a4d9aa8b075759b3a6ac8703cb0f4a56e0f6013da3acd212b",
+      "size_bytes": 351
     },
     {
       "mesh_bounds_m": null,
@@ -292,7 +292,7 @@
   ],
   "bundle_hash_policy": "sha256-canonical-json-with-bundle_sha256-zeroed/v1",
   "bundle_id": "ams-m4-canonical-km-v2",
-  "bundle_sha256": "be74a467aa91cc5c7e0f0d4b510b94b6c04763099931911377d5940a9e9ee0c4",
+  "bundle_sha256": "41de5ab8b5009a02ea6b07c05d586f6c70bf7ddd10808ecc775e2bb4e5efc996",
   "causal_scenarios": {
     "building_blocked": {
       "control_link": "cp>uav5",

@@ -1045,6 +1045,13 @@ def validate_scene_bundle(bundle_path: Path = DEFAULT_BUNDLE, root: Path = ROOT)
         jammer_records = jammers.get("jammers", [])
         if len(jammer_records) != 1 or jammer_records[0].get("id") != bundle.get("jammer_fixture", {}).get("id") or jammer_records[0].get("position_m") != bundle.get("jammer_fixture", {}).get("position_m"):
             raise SceneValidationError("jammer runtime config and scene fixture differ")
+        if (
+            jammer_records[0].get("enabled") is not False
+            or jammer_records[0].get("time_behavior") != "runtime_off_on_off"
+        ):
+            raise SceneValidationError(
+                "jammer baseline must start disabled for the off/on/off causal contract"
+            )
     except (KeyError, TypeError, yaml.YAMLError, SceneValidationError) as exc:
         config_failures.append(str(exc))
     gates["runtime_configs"] = make_gate(config_failures)

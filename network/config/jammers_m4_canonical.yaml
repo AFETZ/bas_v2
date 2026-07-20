@@ -2,7 +2,7 @@ schema_version: 1
 scenario: scenario_m4_canonical
 jammers:
   - id: jammer_m4
-    enabled: true
+    enabled: false
     role: jammer
     position_m: [2000.0, -3000.0, 100.0]
     orientation_quat_xyzw: [0.0, 0.0, 0.0, 1.0]
