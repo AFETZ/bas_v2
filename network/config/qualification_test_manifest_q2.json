@@ -50,6 +50,7 @@
     "test_mavlink_vertical_slice_probe.MavlinkVerticalSliceProbeTests.test_latency_statistics_are_finite_and_nearest_rank",
     "test_mavlink_vertical_slice_probe.MavlinkVerticalSliceProbeTests.test_marker_rejects_oversized_nonce",
     "test_mavlink_vertical_slice_probe.MavlinkVerticalSliceProbeTests.test_mavlink_sequence_parsing",
+    "test_mavlink_vertical_slice_probe.MavlinkVerticalSliceProbeTests.test_phase_window_opens_before_gcs_socket_can_queue_packets",
     "test_mavlink_vertical_slice_probe.MavlinkVerticalSliceProbeTests.test_process_reference_supports_cmdline_hash",
     "test_ns3_build_receipt.Ns3BuildReceiptTests.test_any_cmake_option_change_invalidates_existing_receipt",
     "test_ns3_build_receipt.Ns3BuildReceiptTests.test_changed_official_source_tree_is_rejected",

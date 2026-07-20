@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import tempfile
@@ -12,6 +13,8 @@ from network.tests.mavlink_vertical_slice_probe import (
     PhaseResult,
     attempt_nonce,
     criteria_met,
+    emit_phase_start,
+    execute_phase,
     latency_stats,
     make_marker,
     mavlink_frame_sequence,
@@ -44,6 +47,44 @@ class MavlinkVerticalSliceProbeTests(unittest.TestCase):
         self.assertEqual(mavlink_frame_sequence(bytes([0xFD, 0, 0, 0, 91])), 91)
         with self.assertRaises(ValueError):
             mavlink_frame_sequence(b"bad")
+
+    def test_phase_window_opens_before_gcs_socket_can_queue_packets(self) -> None:
+        class Recorder:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, dict[str, object]]] = []
+
+            def emit(self, event: str, **details: object) -> None:
+                self.calls.append((event, details))
+
+        args = Namespace(
+            attempts=10,
+            expected_ack=True,
+            gcs_bind=("10.71.0.10", 14600),
+            uav_endpoint=("10.71.1.10", 14601),
+            target_system=1,
+        )
+        recorder = Recorder()
+        emit_phase_start(recorder, args)  # type: ignore[arg-type]
+        self.assertEqual(
+            recorder.calls,
+            [
+                (
+                    "phase_start",
+                    {
+                        "attempts": 10,
+                        "expected_ack": True,
+                        "gcs_bind": ["10.71.0.10", 14600],
+                        "uav_endpoint": ["10.71.1.10", 14601],
+                        "target_system": 1,
+                    },
+                )
+            ],
+        )
+        source = inspect.getsource(execute_phase)
+        self.assertLess(
+            source.index("emit_phase_start(writer, args)"),
+            source.index("socket.socket("),
+        )
 
     def test_latency_statistics_are_finite_and_nearest_rank(self) -> None:
         result = latency_stats([1.0, 2.0, 3.0, 4.0, 100.0])

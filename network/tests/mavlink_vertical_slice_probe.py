@@ -520,6 +520,27 @@ def wait_for_heartbeat(
     return heartbeats
 
 
+def emit_phase_start(writer: JsonlWriter, args: argparse.Namespace) -> None:
+    """Open the evidence window before the GCS socket can queue a packet.
+
+    The adapter and probe use the same monotonic clock.  If UDP is bound
+    first, a just-recovered link can forward a heartbeat into the socket
+    queue before ``phase_start`` is recorded; the probe would then observe a
+    response that the independent validator must correctly reject as outside
+    its adapter window.  Starting the window before binding makes the
+    producer's causal boundary unambiguous without relaxing validation.
+    """
+
+    writer.emit(
+        "phase_start",
+        attempts=args.attempts,
+        expected_ack=args.expected_ack,
+        gcs_bind=list(args.gcs_bind),
+        uav_endpoint=list(args.uav_endpoint),
+        target_system=args.target_system,
+    )
+
+
 def execute_phase(args: argparse.Namespace, writer: JsonlWriter) -> PhaseResult:
     os.environ.setdefault("MAVLINK20", "1")
     try:
@@ -527,6 +548,8 @@ def execute_phase(args: argparse.Namespace, writer: JsonlWriter) -> PhaseResult:
     except ImportError as exc:  # pragma: no cover - runtime dependency gate.
         raise RuntimeError(f"pymavlink is required: {exc}") from exc
 
+    # This must remain before bind(): see emit_phase_start().
+    emit_phase_start(writer, args)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, MAVLINK_CONTROL_TOS)
@@ -550,15 +573,6 @@ def execute_phase(args: argparse.Namespace, writer: JsonlWriter) -> PhaseResult:
     ack_latencies_ms: list[float] = []
     telemetry_latencies_ms: list[float] = []
     heartbeat_timeout = False
-
-    writer.emit(
-        "phase_start",
-        attempts=args.attempts,
-        expected_ack=args.expected_ack,
-        gcs_bind=list(args.gcs_bind),
-        uav_endpoint=list(destination),
-        target_system=args.target_system,
-    )
 
     try:
         if args.expected_ack:
