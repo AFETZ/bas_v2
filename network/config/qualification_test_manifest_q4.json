@@ -168,6 +168,7 @@
     "test_m4_scene_bundle.M4SceneBundleTests.test_sitl_home_must_match_gazebo_wgs84_origin",
     "test_m4_scene_bundle.M4SceneBundleTests.test_symlinked_transitive_asset_is_rejected",
     "test_m4_scene_bundle.M4SceneBundleTests.test_terrain_down_pose_moved_clear_is_rejected",
+    "test_m4_scene_bundle.M4SceneBundleTests.test_tracked_bundle_matches_frozen_runtime_identity",
     "test_m4_scene_bundle.M4SceneBundleTests.test_tracked_bundle_passes_all_machine_gates",
     "test_m4_scene_bundle.M4SceneBundleTests.test_uav_spawn_below_terrain_fails_after_hash_rebind",
     "test_m4_scene_bundle.M4SceneBundleTests.test_wgs84_origin_must_match_actual_gazebo_spherical_coordinates",

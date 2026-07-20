@@ -22,6 +22,7 @@ from network.validation.validate_m4_scene_bundle import (
     canonical_json,
     validate_scene_bundle,
 )
+from network.validation.m4_runtime import FROZEN_BUNDLE_SHA256
 
 
 class M4SceneBundleTests(unittest.TestCase):
@@ -72,6 +73,13 @@ class M4SceneBundleTests(unittest.TestCase):
         result = validate_scene_bundle(self.bundle_path, self.root)
         self.assertEqual("PASS", result["status"], result)
         self.assertTrue(all(gate["passed"] for gate in result["gates"].values()))
+
+    def test_tracked_bundle_matches_frozen_runtime_identity(self) -> None:
+        self.assertEqual(
+            self.load_bundle()["bundle_sha256"],
+            FROZEN_BUNDLE_SHA256,
+            "a regenerated canonical bundle must also rebind the frozen M4 runtime identity",
+        )
 
     def test_generator_check_proves_deterministic_tracked_bytes(self) -> None:
         completed = subprocess.run(

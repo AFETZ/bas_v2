@@ -23,9 +23,12 @@ from network.validation.validate_m4_scene_bundle import (
     strict_json,
     validate_scene_bundle,
 )
+from network.validation.m4_runtime import FROZEN_BUNDLE_SHA256
 
 
-EXPECTED_BUNDLE_SHA256 = "be74a467aa91cc5c7e0f0d4b510b94b6c04763099931911377d5940a9e9ee0c4"
+# Kept as a named checker invariant for the emitted report, while the frozen
+# runtime identity has a single source of truth.
+EXPECTED_BUNDLE_SHA256 = FROZEN_BUNDLE_SHA256
 
 
 def file_sha256(path: Path) -> str:

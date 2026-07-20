@@ -151,6 +151,15 @@ Updated: 2026-07-20 UTC.
   jammer now starts disabled; only the declared causal `jammer_on` window
   enables it.  This preserves the real Sionna/ns-3 path and makes the baseline
   physically distinct from the impairment stimulus.
+- The failed M4 capacity preflight `m4_capacity_hbfix_20260720T211425Z` is
+  retained without a formal receipt.  It stopped before provider, Sionna, or
+  flight execution because the jammer-baseline regeneration changed the
+  canonical bundle SHA-256 while two frozen runtime pins still named the old
+  value.  The frozen identity is rebound to
+  `41de5ab8b5009a02ea6b07c05d586f6c70bf7ddd10808ecc775e2bb4e5efc996`, the
+  runtime smoke checker derives the same pin from that single source of truth,
+  and an adversarial tracked-bundle test prevents a future regenerated bundle
+  from silently diverging from the M4 runtime contract.
 
 ## Open Decisions Requiring External Input
 
