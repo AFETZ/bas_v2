@@ -1,6 +1,6 @@
 # Network/Radio Decisions
 
-Updated: 2026-07-17 UTC.
+Updated: 2026-07-20 UTC.
 
 ## Current Authoritative Decisions
 
@@ -133,6 +133,13 @@ Updated: 2026-07-17 UTC.
   `M2_SKIP_BUILDS=1` cannot bypass that receipt.
 - Physical radio hardware is outside current P0 and must not be probed or
   configured without a separate explicit scope.
+- The failed M4 capacity attempt `m4_capacity_20260720T192847Z` is retained as
+  failed evidence, not retried unchanged: its canonical 40 dBm co-channel
+  jammer started enabled, which made the required baseline control uplinks for
+  UAV4/UAV5 unavailable before flight.  The canonical `runtime_off_on_off`
+  jammer now starts disabled; only the declared causal `jammer_on` window
+  enables it.  This preserves the real Sionna/ns-3 path and makes the baseline
+  physically distinct from the impairment stimulus.
 
 ## Open Decisions Requiring External Input
 
