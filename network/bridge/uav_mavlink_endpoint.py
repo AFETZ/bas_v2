@@ -123,6 +123,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"FAIL adapter bind: {exc}", file=sys.stderr)
         return 2
 
+    # ``ByteOpaqueUdpRelay`` invokes this callback immediately before its one
+    # exact ``sendto``.  It gives the raw adapter record a causal send boundary
+    # without changing the bytes, destination, or retry behaviour of the
+    # shared relay core.
+    send_start_monotonic_ns: int | None = None
+
+    def mark_send_start() -> None:
+        nonlocal send_start_monotonic_ns
+        send_start_monotonic_ns = time.monotonic_ns()
+
     relay = ByteOpaqueUdpRelay(
         radio,
         tail,
@@ -130,6 +140,7 @@ def main(argv: list[str] | None = None) -> int:
         tail_peer_host=args.tail_peer_host,
         strict_tail_peer=False,
         forwarding_enabled=True,
+        before_forward=mark_send_start,
     )
     counters = {
         "gcs_to_tail": 0,
@@ -137,6 +148,42 @@ def main(argv: list[str] | None = None) -> int:
         "dropped_no_peer": 0,
         "dropped_unexpected_peer": 0,
     }
+    # This is intentionally scoped to successful adapter forwards rather than
+    # to a payload hash.  MAVLink UDP payload bytes can legitimately recur, so
+    # the hash identifies bytes while this sequence identifies one concrete
+    # relay occurrence in the adapter's ordered raw log.
+    adapter_datagram_seq = 0
+
+    def emit_forward(
+        *,
+        direction: str,
+        source: tuple[str, int],
+        destination: tuple[str, int] | None,
+        payload: bytes,
+        payload_sha256: str,
+        received_monotonic_ns: int,
+        send_start_monotonic_ns: int,
+        send_complete_monotonic_ns: int,
+    ) -> None:
+        nonlocal adapter_datagram_seq
+        adapter_datagram_seq += 1
+        event_log.emit(
+            "forward",
+            direction=direction,
+            source=source,
+            destination=destination,
+            # Preserve the legacy names while publishing explicit endpoint
+            # hash-domain fields for causal occurrence matching.
+            bytes=len(payload),
+            sha256=payload_sha256,
+            adapter_datagram_seq=adapter_datagram_seq,
+            transport_payload_sha256=payload_sha256,
+            transport_payload_size=len(payload),
+            received_monotonic_ns=received_monotonic_ns,
+            send_start_monotonic_ns=send_start_monotonic_ns,
+            send_complete_monotonic_ns=send_complete_monotonic_ns,
+        )
+
     event_log.emit(
         "adapter_start",
         pid=os.getpid(),
@@ -161,9 +208,12 @@ def main(argv: list[str] | None = None) -> int:
                     payload, peer = sock.recvfrom(65535)
                 except BlockingIOError:
                     continue
+                received_monotonic_ns = time.monotonic_ns()
                 digest = hashlib.sha256(payload).hexdigest()
                 if key.data == "tail":
+                    send_start_monotonic_ns = None
                     decision = relay.relay_tail(payload, peer)
+                    send_complete_monotonic_ns = time.monotonic_ns()
                     if decision.action != "forwarded":
                         counters["dropped_unexpected_peer"] += 1
                         event_log.emit(
@@ -175,17 +225,23 @@ def main(argv: list[str] | None = None) -> int:
                             sha256=digest,
                         )
                         continue
+                    if send_start_monotonic_ns is None:
+                        raise RelayError("adapter relay omitted its exact send boundary")
                     counters["tail_to_gcs"] += 1
-                    event_log.emit(
-                        "forward",
+                    emit_forward(
                         direction="tail_to_gcs",
                         source=peer,
                         destination=args.gcs,
-                        bytes=len(payload),
-                        sha256=digest,
+                        payload=payload,
+                        payload_sha256=digest,
+                        received_monotonic_ns=received_monotonic_ns,
+                        send_start_monotonic_ns=send_start_monotonic_ns,
+                        send_complete_monotonic_ns=send_complete_monotonic_ns,
                     )
                 else:
+                    send_start_monotonic_ns = None
                     decision = relay.relay_radio(payload, peer)
+                    send_complete_monotonic_ns = time.monotonic_ns()
                     if decision.reason == "unexpected_gcs_peer":
                         counters["dropped_unexpected_peer"] += 1
                         event_log.emit(
@@ -207,14 +263,18 @@ def main(argv: list[str] | None = None) -> int:
                             sha256=digest,
                         )
                     elif decision.action == "forwarded":
+                        if send_start_monotonic_ns is None:
+                            raise RelayError("adapter relay omitted its exact send boundary")
                         counters["gcs_to_tail"] += 1
-                        event_log.emit(
-                            "forward",
+                        emit_forward(
                             direction="gcs_to_tail",
                             source=peer,
                             destination=decision.destination,
-                            bytes=len(payload),
-                            sha256=digest,
+                            payload=payload,
+                            payload_sha256=digest,
+                            received_monotonic_ns=received_monotonic_ns,
+                            send_start_monotonic_ns=send_start_monotonic_ns,
+                            send_complete_monotonic_ns=send_complete_monotonic_ns,
                         )
                     else:
                         raise RelayError(

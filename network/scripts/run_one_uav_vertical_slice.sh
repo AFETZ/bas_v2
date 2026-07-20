@@ -20,6 +20,10 @@ DOWN_ATTEMPTS=5
 RECOVERY_ATTEMPTS=10
 STARTUP_TIMEOUT_S="${STARTUP_TIMEOUT_S:-90}"
 HEARTBEAT_TIMEOUT_S="${HEARTBEAT_TIMEOUT_S:-20}"
+POSITIVE_HEARTBEAT_OBSERVATION_S="${POSITIVE_HEARTBEAT_OBSERVATION_S:-5}"
+POSITIVE_READINESS_STABILITY_S="${POSITIVE_READINESS_STABILITY_S:-10}"
+PRESTOP_READINESS_STABILITY_S="${PRESTOP_READINESS_STABILITY_S:-10}"
+STOPPED_DRAIN_S="${STOPPED_DRAIN_S:-10}"
 ACK_TIMEOUT_S="${ACK_TIMEOUT_S:-3}"
 DOWN_HEARTBEAT_TIMEOUT_S="${DOWN_HEARTBEAT_TIMEOUT_S:-5}"
 DOWN_ACK_TIMEOUT_S="${DOWN_ACK_TIMEOUT_S:-2}"
@@ -39,6 +43,8 @@ ENDPOINT_SCHEMA="$ROOT_DIR/network/config/endpoint_transaction_schema.json"
 ENDPOINT_MATRIX="$ROOT_DIR/network/config/endpoint_matrix_5uav.json"
 ENDPOINT_CONTRACT="$RUN_DIR/metrics/m2_endpoint_contract.json"
 RAW_CAPTURE="$ROOT_DIR/network/scripts/raw_packet_capture.py"
+LIFECYCLE_EVENT="$ROOT_DIR/network/scripts/m2_lifecycle_event.py"
+LIFECYCLE_MONITOR="$ROOT_DIR/network/scripts/m2_lifecycle_monitor.py"
 PROBE="$ROOT_DIR/network/tests/mavlink_vertical_slice_probe.py"
 MAVPROXY_SCRIPT="/home/ubuntu/.local/bin/mavproxy.py"
 MAVLINK_PYTHON="/usr/bin/python3.10"
@@ -47,10 +53,36 @@ PROCESS_IDENTITY="$RUN_DIR/logs/m2_process_identity.json"
 PROBE_EVENTS="$RUN_DIR/logs/m2_probe_events.jsonl"
 PROCESS_EVENTS="$RUN_DIR/logs/m2_process_events.jsonl"
 ADAPTER_EVENTS="$RUN_DIR/logs/uav_adapter.jsonl"
+LIFECYCLE_EVENTS="$RUN_DIR/logs/m2_lifecycle.jsonl"
+MONITOR_EVENTS="$RUN_DIR/logs/m2_monitor.jsonl"
+MONITOR_STOP_FILE="$RUN_DIR/logs/m2_monitor.stop"
+GCS_ENDPOINT_CONTROL_SOCKET="$RUN_DIR/logs/m2_gcs_endpoint.sock"
+GCS_ENDPOINT_STDOUT="$RUN_DIR/logs/m2_gcs_endpoint.stdout"
+GCS_ENDPOINT_STDERR="$RUN_DIR/logs/m2_gcs_endpoint.stderr"
+GCS_ENDPOINT_SHUTDOWN_LOG="$RUN_DIR/logs/m2_gcs_endpoint_shutdown.log"
 STARTED_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 if [[ ! "$RUN_ID" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
   printf 'FAIL RUN_ID contains unsafe characters: %s\n' "$RUN_ID" >&2
+  exit 2
+fi
+if [[ ! "$POSITIVE_HEARTBEAT_OBSERVATION_S" =~ ^[1-9][0-9]*$ ]] || \
+   (( POSITIVE_HEARTBEAT_OBSERVATION_S < 3 )); then
+  printf 'FAIL POSITIVE_HEARTBEAT_OBSERVATION_S must be an integer of at least 3 seconds\n' >&2
+  exit 2
+fi
+if [[ ! "$POSITIVE_READINESS_STABILITY_S" =~ ^[1-9][0-9]*$ ]] || \
+   (( POSITIVE_READINESS_STABILITY_S < 10 )); then
+  printf 'FAIL POSITIVE_READINESS_STABILITY_S must be an integer of at least 10 seconds\n' >&2
+  exit 2
+fi
+if [[ ! "$PRESTOP_READINESS_STABILITY_S" =~ ^[1-9][0-9]*$ ]] || \
+   (( PRESTOP_READINESS_STABILITY_S < 10 )); then
+  printf 'FAIL PRESTOP_READINESS_STABILITY_S must be an integer of at least 10 seconds\n' >&2
+  exit 2
+fi
+if [[ ! "$STOPPED_DRAIN_S" =~ ^[1-9][0-9]*$ ]] || (( STOPPED_DRAIN_S < 1 )); then
+  printf 'FAIL STOPPED_DRAIN_S must be an integer of at least one second\n' >&2
   exit 2
 fi
 if [[ "$(basename "$RUN_DIR")" != "$RUN_ID" ]]; then
@@ -162,13 +194,26 @@ if [[ ! -x "$NS3_BINARY" ]]; then
   printf 'Run network/ns3/build_ns3_tap_packet_engine.sh inside /workspace/multiagent_simulation.\n' >&2
   exit 2
 fi
-if [[ ! -f "$RAW_CAPTURE" || ! -f "$NS3_CONFIG_TOOL" || ! -f "$NS3_RUNNER" ]]; then
+if [[ ! -f "$RAW_CAPTURE" || ! -f "$LIFECYCLE_EVENT" || ! -f "$LIFECYCLE_MONITOR" || \
+      ! -f "$NS3_CONFIG_TOOL" || ! -f "$NS3_RUNNER" ]]; then
   printf 'FAIL shared M2 packet-engine/capture tooling is incomplete\n' >&2
   exit 2
 fi
 
 runner_log() {
   printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "$RUNNER_LOG"
+}
+
+lifecycle_event() {
+  local event="$1"
+  shift
+  python3 "$LIFECYCLE_EVENT" \
+    --output "$LIFECYCLE_EVENTS" \
+    --run-id "$RUN_ID" \
+    --runtime-id "$RUNTIME_ID" \
+    --run-nonce "$RUN_NONCE" \
+    --event "$event" \
+    "$@" >> "$RUNNER_LOG"
 }
 
 # This verification is outside the optional build block by design: a skipped
@@ -338,6 +383,11 @@ CURRENT_NS3_WRAPPER_PID=""
 CURRENT_NS3_PGID=""
 CURRENT_NS3_ACTUAL_PID=""
 CURRENT_NS3_PHASE=""
+MONITOR_PID=""
+MONITOR_PGID=""
+GCS_ENDPOINT_WRAPPER_PID=""
+GCS_ENDPOINT_PGID=""
+GCS_ENDPOINT_ACTUAL_PID=""
 CLEANUP_ACTIVE=0
 
 pid_alive() {
@@ -393,6 +443,80 @@ stop_capture() {
   fi
 }
 
+stop_lifecycle_monitor() {
+  local strict="${1:-false}"
+  local pid="$MONITOR_PID"
+  local pgid="$MONITOR_PGID"
+  [[ -n "$pid" ]] || return 0
+  printf 'stop\n' > "$MONITOR_STOP_FILE"
+  if ! wait_pid_dead "$pid" 100; then
+    if [[ "$strict" == "true" ]]; then
+      printf 'FAIL M2 lifecycle monitor did not stop through its stop-file protocol\n' >&2
+      return 1
+    fi
+    kill -TERM -- "-$pgid" >/dev/null 2>&1 || true
+    wait_pid_dead "$pid" 20 || kill -KILL -- "-$pgid" >/dev/null 2>&1 || true
+  fi
+  local monitor_rc=0
+  wait "$pid" || monitor_rc=$?
+  MONITOR_PID=""
+  MONITOR_PGID=""
+  if [[ "$strict" == "true" && "$monitor_rc" -ne 0 ]]; then
+    printf 'FAIL M2 lifecycle monitor exited with %s\n' "$monitor_rc" >&2
+    return 1
+  fi
+  if [[ ! -s "$MONITOR_EVENTS" ]]; then
+    printf 'FAIL M2 lifecycle monitor evidence is missing or empty: %s\n' "$MONITOR_EVENTS" >&2
+    return 1
+  fi
+}
+
+stop_gcs_endpoint() {
+  local strict="${1:-false}"
+  local wrapper="$GCS_ENDPOINT_WRAPPER_PID"
+  local pgid="$GCS_ENDPOINT_PGID"
+  [[ -n "$wrapper" ]] || return 0
+  local shutdown_rc=0
+  if python3 "$PROBE" control \
+    --control-socket "$GCS_ENDPOINT_CONTROL_SOCKET" \
+    --run-id "$RUN_ID" \
+    --runtime-id "$RUNTIME_ID" \
+    --run-nonce "$RUN_NONCE" \
+    --operation shutdown \
+    --timeout-s 20 \
+    > "$GCS_ENDPOINT_SHUTDOWN_LOG" 2>&1; then
+    :
+  else
+    shutdown_rc=$?
+  fi
+  if [[ "$strict" == "true" && "$shutdown_rc" -ne 0 ]]; then
+    printf 'FAIL persistent GCS endpoint shutdown control failed; see %s\n' \
+      "$GCS_ENDPOINT_SHUTDOWN_LOG" >&2
+    return 1
+  fi
+  if ! wait_pid_dead "$wrapper" 100; then
+    if [[ "$strict" == "true" ]]; then
+      printf 'FAIL persistent GCS endpoint did not stop through its control protocol\n' >&2
+      return 1
+    fi
+    kill -TERM -- "-$pgid" >/dev/null 2>&1 || true
+    wait_pid_dead "$wrapper" 20 || kill -KILL -- "-$pgid" >/dev/null 2>&1 || true
+  fi
+  local endpoint_rc=0
+  wait "$wrapper" || endpoint_rc=$?
+  GCS_ENDPOINT_WRAPPER_PID=""
+  GCS_ENDPOINT_PGID=""
+  GCS_ENDPOINT_ACTUAL_PID=""
+  if [[ "$strict" == "true" && "$endpoint_rc" -ne 0 ]]; then
+    printf 'FAIL persistent GCS endpoint exited with %s\n' "$endpoint_rc" >&2
+    return 1
+  fi
+  if [[ "$strict" == "true" && ( ! -s "$PROBE_EVENTS" || -s "$GCS_ENDPOINT_STDERR" ) ]]; then
+    printf 'FAIL persistent GCS endpoint evidence/stdERR is incomplete\n' >&2
+    return 1
+  fi
+}
+
 start_capture() {
   local key="$1"
   local namespace="$2"
@@ -431,6 +555,7 @@ start_capture() {
 }
 
 stop_ns3_without_artifact_checks() {
+  local strict="${1:-false}"
   local wrapper="$CURRENT_NS3_WRAPPER_PID"
   local actual="$CURRENT_NS3_ACTUAL_PID"
   local pgid="$CURRENT_NS3_PGID"
@@ -440,14 +565,27 @@ stop_ns3_without_artifact_checks() {
     printf 'stop\n' > "$RUN_DIR/logs/ns3_${phase}.stop"
   fi
   if [[ -n "$actual" ]] && ! wait_pid_dead "$actual" 100; then
+    if [[ "$strict" == "true" ]]; then
+      printf 'FAIL ns-3 %s did not terminate through its stop-file lifecycle\n' "$phase" >&2
+      return 1
+    fi
     kill -TERM "$actual" >/dev/null 2>&1 || true
     wait_pid_dead "$actual" 30 || kill -KILL "$actual" >/dev/null 2>&1 || true
   fi
   if ! wait_pid_dead "$wrapper" 30; then
+    if [[ "$strict" == "true" ]]; then
+      printf 'FAIL ns-3 %s wrapper did not terminate cleanly\n' "$phase" >&2
+      return 1
+    fi
     kill -TERM -- "-$pgid" >/dev/null 2>&1 || true
     wait_pid_dead "$wrapper" 20 || kill -KILL -- "-$pgid" >/dev/null 2>&1 || true
   fi
-  wait "$wrapper" >/dev/null 2>&1 || true
+  local wrapper_rc=0
+  wait "$wrapper" >/dev/null 2>&1 || wrapper_rc=$?
+  if [[ "$strict" == "true" && "$wrapper_rc" -ne 0 ]]; then
+    printf 'FAIL ns-3 %s wrapper exited with %s after stop-file request\n' "$phase" "$wrapper_rc" >&2
+    return 1
+  fi
   CURRENT_NS3_WRAPPER_PID=""
   CURRENT_NS3_PGID=""
   CURRENT_NS3_ACTUAL_PID=""
@@ -489,6 +627,8 @@ cleanup() {
   fi
   CLEANUP_ACTIVE=1
   set +e
+  stop_lifecycle_monitor false
+  stop_gcs_endpoint false
   stop_ns3_without_artifact_checks
   local key
   for key in "${!CAPTURE_PID[@]}"; do
@@ -549,7 +689,31 @@ for namespace in namespaces:
 Path(output).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
 
-start_capture tail root "$TAIL_ROOT" "$RUN_DIR/pcap/uav_tail.pcap"
+start_persistent_captures() {
+  # M2's capture boundary deliberately spans the whole engine lifecycle:
+  # good -> stop/drain -> down -> recovery.  A phase-local collector can hide
+  # a queued frame at either transition, so these five collectors are started
+  # before any producer and stopped only after the recovery terminal boundary.
+  start_capture tail root "$TAIL_ROOT" "$RUN_DIR/pcap/uav_tail.pcap"
+  start_capture gcs "$GCS_NS" eth0 "$RUN_DIR/pcap/gcs_ingress.pcap"
+  start_capture ns3_external_gcs "$NS3_NS" v-gcs-ns3 \
+    "$RUN_DIR/pcap/ns3_external_ingress.pcap"
+  start_capture ns3_external_uav "$NS3_NS" v-uav-ns3 \
+    "$RUN_DIR/pcap/ns3_external_egress.pcap"
+  start_capture uav "$UAV_NS" eth0 "$RUN_DIR/pcap/uav_egress.pcap"
+}
+
+stop_persistent_captures() {
+  local key
+  for key in tail gcs ns3_external_gcs ns3_external_uav uav; do
+    stop_capture "$key"
+  done
+}
+
+start_persistent_captures
+lifecycle_event captures_ready \
+  --field capture_count=5 \
+  --field capture_contract=persistent_good_stopped_recovery
 
 ADAPTER_READY="$RUN_DIR/logs/uav_adapter.ready"
 setsid ip netns exec "$UAV_NS" env PYTHONUNBUFFERED=1 \
@@ -698,6 +862,126 @@ print(f"{pid}:{int(raw[raw.rfind(')') + 2:].split()[19])}:{hashlib.sha256(comman
 PY
 }
 
+start_gcs_endpoint() {
+  if [[ -e "$GCS_ENDPOINT_CONTROL_SOCKET" || -e "$PROBE_EVENTS" || -e "$PROCESS_EVENTS" ]]; then
+    printf 'FAIL refusing to replace persistent GCS endpoint evidence or control socket\n' >&2
+    return 1
+  fi
+  setsid ip netns exec "$GCS_NS" env PYTHONUNBUFFERED=1 \
+    python3 "$PROBE" serve \
+    --run-id "$RUN_ID" \
+    --runtime-id "$RUNTIME_ID" \
+    --run-nonce "$RUN_NONCE" \
+    --endpoint-event-log "$PROBE_EVENTS" \
+    --process-identity "$PROCESS_IDENTITY" \
+    --process-event-log "$PROCESS_EVENTS" \
+    --control-socket "$GCS_ENDPOINT_CONTROL_SOCKET" \
+    --gcs-bind 10.71.0.10:14600 \
+    --uav-endpoint 10.71.1.10:14601 \
+    > "$GCS_ENDPOINT_STDOUT" 2> "$GCS_ENDPOINT_STDERR" &
+  GCS_ENDPOINT_WRAPPER_PID=$!
+  GCS_ENDPOINT_PGID=$GCS_ENDPOINT_WRAPPER_PID
+  local index
+  for ((index = 0; index < STARTUP_TIMEOUT_S * 10; index++)); do
+    if [[ -S "$GCS_ENDPOINT_CONTROL_SOCKET" && -s "$GCS_ENDPOINT_STDOUT" && -s "$PROBE_EVENTS" ]]; then
+      if GCS_ENDPOINT_ACTUAL_PID="$(python3 - "$GCS_ENDPOINT_STDOUT" "$PROBE_EVENTS" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+stdout_path, events_path = map(Path, sys.argv[1:])
+ready = [json.loads(line) for line in stdout_path.read_text(encoding="utf-8").splitlines() if line]
+if len(ready) != 1:
+    raise SystemExit("persistent endpoint did not emit exactly one readiness record")
+record = ready[0]
+if (
+    record.get("schema") != "ams.m2.persistent-gcs-endpoint/v1"
+    or record.get("event") != "endpoint_ready"
+    or record.get("gcs_bind") != ["10.71.0.10", 14600]
+):
+    raise SystemExit("persistent endpoint readiness record is not exact")
+events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines() if line]
+starts = [event for event in events if event.get("event") == "endpoint_started"]
+if len(starts) != 1 or not isinstance(starts[0].get("endpoint_pid"), int):
+    raise SystemExit("persistent endpoint start identity is absent")
+if record.get("endpoint_instance_id") != starts[0].get("endpoint_instance_id"):
+    raise SystemExit("persistent endpoint readiness identity does not bind endpoint_started")
+print(starts[0]["endpoint_pid"])
+PY
+      )" && [[ -n "$GCS_ENDPOINT_ACTUAL_PID" ]] && pid_alive "$GCS_ENDPOINT_ACTUAL_PID"; then
+        break
+      fi
+    fi
+    if ! pid_alive "$GCS_ENDPOINT_WRAPPER_PID"; then
+      wait "$GCS_ENDPOINT_WRAPPER_PID" || true
+      printf 'FAIL persistent GCS endpoint exited before readiness; see %s\n' "$GCS_ENDPOINT_STDERR" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
+  if [[ -z "$GCS_ENDPOINT_ACTUAL_PID" ]] || ! pid_alive "$GCS_ENDPOINT_ACTUAL_PID"; then
+    printf 'FAIL persistent GCS endpoint did not become ready\n' >&2
+    return 1
+  fi
+  runner_log "persistent GCS endpoint ready pid=$GCS_ENDPOINT_ACTUAL_PID"
+}
+
+start_lifecycle_monitor() {
+  local topology_sha256
+  topology_sha256="$(python3 - "$RUN_DIR/logs/m2_netns_snapshot.json" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+)"
+  rm -f -- "$MONITOR_STOP_FILE"
+  setsid python3 "$LIFECYCLE_MONITOR" \
+    --run-id "$RUN_ID" \
+    --runtime-id "$RUNTIME_ID" \
+    --run-nonce "$RUN_NONCE" \
+    --output "$MONITOR_EVENTS" \
+    --sample-period-s 0.5 \
+    --stop-file "$MONITOR_STOP_FILE" \
+    --topology-file "$RUN_DIR/logs/m2_netns_snapshot.json" \
+    --topology-sha256 "$topology_sha256" \
+    --role "launch=$(process_reference "$LAUNCH_PID")" \
+    --role "sitl=$(process_reference "$SITL_PID")" \
+    --role "mavproxy=$(process_reference "$MAVPROXY_PID")" \
+    --role "adapter=$(process_reference "$ADAPTER_ACTUAL_PID")" \
+    --role "gcs_endpoint=$(process_reference "$GCS_ENDPOINT_ACTUAL_PID")" \
+    --role "capture_tail=$(process_reference "${CAPTURE_PID[tail]}")" \
+    --role "capture_gcs=$(process_reference "${CAPTURE_PID[gcs]}")" \
+    --role "capture_ns3_external_gcs=$(process_reference "${CAPTURE_PID[ns3_external_gcs]}")" \
+    --role "capture_ns3_external_uav=$(process_reference "${CAPTURE_PID[ns3_external_uav]}")" \
+    --role "capture_uav=$(process_reference "${CAPTURE_PID[uav]}")" \
+    > "$RUN_DIR/logs/m2_lifecycle_monitor.stdout" \
+    2> "$RUN_DIR/logs/m2_lifecycle_monitor.stderr" &
+  MONITOR_PID=$!
+  MONITOR_PGID=$MONITOR_PID
+  local index
+  for ((index = 0; index < 50; index++)); do
+    [[ -s "$MONITOR_EVENTS" ]] && break
+    if ! pid_alive "$MONITOR_PID"; then
+      wait "$MONITOR_PID" || true
+      printf 'FAIL M2 lifecycle monitor exited before first sample\n' >&2
+      return 1
+    fi
+    sleep 0.1
+  done
+  if [[ ! -s "$MONITOR_EVENTS" ]] || ! pid_alive "$MONITOR_PID"; then
+    printf 'FAIL M2 lifecycle monitor did not become ready\n' >&2
+    return 1
+  fi
+}
+
+start_gcs_endpoint
+start_lifecycle_monitor
+lifecycle_event endpoints_ready \
+  --field monitor_pid="$MONITOR_PID" \
+  --field stable_process_count=5 \
+  --field persistent_capture_count=5
+
 find_ns3_process() {
   local matches=()
   local pid
@@ -737,6 +1021,7 @@ start_ns3() {
     DURATION_MS=3600000 NS3_SEED=42 NS3_RUN=1 SELF_TEST=0 \
     SIONNA_IPC_ENABLED=0 \
     EVENTS_FILE="$RUN_DIR/logs/ns3_${phase}_packet_events.jsonl" \
+    LIFECYCLE_FILE="$RUN_DIR/logs/ns3_${phase}.lifecycle.jsonl" \
     PCAP_PREFIX="$RUN_DIR/pcap/ns3_${phase}" \
     READY_FILE="$RUN_DIR/logs/ns3_${phase}.ready" \
     STOP_FILE="$RUN_DIR/logs/ns3_${phase}.stop" \
@@ -761,8 +1046,60 @@ start_ns3() {
     printf 'FAIL ns-3 %s readiness timeout\n' "$phase" >&2
     return 1
   fi
+  if [[ ! -s "$RUN_DIR/logs/ns3_${phase}.lifecycle.jsonl" ]]; then
+    printf 'FAIL ns-3 %s lifecycle journal is absent before readiness acceptance\n' "$phase" >&2
+    return 1
+  fi
   CURRENT_NS3_ACTUAL_PID="$(find_ns3_process)"
   pid_alive "$CURRENT_NS3_ACTUAL_PID"
+  case "$phase" in
+    good)
+      lifecycle_event engine1_ready \
+        --field phase=good \
+        --field event_epoch="$event_epoch" \
+        --field ns3_pid="$CURRENT_NS3_ACTUAL_PID"
+      ;;
+    recovery)
+      lifecycle_event engine2_ready \
+        --field phase=recovery \
+        --field event_epoch="$event_epoch" \
+        --field ns3_pid="$CURRENT_NS3_ACTUAL_PID"
+      ;;
+  esac
+}
+
+wait_positive_readiness() {
+  local phase="$1"
+  local stability_s="${2:-$POSITIVE_READINESS_STABILITY_S}"
+  local expected_ns3_pid="$CURRENT_NS3_ACTUAL_PID"
+  local expected_ns3_wrapper_pid="$CURRENT_NS3_WRAPPER_PID"
+  local iterations=$((stability_s * 10))
+  local index
+  if [[ -z "$expected_ns3_pid" || -z "$expected_ns3_wrapper_pid" ]]; then
+    printf 'FAIL %s positive readiness has no ns-3 process identity\n' "$phase" >&2
+    return 1
+  fi
+  runner_log \
+    "phase $phase positive readiness stability started duration_s=$stability_s ns3_pid=$expected_ns3_pid"
+  for ((index = 0; index < iterations; index++)); do
+    if [[ "$CURRENT_NS3_ACTUAL_PID" != "$expected_ns3_pid" ]] || \
+       [[ "$CURRENT_NS3_WRAPPER_PID" != "$expected_ns3_wrapper_pid" ]] || \
+       ! pid_alive "$expected_ns3_pid" || \
+       ! pid_alive "$expected_ns3_wrapper_pid" || \
+       ! pid_alive "$ADAPTER_WRAPPER_PID" || \
+       ! pid_alive "$ADAPTER_ACTUAL_PID" || \
+       ! pid_alive "$GCS_ENDPOINT_WRAPPER_PID" || \
+       ! pid_alive "$GCS_ENDPOINT_ACTUAL_PID" || \
+       ! pid_alive "$LAUNCH_PID" || \
+       ! pid_alive "$SITL_PID" || \
+       ! pid_alive "$MAVPROXY_PID"; then
+      printf 'FAIL %s positive readiness lost a required runtime process\n' "$phase" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
+  runner_log \
+    "phase $phase positive readiness stability complete duration_s=$stability_s ns3_pid=$expected_ns3_pid"
 }
 
 normalize_ns3_pcaps() {
@@ -786,8 +1123,24 @@ normalize_ns3_pcaps() {
 stop_ns3_phase() {
   local phase="$1"
   [[ "$CURRENT_NS3_PHASE" == "$phase" ]]
-  stop_ns3_without_artifact_checks
+  case "$phase" in
+    good)
+      lifecycle_event stop_requested --field engine=1 --field phase=good
+      ;;
+    recovery)
+      lifecycle_event recovery_stop_requested --field engine=2 --field phase=recovery
+      ;;
+  esac
+  stop_ns3_without_artifact_checks true
   normalize_ns3_pcaps "$phase"
+  case "$phase" in
+    good)
+      lifecycle_event engine1_stopped --field engine=1 --field phase=good
+      ;;
+    recovery)
+      lifecycle_event engine2_stopped --field engine=2 --field phase=recovery
+      ;;
+  esac
 }
 
 run_probe_phase() {
@@ -799,87 +1152,162 @@ run_probe_phase() {
   local ack_timeout="$6"
   shift 6
   local extra=("$@")
+  # The control client must remain connected until the endpoint has completed
+  # the whole phase.  In particular, the intentionally blackholed down phase
+  # can consume every ACK timeout plus its final heartbeat timeout; the CLI
+  # default of 10 seconds is therefore not a safe upper bound.
+  local control_timeout_s
+  control_timeout_s="$(python3 - "$attempts" "$expected_ack" "$heartbeat_timeout" \
+    "$ack_timeout" "$POSITIVE_HEARTBEAT_OBSERVATION_S" <<'PY'
+import math
+import sys
+
+attempts_text, expected_ack, heartbeat_text, ack_text, observation_text = sys.argv[1:]
+try:
+    attempts = int(attempts_text)
+    heartbeat = float(heartbeat_text)
+    ack = float(ack_text)
+    observation = float(observation_text)
+except ValueError as exc:
+    raise SystemExit(f"invalid persistent control timeout input: {exc}") from exc
+if attempts <= 0 or not all(math.isfinite(value) and value > 0 for value in (heartbeat, ack, observation)):
+    raise SystemExit("persistent control timeout inputs must be positive finite values")
+# 10s maximum pre-window quiet wait, two 0.5s direct-endpoint checks, and a
+# conservative 15s process/control scheduling margin surround the probe work.
+phase_work = (observation if expected_ack == "true" else heartbeat) + attempts * ack
+timeout_s = math.ceil(10.0 + 1.0 + phase_work + 15.0)
+if timeout_s > 600:
+    raise SystemExit("persistent control timeout exceeds the 600-second protocol maximum")
+print(max(30, timeout_s))
+PY
+)"
   local command=(
-    python3 "$PROBE"
-    --phase "$phase"
-    --attempts "$attempts"
-    --expected-ack "$expected_ack"
+    python3 "$PROBE" control
+    --control-socket "$GCS_ENDPOINT_CONTROL_SOCKET"
     --run-id "$RUN_ID"
     --runtime-id "$RUNTIME_ID"
     --run-nonce "$RUN_NONCE"
-    --event-log "$PROBE_EVENTS"
-    --process-event-log "$PROCESS_EVENTS"
-    --process-identity "$PROCESS_IDENTITY"
-    --phase-summary "$RUN_DIR/metrics/m2_phase_${phase}.json"
+    --operation run-phase
+    --phase "$phase"
+    --expected-ns3-state "$expected_ns3_state"
+    --attempts "$attempts"
     --heartbeat-timeout-s "$heartbeat_timeout"
     --ack-timeout-s "$ack_timeout"
-    --expected-ns3-state "$expected_ns3_state"
-    --forbidden-endpoint 127.0.0.1:5760
-    --forbidden-endpoint 10.72.1.1:5760
+    --timeout-s "$control_timeout_s"
     "${extra[@]}"
   )
-  if ! ip netns exec "$GCS_NS" env PYTHONUNBUFFERED=1 \
-    "${command[@]}" > "$RUN_DIR/logs/probe_${phase}.log" 2>&1; then
+  if [[ "$expected_ack" == "true" ]]; then
+    command+=(
+      --positive-heartbeat-observation-s "$POSITIVE_HEARTBEAT_OBSERVATION_S"
+    )
+  fi
+  if ! env PYTHONUNBUFFERED=1 "${command[@]}" > "$RUN_DIR/logs/probe_${phase}.log" 2>&1; then
     cat "$RUN_DIR/logs/probe_${phase}.log" >&2
     return 1
   fi
+  python3 - "$RUN_DIR/logs/probe_${phase}.log" "$RUN_DIR/metrics/m2_phase_${phase}.json" \
+    "$RUN_ID" "$RUNTIME_ID" "$RUN_NONCE" "$phase" "$attempts" "$expected_ack" <<'PY'
+import json
+import math
+import sys
+from pathlib import Path
+
+log_path, output, run_id, runtime_id, nonce, phase, attempts_text, expected_ack_text = sys.argv[1:]
+lines = [line for line in Path(log_path).read_text(encoding="utf-8").splitlines() if line]
+if len(lines) != 1:
+    raise SystemExit("persistent phase control did not emit exactly one response")
+response = json.loads(lines[0])
+result = response.get("result") if isinstance(response.get("result"), dict) else {}
+phase_result = result.get("phase_result") if isinstance(result.get("phase_result"), dict) else {}
+attempts = int(attempts_text)
+expected_ack = expected_ack_text == "true"
+if (
+    response.get("ok") is not True
+    or response.get("operation") != "run_phase"
+    or result.get("phase") != phase
+    or phase_result.get("attempts") != attempts
+):
+    raise SystemExit("persistent phase control response is not the requested phase result")
+acks = phase_result.get("acknowledgements")
+if isinstance(acks, bool) or not isinstance(acks, int) or not 0 <= acks <= attempts:
+    raise SystemExit("persistent phase acknowledgement count is invalid")
+loss_rate = (attempts - acks) / attempts
+data = {
+    "schema_version": 2,
+    "contract": "ams.m2.vertical_slice.phase/v1",
+    "run_id": run_id,
+    "runtime_id": runtime_id,
+    "run_nonce": nonce,
+    "phase": phase,
+    "attempts": attempts,
+    "expected_ack": expected_ack,
+    "acknowledgements": acks,
+    "telemetry_responses": phase_result.get("telemetry_responses"),
+    "heartbeat_count": phase_result.get("heartbeat_count"),
+    "heartbeat_observation_count": phase_result.get("heartbeat_observation_count"),
+    "heartbeat_observation_s": phase_result.get("heartbeat_observation_s"),
+    "heartbeat_timeout": phase_result.get("heartbeat_timeout"),
+    "loss_rate": loss_rate,
+    "ack_latency": phase_result.get("ack_latency"),
+    "telemetry_latency": phase_result.get("telemetry_latency"),
+}
+Path(output).write_text(json.dumps(data, allow_nan=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
 }
 
-start_phase_captures() {
-  local phase="$1"
-  start_capture "gcs_${phase}" "$GCS_NS" eth0 \
-    "$RUN_DIR/pcap/gcs_ingress_${phase}.pcap"
-  # This veth is the persistent external ingress to the ns-3 Linux bridge.
-  # Unlike tap-gcs, it still observes offers while the ns-3 process is down.
-  start_capture "ns3_external_${phase}" "$NS3_NS" v-gcs-ns3 \
-    "$RUN_DIR/pcap/ns3_external_ingress_${phase}.pcap"
-  start_capture "uav_${phase}" "$UAV_NS" eth0 \
-    "$RUN_DIR/pcap/uav_egress_${phase}.pcap"
-}
-
-stop_phase_captures() {
-  local phase="$1"
-  stop_capture "gcs_${phase}"
-  stop_capture "ns3_external_${phase}"
-  stop_capture "uav_${phase}"
-}
-
-start_phase_captures good
 start_ns3 good
+lifecycle_event good_dwell_start --field duration_s="$POSITIVE_READINESS_STABILITY_S"
+wait_positive_readiness good
+lifecycle_event good_dwell_complete --field duration_s="$POSITIVE_READINESS_STABILITY_S"
 GOOD_NS3_REFERENCE="$(process_reference "$CURRENT_NS3_ACTUAL_PID")"
 runner_log "phase good started ns3_pid=$CURRENT_NS3_ACTUAL_PID"
+lifecycle_event good_start --field ns3_pid="$CURRENT_NS3_ACTUAL_PID"
 run_probe_phase good "$GOOD_ATTEMPTS" true up "$HEARTBEAT_TIMEOUT_S" "$ACK_TIMEOUT_S" \
   --ns3-process "$GOOD_NS3_REFERENCE"
 sleep "$CAPTURE_DRAIN_S"
+lifecycle_event good_terminal --field attempts="$GOOD_ATTEMPTS"
+lifecycle_event prestop_dwell_start --field duration_s="$PRESTOP_READINESS_STABILITY_S"
+wait_positive_readiness good "$PRESTOP_READINESS_STABILITY_S"
+lifecycle_event prestop_dwell_complete --field duration_s="$PRESTOP_READINESS_STABILITY_S"
 stop_ns3_phase good
-stop_phase_captures good
 runner_log "phase good complete and ns-3 stopped"
 
+lifecycle_event stopped_drain_start --field duration_s="$STOPPED_DRAIN_S"
+sleep "$STOPPED_DRAIN_S"
+lifecycle_event stopped_drain_complete --field duration_s="$STOPPED_DRAIN_S"
 sleep "$DOWN_SETTLE_S"
-start_phase_captures down
 runner_log "phase down started with prior_ns3=$GOOD_NS3_REFERENCE"
+lifecycle_event down_start --field prior_engine=1
 run_probe_phase down "$DOWN_ATTEMPTS" false down "$DOWN_HEARTBEAT_TIMEOUT_S" "$DOWN_ACK_TIMEOUT_S" \
   --absent-process "$GOOD_NS3_REFERENCE"
 sleep "$CAPTURE_DRAIN_S"
-stop_phase_captures down
+lifecycle_event down_terminal --field attempts="$DOWN_ATTEMPTS"
 runner_log "phase down complete"
 
-start_phase_captures recovery
 start_ns3 recovery
+lifecycle_event recovery_dwell_start --field duration_s="$POSITIVE_READINESS_STABILITY_S"
+wait_positive_readiness recovery
+lifecycle_event recovery_dwell_complete --field duration_s="$POSITIVE_READINESS_STABILITY_S"
 RECOVERY_NS3_REFERENCE="$(process_reference "$CURRENT_NS3_ACTUAL_PID")"
 runner_log "phase recovery started ns3_pid=$CURRENT_NS3_ACTUAL_PID"
+lifecycle_event recovery_start --field ns3_pid="$CURRENT_NS3_ACTUAL_PID"
 run_probe_phase recovery "$RECOVERY_ATTEMPTS" true up "$HEARTBEAT_TIMEOUT_S" "$ACK_TIMEOUT_S" \
   --ns3-process "$RECOVERY_NS3_REFERENCE" \
   --absent-process "$GOOD_NS3_REFERENCE"
 sleep "$CAPTURE_DRAIN_S"
+lifecycle_event recovery_terminal --field attempts="$RECOVERY_ATTEMPTS"
+lifecycle_event recovery_prestop_dwell_start --field duration_s="$PRESTOP_READINESS_STABILITY_S"
+wait_positive_readiness recovery "$PRESTOP_READINESS_STABILITY_S"
+lifecycle_event recovery_prestop_dwell_complete --field duration_s="$PRESTOP_READINESS_STABILITY_S"
 stop_ns3_phase recovery
-stop_phase_captures recovery
 runner_log "phase recovery complete and ns-3 stopped"
 
 # Stop all live producers before hashing the immutable raw evidence.
+stop_lifecycle_monitor true
+stop_gcs_endpoint true
 stop_adapter
 stop_launch
-stop_capture tail
+stop_persistent_captures
 GCS_NS="$GCS_NS" NS3_NS="$NS3_NS" UAV_NS="$UAV_NS" TAIL_ROOT="$TAIL_ROOT" \
   "$ROOT_DIR/network/scripts/setup_one_uav_netns.sh" down \
   > "$RUN_DIR/logs/netns_teardown.log" 2>&1
@@ -978,11 +1406,12 @@ for phase, epoch in (("good", 1), ("recovery", 2)):
         "argv": raw_record(f"logs/ns3_{phase}.argv"),
         "ready": raw_record(f"logs/ns3_{phase}.ready"),
         "stop": raw_record(f"logs/ns3_{phase}.stop"),
+        "lifecycle": raw_record(f"logs/ns3_{phase}.lifecycle.jsonl"),
     }
 
 data = {
     "schema_version": 2,
-    "contract": "ams.m2.vertical_slice/v1",
+    "contract": "ams.m2.vertical_slice/v2",
     "run_id": run_id,
     "runtime_id": runtime_id,
     "run_nonce": nonce,
@@ -1028,6 +1457,10 @@ data = {
         "probe": "logs/m2_probe_events.jsonl",
         "processes": "logs/m2_process_events.jsonl",
         "adapter": "logs/uav_adapter.jsonl",
+        "gcs_endpoint_stdout": "logs/m2_gcs_endpoint.stdout",
+        "gcs_endpoint_shutdown": "logs/m2_gcs_endpoint_shutdown.log",
+        "lifecycle": "logs/m2_lifecycle.jsonl",
+        "monitor": "logs/m2_monitor.jsonl",
     },
 }
 output.write_text(
@@ -1051,6 +1484,14 @@ required = [
     "logs/m2_probe_events.jsonl",
     "logs/m2_process_events.jsonl",
     "logs/uav_adapter.jsonl",
+    "logs/m2_lifecycle.jsonl",
+    "logs/m2_monitor.jsonl",
+    "logs/m2_monitor.stop",
+    "logs/m2_lifecycle_monitor.stdout",
+    "logs/m2_lifecycle_monitor.stderr",
+    "logs/m2_gcs_endpoint.stdout",
+    "logs/m2_gcs_endpoint.stderr",
+    "logs/m2_gcs_endpoint_shutdown.log",
     "logs/m2_process_identity.json",
     "logs/m2_netns_snapshot.json",
     "metrics/m2_run.json",
@@ -1062,37 +1503,24 @@ required = [
     "logs/ns3_good.argv",
     "logs/ns3_good.ready",
     "logs/ns3_good.stop",
+    "logs/ns3_good.lifecycle.jsonl",
     "logs/ns3_recovery_config.json",
     "logs/ns3_recovery_packet_events.jsonl",
     "logs/ns3_recovery.argv",
     "logs/ns3_recovery.ready",
     "logs/ns3_recovery.stop",
-    "pcap/gcs_ingress_good.pcap",
-    "pcap/ns3_external_ingress_good.pcap",
+    "logs/ns3_recovery.lifecycle.jsonl",
+    "pcap/uav_tail.pcap",
+    "pcap/gcs_ingress.pcap",
+    "pcap/ns3_external_ingress.pcap",
+    "pcap/ns3_external_egress.pcap",
     "pcap/ns3_ingress_good.pcap",
     "pcap/ns3_egress_good.pcap",
-    "pcap/uav_egress_good.pcap",
-    "pcap/gcs_ingress_recovery.pcap",
-    "pcap/ns3_external_ingress_recovery.pcap",
     "pcap/ns3_ingress_recovery.pcap",
     "pcap/ns3_egress_recovery.pcap",
-    "pcap/uav_egress_recovery.pcap",
-    "pcap/gcs_ingress_down.pcap",
-    "pcap/ns3_external_ingress_down.pcap",
-    "pcap/uav_egress_down.pcap",
+    "pcap/uav_egress.pcap",
 ]
-for key in (
-    "tail",
-    "gcs_good",
-    "ns3_external_good",
-    "uav_good",
-    "gcs_down",
-    "ns3_external_down",
-    "uav_down",
-    "gcs_recovery",
-    "ns3_external_recovery",
-    "uav_recovery",
-):
+for key in ("tail", "gcs", "ns3_external_gcs", "ns3_external_uav", "uav"):
     required.extend(
         (
             f"logs/capture_{key}_stats.json",
@@ -1127,7 +1555,7 @@ for relative in sorted(selected):
     files[relative] = {"sha256": digest, "size_bytes": path.stat().st_size}
 data = {
     "schema_version": 2,
-    "contract": "ams.m2.vertical_slice.manifest/v1",
+    "contract": "ams.m2.vertical_slice.manifest/v2",
     "run_id": run_id,
     "runtime_id": runtime_id,
     "run_nonce": nonce,

@@ -473,7 +473,7 @@ class Fixture:
         m2_result = {
             "schema_version": 2,
             "contract": validator.M2_RESULT_CONTRACT,
-            "validation_contract": "ams.m2.vertical_slice/v1",
+            "validation_contract": validator.M2_EVIDENCE_CONTRACT,
             "run_id": "m2_fixture",
             "runtime_id": "33" * 16,
             "packet_engine": m2_packet_engine,
@@ -481,11 +481,12 @@ class Fixture:
             "passed": True,
             "failures": [],
             "gates": {
-                "shared_packet_core": {
+                gate_name: {
                     "status": "passed",
                     "failures": [],
                     "details": {},
                 }
+                for gate_name in sorted(validator.M2_REQUIRED_GATES)
             },
         }
         m2_result_payload = (
@@ -610,6 +611,7 @@ class Fixture:
                     "path": str(receipt),
                     "sha256": validator.sha256_file(receipt),
                 },
+                "lifecycle_manifest": validator.expected_engine_lifecycle_manifest(),
             },
             "m2_predecessor": m2_predecessor,
             "p2mp": {
@@ -859,6 +861,7 @@ class Fixture:
         self._forbidden()
         self.write_engine_records()
         self._lifecycle()
+        self._engine_lifecycle()
         self._topology()
         self._captures()
         self._continuous_topology()
@@ -2003,6 +2006,11 @@ class Fixture:
                 {"exit_code": 0, "listener_processes": 6},
             ),
             (
+                "engine_final_stop_requested",
+                116_450_000_000,
+                {"event_epoch": 2},
+            ),
+            (
                 "engine_final_stop",
                 116_500_000_000,
                 {"event_epoch": 2, "exit_code": 0},
@@ -2054,6 +2062,61 @@ class Fixture:
             for sequence, (event, timestamp, details) in enumerate(values, start=1)
         ]
         dump_jsonl(self.root / "raw/lifecycle.jsonl", records)
+
+    def _engine_lifecycle(self) -> None:
+        """Emit the C++-owned write-once lifecycle artifact for both epochs."""
+
+        queue_devices = ["gcs", *(f"uav{index}" for index in range(1, 6))]
+        zero_depths = {
+            "control_packets": 0,
+            "payload_packets": 0,
+            "additional_data_packets": 0,
+            "total_packets": 0,
+        }
+        times = {
+            1: (8_500_000_000, 52_950_000_000, 52_960_000_000, 52_970_000_000),
+            2: (75_050_000_000, 116_460_000_000, 116_470_000_000, 116_480_000_000),
+        }
+        for epoch, host_times in times.items():
+            config_hash = self.config_hashes[epoch]
+            records: list[dict[str, object]] = []
+            for sequence, (event, host_time) in enumerate(
+                zip(validator.ENGINE_LIFECYCLE_EVENTS, host_times, strict=True),
+                start=1,
+            ):
+                record: dict[str, object] = {
+                    "schema": validator.ENGINE_LIFECYCLE_SCHEMA,
+                    "event": event,
+                    "event_sequence": sequence,
+                    "event_epoch": epoch,
+                    "config_sha256": config_hash,
+                    "host_monotonic_ns": host_time,
+                    "sim_time_ns": sequence * 1_000_000,
+                }
+                if event == "ready":
+                    record["registered_queue_count"] = len(queue_devices)
+                elif event in {"stop_observed", "stopped"}:
+                    record["stop_reason"] = "stop_file"
+                else:
+                    record.update(
+                        {
+                            "stop_reason": "stop_file",
+                            "queues": [
+                                {
+                                    "device_id": device,
+                                    "before_depths": dict(zero_depths),
+                                    "after_depths": dict(zero_depths),
+                                    "flushed_packets": 0,
+                                }
+                                for device in queue_devices
+                            ],
+                            "all_queues_empty": True,
+                        }
+                    )
+                records.append(record)
+            dump_jsonl(
+                self.root / f"logs/ns3_epoch{epoch}.lifecycle.jsonl", records
+            )
 
     def _forbidden(self) -> None:
         canaries = producer.forbidden_canaries(RUN_NONCE)
@@ -3143,6 +3206,33 @@ class M3ExternalMatrixValidatorTests(unittest.TestCase):
         stats["packets_received_kernel"] = len(frames)
         dump(stats_path, stats)
 
+    def rewrite_m2_receipt(self, receipt: dict[str, object]) -> None:
+        result = receipt["result"]
+        assert isinstance(result, dict)
+        result_payload = (
+            json.dumps(result, allow_nan=False, indent=2, sort_keys=True) + "\n"
+        ).encode()
+        receipt["result_sha256"] = hashlib.sha256(result_payload).hexdigest()
+        receipt_payload = (
+            json.dumps(receipt, allow_nan=False, indent=2, sort_keys=True) + "\n"
+        ).encode()
+        for path in (
+            self.fixture.m2_receipt,
+            self.run_dir / "raw/m2_component_host_final_receipt.json",
+        ):
+            path.chmod(0o644)
+            path.write_bytes(receipt_payload)
+            path.chmod(0o444)
+        contract_path = self.run_dir / "raw/run_contract.json"
+        contract = json.loads(contract_path.read_text())
+        contract["m2_predecessor"]["receipt"]["sha256"] = hashlib.sha256(
+            receipt_payload
+        ).hexdigest()
+        contract["m2_predecessor"]["receipt"]["result_sha256"] = receipt[
+            "result_sha256"
+        ]
+        dump(contract_path, contract)
+
     def rewrite_actual_control_events(
         self, records: list[dict[str, object]]
     ) -> None:
@@ -3578,6 +3668,49 @@ class M3ExternalMatrixValidatorTests(unittest.TestCase):
         self.assertFalse(result["passed"])
         self.assertIn("delivered during stopped window", "\n".join(result["failures"]))
 
+    def test_engine_lifecycle_requires_terminal_empty_queues(self) -> None:
+        path = self.run_dir / "logs/ns3_epoch1.lifecycle.jsonl"
+        records = validator.strict_jsonl(path)
+        terminal = next(record for record in records if record["event"] == "queues_terminal")
+        queue = terminal["queues"][0]
+        queue["after_depths"] = {
+            "control_packets": 1,
+            "payload_packets": 0,
+            "additional_data_packets": 0,
+            "total_packets": 1,
+        }
+        queue["flushed_packets"] = -1
+        dump_jsonl(path, records)
+
+        result = self.evaluate()
+
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "queue is nonempty after terminal flush",
+            "\n".join(result["gates"]["packet_engine_lifecycle"]["failures"]),
+        )
+
+    def test_engine_lifecycle_final_stop_must_follow_recovery_window(self) -> None:
+        path = self.run_dir / "logs/ns3_epoch2.lifecycle.jsonl"
+        records = validator.strict_jsonl(path)
+        shifted_times = {
+            "stop_observed": 115_400_000_000,
+            "queues_terminal": 115_410_000_000,
+            "stopped": 115_420_000_000,
+        }
+        for record in records:
+            if record["event"] in shifted_times:
+                record["host_monotonic_ns"] = shifted_times[record["event"]]
+        dump_jsonl(path, records)
+
+        result = self.evaluate()
+
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "epoch 2 raw terminal lifecycle precedes recovery end",
+            "\n".join(result["gates"]["packet_engine_lifecycle"]["failures"]),
+        )
+
     def test_duplicate_p2mp_shared_service_fails_single_root_gate(self) -> None:
         duplicate = next(
             dict(item)
@@ -3609,6 +3742,32 @@ class M3ExternalMatrixValidatorTests(unittest.TestCase):
         self.assertFalse(result["passed"])
         self.assertFalse(result["gates"]["m2_extension"]["passed"])
         self.assertIn("not byte-identical", "\n".join(result["failures"]))
+
+    def test_m2_predecessor_requires_v2_evidence_contract(self) -> None:
+        receipt = json.loads(self.fixture.m2_receipt.read_text())
+        receipt["result"]["validation_contract"] = "ams.m2.vertical_slice/v1"
+        self.rewrite_m2_receipt(receipt)
+
+        result = self.evaluate()
+
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "current-gate-set is not passing exact",
+            "\n".join(result["gates"]["m2_extension"]["failures"]),
+        )
+
+    def test_m2_predecessor_requires_complete_current_gate_set(self) -> None:
+        receipt = json.loads(self.fixture.m2_receipt.read_text())
+        receipt["result"]["gates"].pop("packet_engine_lifecycle")
+        self.rewrite_m2_receipt(receipt)
+
+        result = self.evaluate()
+
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "current-gate-set is not passing exact",
+            "\n".join(result["gates"]["m2_extension"]["failures"]),
+        )
 
     def test_rehashed_m2_shared_source_substitution_fails(self) -> None:
         receipt = json.loads(self.fixture.m2_receipt.read_text())
@@ -4565,6 +4724,12 @@ class M3ExternalMatrixStaticTests(unittest.TestCase):
         self.assertIn("--no-write", runner)
         self.assertIn('RESULT_PATH="$RUN_DIR/metrics/m3_validation_results.json"', runner)
         self.assertIn('cmp "$RESULT_PATH" "$INDEPENDENT_RESULT"', runner)
+        self.assertIn(
+            'local engine_lifecycle="$RUN_DIR/logs/ns3_epoch${epoch}.lifecycle.jsonl"',
+            runner,
+        )
+        self.assertIn('LIFECYCLE_FILE="$engine_lifecycle"', runner)
+        self.assertIn('lifecycle engine_final_stop_requested', runner)
         for event in (
             "captures_start_requested",
             "forbidden_listeners_start_requested",

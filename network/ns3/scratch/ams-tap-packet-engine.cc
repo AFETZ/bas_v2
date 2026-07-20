@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -24,8 +25,10 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -39,6 +42,7 @@ namespace
 
 constexpr const char* CONTRACT = "ams.tap_packet_engine/v1";
 constexpr const char* EVENT_SCHEMA = "ams.ns3.packet_event/v1";
+constexpr const char* LIFECYCLE_SCHEMA = "ams.ns3.lifecycle/v1";
 constexpr uint32_t MAX_UAVS = 5;
 constexpr uint32_t MAX_QUEUE_PACKETS = 1000000;
 constexpr uint64_t MAX_DURATION_MS = 86400000;
@@ -1281,6 +1285,54 @@ class AmsThreeClassQueue : public Queue<Packet>
         m_radioDevice = std::move(device);
     }
 
+    struct Depths
+    {
+        uint32_t control = 0;
+        uint32_t payload = 0;
+        uint32_t additionalData = 0;
+        uint64_t total = 0;
+    };
+
+    struct FlushResult
+    {
+        Depths before;
+        Depths after;
+        uint64_t flushedPackets = 0;
+    };
+
+    Depths ActualDepths() const
+    {
+        const uint64_t total = static_cast<uint64_t>(m_counts[BoundedPriorityScheduler::CONTROL_CLASS]) +
+                               static_cast<uint64_t>(m_counts[BoundedPriorityScheduler::PAYLOAD_CLASS]) +
+                               static_cast<uint64_t>(
+                                   m_counts[BoundedPriorityScheduler::ADDITIONAL_DATA_CLASS]);
+        if (GetContainer().size() != total)
+        {
+            throw std::runtime_error("three-class queue depth accounting diverged");
+        }
+        return {m_counts[BoundedPriorityScheduler::CONTROL_CLASS],
+                m_counts[BoundedPriorityScheduler::PAYLOAD_CLASS],
+                m_counts[BoundedPriorityScheduler::ADDITIONAL_DATA_CLASS],
+                total};
+    }
+
+    FlushResult FlushForLifecycleStop()
+    {
+        FlushResult result;
+        result.before = ActualDepths();
+        // Queue::Flush() deliberately dispatches through our virtual Remove(),
+        // so each dropped packet preserves the queue_flush packet-event trail
+        // and all three class counters are decremented by the real queue code.
+        Flush();
+        result.after = ActualDepths();
+        result.flushedPackets = result.before.total - result.after.total;
+        if (result.after.total != 0 || result.flushedPackets != result.before.total)
+        {
+            throw std::runtime_error("three-class queue did not reach an empty terminal state");
+        }
+        return result;
+    }
+
     bool Enqueue(Ptr<Packet> packet) override
     {
         const FrameMetadata metadata = InspectFrame(packet);
@@ -1509,6 +1561,9 @@ struct EngineConfig
     std::string pcapPrefix;
     std::string readyFile;
     std::string stopFile;
+    // This is a runtime evidence sink, deliberately excluded from CanonicalConfig:
+    // changing its pathname must not change simulated packet behavior.
+    std::string lifecycleFile;
     bool sionnaIpcEnabled = false;
     std::string sionnaStateFile;
     uint32_t sionnaPollIntervalMs = 1;
@@ -2505,14 +2560,232 @@ ScheduleSelfTest(const NetDeviceContainer& endpointDevices,
 }
 
 void
-PollStopFile(const std::string& stopFile)
+WriteAllOrThrow(int descriptor, const std::string& payload)
+{
+    std::size_t offset = 0;
+    while (offset < payload.size())
+    {
+        const ssize_t written =
+            ::write(descriptor, payload.data() + offset, payload.size() - offset);
+        if (written < 0 && errno == EINTR)
+        {
+            continue;
+        }
+        if (written <= 0)
+        {
+            throw std::runtime_error("cannot append lifecycle JSONL: " +
+                                     std::string(std::strerror(errno)));
+        }
+        offset += static_cast<std::size_t>(written);
+    }
+}
+
+class LifecycleLogger
+{
+  public:
+    LifecycleLogger(const std::string& path, uint64_t eventEpoch, std::string configHash)
+        : m_eventEpoch(eventEpoch),
+          m_configHash(std::move(configHash))
+    {
+        if (path.empty())
+        {
+            throw std::runtime_error("lifecycleFile must not be empty");
+        }
+        const std::filesystem::path outputPath(path);
+        const std::filesystem::path parent =
+            outputPath.parent_path().empty() ? std::filesystem::path(".") : outputPath.parent_path();
+        std::error_code directoryError;
+        std::filesystem::create_directories(parent, directoryError);
+        if (directoryError)
+        {
+            throw std::runtime_error("cannot create lifecycle directory " + parent.string() + ": " +
+                                     directoryError.message());
+        }
+
+        int flags = O_WRONLY | O_CREAT | O_EXCL | O_APPEND | O_CLOEXEC;
+#ifdef O_NOFOLLOW
+        flags |= O_NOFOLLOW;
+#endif
+        const int descriptor = ::open(outputPath.c_str(), flags, 0640);
+        if (descriptor < 0)
+        {
+            throw std::runtime_error("cannot exclusively create lifecycle JSONL " + path + ": " +
+                                     std::string(std::strerror(errno)));
+        }
+        const int directoryDescriptor =
+            ::open(parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (directoryDescriptor < 0)
+        {
+            const int error = errno;
+            ::close(descriptor);
+            throw std::runtime_error("cannot open lifecycle directory " + parent.string() + ": " +
+                                     std::string(std::strerror(error)));
+        }
+        if (::fsync(directoryDescriptor) != 0)
+        {
+            const int error = errno;
+            ::close(directoryDescriptor);
+            ::close(descriptor);
+            throw std::runtime_error("cannot fsync lifecycle directory " + parent.string() + ": " +
+                                     std::string(std::strerror(error)));
+        }
+        ::close(directoryDescriptor);
+        m_descriptor = descriptor;
+    }
+
+    ~LifecycleLogger()
+    {
+        if (m_descriptor >= 0)
+        {
+            ::close(m_descriptor);
+        }
+    }
+
+    LifecycleLogger(const LifecycleLogger&) = delete;
+    LifecycleLogger& operator=(const LifecycleLogger&) = delete;
+
+    void Emit(const std::string& event, const std::string& details = "")
+    {
+        if (event.empty())
+        {
+            throw std::runtime_error("lifecycle event must not be empty");
+        }
+        std::ostringstream record;
+        record << "{\"schema\":\"" << LIFECYCLE_SCHEMA << "\",\"event\":\""
+               << JsonEscape(event) << "\",\"event_sequence\":" << ++m_sequence
+               << ",\"event_epoch\":" << m_eventEpoch << ",\"config_sha256\":\""
+               << m_configHash << "\",\"host_monotonic_ns\":" << SteadyNowNs()
+               << ",\"sim_time_ns\":" << Simulator::Now().GetNanoSeconds();
+        if (!details.empty())
+        {
+            record << ',' << details;
+        }
+        record << "}\n";
+        WriteAllOrThrow(m_descriptor, record.str());
+        Sync();
+    }
+
+    void Sync() const
+    {
+        if (m_descriptor < 0 || ::fsync(m_descriptor) != 0)
+        {
+            throw std::runtime_error("cannot fsync lifecycle JSONL: " +
+                                     std::string(std::strerror(errno)));
+        }
+    }
+
+  private:
+    int m_descriptor = -1;
+    uint64_t m_eventEpoch;
+    std::string m_configHash;
+    uint64_t m_sequence = 0;
+};
+
+struct RegisteredQueue
+{
+    std::string deviceId;
+    Ptr<AmsThreeClassQueue> queue;
+};
+
+std::string
+JsonDepths(const AmsThreeClassQueue::Depths& depths)
+{
+    std::ostringstream out;
+    out << "{\"control_packets\":" << depths.control << ",\"payload_packets\":"
+        << depths.payload << ",\"additional_data_packets\":" << depths.additionalData
+        << ",\"total_packets\":" << depths.total << '}';
+    return out.str();
+}
+
+class LifecycleController
+{
+  public:
+    LifecycleController(LifecycleLogger& logger, const std::vector<RegisteredQueue>& queues)
+        : m_logger(logger),
+          m_queues(queues)
+    {
+        if (m_queues.empty())
+        {
+            throw std::runtime_error("lifecycle queue registry must not be empty");
+        }
+    }
+
+    void MarkReady()
+    {
+        if (m_ready)
+        {
+            throw std::runtime_error("duplicate lifecycle ready transition");
+        }
+        m_ready = true;
+        m_logger.Emit("ready",
+                      "\"registered_queue_count\":" + std::to_string(m_queues.size()));
+    }
+
+    void ObserveStop(const std::string& reason)
+    {
+        if (m_stopping)
+        {
+            return;
+        }
+        if (!m_ready)
+        {
+            throw std::runtime_error("lifecycle stop observed before ready");
+        }
+        m_stopping = true;
+        m_logger.Emit("stop_observed", "\"stop_reason\":\"" + JsonEscape(reason) + "\"");
+
+        std::ostringstream terminal;
+        terminal << "\"stop_reason\":\"" << JsonEscape(reason)
+                 << "\",\"queues\":[";
+        bool allQueuesEmpty = true;
+        for (std::size_t index = 0; index < m_queues.size(); ++index)
+        {
+            const RegisteredQueue& registration = m_queues[index];
+            if (!registration.queue)
+            {
+                throw std::runtime_error("lifecycle queue registry contains a null queue");
+            }
+            const AmsThreeClassQueue::FlushResult result = registration.queue->FlushForLifecycleStop();
+            allQueuesEmpty = allQueuesEmpty && result.after.total == 0;
+            if (index > 0)
+            {
+                terminal << ',';
+            }
+            terminal << "{\"device_id\":\"" << JsonEscape(registration.deviceId)
+                     << "\",\"before_depths\":" << JsonDepths(result.before)
+                     << ",\"after_depths\":" << JsonDepths(result.after)
+                     << ",\"flushed_packets\":" << result.flushedPackets << '}';
+        }
+        terminal << "],\"all_queues_empty\":" << (allQueuesEmpty ? "true" : "false");
+        m_logger.Emit("queues_terminal", terminal.str());
+        if (!allQueuesEmpty)
+        {
+            throw std::runtime_error("lifecycle queues did not reach an empty terminal state");
+        }
+        // Every lifecycle record is fsynced by Emit.  Keep this explicit at
+        // the stop boundary: durable terminal evidence precedes Simulator::Stop.
+        m_logger.Sync();
+        Simulator::Stop();
+        m_logger.Emit("stopped", "\"stop_reason\":\"" + JsonEscape(reason) + "\"");
+        m_logger.Sync();
+    }
+
+  private:
+    LifecycleLogger& m_logger;
+    const std::vector<RegisteredQueue>& m_queues;
+    bool m_ready = false;
+    bool m_stopping = false;
+};
+
+void
+PollStopFile(const std::string& stopFile, LifecycleController* lifecycle)
 {
     if (!stopFile.empty() && std::ifstream(stopFile).good())
     {
-        Simulator::Stop();
+        lifecycle->ObserveStop("stop_file");
         return;
     }
-    Simulator::Schedule(MilliSeconds(100), &PollStopFile, stopFile);
+    Simulator::Schedule(MilliSeconds(100), &PollStopFile, stopFile, lifecycle);
 }
 
 uint32_t
@@ -2703,6 +2976,9 @@ main(int argc, char* argv[])
     command.AddValue("pcapPrefix", "Optional shared-medium PCAP prefix", config.pcapPrefix);
     command.AddValue("readyFile", "Optional readiness JSON marker", config.readyFile);
     command.AddValue("stopFile", "Optional realtime stop marker", config.stopFile);
+    command.AddValue("lifecycleFile",
+                     "Required append-only raw lifecycle JSONL evidence output",
+                     config.lifecycleFile);
     command.AddValue("sionnaIpcEnabled",
                      "Enable fail-closed asynchronous Sionna state IPC",
                      config.sionnaIpcEnabled);
@@ -2758,6 +3034,11 @@ main(int argc, char* argv[])
         std::cerr << "FAIL eventsFile must not be empty\n";
         return 2;
     }
+    if (config.lifecycleFile.empty())
+    {
+        std::cerr << "FAIL lifecycleFile must not be empty\n";
+        return 2;
+    }
 
     try
     {
@@ -2787,6 +3068,7 @@ main(int argc, char* argv[])
         RadioController radioController(config.sionnaIpcEnabled,
                                         &radioStates,
                                         config.sionnaIntervention);
+        LifecycleLogger lifecycleLogger(config.lifecycleFile, config.eventEpoch, resolvedHash);
         PacketEventLogger logger(config.eventsFile,
                                  config.eventEpoch,
                                  resolvedHash,
@@ -2825,6 +3107,8 @@ main(int argc, char* argv[])
         radio.SetChannelAttribute("DataRate", StringValue(config.radioRate));
         radio.SetChannelAttribute("Delay", StringValue(config.radioDelay));
         NetDeviceContainer radioDevices = radio.Install(routers);
+        std::vector<RegisteredQueue> queueRegistry;
+        queueRegistry.reserve(radioDevices.GetN());
         if (radioDevices.GetN() > 0)
         {
             radioController.SetChannel(DynamicCast<CsmaChannel>(radioDevices.Get(0)->GetChannel()));
@@ -2878,6 +3162,7 @@ main(int argc, char* argv[])
                     device);
             }
             device->SetQueue(queue);
+            queueRegistry.push_back({deviceId, queue});
             device->TraceConnect(
                 "PhyTxBegin",
                 deviceId,
@@ -2928,6 +3213,7 @@ main(int argc, char* argv[])
         Ipv4GlobalRoutingHelper::PopulateRoutingTables();
         radioStates.Start();
         clockDatagrams.Start();
+        LifecycleController lifecycle(lifecycleLogger, queueRegistry);
 
         const Ipv4Address multicastSource(EndpointIp(0).c_str());
         const Ipv4Address multicastGroup("239.71.0.1");
@@ -2974,7 +3260,14 @@ main(int argc, char* argv[])
                 tapBridge.SetAttribute("DeviceName", StringValue(tapUavs[index - 1]));
                 tapBridge.Install(endpointGhosts.Get(index), endpointDevices.Get(index));
             }
-            Simulator::Schedule(MilliSeconds(100), &PollStopFile, config.stopFile);
+        }
+
+        if (!config.stopFile.empty())
+        {
+            Simulator::Schedule(MilliSeconds(100),
+                                &PollStopFile,
+                                config.stopFile,
+                                &lifecycle);
         }
 
         if (!config.pcapPrefix.empty())
@@ -2988,13 +3281,19 @@ main(int argc, char* argv[])
                                  true);
             }
         }
+        // The raw lifecycle ready record is durable before the compatibility
+        // ready marker can let an external orchestration phase proceed.
+        Simulator::Schedule(MilliSeconds(1), &LifecycleController::MarkReady, &lifecycle);
         Simulator::Schedule(MilliSeconds(1),
                             &WriteReadyFile,
                             config.readyFile,
                             resolvedHash,
                             config.eventEpoch,
                             config.uavCount);
-        Simulator::Stop(MilliSeconds(config.durationMs));
+        Simulator::Schedule(MilliSeconds(config.durationMs),
+                            &LifecycleController::ObserveStop,
+                            &lifecycle,
+                            std::string("duration"));
         Simulator::Run();
 
         bool selfTestPassed = true;

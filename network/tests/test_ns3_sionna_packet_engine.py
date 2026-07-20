@@ -170,9 +170,27 @@ def append_superseding_state(
     return record
 
 
+def unique_lifecycle_path(directory: Path) -> Path:
+    """Return a unique, absent path for the engine's O_EXCL lifecycle log."""
+    descriptor, raw_path = tempfile.mkstemp(
+        prefix="ns3-packet-engine-",
+        suffix=".lifecycle.jsonl",
+        dir=directory,
+    )
+    os.close(descriptor)
+    path = Path(raw_path)
+    path.unlink()
+    return path
+
+
 def run_engine(config: EngineConfig, events: Path) -> subprocess.CompletedProcess[str]:
+    lifecycle = unique_lifecycle_path(events.parent)
     return subprocess.run(
-        [str(BINARY), *config.engine_argv(events_file=str(events))],
+        [
+            str(BINARY),
+            *config.engine_argv(events_file=str(events)),
+            f"--lifecycleFile={lifecycle}",
+        ],
         cwd=ROOT,
         env=binary_environment(),
         text=True,

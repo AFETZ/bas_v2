@@ -59,7 +59,35 @@ FORBIDDEN_RESULT_CONTRACT = "ams.m3.forbidden_canary_observation/v1"
 FORBIDDEN_LISTENER_SCHEMA = "ams.m3.forbidden_listener_event/v1"
 M2_RECEIPT_CONTRACT = "ams.m2.host-final-receipt/v1"
 M2_RESULT_CONTRACT = "ams.m2.vertical-slice-validation/v2"
+M2_EVIDENCE_CONTRACT = "ams.m2.vertical_slice/v2"
 M2_EXTENSION_CONTRACT = "ams.m2-to-m3.shared-packet-core/v1"
+ENGINE_LIFECYCLE_SCHEMA = "ams.ns3.lifecycle/v1"
+ENGINE_LIFECYCLE_MANIFEST_CONTRACT = "ams.m3.packet-engine-lifecycle-manifest/v1"
+ENGINE_LIFECYCLE_EVENTS = (
+    "ready",
+    "stop_observed",
+    "queues_terminal",
+    "stopped",
+)
+M2_REQUIRED_GATES = frozenset(
+    {
+        "metadata",
+        "probe_transactions",
+        "lifecycle",
+        "lifecycle_monitor",
+        "endpoint_contract",
+        "ns3_build_receipt",
+        "packet_engine",
+        "packet_engine_lifecycle",
+        "packet_captures",
+        "capture_accounting",
+        "adapter_path",
+        "process_identity",
+        "critical_logs",
+        "provenance",
+        "manifest",
+    }
+)
 ENDPOINTS = ("gcs", "uav1", "uav2", "uav3", "uav4", "uav5")
 NAMESPACES = {
     "gcs": "ams-gcs",
@@ -102,6 +130,23 @@ HEX32 = re.compile(r"^[0-9a-f]{32}$")
 
 class ValidationError(ValueError):
     """A raw artifact cannot be parsed unambiguously."""
+
+
+def expected_engine_lifecycle_manifest() -> dict[str, Any]:
+    """The M3 run contract must name each write-once engine lifecycle file."""
+
+    return {
+        "contract": ENGINE_LIFECYCLE_MANIFEST_CONTRACT,
+        "schema": ENGINE_LIFECYCLE_SCHEMA,
+        "events": list(ENGINE_LIFECYCLE_EVENTS),
+        "epochs": [
+            {
+                "event_epoch": epoch,
+                "path": f"logs/ns3_epoch{epoch}.lifecycle.jsonl",
+            }
+            for epoch in (1, 2)
+        ],
+    }
 
 
 def canonical_json(value: Any) -> bytes:
@@ -333,24 +378,27 @@ def validate_m2_extension(
         result_payload = (
             json.dumps(result, allow_nan=False, indent=2, sort_keys=True) + "\n"
         ).encode()
+        result_gates = result.get("gates") if isinstance(result, dict) else None
         if (
             sha256_bytes(result_payload) != receipt.get("result_sha256")
             or result.get("schema_version") != 2
             or result.get("contract") != M2_RESULT_CONTRACT
-            or result.get("validation_contract") != "ams.m2.vertical_slice/v1"
+            or result.get("validation_contract") != M2_EVIDENCE_CONTRACT
             or result.get("run_id") != receipt.get("run_id")
             or result.get("passed") is not True
             or result.get("failures") != []
-            or not isinstance(result.get("gates"), dict)
-            or not result["gates"]
+            or not isinstance(result_gates, dict)
+            or set(result_gates) != M2_REQUIRED_GATES
             or any(
                 not isinstance(value, dict)
                 or value.get("status") != "passed"
                 or value.get("failures") != []
-                for value in result["gates"].values()
+                for value in result_gates.values()
             )
         ):
-            raise ValidationError("embedded M2 result/hash/gates are not passing exact")
+            raise ValidationError(
+                "embedded M2 result/hash/current-gate-set is not passing exact"
+            )
 
         m2_engine = result.get("packet_engine")
         engine_keys = {
@@ -501,6 +549,294 @@ def validate_m2_extension(
     except (KeyError, OSError, TypeError, ValueError, ValidationError) as exc:
         failures.append(str(exc))
     return failures, details, shared
+
+
+def validate_engine_lifecycle(
+    run_dir: Path,
+    *,
+    engine_hashes: dict[int, str],
+    runner_lifecycle: list[dict[str, Any]],
+    windows: dict[str, dict[str, Any]],
+) -> tuple[list[str], dict[str, Any]]:
+    """Independently bind each real packet-engine shutdown to M3 windows.
+
+    The packet-event stream proves packet movement while an engine is alive.
+    This companion gate proves that each supervised child reached a durable,
+    queue-empty terminal state before the runner classified it as stopped.
+    """
+
+    failures: list[str] = []
+    details: dict[str, Any] = {"epochs": {}}
+    raw_records_by_epoch: dict[int, dict[str, dict[str, Any]]] = {}
+    common_keys = {
+        "schema",
+        "event",
+        "event_sequence",
+        "event_epoch",
+        "config_sha256",
+        "host_monotonic_ns",
+        "sim_time_ns",
+    }
+    expected_keys = {
+        "ready": common_keys | {"registered_queue_count"},
+        "stop_observed": common_keys | {"stop_reason"},
+        "queues_terminal": common_keys
+        | {"stop_reason", "queues", "all_queues_empty"},
+        "stopped": common_keys | {"stop_reason"},
+    }
+    expected_devices = ["gcs", *(f"uav{index}" for index in range(1, 6))]
+    depth_keys = {
+        "control_packets",
+        "payload_packets",
+        "additional_data_packets",
+        "total_packets",
+    }
+
+    for epoch in (1, 2):
+        path = run_dir / f"logs/ns3_epoch{epoch}.lifecycle.jsonl"
+        epoch_details: dict[str, Any] = {"path": path.relative_to(run_dir).as_posix()}
+        details["epochs"][f"epoch{epoch}"] = epoch_details
+        try:
+            records = strict_jsonl(path)
+            expected_hash = engine_hashes.get(epoch)
+            if not isinstance(expected_hash, str) or not HEX64.fullmatch(expected_hash):
+                raise ValidationError(f"epoch {epoch} has no valid resolved config hash")
+            if len(records) != len(ENGINE_LIFECYCLE_EVENTS):
+                raise ValidationError(
+                    f"epoch {epoch} lifecycle cardinality is not {len(ENGINE_LIFECYCLE_EVENTS)}"
+                )
+            if [record.get("event") for record in records] != list(
+                ENGINE_LIFECYCLE_EVENTS
+            ):
+                raise ValidationError(f"epoch {epoch} lifecycle event order is not exact")
+            if [record.get("event_sequence") for record in records] != list(
+                range(1, len(ENGINE_LIFECYCLE_EVENTS) + 1)
+            ):
+                raise ValidationError(f"epoch {epoch} lifecycle sequence is not contiguous")
+            if any(
+                set(record) != expected_keys[str(record.get("event"))]
+                for record in records
+                if str(record.get("event")) in expected_keys
+            ) or any(str(record.get("event")) not in expected_keys for record in records):
+                raise ValidationError(f"epoch {epoch} lifecycle record keys are not exact")
+            host_times = [record.get("host_monotonic_ns") for record in records]
+            sim_times = [record.get("sim_time_ns") for record in records]
+            if (
+                any(type(value) is not int or value < 0 for value in host_times)
+                or any(later <= earlier for earlier, later in zip(host_times, host_times[1:]))
+            ):
+                raise ValidationError(
+                    f"epoch {epoch} lifecycle host timestamps are not strictly increasing"
+                )
+            if (
+                any(type(value) is not int or value < 0 for value in sim_times)
+                or any(later < earlier for earlier, later in zip(sim_times, sim_times[1:]))
+            ):
+                raise ValidationError(
+                    f"epoch {epoch} lifecycle simulator timestamps are invalid"
+                )
+            if any(
+                record.get("schema") != ENGINE_LIFECYCLE_SCHEMA
+                or record.get("event_epoch") != epoch
+                or record.get("config_sha256") != expected_hash
+                for record in records
+            ):
+                raise ValidationError(
+                    f"epoch {epoch} lifecycle crosses schema/epoch/config identity"
+                )
+            by_event = {str(record["event"]): record for record in records}
+            if by_event["ready"].get("registered_queue_count") != len(expected_devices):
+                raise ValidationError(
+                    f"epoch {epoch} lifecycle registered queue count is not six"
+                )
+            if any(
+                by_event[event].get("stop_reason") != "stop_file"
+                for event in ("stop_observed", "queues_terminal", "stopped")
+            ):
+                raise ValidationError(
+                    f"epoch {epoch} lifecycle stop reason is not the supervised stop file"
+                )
+            terminal = by_event["queues_terminal"]
+            queues = terminal.get("queues")
+            if terminal.get("all_queues_empty") is not True or not isinstance(queues, list):
+                raise ValidationError(
+                    f"epoch {epoch} lifecycle terminal queue state is malformed"
+                )
+            if [queue.get("device_id") for queue in queues if isinstance(queue, dict)] != expected_devices or len(queues) != len(expected_devices):
+                raise ValidationError(
+                    f"epoch {epoch} lifecycle queue device registry is not exact"
+                )
+            flushed_packets = 0
+            for queue in queues:
+                if not isinstance(queue, dict) or set(queue) != {
+                    "device_id",
+                    "before_depths",
+                    "after_depths",
+                    "flushed_packets",
+                }:
+                    raise ValidationError(
+                        f"epoch {epoch} lifecycle queue terminal fields are not exact"
+                    )
+                totals: dict[str, int] = {}
+                for label in ("before_depths", "after_depths"):
+                    depths = queue.get(label)
+                    if not isinstance(depths, dict) or set(depths) != depth_keys:
+                        raise ValidationError(
+                            f"epoch {epoch} lifecycle {label} fields are not exact"
+                        )
+                    if any(type(value) is not int or value < 0 for value in depths.values()):
+                        raise ValidationError(
+                            f"epoch {epoch} lifecycle {label} is not finite/nonnegative"
+                        )
+                    if depths["total_packets"] != sum(
+                        depths[name]
+                        for name in (
+                            "control_packets",
+                            "payload_packets",
+                            "additional_data_packets",
+                        )
+                    ):
+                        raise ValidationError(
+                            f"epoch {epoch} lifecycle {label} total is inconsistent"
+                        )
+                    totals[label] = depths["total_packets"]
+                if any(queue["after_depths"][name] != 0 for name in depth_keys):
+                    raise ValidationError(
+                        f"epoch {epoch} lifecycle queue is nonempty after terminal flush"
+                    )
+                if (
+                    type(queue.get("flushed_packets")) is not int
+                    or queue["flushed_packets"] != totals["before_depths"]
+                    - totals["after_depths"]
+                ):
+                    raise ValidationError(
+                        f"epoch {epoch} lifecycle flushed-packet accounting differs"
+                    )
+                flushed_packets += queue["flushed_packets"]
+            epoch_details.update(
+                {
+                    "config_sha256": expected_hash,
+                    "host_monotonic_ns": {
+                        event: by_event[event]["host_monotonic_ns"]
+                        for event in ENGINE_LIFECYCLE_EVENTS
+                    },
+                    "flushed_packets": flushed_packets,
+                }
+            )
+            raw_records_by_epoch[epoch] = by_event
+        except ValidationError as exc:
+            failures.append(str(exc))
+
+    def runner_event(name: str, epoch: int) -> dict[str, Any] | None:
+        matches = [
+            record
+            for record in runner_lifecycle
+            if record.get("event") == name
+            and isinstance(record.get("details"), dict)
+            and record["details"].get("event_epoch") == epoch
+        ]
+        if len(matches) != 1 or type(matches[0].get("monotonic_ns")) is not int:
+            failures.append(
+                f"epoch {epoch} runner lifecycle {name} identity/time is not exact"
+            )
+            return None
+        return matches[0]
+
+    def window_time(phase: str, field: str) -> int | None:
+        window = windows.get(phase)
+        value = window.get(field) if isinstance(window, dict) else None
+        if type(value) is not int:
+            failures.append(f"{phase} phase window {field} is unavailable for engine lifecycle")
+            return None
+        return value
+
+    positive_start = window_time("positive", "start_monotonic_ns")
+    p2mp_end = window_time("p2mp", "end_monotonic_ns")
+    stopped_start = window_time("stopped", "start_monotonic_ns")
+    stopped_end = window_time("stopped", "end_monotonic_ns")
+    recovery_start = window_time("recovery", "start_monotonic_ns")
+    recovery_end = window_time("recovery", "end_monotonic_ns")
+    runner_names = {
+        1: ("engine_started", "engine_ready", "engine_stop_requested", "engine_stopped"),
+        2: (
+            "engine_restarted",
+            "engine_ready",
+            "engine_final_stop_requested",
+            "engine_final_stop",
+        ),
+    }
+    for epoch, names in runner_names.items():
+        raw = raw_records_by_epoch.get(epoch)
+        start, ready, stop_requested, stop_complete = (
+            runner_event(name, epoch) for name in names
+        )
+        if raw is None or any(record is None for record in (start, ready, stop_requested, stop_complete)):
+            continue
+        raw_ready = raw["ready"]["host_monotonic_ns"]
+        raw_stop_observed = raw["stop_observed"]["host_monotonic_ns"]
+        raw_terminal = raw["queues_terminal"]["host_monotonic_ns"]
+        raw_stopped = raw["stopped"]["host_monotonic_ns"]
+        if not (
+            start["monotonic_ns"]
+            <= raw_ready
+            <= ready["monotonic_ns"]
+        ):
+            failures.append(
+                f"epoch {epoch} raw ready is not bounded by runner start/readiness"
+            )
+        if not (
+            stop_requested["monotonic_ns"]
+            <= raw_stop_observed
+            < raw_terminal
+            < raw_stopped
+            <= stop_complete["monotonic_ns"]
+        ):
+            failures.append(
+                f"epoch {epoch} raw terminal lifecycle is not bounded by runner stop"
+            )
+        if epoch == 1:
+            if (
+                positive_start is not None
+                and raw_ready > positive_start - 10_000_000_000
+            ):
+                failures.append("epoch 1 raw readiness was not stable for 10 seconds")
+            if (
+                p2mp_end is not None
+                and stopped_start is not None
+                and not (
+                    p2mp_end
+                    <= raw_stop_observed
+                    < raw_stopped
+                    < stopped_start
+                )
+            ):
+                failures.append(
+                    "epoch 1 raw stop/terminal boundary is outside the declared drain"
+                )
+        else:
+            if (
+                stopped_end is not None
+                and recovery_start is not None
+                and not (
+                    stopped_end < raw_ready <= recovery_start - 10_000_000_000
+                )
+            ):
+                failures.append(
+                    "epoch 2 raw readiness is outside stopped/recovery transition"
+                )
+            if recovery_end is not None and raw_stop_observed < recovery_end:
+                failures.append("epoch 2 raw terminal lifecycle precedes recovery end")
+
+    if stopped_start is not None and stopped_end is not None:
+        for epoch, raw in raw_records_by_epoch.items():
+            if any(
+                stopped_start <= record["host_monotonic_ns"] < stopped_end
+                for record in raw.values()
+            ):
+                failures.append(
+                    f"epoch {epoch} raw engine lifecycle appears inside stopped window"
+                )
+    return failures, details
 
 
 def x25_crc(payload: bytes) -> int:
@@ -3543,6 +3879,23 @@ def validate(
     else:
         try:
             binary = Path(engine_identity["path"])
+            if set(engine_identity) != {
+                "program",
+                "path",
+                "sha256",
+                "size",
+                "contract",
+                "event_schema",
+                "uav_count",
+                "ns3_dir",
+                "copied_source",
+                "required_modules",
+                "build_receipt",
+                "lifecycle_manifest",
+            }:
+                gate_failures["run_identity"].append(
+                    "packet-engine identity/artifact manifest keys are not exact"
+                )
             if (
                 engine_identity.get("contract") != "ams.tap_packet_engine/v1"
                 or engine_identity.get("uav_count") != 5
@@ -3558,6 +3911,13 @@ def validate(
             ):
                 gate_failures["run_identity"].append(
                     "packet-engine required module union mismatch"
+                )
+            if (
+                engine_identity.get("lifecycle_manifest")
+                != expected_engine_lifecycle_manifest()
+            ):
+                gate_failures["run_identity"].append(
+                    "packet-engine lifecycle artifact manifest is not exact"
                 )
         except (KeyError, OSError, TypeError):
             gate_failures["run_identity"].append(
@@ -4731,8 +5091,10 @@ def validate(
             )
 
     lifecycle_event_names: list[str] = []
+    lifecycle_records: list[dict[str, Any]] = []
     try:
         lifecycle = strict_jsonl(run_dir / "raw/lifecycle.jsonl")
+        lifecycle_records = lifecycle
         lifecycle_keys = {
             "schema",
             "run_id",
@@ -4798,6 +5160,7 @@ def validate(
             "endpoint_agents_stopped",
             "forbidden_listeners_stop_requested",
             "forbidden_listeners_stopped",
+            "engine_final_stop_requested",
             "engine_final_stop",
             "actual_sitl_stack_stop_requested",
             "actual_sitl_stack_stopped",
@@ -4871,6 +5234,7 @@ def validate(
                 "exit_code": 0,
                 "listener_processes": 6,
             },
+            "engine_final_stop_requested": {"event_epoch": 2},
             "engine_final_stop": {"event_epoch": 2, "exit_code": 0},
             "actual_sitl_stack_stop_requested": {
                 "adapter_processes": 5,
@@ -5094,6 +5458,20 @@ def validate(
                 gate_failures["lifecycle"].append("stopped engine did not exit cleanly")
     except ValidationError as exc:
         gate_failures["lifecycle"].append(str(exc))
+
+    try:
+        engine_lifecycle_failures, engine_lifecycle_details = validate_engine_lifecycle(
+            run_dir,
+            engine_hashes=engine_hashes,
+            runner_lifecycle=lifecycle_records,
+            windows=windows,
+        )
+        gate_failures["packet_engine_lifecycle"].extend(engine_lifecycle_failures)
+        details["packet_engine_lifecycle"] = engine_lifecycle_details
+    except (KeyError, TypeError, ValidationError) as exc:
+        gate_failures["packet_engine_lifecycle"].append(
+            f"packet-engine lifecycle parser failed closed: {exc}"
+        )
 
     expected_pcaps = [
         *(run_dir / f"pcap/endpoint-{endpoint}.pcap" for endpoint in ENDPOINTS),
@@ -5800,6 +6178,7 @@ def validate(
         "positive_matrix",
         "stopped_isolation",
         "ns3_path",
+        "packet_engine_lifecycle",
         "p2mp",
         "lifecycle",
         "captures",

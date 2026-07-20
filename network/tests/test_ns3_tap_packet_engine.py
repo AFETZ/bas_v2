@@ -21,6 +21,7 @@ from network.ns3.tap_packet_engine_config import (
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "network/ns3/scratch/ams-tap-packet-engine.cc"
 BUILD_SCRIPT = ROOT / "network/ns3/build_ns3_tap_packet_engine.sh"
+RUNNER = ROOT / "network/ns3/run_ns3_tap_packet_engine.sh"
 OLD_DIAGNOSTIC = ROOT / "network/ns3/scratch/ams-tap-vertical-slice.cc"
 BINARY = Path(
     os.environ.get(
@@ -57,9 +58,23 @@ def binary_environment() -> dict[str, str]:
     return environment
 
 
-def run_engine(config: EngineConfig, events: Path) -> subprocess.CompletedProcess[str]:
+def run_engine(
+    config: EngineConfig,
+    events: Path,
+    lifecycle: Path | None = None,
+    stop_file: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    if lifecycle is None:
+        lifecycle = events.with_suffix(".lifecycle.jsonl")
+    arguments = [
+        str(BINARY),
+        *config.engine_argv(events_file=str(events)),
+        f"--lifecycleFile={lifecycle}",
+    ]
+    if stop_file is not None:
+        arguments.append(f"--stopFile={stop_file}")
     return subprocess.run(
-        [str(BINARY), *config.engine_argv(events_file=str(events))],
+        arguments,
         cwd=ROOT,
         env=binary_environment(),
         text=True,
@@ -240,6 +255,32 @@ class TapPacketEngineStaticTests(unittest.TestCase):
         ):
             self.assertIn(field, source)
 
+    def test_lifecycle_evidence_is_durable_and_queue_terminal(self) -> None:
+        source = SOURCE.read_text(encoding="utf-8")
+        canonical_start = source.index("std::string\nCanonicalConfig(")
+        canonical_end = source.index("bool\nIsValidInterfaceName", canonical_start)
+        canonical = source[canonical_start:canonical_end]
+
+        self.assertIn('LIFECYCLE_SCHEMA = "ams.ns3.lifecycle/v1"', source)
+        self.assertIn('command.AddValue("lifecycleFile"', source)
+        self.assertNotIn("lifecycleFile", canonical)
+        self.assertIn("O_CREAT | O_EXCL | O_APPEND", source)
+        self.assertIn("::fsync(m_descriptor)", source)
+        self.assertIn("queueRegistry.push_back({deviceId, queue})", source)
+        self.assertIn("FlushForLifecycleStop", source)
+        self.assertIn("Flush();", source)
+        self.assertRegex(
+            source,
+            r'm_logger\.Emit\("stop_observed"[\s\S]+?'
+            r'm_logger\.Emit\("queues_terminal"[\s\S]+?'
+            r'm_logger\.Sync\(\);\s*Simulator::Stop\(\);[\s\S]+?'
+            r'm_logger\.Emit\("stopped"',
+        )
+
+        wrapper = RUNNER.read_text(encoding="utf-8")
+        self.assertIn('LIFECYCLE_FILE="${LIFECYCLE_FILE:-', wrapper)
+        self.assertIn('--lifecycleFile="$LIFECYCLE_FILE"', wrapper)
+
     def test_build_is_exact_ns340_and_uses_canonical_locked_module_union(self) -> None:
         build = BUILD_SCRIPT.read_text(encoding="utf-8")
         self.assertIn('NS3_VERSION" != "3.40"', build)
@@ -299,7 +340,12 @@ class TapPacketEngineCompiledTests(unittest.TestCase):
             argument for argument in args if not argument.startswith("--configHash=")
         ]
         result = subprocess.run(
-            [str(BINARY), *args, "--printConfigHash=1"],
+            [
+                str(BINARY),
+                *args,
+                "--lifecycleFile=runtime-only-lifecycle.jsonl",
+                "--printConfigHash=1",
+            ],
             cwd=ROOT,
             env=binary_environment(),
             text=True,
@@ -336,12 +382,39 @@ class TapPacketEngineCompiledTests(unittest.TestCase):
         config = config_for()
         with tempfile.TemporaryDirectory() as temporary:
             events = Path(temporary) / "events.jsonl"
-            result = run_engine(config, events)
+            lifecycle = Path(temporary) / "lifecycle.jsonl"
+            result = run_engine(config, events, lifecycle)
             self.assertEqual(result.returncode, 0, result.stderr)
             summary = json.loads(result.stdout)
             self.assertEqual(summary["p2mp_root_transmissions"], 1)
             self.assertEqual(summary["p2mp_egress_devices"], 5)
             records = [json.loads(line) for line in events.read_text().splitlines()]
+            lifecycle_records = [
+                json.loads(line) for line in lifecycle.read_text().splitlines()
+            ]
+
+        self.assertEqual(
+            [record["event"] for record in lifecycle_records],
+            ["ready", "stop_observed", "queues_terminal", "stopped"],
+        )
+        self.assertEqual(
+            [record["event_sequence"] for record in lifecycle_records], [1, 2, 3, 4]
+        )
+        for record in lifecycle_records:
+            self.assertEqual(record["schema"], "ams.ns3.lifecycle/v1")
+            self.assertEqual(record["event_epoch"], config.event_epoch)
+            self.assertEqual(record["config_sha256"], config.sha256())
+            self.assertIsInstance(record["host_monotonic_ns"], int)
+            self.assertIsInstance(record["sim_time_ns"], int)
+        self.assertEqual(lifecycle_records[1]["stop_reason"], "duration")
+        terminal = lifecycle_records[2]
+        self.assertTrue(terminal["all_queues_empty"])
+        self.assertEqual(len(terminal["queues"]), config.uav_count + 1)
+        for queue in terminal["queues"]:
+            self.assertEqual(queue["after_depths"]["total_packets"], 0)
+            self.assertEqual(queue["after_depths"]["control_packets"], 0)
+            self.assertEqual(queue["after_depths"]["payload_packets"], 0)
+            self.assertEqual(queue["after_depths"]["additional_data_packets"], 0)
 
         required = {
             "schema",
@@ -547,6 +620,41 @@ class TapPacketEngineCompiledTests(unittest.TestCase):
             self.assertEqual(first_result.returncode, 0, first_result.stderr)
             self.assertEqual(second_result.returncode, 0, second_result.stderr)
             self.assertEqual(first.read_bytes(), second.read_bytes())
+
+    def test_preexisting_stop_file_records_durable_queue_terminal_transition(
+        self,
+    ) -> None:
+        config = config_for(uav_count=1, duration_ms=500)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            events = root / "events.jsonl"
+            lifecycle = root / "lifecycle.jsonl"
+            stop_file = root / "stop"
+            stop_file.touch()
+            result = run_engine(config, events, lifecycle, stop_file)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            records = [json.loads(line) for line in lifecycle.read_text().splitlines()]
+
+        self.assertEqual(
+            [record["event"] for record in records],
+            ["ready", "stop_observed", "queues_terminal", "stopped"],
+        )
+        self.assertEqual(records[1]["stop_reason"], "stop_file")
+        self.assertEqual(records[3]["stop_reason"], "stop_file")
+        self.assertTrue(records[2]["all_queues_empty"])
+        self.assertEqual(len(records[2]["queues"]), 2)
+        self.assertTrue(
+            all(
+                queue["after_depths"]
+                == {
+                    "control_packets": 0,
+                    "payload_packets": 0,
+                    "additional_data_packets": 0,
+                    "total_packets": 0,
+                }
+                for queue in records[2]["queues"]
+            )
+        )
 
     def test_queue_overflow_unknown_dscp_and_hash_substitution_fail_closed(
         self,

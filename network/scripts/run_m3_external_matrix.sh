@@ -699,9 +699,15 @@ start_engine() {
   local config="$RUN_DIR/logs/ns3_epoch${epoch}_config.json"
   local argv_file="$RUN_DIR/logs/ns3_epoch${epoch}.argv"
   local events="$RUN_DIR/logs/ns3_epoch${epoch}_events.jsonl"
+  local engine_lifecycle="$RUN_DIR/logs/ns3_epoch${epoch}.lifecycle.jsonl"
   local ready="$RUN_DIR/logs/ns3_epoch${epoch}.ready.json"
   local stop="$RUN_DIR/logs/ns3_epoch${epoch}.stop"
   local pcap_prefix="$RUN_DIR/pcap/ns3-epoch${epoch}"
+  [[ ! -e "$engine_lifecycle" ]] || {
+    printf 'FAIL epoch %s lifecycle evidence already exists: %s\n' \
+      "$epoch" "$engine_lifecycle" >&2
+    exit 2
+  }
   rm -f "$ready" "$stop"
   env \
     RUN_DIR="$RUN_DIR" \
@@ -717,6 +723,7 @@ start_engine() {
     TAP_GCS=tap-gcs \
     TAP_UAVS=tap-uav1,tap-uav2,tap-uav3,tap-uav4,tap-uav5 \
     EVENTS_FILE="$events" \
+    LIFECYCLE_FILE="$engine_lifecycle" \
     PCAP_PREFIX="$pcap_prefix" \
     READY_FILE="$ready" \
     STOP_FILE="$stop" \
@@ -728,8 +735,8 @@ start_engine() {
   ENGINE_PID=$!
   ENGINE_STOP_FILE=$stop
   lifecycle "$lifecycle_event" "$(printf '{"event_epoch":%d,"pid":%d}' "$epoch" "$ENGINE_PID")"
-  wait_for_files 15 "$ready" || {
-    printf 'FAIL epoch %s packet engine did not become ready\n' "$epoch" >&2
+  wait_for_files 15 "$ready" "$engine_lifecycle" || {
+    printf 'FAIL epoch %s packet engine did not produce ready/lifecycle evidence\n' "$epoch" >&2
     exit 2
   }
   kill -0 "$ENGINE_PID" || {
@@ -873,6 +880,7 @@ for pid in "${FORBIDDEN_LISTENER_PIDS[@]}"; do
 done
 FORBIDDEN_LISTENER_PIDS=()
 lifecycle forbidden_listeners_stopped '{"exit_code":0,"listener_processes":6}'
+lifecycle engine_final_stop_requested '{"event_epoch":2}'
 stop_engine 2 engine_final_stop
 
 lifecycle actual_sitl_stack_stop_requested '{"adapter_processes":5,"supervisor_processes":1,"flight_process_groups":1}'

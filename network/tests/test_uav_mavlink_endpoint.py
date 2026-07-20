@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import signal
 import socket
@@ -178,6 +179,32 @@ class UavMavlinkEndpointTests(unittest.TestCase):
                 [event["direction"] for event in forwards],
                 ["tail_to_gcs", "gcs_to_tail"],
             )
+            self.assertEqual(
+                [event["adapter_datagram_seq"] for event in forwards],
+                [1, 2],
+            )
+            expected_payloads = {
+                "tail_to_gcs": telemetry,
+                "gcs_to_tail": command,
+            }
+            for event in forwards:
+                payload = expected_payloads[event["direction"]]
+                self.assertEqual(event["sha256"], hashlib.sha256(payload).hexdigest())
+                self.assertEqual(event["bytes"], len(payload))
+                self.assertEqual(
+                    event["transport_payload_sha256"],
+                    hashlib.sha256(payload).hexdigest(),
+                )
+                self.assertEqual(event["transport_payload_size"], len(payload))
+                received_ns = event["received_monotonic_ns"]
+                send_start_ns = event["send_start_monotonic_ns"]
+                send_complete_ns = event["send_complete_monotonic_ns"]
+                self.assertIsInstance(received_ns, int)
+                self.assertIsInstance(send_start_ns, int)
+                self.assertIsInstance(send_complete_ns, int)
+                self.assertLessEqual(received_ns, send_start_ns)
+                self.assertLessEqual(send_start_ns, send_complete_ns)
+                self.assertLessEqual(send_complete_ns, event["monotonic_ns"])
             self.assertEqual(events[-1]["event"], "adapter_stop")
             self.assertEqual(events[-1]["counters"]["tail_to_gcs"], 1)
             self.assertEqual(events[-1]["counters"]["gcs_to_tail"], 1)

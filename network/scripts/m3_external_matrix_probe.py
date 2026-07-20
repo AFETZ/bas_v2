@@ -42,7 +42,35 @@ FORBIDDEN_RESULT_CONTRACT = "ams.m3.forbidden_canary_observation/v1"
 FORBIDDEN_LISTENER_SCHEMA = "ams.m3.forbidden_listener_event/v1"
 M2_RECEIPT_CONTRACT = "ams.m2.host-final-receipt/v1"
 M2_RESULT_CONTRACT = "ams.m2.vertical-slice-validation/v2"
+M2_EVIDENCE_CONTRACT = "ams.m2.vertical_slice/v2"
 M2_EXTENSION_CONTRACT = "ams.m2-to-m3.shared-packet-core/v1"
+ENGINE_LIFECYCLE_SCHEMA = "ams.ns3.lifecycle/v1"
+ENGINE_LIFECYCLE_MANIFEST_CONTRACT = "ams.m3.packet-engine-lifecycle-manifest/v1"
+ENGINE_LIFECYCLE_EVENTS = (
+    "ready",
+    "stop_observed",
+    "queues_terminal",
+    "stopped",
+)
+M2_REQUIRED_GATES = frozenset(
+    {
+        "metadata",
+        "probe_transactions",
+        "lifecycle",
+        "lifecycle_monitor",
+        "endpoint_contract",
+        "ns3_build_receipt",
+        "packet_engine",
+        "packet_engine_lifecycle",
+        "packet_captures",
+        "capture_accounting",
+        "adapter_path",
+        "process_identity",
+        "critical_logs",
+        "provenance",
+        "manifest",
+    }
+)
 ENDPOINTS = ("gcs", "uav1", "uav2", "uav3", "uav4", "uav5")
 NAMESPACES = {
     "gcs": "ams-gcs",
@@ -159,6 +187,7 @@ def load_m2_predecessor(path: Path) -> tuple[dict[str, Any], bytes]:
     payload = path.read_bytes()
     receipt = strict_json(path)
     result = receipt.get("result")
+    gates = result.get("gates") if isinstance(result, dict) else None
     if (
         receipt.get("schema_version") != 1
         or receipt.get("contract") != M2_RECEIPT_CONTRACT
@@ -169,8 +198,17 @@ def load_m2_predecessor(path: Path) -> tuple[dict[str, Any], bytes]:
         or receipt.get("result_contract") != M2_RESULT_CONTRACT
         or not isinstance(result, dict)
         or result.get("contract") != M2_RESULT_CONTRACT
+        or result.get("validation_contract") != M2_EVIDENCE_CONTRACT
         or result.get("passed") is not True
         or result.get("failures") != []
+        or not isinstance(gates, dict)
+        or set(gates) != M2_REQUIRED_GATES
+        or any(
+            not isinstance(gate, dict)
+            or gate.get("status") != "passed"
+            or gate.get("failures") != []
+            for gate in gates.values()
+        )
         or not isinstance(result.get("packet_engine"), dict)
         or not isinstance(result.get("endpoint_transaction"), dict)
     ):
@@ -195,6 +233,23 @@ def load_m2_predecessor(path: Path) -> tuple[dict[str, Any], bytes]:
         "endpoint_transaction": result["endpoint_transaction"],
     }
     return summary, payload
+
+
+def engine_lifecycle_manifest() -> dict[str, Any]:
+    """Return the immutable M3 declaration for both raw engine lifecycles."""
+
+    return {
+        "contract": ENGINE_LIFECYCLE_MANIFEST_CONTRACT,
+        "schema": ENGINE_LIFECYCLE_SCHEMA,
+        "events": list(ENGINE_LIFECYCLE_EVENTS),
+        "epochs": [
+            {
+                "event_epoch": epoch,
+                "path": f"logs/ns3_epoch{epoch}.lifecycle.jsonl",
+            }
+            for epoch in (1, 2)
+        ],
+    }
 
 
 def endpoint_ip(endpoint: str) -> str:
@@ -1480,6 +1535,7 @@ def initialize_run(args: argparse.Namespace) -> None:
                 "traffic-control",
             ],
             "build_receipt": {"path": str(receipt), "sha256": sha256_file(receipt)},
+            "lifecycle_manifest": engine_lifecycle_manifest(),
         },
         "m2_predecessor": m2_predecessor,
         "p2mp": {

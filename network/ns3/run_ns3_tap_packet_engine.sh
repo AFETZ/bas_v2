@@ -10,6 +10,7 @@ NS3_DIR="${NS3_DIR:-$ROOT_DIR/.external/ns-3}"
 BINARY="$NS3_DIR/build/scratch/ns3.40-ams-tap-packet-engine-default"
 CONFIG_TOOL="$ROOT_DIR/network/ns3/tap_packet_engine_config.py"
 EVENTS_FILE="${EVENTS_FILE:-$RUN_DIR/logs/ns3_packet_events.jsonl}"
+LIFECYCLE_FILE="${LIFECYCLE_FILE:-$RUN_DIR/logs/ns3_packet_engine.lifecycle.jsonl}"
 PCAP_PREFIX="${PCAP_PREFIX:-$RUN_DIR/pcap/ns3_packet_engine}"
 READY_FILE="${READY_FILE:-$RUN_DIR/logs/ns3_packet_engine.ready}"
 STOP_FILE="${STOP_FILE:-$RUN_DIR/logs/ns3_packet_engine.stop}"
@@ -64,7 +65,9 @@ if [[ "${#ENGINE_ARGS[@]}" -lt 10 ]]; then
   printf 'FAIL resolved packet-engine argv is unexpectedly short\n' >&2
   exit 2
 fi
-ENGINE_ARGS+=(--readyFile="$READY_FILE" --stopFile="$STOP_FILE")
+# lifecycleFile is runtime-only raw evidence, intentionally appended after
+# the canonical config-tool argv together with the readiness/stop controls.
+ENGINE_ARGS+=(--readyFile="$READY_FILE" --stopFile="$STOP_FILE" --lifecycleFile="$LIFECYCLE_FILE")
 
 if [[ "$SELF_TEST" == "1" ]]; then
   exec env \
