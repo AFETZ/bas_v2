@@ -145,6 +145,7 @@
     "test_m4_gazebo_pose_source.M4GazeboPoseVSourceTests.test_decode_exception_is_stored_instead_of_escaping_transport_callback",
     "test_m4_gazebo_pose_source.M4GazeboPoseVSourceTests.test_native_subscription_delivery_and_close",
     "test_m4_pose_lineage.M4RawPoseLineageTests.test_mutated_raw_header_cannot_reuse_immutable_pose_hash",
+    "test_m4_pose_lineage.M4RawPoseLineageTests.test_snapshot_time_never_precedes_included_pose",
     "test_m4_pose_lineage.M4RawPoseLineageTests.test_tracker_rejects_wrong_ros_header_before_readiness",
     "test_m4_pose_lineage.M4RawPoseLineageTests.test_world_pose_snapshot_preserves_exact_raw_ros_lineage",
     "test_m4_scene_bundle.M4SceneBundleTests.test_agl_under_20m_is_rejected_after_all_hashes_are_rebound",

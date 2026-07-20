@@ -4,11 +4,14 @@ import copy
 import json
 import tempfile
 import time
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from network.radio_provider.sionna_packet_adapter import PacketAdapterError
+from network.scripts import m4_adapter_runtime
 from network.scripts.m4_adapter_runtime import PoseTracker
 from network.validation.m4_common import validate_pose_snapshots
 
@@ -89,7 +92,7 @@ class M4RawPoseLineageTests(unittest.TestCase):
             for uav in range(1, 6):
                 tracker.update_uav(f"uav{uav}", self.odometry(uav))
             tracker.update_world(self.world_poses())
-            snapshot = tracker.snapshot(time.monotonic_ns())
+            snapshot = tracker.snapshot()
             self.assertIsNotNone(snapshot)
             assert snapshot is not None
         finally:
@@ -177,6 +180,55 @@ class M4RawPoseLineageTests(unittest.TestCase):
                     tracker.update_uav(
                         "uav1", self.odometry(1, header_frame="map")
                     )
+            finally:
+                tracker.close()
+
+    def test_snapshot_time_never_precedes_included_pose(self) -> None:
+        class InjectingRLock:
+            """Inject one callback exactly while snapshot acquires its lock."""
+
+            def __init__(self) -> None:
+                self._lock = threading.RLock()
+                self.inject: object | None = None
+
+            def __enter__(self) -> "InjectingRLock":
+                self._lock.acquire()
+                callback = self.inject
+                self.inject = None
+                if callable(callback):
+                    callback()
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                self._lock.release()
+
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = PoseTracker(Path(directory), self.jammer())
+            try:
+                lock = InjectingRLock()
+                with mock.patch.object(
+                    m4_adapter_runtime.time,
+                    "monotonic_ns",
+                    side_effect=[100, 110, 120, 130, 140, 150, 200, 300],
+                ):
+                    for uav in range(1, 6):
+                        tracker.update_uav(f"uav{uav}", self.odometry(uav))
+                    tracker.update_world(self.world_poses())
+                    tracker._lock = lock
+                    lock.inject = lambda: tracker.update_uav(
+                        "uav1", self.odometry(1)
+                    )
+                    snapshot = tracker.snapshot()
+                self.assertIsNotNone(snapshot)
+                assert snapshot is not None
+                self.assertEqual(snapshot.snapshot_monotonic_ns, 300)
+                self.assertLessEqual(
+                    max(
+                        int(item["pose_monotonic_ns"])
+                        for item in [*snapshot.nodes, *snapshot.jammers]
+                    ),
+                    snapshot.snapshot_monotonic_ns,
+                )
             finally:
                 tracker.close()
 

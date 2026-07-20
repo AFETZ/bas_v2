@@ -194,8 +194,12 @@ class PoseTracker:
                 for item in self._poses.values()
             )
 
-    def snapshot(self, now: int) -> PoseSnapshot | None:
+    def snapshot(self) -> PoseSnapshot | None:
         with self._lock:
+            # A ROS/Gazebo callback may update a pose on another transport
+            # thread.  Capture time only after owning the same lock as that
+            # update so an included pose can never be newer than its snapshot.
+            now = time.monotonic_ns()
             if set(self._poses) != {*NODE_IDS, "jammer_m4"}:
                 return None
             if (
@@ -662,7 +666,7 @@ def main() -> int:
             world_pose_source.raise_if_failed()
             now = time.monotonic_ns()
             if tracker.complete_and_fresh(now):
-                initial = tracker.snapshot(now)
+                initial = tracker.snapshot()
                 break
         if initial is None:
             raise M4ValidationError("six-node/jammer ROS/Gazebo pose readiness timed out")
@@ -698,10 +702,9 @@ def main() -> int:
         loop_period_ns = 5_000_000
         next_loop_tick_ns = time.monotonic_ns()
         while not stop.is_set() and not args.stop_file.exists():
-            started = time.monotonic_ns()
             rclpy.spin_once(node, timeout_sec=0.0)
             world_pose_source.raise_if_failed()
-            snapshot = tracker.snapshot(started)
+            snapshot = tracker.snapshot()
             if snapshot is not None:
                 adapter.update_poses(snapshot)
             for path, command in [*deferred.items(), *control.poll()]:
