@@ -166,6 +166,7 @@ EXPECTED_REPOSITORY_LATER_MANIFESTS = {
         "network/tests/test_sionna_async_protocol.py",
         "network/tests/test_sionna_async_service.py",
         "network/tests/test_sionna_packet_adapter.py",
+        "network/tests/test_sionna_provider.py",
         "network/validation/m4_airborne_motion.py",
         "network/validation/m4_capacity_budget.py",
         "network/validation/m4_common.py",

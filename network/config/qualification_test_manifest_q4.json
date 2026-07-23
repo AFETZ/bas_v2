@@ -34,6 +34,7 @@
     "test_m4_capacity_validator.CapacityAirborneControllerTests.test_encoder_is_exact_command_long_plus_timesync_with_unique_attempt_token",
     "test_m4_capacity_validator.CapacityAirborneControllerTests.test_exact_deadline_response_times_out_and_cannot_complete",
     "test_m4_capacity_validator.CapacityAirborneControllerTests.test_gate_has_separate_warmup_landing_and_disarm_budgets",
+    "test_m4_capacity_validator.CapacityAirborneControllerTests.test_pre_measurement_allows_a_fourth_bounded_attempt",
     "test_m4_capacity_validator.CapacityAirborneControllerTests.test_pre_measurement_loss_retries_after_three_second_quiet_drain",
     "test_m4_capacity_validator.CapacityAirborneControllerTests.test_reposition_is_exact_command_int_and_all_tokens_are_disjoint",
     "test_m4_capacity_validator.CapacityAirborneControllerTests.test_stage_accepts_only_ack_and_exact_ts1_before_half_open_deadline",
@@ -157,6 +158,7 @@
     "test_m4_scene_bundle.M4SceneBundleTests.test_global_position_unit_or_correspondence_tolerance_mutation_fails",
     "test_m4_scene_bundle.M4SceneBundleTests.test_highrise_floor_convention_mutation_is_rejected",
     "test_m4_scene_bundle.M4SceneBundleTests.test_landmark_error_above_one_metre_fails_with_rebound_bundle",
+    "test_m4_scene_bundle.M4SceneBundleTests.test_m4_physics_cannot_fall_below_ardupilot_prearm_rate",
     "test_m4_scene_bundle.M4SceneBundleTests.test_missing_gazebo_jammer_entity_fails_after_hash_rebind",
     "test_m4_scene_bundle.M4SceneBundleTests.test_ned_to_enu_axis_sign_mutation_is_rejected",
     "test_m4_scene_bundle.M4SceneBundleTests.test_range_distance_claim_not_derived_from_endpoints_is_rejected",
@@ -166,6 +168,7 @@
     "test_m4_scene_bundle.M4SceneBundleTests.test_service_tier_boundary_mutation_fails_after_hash_rebind",
     "test_m4_scene_bundle.M4SceneBundleTests.test_sionna_mesh_reference_removal_fails_after_hash_rebind",
     "test_m4_scene_bundle.M4SceneBundleTests.test_sitl_home_must_match_gazebo_wgs84_origin",
+    "test_m4_scene_bundle.M4SceneBundleTests.test_surface_epsilon_mutation_fails_after_hash_rebind",
     "test_m4_scene_bundle.M4SceneBundleTests.test_symlinked_transitive_asset_is_rejected",
     "test_m4_scene_bundle.M4SceneBundleTests.test_terrain_down_pose_moved_clear_is_rejected",
     "test_m4_scene_bundle.M4SceneBundleTests.test_tracked_bundle_matches_frozen_runtime_identity",
@@ -247,7 +250,10 @@
     "test_sionna_packet_adapter.TailerAndIpcTests.test_fault_capture_is_a_bounded_ring_and_never_evicts_held_bytes",
     "test_sionna_packet_adapter.TailerAndIpcTests.test_fault_injector_holds_and_releases_exact_real_result_bytes",
     "test_sionna_packet_adapter.TailerAndIpcTests.test_state_ipc_is_append_only_self_hashed_and_bounded",
-    "test_sionna_packet_adapter.TailerAndIpcTests.test_tailer_is_nonblocking_preserves_partial_line_and_rejects_truncation"
+    "test_sionna_packet_adapter.TailerAndIpcTests.test_tailer_is_nonblocking_preserves_partial_line_and_rejects_truncation",
+    "test_sionna_provider.SionnaPathEvidenceTests.test_empty_sionna_path_axes_are_blocked_no_path",
+    "test_sionna_provider.SionnaSurfaceEpsilonTests.test_surface_epsilon_offsets_only_the_solver_position",
+    "test_sionna_provider.SionnaSurfaceEpsilonTests.test_surface_epsilon_rejects_nonphysical_values"
   ],
   "schema_version": 1,
   "test_modules": [
@@ -262,6 +268,7 @@
     "test_ns3_sionna_packet_engine",
     "test_sionna_async_protocol",
     "test_sionna_async_service",
-    "test_sionna_packet_adapter"
+    "test_sionna_packet_adapter",
+    "test_sionna_provider"
   ]
 }
