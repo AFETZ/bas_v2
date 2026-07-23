@@ -45,6 +45,12 @@ POST_MEASUREMENT_CONTROL_NS = 10_000_000_000
 AIRBORNE_TIMEOUT_NS = 60_000_000_000
 PREARM_STATE_TIMEOUT_NS = 30_000_000_000
 MAX_COMMAND_ATTEMPTS = 4
+# The first explicit stream command is issued immediately after the passive
+# five-heartbeat gate.  It can race the first Sionna state application, then
+# needs to survive natural uplink/ACK/TIMESYNC loss.  Give only that bootstrap
+# command two additional bounded, token-distinct attempts; later stream and
+# flight commands retain the ordinary four-attempt bound.
+EXTENDED_SYS_STATE_MAX_COMMAND_ATTEMPTS = 6
 PER_STAGE_MAX_NS = (
     MAX_COMMAND_ATTEMPTS * OUTCOME_TIMEOUT_NS
     + (MAX_COMMAND_ATTEMPTS - 1) * OUTCOME_TIMEOUT_NS
@@ -192,6 +198,26 @@ WARMUP_MOTION_STAGES = tuple(
 )
 
 
+def maximum_attempts_for_stage(stage: str) -> int:
+    """Return the declared bounded retry count for one flight stage."""
+
+    if stage not in STAGE_BY_NAME:
+        raise AirborneControlError("capacity flight stage is unknown")
+    if stage == "stream_extended_sys_state":
+        return EXTENDED_SYS_STATE_MAX_COMMAND_ATTEMPTS
+    return MAX_COMMAND_ATTEMPTS
+
+
+def stage_execution_budget_ns(stage: str) -> int:
+    """Return the outcome/retry-drain bound for one declared stage."""
+
+    attempts = maximum_attempts_for_stage(stage)
+    return (
+        attempts * OUTCOME_TIMEOUT_NS
+        + (attempts - 1) * OUTCOME_TIMEOUT_NS
+    )
+
+
 def stage_timing_budget() -> dict[str, Any]:
     """Return the exact worst-case command/state budget used by orchestration."""
 
@@ -213,7 +239,12 @@ def stage_timing_budget() -> dict[str, Any]:
         if command_id in seen_command_ids:
             repeated_post_command_boundaries += 1
         seen_command_ids.add(command_id)
-    pre_command_ns = len(PRE_MEASUREMENT_STAGES) * PER_STAGE_MAX_NS
+    extended_sys_state_max_ns = stage_execution_budget_ns(
+        "stream_extended_sys_state"
+    )
+    pre_command_ns = sum(
+        stage_execution_budget_ns(stage) for stage in PRE_MEASUREMENT_STAGES
+    )
     boundary_ns = repeated_pre_command_boundaries * OUTCOME_TIMEOUT_NS
     bounded_preflight_ns = (
         pre_command_ns
@@ -224,9 +255,13 @@ def stage_timing_budget() -> dict[str, Any]:
     return {
         "contract": STAGE_TIMING_BUDGET_CONTRACT,
         "maximum_attempts_per_stage": MAX_COMMAND_ATTEMPTS,
+        "extended_sys_state_max_attempts": (
+            EXTENDED_SYS_STATE_MAX_COMMAND_ATTEMPTS
+        ),
         "outcome_timeout_ns": OUTCOME_TIMEOUT_NS,
         "retry_quiet_drain_ns": OUTCOME_TIMEOUT_NS,
         "per_stage_max_ns": PER_STAGE_MAX_NS,
+        "extended_sys_state_max_ns": extended_sys_state_max_ns,
         "pre_measurement_stage_count": len(PRE_MEASUREMENT_STAGES),
         "pre_measurement_command_budget_ns": pre_command_ns,
         "preflight_reused_command_boundary_count": repeated_pre_command_boundaries,
@@ -235,14 +270,18 @@ def stage_timing_budget() -> dict[str, Any]:
         "airborne_state_timeout_ns": AIRBORNE_TIMEOUT_NS,
         "bounded_preflight_ns": bounded_preflight_ns,
         "warmup_motion_stage_count": len(WARMUP_MOTION_STAGES),
-        "bounded_warmup_motion_ns": len(WARMUP_MOTION_STAGES)
-        * PER_STAGE_MAX_NS,
+        "bounded_warmup_motion_ns": sum(
+            stage_execution_budget_ns(stage) for stage in WARMUP_MOTION_STAGES
+        ),
         "post_measurement_stage_count": len(POST_MEASUREMENT_STAGES),
         "post_measurement_reused_command_boundary_count": (
             repeated_post_command_boundaries
         ),
         "post_measurement_command_budget_ns": (
-            len(POST_MEASUREMENT_STAGES) * PER_STAGE_MAX_NS
+            sum(
+                stage_execution_budget_ns(stage)
+                for stage in POST_MEASUREMENT_STAGES
+            )
             + repeated_post_command_boundaries * OUTCOME_TIMEOUT_NS
         ),
         "landing_state_timeout_ns": LANDING_TIMEOUT_NS,
@@ -451,6 +490,9 @@ def airborne_gate_contract(schedule: Mapping[str, Any]) -> dict[str, Any]:
         "maximum_pose_age_ns": POSE_FRESHNESS_NS,
         "command_outcome_timeout_ns": OUTCOME_TIMEOUT_NS,
         "pre_measurement_max_attempts": MAX_COMMAND_ATTEMPTS,
+        "extended_sys_state_max_attempts": (
+            EXTENDED_SYS_STATE_MAX_COMMAND_ATTEMPTS
+        ),
         # LAND and DISARM are idempotent ArduPilot commands.  They use the
         # same bounded, token-distinct retry policy as preparation so a lost
         # ACK/TIMESYNC cannot strand armed vehicles after measurement.
@@ -564,7 +606,11 @@ class CapacityAirborneController:
         else:
             raise AirborneControlError("capacity flight stage timing class differs")
         maximum_attempts = int(
-            self.gate[attempt_key]
+            self.gate[
+                "extended_sys_state_max_attempts"
+                if stage == "stream_extended_sys_state"
+                else attempt_key
+            ]
         )
         remaining = set(EXPECTED_UAVS)
         for attempt in range(1, maximum_attempts + 1):

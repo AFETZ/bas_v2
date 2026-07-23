@@ -1571,9 +1571,19 @@ class CapacityAirborneControllerTests(unittest.TestCase):
             )
             for definition in airborne.STAGE_DEFINITIONS
             for uav in airborne.EXPECTED_UAVS
-            for attempt in range(1, airborne.MAX_COMMAND_ATTEMPTS + 1)
+            for attempt in range(
+                1,
+                airborne.maximum_attempts_for_stage(str(definition["stage"])) + 1,
+            )
         }
-        self.assertEqual(len(tokens), len(airborne.STAGE_DEFINITIONS) * 5 * airborne.MAX_COMMAND_ATTEMPTS)
+        self.assertEqual(
+            len(tokens),
+            sum(
+                airborne.maximum_attempts_for_stage(str(definition["stage"]))
+                for definition in airborne.STAGE_DEFINITIONS
+            )
+            * 5,
+        )
         self.assertTrue(all(0 < token < 1 << 63 for token in tokens))
 
     def test_gate_has_separate_warmup_landing_and_disarm_budgets(self) -> None:

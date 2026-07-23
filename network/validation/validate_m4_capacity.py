@@ -3334,7 +3334,9 @@ def _validate_m4_airborne_gate(
             definition = STAGE_BY_NAME.get(str(stage))
             uav = offer.get("uav")
             attempt = offer.get("attempt")
-            if stage in PRE_MEASUREMENT_STAGES:
+            if stage == "stream_extended_sys_state":
+                attempt_key = "extended_sys_state_max_attempts"
+            elif stage in PRE_MEASUREMENT_STAGES:
                 attempt_key = "pre_measurement_max_attempts"
             elif stage in WARMUP_MOTION_STAGES:
                 attempt_key = "warmup_motion_max_attempts"
@@ -3773,12 +3775,16 @@ def _validate_m4_airborne_gate(
             ]
             maximum_attempts = int(
                 expected_gate[
-                    "pre_measurement_max_attempts"
-                    if key[0] in PRE_MEASUREMENT_STAGES
+                    "extended_sys_state_max_attempts"
+                    if key[0] == "stream_extended_sys_state"
                     else (
-                        "warmup_motion_max_attempts"
-                        if key[0] in WARMUP_MOTION_STAGES
-                        else "post_measurement_max_attempts"
+                        "pre_measurement_max_attempts"
+                        if key[0] in PRE_MEASUREMENT_STAGES
+                        else (
+                            "warmup_motion_max_attempts"
+                            if key[0] in WARMUP_MOTION_STAGES
+                            else "post_measurement_max_attempts"
+                        )
                     )
                 ]
             )
