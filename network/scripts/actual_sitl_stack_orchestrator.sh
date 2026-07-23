@@ -34,7 +34,7 @@ usage() {
     '  --installed-share PATH --flight-scenario PATH --world-file RELATIVE' \
     '  --manifest PATH --endpoint-ready PATH --stack-ready PATH' \
     '  --stop-file PATH --stopped-file PATH [--clock-socket PATH]' \
-    '  [--headless-rendering true|false] [--mavproxy-streamrate 1..50]'
+    '  [--headless-rendering true|false] [--mavproxy-streamrate -1|1..50]'
 }
 
 while (($#)); do
@@ -74,8 +74,8 @@ done
   printf 'FAIL headless rendering must be true or false\n' >&2
   exit 2
 }
-[[ -z "$MAVPROXY_STREAMRATE" || "$MAVPROXY_STREAMRATE" =~ ^([1-9]|[1-4][0-9]|50)$ ]] || {
-  printf 'FAIL MAVProxy stream rate must be empty or an integer in 1..50\n' >&2
+[[ -z "$MAVPROXY_STREAMRATE" || "$MAVPROXY_STREAMRATE" == "-1" || "$MAVPROXY_STREAMRATE" =~ ^([1-9]|[1-4][0-9]|50)$ ]] || {
+  printf 'FAIL MAVProxy stream rate must be empty, -1, or an integer in 1..50\n' >&2
   exit 2
 }
 if [[ "$PROFILE" == m4_* && -z "$CLOCK_SOCKET" ]]; then

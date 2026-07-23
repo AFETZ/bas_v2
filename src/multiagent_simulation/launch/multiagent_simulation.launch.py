@@ -141,11 +141,13 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
     mavproxy_streamrate = LaunchConfiguration("mavproxy_streamrate").perform(
         context
     ).strip()
-    if mavproxy_streamrate and (
+    if mavproxy_streamrate and mavproxy_streamrate != "-1" and (
         not mavproxy_streamrate.isdigit()
         or not 1 <= int(mavproxy_streamrate) <= 50
     ):
-        raise RuntimeError("mavproxy_streamrate must be empty or an integer in 1..50")
+        raise RuntimeError(
+            "mavproxy_streamrate must be empty, -1, or an integer in 1..50"
+        )
     gz_server_args = "-v4 -s -r"
     if headless_rendering:
         gz_server_args += " --headless-rendering"
@@ -498,8 +500,9 @@ def generate_launch_description():
                 "mavproxy_streamrate",
                 default_value="",
                 description=(
-                    "Optional bounded MAVProxy telemetry stream rate in Hz. "
-                    "Formal modeled-network profiles set this explicitly."
+                    "Optional MAVProxy telemetry stream rate in Hz; -1 disables "
+                    "MAVProxy's broad REQUEST_DATA_STREAM request. Formal "
+                    "modeled-network profiles set this explicitly."
                 ),
             ),
             DeclareLaunchArgument(
