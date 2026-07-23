@@ -1624,10 +1624,14 @@ def create_schedule(args: argparse.Namespace) -> None:
         "expected_engine_state": "stopped",
     }
     restart_request = stopped["end_monotonic_ns"] + 500_000_000
+    # The M3 validator reserves the final ten seconds before recovery for a
+    # fully ready epoch-2 engine.  Keep two bounded seconds after the restart
+    # request for ns-3 readiness, rather than relying on the former 500 ms
+    # scheduling edge under normal host jitter.
     recovery = {
         "phase": "recovery",
-        "start_monotonic_ns": restart_request + 10_500_000_000,
-        "end_monotonic_ns": restart_request + 75_500_000_000,
+        "start_monotonic_ns": restart_request + 12_000_000_000,
+        "end_monotonic_ns": restart_request + 77_000_000_000,
         "offered_per_cell": 20,
         "p2mp_roots": 0,
         "send_span_ms": 25_000,
