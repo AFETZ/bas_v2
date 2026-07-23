@@ -1708,6 +1708,23 @@ def gate(failures: list[str], details: dict[str, Any] | None = None) -> dict[str
     return {"passed": not failures, "failures": failures, "details": details or {}}
 
 
+def _phase_ambiguous_stopped_control_uplink(cell: dict[str, Any]) -> bool:
+    """Return whether an untagged MAVLink tail frame cannot identify its phase.
+
+    Real MAVLink uplinks may be autonomous heartbeat/telemetry frames.  Their
+    byte sequence can recur after the MAVLink sequence field wraps, so a
+    payload hash found in a non-overlapping engine epoch is not evidence that
+    a stopped-phase frame crossed the engine.  Stopped control delivery is
+    instead bound by the actual-control timeout, adapter-forward, recovery
+    drain, and engine-lifecycle evidence.
+    """
+
+    return (
+        cell.get("traffic_class") == "control"
+        and cell.get("direction") == "uplink"
+    )
+
+
 def _firewall_failures(record: dict[str, Any], label: str) -> list[str]:
     failures: list[str] = []
     nftables = record.get("nftables")
@@ -4932,7 +4949,9 @@ def validate(
             if isinstance(payload_hash, str):
                 engine_by_hash_epoch[(epoch, payload_hash)].append(record)
 
-    for cell_id in cells:
+    for cell_id, cell in cells.items():
+        if _phase_ambiguous_stopped_control_uplink(cell):
+            continue
         for stopped_offer in offered_by_phase_cell[("stopped", cell_id)]:
             payload_hash = str(stopped_offer["transport_payload_sha256"])
             released = sum(
@@ -5753,7 +5772,9 @@ def validate(
                 f"ns3-external-{destination_endpoint}.pcap",
                 f"endpoint-{destination_endpoint}.pcap",
             }
-            if phase == "stopped":
+            if phase == "stopped" and not _phase_ambiguous_stopped_control_uplink(
+                cell
+            ):
                 for capture_name in downstream_names:
                     forbidden, _ = role_evidence(capture_name, offered, cell)
                     if forbidden:

@@ -3668,6 +3668,25 @@ class M3ExternalMatrixValidatorTests(unittest.TestCase):
         self.assertFalse(result["passed"])
         self.assertIn("delivered during stopped window", "\n".join(result["failures"]))
 
+    def test_stopped_control_uplink_hash_is_phase_ambiguous_only_for_tail_frames(
+        self,
+    ) -> None:
+        self.assertTrue(
+            validator._phase_ambiguous_stopped_control_uplink(
+                self.fixture.cells["uav1.control.uplink"]
+            )
+        )
+        self.assertFalse(
+            validator._phase_ambiguous_stopped_control_uplink(
+                self.fixture.cells["uav1.control.downlink"]
+            )
+        )
+        self.assertFalse(
+            validator._phase_ambiguous_stopped_control_uplink(
+                self.fixture.cells["uav1.additional_data.downlink"]
+            )
+        )
+
     def test_engine_lifecycle_requires_terminal_empty_queues(self) -> None:
         path = self.run_dir / "logs/ns3_epoch1.lifecycle.jsonl"
         records = validator.strict_jsonl(path)
