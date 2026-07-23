@@ -23,7 +23,7 @@
       "sha256": "7a725a48ee17607a09b7a98ecfe00abbafeb53c4efb0c843bda20fe50c7c872f"
     }
   },
-  "asset_manifest_sha256": "ea28762ff46159451beb87a73aa4b239b609dc5daf6068c417a79653ac105604",
+  "asset_manifest_sha256": "f4bb519d31ace1528d5eba7cedaba3c9c1ed00797774a4dd0ad6e4bf18c4a6f8",
   "assets": [
     {
       "mesh_bounds_m": null,
@@ -36,8 +36,8 @@
       "mesh_bounds_m": null,
       "path": "network/config/radio_m4_canonical.yaml",
       "role": "radio_provider_config",
-      "sha256": "c34c3e35adbce9dd02ba56f83cbece6b70b2f8bb0ae1d282364480008a3b95fd",
-      "size_bytes": 1859
+      "sha256": "8f770065a08e29e422d943c2e39a01385b97f7863fe26237b106bf1525682235",
+      "size_bytes": 1858
     },
     {
       "mesh_bounds_m": null,
@@ -292,7 +292,7 @@
   ],
   "bundle_hash_policy": "sha256-canonical-json-with-bundle_sha256-zeroed/v1",
   "bundle_id": "ams-m4-canonical-km-v2",
-  "bundle_sha256": "3977456991db70f5605f48e0efcd8d38c7ab2c75d885261276556ba7828e0662",
+  "bundle_sha256": "3b6edf0e601e854d055430fcefa426925ce4136c3bf7f7d4cb2983129e327a7f",
   "causal_scenarios": {
     "building_blocked": {
       "control_link": "cp>uav5",

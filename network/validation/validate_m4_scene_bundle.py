@@ -1056,7 +1056,7 @@ def validate_scene_bundle(bundle_path: Path = DEFAULT_BUNDLE, root: Path = ROOT)
             or radio["radio"].get("bandwidth_hz") != 20000000
         ):
             raise SceneValidationError("radio timing/frequency policy differs")
-        if radio["sionna"].get("solver", {}).get("surface_epsilon_m") != 0.001:
+        if radio["sionna"].get("solver", {}).get("surface_epsilon_m") != 0.05:
             raise SceneValidationError(
                 "radio solver does not bind the terrain-boundary ray-origin epsilon"
             )

@@ -296,7 +296,7 @@ class M4SceneBundleTests(unittest.TestCase):
         path = self.root / "network/config/radio_m4_canonical.yaml"
         path.write_text(
             path.read_text(encoding="utf-8").replace(
-                "surface_epsilon_m: 0.001", "surface_epsilon_m: 0.002"
+                "surface_epsilon_m: 0.05", "surface_epsilon_m: 0.051"
             ),
             encoding="utf-8",
         )

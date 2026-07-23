@@ -35,7 +35,10 @@ DEFAULT_JAMMERS = ROOT_DIR / "network/config/jammers.yaml"
 DEFAULT_SERVICE_TIERS = ROOT_DIR / "network/config/service_tiers.yaml"
 FLOOR_W = 1e-30
 FLOOR_GAIN = 1e-30
-MAX_SIONNA_SURFACE_EPSILON_M = 0.01
+# This bounded, solver-only lift keeps rays above a terrain surface when Gazebo
+# ground-contact resolution briefly reports a vehicle inside the triangulated
+# mesh. Raw node poses remain untouched.
+MAX_SIONNA_SURFACE_EPSILON_M = 0.05
 PATH_TYPE_NAMES = (
     "los",
     "specular",
@@ -651,9 +654,9 @@ class SionnaRadioProvider:
     def _sionna_ray_origin_position(
         position: list[float], surface_epsilon_m: float
     ) -> list[float]:
-        """Offset only the Sionna device origin above a coincident mesh surface.
+        """Offset only the Sionna device origin above terrain-contact jitter.
 
-        The caller retains and logs the unmodified physical pose.  This tiny
+        The caller retains and logs the unmodified physical pose. This bounded
         solver-space offset prevents a terrain-triangle self-intersection from
         being interpreted as a zero-candidate-path query.
         """

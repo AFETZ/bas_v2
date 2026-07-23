@@ -343,7 +343,7 @@ sionna:
     refraction: false
     diffraction: false
     synthetic_array: true
-    surface_epsilon_m: 0.001
+    surface_epsilon_m: 0.05
     seed: 42
 service_tier_selection:
   - {min_sinr_db: 20.0, service_tier_bps: 20000000, link_state: excellent, per_input: 0.001}

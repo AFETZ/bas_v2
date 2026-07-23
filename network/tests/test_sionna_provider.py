@@ -41,7 +41,7 @@ class SionnaSurfaceEpsilonTests(unittest.TestCase):
     def test_surface_epsilon_offsets_only_the_solver_position(self) -> None:
         raw_position = [-7000.0, -2500.0, 44.0]
         epsilon_m = provider.SionnaRadioProvider._sionna_surface_epsilon_m(
-            {"surface_epsilon_m": 0.001}
+            {"surface_epsilon_m": 0.05}
         )
 
         solver_position = provider.SionnaRadioProvider._sionna_ray_origin_position(
@@ -49,10 +49,10 @@ class SionnaSurfaceEpsilonTests(unittest.TestCase):
         )
 
         self.assertEqual(raw_position, [-7000.0, -2500.0, 44.0])
-        self.assertEqual(solver_position, [-7000.0, -2500.0, 44.001])
+        self.assertEqual(solver_position, [-7000.0, -2500.0, 44.05])
 
     def test_surface_epsilon_rejects_nonphysical_values(self) -> None:
-        for value in (True, -0.001, 0.011, float("inf")):
+        for value in (True, -0.001, 0.051, float("inf")):
             with self.subTest(value=value):
                 with self.assertRaises(provider.ProviderError):
                     provider.SionnaRadioProvider._sionna_surface_epsilon_m(
