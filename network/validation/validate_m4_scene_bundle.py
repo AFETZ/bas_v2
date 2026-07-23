@@ -32,6 +32,10 @@ GEODETIC_ORIGIN = {
     "latitude_deg": -35.3632621,
     "longitude_deg": 149.1652374,
 }
+M4_SITL_SCHEDULER_RATE_HZ = 400.0
+M4_SITL_GYRO_RATE_MULTIPLIER = 1.8
+M4_SITL_PHYSICS_RATE_HZ = 800.0
+M4_SITL_PHYSICS_STEP_S = 1.0 / M4_SITL_PHYSICS_RATE_HZ
 IDENTITY_4X4 = [
     [1.0, 0.0, 0.0, 0.0],
     [0.0, 1.0, 0.0, 0.0],
@@ -564,6 +568,37 @@ def validate_scene_bundle(bundle_path: Path = DEFAULT_BUNDLE, root: Path = ROOT)
     except (KeyError, json.JSONDecodeError, SceneValidationError) as exc:
         scene_ref_failures.append(str(exc))
     gates["shared_scene_references"] = make_gate(scene_ref_failures)
+
+    physics_failures: list[str] = []
+    try:
+        if sdf_root is None:
+            raise SceneValidationError("Gazebo SDF was not parsed for physics validation")
+        world = sdf_root.find("world")
+        physics = world.find("physics") if world is not None else None
+        if physics is None or physics.attrib != {
+            "name": "m4_capacity_physics",
+            "type": "ode",
+        }:
+            raise SceneValidationError("M4 Gazebo physics identity differs")
+        step_s = float(physics.findtext("max_step_size") or "nan")
+        update_rate_hz = float(physics.findtext("real_time_update_rate") or "nan")
+        if not close(step_s, M4_SITL_PHYSICS_STEP_S) or not close(
+            update_rate_hz, M4_SITL_PHYSICS_RATE_HZ
+        ):
+            raise SceneValidationError("M4 Gazebo physics rate differs")
+        if (1.0 / step_s) < (
+            M4_SITL_SCHEDULER_RATE_HZ * M4_SITL_GYRO_RATE_MULTIPLIER
+        ):
+            raise SceneValidationError("M4 Gazebo gyro source is below ArduPilot pre-arm minimum")
+    except (TypeError, ValueError, SceneValidationError) as exc:
+        physics_failures.append(str(exc))
+    gates["gazebo_physics"] = make_gate(
+        physics_failures,
+        {
+            "max_step_size_s": M4_SITL_PHYSICS_STEP_S,
+            "real_time_update_rate_hz": M4_SITL_PHYSICS_RATE_HZ,
+        },
+    )
 
     entity_failures: list[str] = []
     try:

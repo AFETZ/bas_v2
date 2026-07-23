@@ -202,13 +202,16 @@ def landmarks_obj() -> bytes:
 
 
 def gazebo_world() -> bytes:
+    # ArduPilot's enabled pre-arm checks require a gyro backend rate of at
+    # least 1.8 times its 400 Hz scheduler rate.  Keep a modest margin above
+    # the resulting 720 Hz floor without disabling any flight safety checks.
     return b'''<?xml version="1.0" ?>
 <sdf version="1.9">
   <world name="map">
     <physics name="m4_capacity_physics" type="ode">
-      <max_step_size>0.004</max_step_size>
+      <max_step_size>0.00125</max_step_size>
       <real_time_factor>1.0</real_time_factor>
-      <real_time_update_rate>250</real_time_update_rate>
+      <real_time_update_rate>800</real_time_update_rate>
     </physics>
     <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
     <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors"><render_engine>ogre2</render_engine></plugin>

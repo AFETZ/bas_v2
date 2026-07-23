@@ -91,6 +91,29 @@ class M4SceneBundleTests(unittest.TestCase):
         )
         self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
 
+    def test_m4_physics_cannot_fall_below_ardupilot_prearm_rate(self) -> None:
+        path = (
+            self.root
+            / "src/multiagent_simulation/worlds/m4_canonical/m4_canonical.sdf"
+        )
+        path.write_text(
+            path.read_text(encoding="utf-8")
+            .replace(
+                "<max_step_size>0.00125</max_step_size>",
+                "<max_step_size>0.004</max_step_size>",
+            )
+            .replace(
+                "<real_time_update_rate>800</real_time_update_rate>",
+                "<real_time_update_rate>250</real_time_update_rate>",
+            ),
+            encoding="utf-8",
+        )
+        bundle = self.load_bundle()
+        self.refresh_and_write(bundle, refresh_assets=True)
+        self.assert_failed_gate(
+            validate_scene_bundle(self.bundle_path, self.root), "gazebo_physics"
+        )
+
     def test_capacity_baseline_requires_jammer_disabled(self) -> None:
         jammer_path = self.root / "network/config/jammers_m4_canonical.yaml"
         jammer_path.write_text(
