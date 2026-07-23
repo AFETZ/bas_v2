@@ -1441,7 +1441,11 @@ class CapacityAirborneControllerTests(unittest.TestCase):
         return message
 
     def controller_with_pump(
-        self, *, drop_first_uav1: bool = False, exact_deadline_uav1: bool = False
+        self,
+        *,
+        drop_first_uav1: bool = False,
+        drop_uav1_attempts: set[int] | None = None,
+        exact_deadline_uav1: bool = False,
     ) -> tuple[
         airborne.CapacityAirborneController,
         "CapacityAirborneControllerTests.Clock",
@@ -1453,11 +1457,15 @@ class CapacityAirborneControllerTests(unittest.TestCase):
         writer = mock.Mock()
         holder: dict[str, airborne.CapacityAirborneController] = {}
 
+        dropped_uav1_attempts = set(drop_uav1_attempts or ())
+        if drop_first_uav1:
+            dropped_uav1_attempts.add(1)
+
         def pump(_timeout_s: float) -> None:
             controller = holder["controller"]
             clock.advance()
             for uav, pending in list(controller.pending_by_uav.items()):
-                if drop_first_uav1 and uav == 1 and pending.attempt == 1:
+                if uav == 1 and pending.attempt in dropped_uav1_attempts:
                     continue
                 if exact_deadline_uav1 and uav == 1:
                     clock.value = pending.sent_monotonic_ns + airborne.OUTCOME_TIMEOUT_NS
@@ -1563,11 +1571,9 @@ class CapacityAirborneControllerTests(unittest.TestCase):
             )
             for definition in airborne.STAGE_DEFINITIONS
             for uav in airborne.EXPECTED_UAVS
-            for attempt in range(1, 4)
+            for attempt in range(1, airborne.MAX_COMMAND_ATTEMPTS + 1)
         }
-        self.assertEqual(
-            len(tokens), len(airborne.STAGE_DEFINITIONS) * 5 * 3
-        )
+        self.assertEqual(len(tokens), len(airborne.STAGE_DEFINITIONS) * 5 * airborne.MAX_COMMAND_ATTEMPTS)
         self.assertTrue(all(0 < token < 1 << 63 for token in tokens))
 
     def test_gate_has_separate_warmup_landing_and_disarm_budgets(self) -> None:
@@ -1576,7 +1582,7 @@ class CapacityAirborneControllerTests(unittest.TestCase):
         self.assertEqual(
             gate["warmup_motion_deadline_monotonic_ns"]
             - gate["warmup_start_monotonic_ns"],
-            15_000_000_000,
+            airborne.PER_STAGE_MAX_NS,
         )
         self.assertEqual(
             gate["landing_deadline_monotonic_ns"]
@@ -1645,6 +1651,20 @@ class CapacityAirborneControllerTests(unittest.TestCase):
             - drains[0]["last_response_monotonic_ns"],
             airborne.OUTCOME_TIMEOUT_NS,
         )
+
+    def test_pre_measurement_allows_a_fourth_bounded_attempt(self) -> None:
+        controller, _clock, sock, writer = self.controller_with_pump(
+            drop_uav1_attempts={1, 2, 3}
+        )
+        controller._send_stage("takeoff")
+        self.assertEqual(len(sock.sent), 8)
+        offers = [
+            call.kwargs
+            for call in writer.emit.call_args_list
+            if call.args[0] == "flight_command_offered" and call.kwargs["uav"] == 1
+        ]
+        self.assertEqual([item["attempt"] for item in offers], [1, 2, 3, 4])
+        self.assertEqual(len({item["timesync_request_ts1"] for item in offers}), 4)
 
 
 class FrozenRuntimeContractTests(unittest.TestCase):

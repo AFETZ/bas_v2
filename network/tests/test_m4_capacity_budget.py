@@ -193,8 +193,8 @@ class CapacityExecutionBudgetTests(unittest.TestCase):
     def test_exact_budget_binds_schedule_engine_and_live_process(self) -> None:
         details, failures = self._validate()
         self.assertEqual(failures, [])
-        self.assertEqual(BOUNDED_PREFLIGHT_NS, 219_000_000_000)
-        self.assertEqual(READINESS_RESERVE_NS, 85_500_000_000)
+        self.assertEqual(BOUNDED_PREFLIGHT_NS, 267_000_000_000)
+        self.assertEqual(READINESS_RESERVE_NS, 37_500_000_000)
         self.assertEqual(CONTRACT_TO_CLEAN_SHUTDOWN_NS, 1_540_000_000_000)
         self.assertEqual(NS3_ENGINE_DURATION_NS, 1_600_000_000_000)
         self.assertEqual(WRAPPER_TIMEOUT_NS, 1_800_000_000_000)

@@ -44,7 +44,7 @@ DISARM_TIMEOUT_NS = 60_000_000_000
 POST_MEASUREMENT_CONTROL_NS = 10_000_000_000
 AIRBORNE_TIMEOUT_NS = 60_000_000_000
 PREARM_STATE_TIMEOUT_NS = 30_000_000_000
-MAX_COMMAND_ATTEMPTS = 3
+MAX_COMMAND_ATTEMPTS = 4
 PER_STAGE_MAX_NS = (
     MAX_COMMAND_ATTEMPTS * OUTCOME_TIMEOUT_NS
     + (MAX_COMMAND_ATTEMPTS - 1) * OUTCOME_TIMEOUT_NS
@@ -450,12 +450,12 @@ def airborne_gate_contract(schedule: Mapping[str, Any]) -> dict[str, Any]:
         "maximum_high_rate_state_age_ns": HIGH_RATE_STATE_FRESHNESS_NS,
         "maximum_pose_age_ns": POSE_FRESHNESS_NS,
         "command_outcome_timeout_ns": OUTCOME_TIMEOUT_NS,
-        "pre_measurement_max_attempts": 3,
+        "pre_measurement_max_attempts": MAX_COMMAND_ATTEMPTS,
         # LAND and DISARM are idempotent ArduPilot commands.  They use the
         # same bounded, token-distinct retry policy as preparation so a lost
         # ACK/TIMESYNC cannot strand armed vehicles after measurement.
-        "post_measurement_max_attempts": 3,
-        "warmup_motion_max_attempts": 3,
+        "post_measurement_max_attempts": MAX_COMMAND_ATTEMPTS,
+        "warmup_motion_max_attempts": MAX_COMMAND_ATTEMPTS,
         "retry_quiet_drain_ns": OUTCOME_TIMEOUT_NS,
         "post_measurement_control_ns": POST_MEASUREMENT_CONTROL_NS,
         "landing_state_timeout_ns": LANDING_TIMEOUT_NS,
