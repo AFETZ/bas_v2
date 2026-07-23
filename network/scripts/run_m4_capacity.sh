@@ -273,13 +273,17 @@ ip -j -d link show > "$RUN_DIR/raw/topology/container-root.link.json"
 ip -j addr show > "$RUN_DIR/raw/topology/container-root.addr.json"
 ip -j route show table all > "$RUN_DIR/raw/topology/container-root.route.json"
 
+# The capacity airborne gate independently requires fresh high-rate MAVLink
+# state no older than one second for every UAV.  One hertz forwarding cannot
+# satisfy that bound under the declared natural radio loss, so preserve a
+# bounded ten-hertz upstream telemetry stream for this profile.
 bash "$STACK_LAUNCHER" --run-dir "$RUN_DIR" --run-id "$RUN_ID" \
   --runtime-id "$RUNTIME_ID" --run-nonce "$RUN_NONCE" --profile m4_capacity \
   --installed-share "$EXPECTED_SHARE" --flight-scenario "$RESOLVED_FLIGHT" \
   --world-file m4_canonical/m4_canonical.sdf --manifest "$ACTUAL_MANIFEST" \
   --endpoint-ready "$ACTUAL_ENDPOINT_READY" --stack-ready "$ACTUAL_STACK_READY" \
   --stop-file "$ACTUAL_STACK_STOP" --stopped-file "$ACTUAL_STACK_STOPPED" \
-  --mavproxy-streamrate 1 \
+  --mavproxy-streamrate 10 \
   --clock-socket "$CLOCK_SOCKET" --headless-rendering false \
   > "$RUN_DIR/logs/actual-sitl-stack.stdout" \
   2> "$RUN_DIR/logs/actual-sitl-stack.stderr" &

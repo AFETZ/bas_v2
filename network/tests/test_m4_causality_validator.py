@@ -1099,7 +1099,7 @@ class CausalWindowTests(unittest.TestCase):
         self.assertIn("--fault-enabled", source)
         self.assertIn("DURATION_MS=1250000", source)
         self.assertIn("--mavproxy-streamrate 1", source)
-        self.assertIn("--mavproxy-streamrate 1", capacity_runner.read_text())
+        self.assertIn("--mavproxy-streamrate 10", capacity_runner.read_text())
         self.assertIn('mavproxy_streamrate:="$MAVPROXY_STREAMRATE"', stack.read_text())
         profiles = json.loads(
             (ROOT / "network/config/component_acceptance_profiles.json").read_text()
