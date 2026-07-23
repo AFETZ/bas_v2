@@ -949,6 +949,39 @@ class FiveUavHealthV2Tests(unittest.TestCase):
         self.assertEqual(emitted[0][0], "process_sample")
         self.assertEqual(samples[0]["counts"]["arducopter"], 5)
 
+    def test_process_monitor_drops_sample_after_measurement_is_sealed(self) -> None:
+        stop_event = threading.Event()
+        measurement_closed = threading.Event()
+        measurement_closed.set()
+        samples = []
+        emitted = []
+
+        class FakeEventLog:
+            def emit(self, event: str, **fields: object) -> None:
+                emitted.append((event, fields))
+
+        run_process_monitor(
+            42,
+            time.monotonic(),
+            stop_event,
+            samples,
+            FakeEventLog(),
+            measurement_closed=measurement_closed,
+            measurement_lock=threading.Lock(),
+            sampler=lambda process_group: (
+                {
+                    "arducopter": 5,
+                    "mavproxy": 5,
+                    "micro_ros_agent": 5,
+                    "gazebo_server": 1,
+                },
+                [{"pid": process_group}],
+                None,
+            ),
+        )
+        self.assertEqual(samples, [])
+        self.assertEqual(emitted, [])
+
     def test_short_health_run_cannot_pass(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             run_dir = Path(temp) / "short_run"
@@ -965,6 +998,36 @@ class FiveUavHealthV2Tests(unittest.TestCase):
             run_dir = Path(temp) / "complete_run"
             write_complete_health_evidence(run_dir)
             self.assertEqual(five_uav_health_status(run_dir)["status"], "passed")
+
+    def test_heartbeat_after_measurement_boundary_fails_without_tolerance(self) -> None:
+        """The collector must seal its streams instead of accepting clock jitter."""
+
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp) / "late_heartbeat"
+            write_complete_health_evidence(run_dir)
+
+            def mutate(records: list[dict]) -> None:
+                last_heartbeat = next(
+                    record
+                    for record in reversed(records)
+                    if record.get("event") == "heartbeat" and record.get("system_id") == 2
+                )
+                completion = next(
+                    record
+                    for record in records
+                    if record.get("event") == "health_probe_complete"
+                )
+                completion["measurement_ended_monotonic_ns"] = (
+                    last_heartbeat["monotonic_ns"] - 1
+                )
+
+            rewrite_raw_and_rehash(run_dir, mutate)
+            result = five_uav_health_status(run_dir)
+            self.assertEqual(result["status"], "failed")
+            self.assertIn(
+                "uav2: raw heartbeat wall age",
+                "\n".join(result["details"]["failures"]),
+            )
 
     def test_summary_without_raw_events_cannot_pass(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

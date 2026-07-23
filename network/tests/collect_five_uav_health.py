@@ -648,6 +648,8 @@ def run_process_monitor(
     event_log: Any,
     *,
     interval_s: float = 1.0,
+    measurement_closed: threading.Event | None = None,
+    measurement_lock: Any | None = None,
     sampler: Callable[
         [int], tuple[dict[str, int], list[dict[str, Any]], str | None]
     ] = process_group_counts,
@@ -659,14 +661,33 @@ def run_process_monitor(
         sampled_mono = time.monotonic()
         if stop_event.is_set():
             break
-        sample = {
-            "offset_s": sampled_mono - started_mono,
-            "counts": counts,
-            "processes": processes,
-            "error": process_error,
-        }
-        samples.append(sample)
-        event_log.emit("process_sample", phase="measurement", **sample)
+        if measurement_lock is None:
+            if measurement_closed is not None and measurement_closed.is_set():
+                break
+            sample = {
+                "offset_s": sampled_mono - started_mono,
+                "counts": counts,
+                "processes": processes,
+                "error": process_error,
+            }
+            samples.append(sample)
+            event_log.emit("process_sample", phase="measurement", **sample)
+        else:
+            # The end-of-measurement boundary holds this lock while it seals
+            # the stream.  A process sample is therefore either completely
+            # inside the observation window or omitted from both raw evidence
+            # and its summary.
+            with measurement_lock:
+                if measurement_closed is not None and measurement_closed.is_set():
+                    break
+                sample = {
+                    "offset_s": sampled_mono - started_mono,
+                    "counts": counts,
+                    "processes": processes,
+                    "error": process_error,
+                }
+                samples.append(sample)
+                event_log.emit("process_sample", phase="measurement", **sample)
         next_sample += interval_s
         stop_event.wait(max(0.0, next_sample - time.monotonic()))
 
@@ -1188,6 +1209,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     stop_event = threading.Event()
     measurement_active = threading.Event()
+    measurement_closed = threading.Event()
     data_lock = threading.Lock()
     heartbeat_errors: list[str] = []
 
@@ -1235,6 +1257,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             valid = all(math.isfinite(float(value)) for value in values) and 0.5 <= quaternion_norm <= 1.5
             with data_lock:
+                if measurement_closed.is_set():
+                    return
                 record = odometry[name]
                 if not valid:
                     record["invalid_samples"] += 1
@@ -1258,29 +1282,33 @@ def main(argv: list[str] | None = None) -> int:
                 update_sample_record(record, now_mono, now_wall)
                 sequence = record["count"]
                 sample_is_active = measurement_active.is_set()
-            event_log.emit(
-                "odometry" if sample_is_active else "readiness_odometry",
-                phase="measurement" if sample_is_active else "readiness",
-                uav=name,
-                source_topic=topic,
-                sequence=sequence,
-                stamp_ns=stamp_ns,
-                valid=valid,
-                position_m=position_m,
-                linear_speed_mps=speed,
-                orientation_xyzw=[
-                    float(orientation.x),
-                    float(orientation.y),
-                    float(orientation.z),
-                    float(orientation.w),
-                ],
-                linear_velocity_mps=[float(linear.x), float(linear.y), float(linear.z)],
-                angular_velocity_rad_s=[
-                    float(angular.x),
-                    float(angular.y),
-                    float(angular.z),
-                ],
-            )
+                # Keep evidence emission in the same critical section as the
+                # boundary decision.  Otherwise a callback accepted just
+                # before the boundary could receive a raw-event timestamp
+                # after it.
+                event_log.emit(
+                    "odometry" if sample_is_active else "readiness_odometry",
+                    phase="measurement" if sample_is_active else "readiness",
+                    uav=name,
+                    source_topic=topic,
+                    sequence=sequence,
+                    stamp_ns=stamp_ns,
+                    valid=valid,
+                    position_m=position_m,
+                    linear_speed_mps=speed,
+                    orientation_xyzw=[
+                        float(orientation.x),
+                        float(orientation.y),
+                        float(orientation.z),
+                        float(orientation.w),
+                    ],
+                    linear_velocity_mps=[float(linear.x), float(linear.y), float(linear.z)],
+                    angular_velocity_rad_s=[
+                        float(angular.x),
+                        float(angular.y),
+                        float(angular.z),
+                    ],
+                )
 
     def heartbeat_worker() -> None:
         try:
@@ -1307,6 +1335,8 @@ def main(argv: list[str] | None = None) -> int:
                     east_m = (lon_deg - home_lon) * 111_320.0 * math.cos(math.radians(home_lat))
                     home_distance_m = math.hypot(north_m, east_m)
                     with data_lock:
+                        if measurement_closed.is_set():
+                            continue
                         position_record = mavlink_positions[system_id]
                         position_record["count"] += 1
                         position_record["last_relative_alt_m"] = relative_alt_m
@@ -1329,25 +1359,27 @@ def main(argv: list[str] | None = None) -> int:
                         )
                         position_sequence = position_record["count"]
                         sample_is_active = measurement_active.is_set()
-                    event_log.emit(
-                        "mavlink_global_position"
-                        if sample_is_active
-                        else "readiness_mavlink_global_position",
-                        phase="measurement" if sample_is_active else "readiness",
-                        system_id=system_id,
-                        component_id=int(message.get_srcComponent()),
-                        sequence=position_sequence,
-                        lat_deg=lat_deg,
-                        lon_deg=lon_deg,
-                        relative_alt_m=relative_alt_m,
-                        home_distance_m=home_distance_m,
-                    )
+                        event_log.emit(
+                            "mavlink_global_position"
+                            if sample_is_active
+                            else "readiness_mavlink_global_position",
+                            phase="measurement" if sample_is_active else "readiness",
+                            system_id=system_id,
+                            component_id=int(message.get_srcComponent()),
+                            sequence=position_sequence,
+                            lat_deg=lat_deg,
+                            lon_deg=lon_deg,
+                            relative_alt_m=relative_alt_m,
+                            home_distance_m=home_distance_m,
+                        )
                     continue
                 if message_type != "HEARTBEAT":
                     continue
                 now_mono = time.monotonic()
                 now_wall = time.time()
                 with data_lock:
+                    if measurement_closed.is_set():
+                        continue
                     record = heartbeats[system_id]
                     sim_candidates = sorted(
                         int(item["last_stamp_ns"])
@@ -1357,14 +1389,13 @@ def main(argv: list[str] | None = None) -> int:
                     sim_time_ns = (
                         sim_candidates[len(sim_candidates) // 2] if sim_candidates else None
                     )
-                if sim_time_ns is None:
-                    event_log.emit(
-                        "heartbeat_unstamped",
-                        phase="measurement" if measurement_active.is_set() else "readiness",
-                        system_id=system_id,
-                    )
-                    continue
-                with data_lock:
+                    if sim_time_ns is None:
+                        event_log.emit(
+                            "heartbeat_unstamped",
+                            phase="measurement" if measurement_active.is_set() else "readiness",
+                            system_id=system_id,
+                        )
+                        continue
                     record = heartbeats[system_id]
                     update_sample_record(record, now_mono, now_wall)
                     previous_sim = record.get("last_sim_time_ns")
@@ -1378,16 +1409,16 @@ def main(argv: list[str] | None = None) -> int:
                     record["last_sim_time_ns"] = sim_time_ns
                     heartbeat_sequence = record["count"]
                     sample_is_active = measurement_active.is_set()
-                event_log.emit(
-                    "heartbeat" if sample_is_active else "readiness_heartbeat",
-                    phase="measurement" if sample_is_active else "readiness",
-                    system_id=system_id,
-                    component_id=int(message.get_srcComponent()),
-                    mav_type=int(message.type),
-                    autopilot=int(message.autopilot),
-                    sequence=heartbeat_sequence,
-                    sim_time_ns=sim_time_ns,
-                )
+                    event_log.emit(
+                        "heartbeat" if sample_is_active else "readiness_heartbeat",
+                        phase="measurement" if sample_is_active else "readiness",
+                        system_id=system_id,
+                        component_id=int(message.get_srcComponent()),
+                        mav_type=int(message.type),
+                        autopilot=int(message.autopilot),
+                        sequence=heartbeat_sequence,
+                        sim_time_ns=sim_time_ns,
+                    )
         except Exception as exc:
             heartbeat_errors.append(str(exc))
             event_log.emit("heartbeat_worker_failed", error=str(exc))
@@ -1633,6 +1664,10 @@ def main(argv: list[str] | None = None) -> int:
                 process_samples,
                 event_log,
             ),
+            kwargs={
+                "measurement_closed": measurement_closed,
+                "measurement_lock": data_lock,
+            },
             daemon=True,
         )
         process_thread.start()
@@ -1644,15 +1679,22 @@ def main(argv: list[str] | None = None) -> int:
         interrupted = True
         event_log.emit("health_probe_interrupted")
     finally:
-        measurement_ended_mono = time.monotonic()
-        measurement_ended_wall = time.time()
-        if ready:
-            event_log.emit(
-                "clock_correlation",
-                correlation_point="measurement_end",
-                monotonic_clock="CLOCK_MONOTONIC",
-                wall_clock="CLOCK_REALTIME",
-            )
+        # Seal every raw measurement stream under the same lock used by their
+        # callbacks.  This makes the declared endpoint an actual upper bound
+        # for raw heartbeat, odometry, MAVLink, and process-sample timestamps.
+        with data_lock:
+            measurement_closed.set()
+            measurement_active.clear()
+            measurement_ended_mono = time.monotonic()
+            measurement_ended_wall = time.time()
+            if ready:
+                event_log.emit(
+                    "clock_correlation",
+                    correlation_point="measurement_end",
+                    monotonic_clock="CLOCK_MONOTONIC",
+                    wall_clock="CLOCK_REALTIME",
+                )
+            stop_event.set()
         measurement_launch_log_end_offset = (
             launch_log.stat().st_size if launch_log.is_file() else 0
         )
@@ -1662,7 +1704,6 @@ def main(argv: list[str] | None = None) -> int:
             else b""
         )
         launch_log_observation_sha256 = hashlib.sha256(launch_log_prefix).hexdigest()
-        stop_event.set()
         heartbeat_thread.join(timeout=2.0)
         if process_thread is not None:
             process_thread.join(timeout=6.0)
