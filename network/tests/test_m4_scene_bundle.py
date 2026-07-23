@@ -292,6 +292,20 @@ class M4SceneBundleTests(unittest.TestCase):
             validate_scene_bundle(self.bundle_path, self.root), "runtime_configs"
         )
 
+    def test_surface_epsilon_mutation_fails_after_hash_rebind(self) -> None:
+        path = self.root / "network/config/radio_m4_canonical.yaml"
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                "surface_epsilon_m: 0.001", "surface_epsilon_m: 0.002"
+            ),
+            encoding="utf-8",
+        )
+        bundle = self.load_bundle()
+        self.refresh_and_write(bundle, refresh_assets=True)
+        self.assert_failed_gate(
+            validate_scene_bundle(self.bundle_path, self.root), "runtime_configs"
+        )
+
     def test_uav_spawn_below_terrain_fails_after_hash_rebind(self) -> None:
         path = self.root / "network/config/scenario_m4_canonical.yaml"
         path.write_text(

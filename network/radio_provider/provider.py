@@ -35,6 +35,7 @@ DEFAULT_JAMMERS = ROOT_DIR / "network/config/jammers.yaml"
 DEFAULT_SERVICE_TIERS = ROOT_DIR / "network/config/service_tiers.yaml"
 FLOOR_W = 1e-30
 FLOOR_GAIN = 1e-30
+MAX_SIONNA_SURFACE_EPSILON_M = 0.01
 PATH_TYPE_NAMES = (
     "los",
     "specular",
@@ -552,6 +553,8 @@ class SionnaRadioProvider:
         pairs = self._required_pairs(links, emitter_map)
         tx_ids = sorted({pair[0] for pair in pairs})
         rx_ids = sorted({pair[1] for pair in pairs})
+        solver_cfg = self._sionna_solver_config()
+        surface_epsilon_m = self._sionna_surface_epsilon_m(solver_cfg)
         with self._scene_lock:
             try:
                 for name in list(self._scene.transmitters.keys()) + list(self._scene.receivers.keys()):
@@ -561,18 +564,23 @@ class SionnaRadioProvider:
                 tx_names = {}
                 rx_names = {}
                 for tx_id in tx_ids:
-                    position = self._entity_position(tx_id, node_map, emitter_map)
+                    position = self._sionna_ray_origin_position(
+                        self._entity_position(tx_id, node_map, emitter_map),
+                        surface_epsilon_m,
+                    )
                     power_dbm = float(emitter_map[tx_id].get("power_dbm", 40.0)) if tx_id in emitter_map else radio["tx_power_dbm"]
                     device_name = self._device_name("tx", tx_id)
                     tx_names[tx_id] = device_name
                     self._scene.add(self._rt.Transmitter(name=device_name, position=position, power_dbm=power_dbm))
                 for rx_id in rx_ids:
-                    position = self._entity_position(rx_id, node_map, emitter_map)
+                    position = self._sionna_ray_origin_position(
+                        self._entity_position(rx_id, node_map, emitter_map),
+                        surface_epsilon_m,
+                    )
                     device_name = self._device_name("rx", rx_id)
                     rx_names[rx_id] = device_name
                     self._scene.add(self._rt.Receiver(name=device_name, position=position))
 
-                solver_cfg = self.settings.sionna.get("solver", {})
                 paths = self._path_solver(
                     self._scene,
                     max_depth=int(solver_cfg.get("max_depth", 1)),
@@ -614,6 +622,44 @@ class SionnaRadioProvider:
             except Exception as exc:
                 raise ProviderError(f"Sionna RT link query failed: {exc}") from exc
 
+    def _sionna_solver_config(self) -> dict[str, Any]:
+        solver_cfg = self.settings.sionna.get("solver", {})
+        if not isinstance(solver_cfg, dict):
+            raise ProviderError("Sionna solver config must be a mapping")
+        return solver_cfg
+
+    @staticmethod
+    def _sionna_surface_epsilon_m(solver_cfg: dict[str, Any]) -> float:
+        """Validate the solver-only elevation offset used at mesh boundaries."""
+
+        value = solver_cfg.get("surface_epsilon_m", 0.0)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ProviderError("Sionna surface_epsilon_m must be a finite number")
+        epsilon_m = float(value)
+        if (
+            not math.isfinite(epsilon_m)
+            or epsilon_m < 0.0
+            or epsilon_m > MAX_SIONNA_SURFACE_EPSILON_M
+        ):
+            raise ProviderError(
+                "Sionna surface_epsilon_m must be within [0, "
+                f"{MAX_SIONNA_SURFACE_EPSILON_M:g}] metres"
+            )
+        return epsilon_m
+
+    @staticmethod
+    def _sionna_ray_origin_position(
+        position: list[float], surface_epsilon_m: float
+    ) -> list[float]:
+        """Offset only the Sionna device origin above a coincident mesh surface.
+
+        The caller retains and logs the unmodified physical pose.  This tiny
+        solver-space offset prevents a terrain-triangle self-intersection from
+        being interpreted as a zero-candidate-path query.
+        """
+
+        return [position[0], position[1], position[2] + surface_epsilon_m]
+
     def _path_evidence(
         self,
         valid: Any,
@@ -638,10 +684,27 @@ class SionnaRadioProvider:
 
         flat_valid = self._np.asarray(pair_valid, dtype=bool).reshape(-1)
         flat_delays = self._np.asarray(pair_delays, dtype=float).reshape(-1)
-        depth = int(pair_interactions.shape[0])
-        flat_interactions = self._np.asarray(pair_interactions).reshape(
-            depth, -1
-        )
+        interactions_array = self._np.asarray(pair_interactions)
+        # Sionna RT represents a pair with no candidate paths using an empty
+        # interaction axis.  In that shape the interaction depth is zero, and
+        # NumPy deliberately rejects ``reshape(0, -1)`` because the inferred
+        # dimension is ambiguous.  It is nevertheless an ordinary physical
+        # result: no resolved propagation path.  Preserve it as such instead
+        # of converting it into a provider failure that drops all traffic on
+        # the affected link.
+        if flat_valid.size == 0:
+            if flat_delays.size != 0 or interactions_array.size != 0:
+                raise ProviderError(
+                    "Sionna empty-path evidence tensor shapes do not align"
+                )
+            return PathEvidence(
+                propagation_delay_ns=0.0,
+                path_count=0,
+                path_type_counts=empty_path_type_counts(),
+                geometry_state="blocked_no_path",
+            )
+        depth = int(interactions_array.shape[0])
+        flat_interactions = interactions_array.reshape(depth, -1)
         if flat_valid.size != flat_delays.size or flat_interactions.shape[1] != flat_valid.size:
             raise ProviderError("Sionna path evidence tensor shapes do not align")
 

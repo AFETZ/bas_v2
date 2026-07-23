@@ -1056,6 +1056,10 @@ def validate_scene_bundle(bundle_path: Path = DEFAULT_BUNDLE, root: Path = ROOT)
             or radio["radio"].get("bandwidth_hz") != 20000000
         ):
             raise SceneValidationError("radio timing/frequency policy differs")
+        if radio["sionna"].get("solver", {}).get("surface_epsilon_m") != 0.001:
+            raise SceneValidationError(
+                "radio solver does not bind the terrain-boundary ray-origin epsilon"
+            )
         expected_mapping = [
             {"min_sinr_db": 20.0, "service_tier_bps": 20000000, "link_state": "excellent", "per_input": 0.001},
             {"min_sinr_db": 11.0, "service_tier_bps": 2000000, "link_state": "good", "per_input": 0.005},
