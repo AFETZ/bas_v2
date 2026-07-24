@@ -38,6 +38,7 @@ from network.validation.m4_common import (
     write_new,
 )
 from network.validation.m4_airborne_motion import (
+    ANGULAR_VELOCITY_METHOD,
     COORDINATE_TRANSFORM_VERSION,
     ODOMETRY_CHILD_FRAME,
     ODOMETRY_HEADER_FRAME,
@@ -3476,6 +3477,9 @@ def validate_causal_runtime(
         orientation = record.get("orientation_quat_xyzw")
         linear = record.get("linear_velocity_mps")
         angular = record.get("angular_velocity_radps")
+        angular_method = record.get("angular_velocity_method")
+        angular_from_stamp = record.get("angular_velocity_from_sim_stamp_ns")
+        angular_dt_ns = record.get("angular_velocity_dt_ns")
         vectors = (position, orientation, linear, angular)
         if (
             uav not in CAUSAL_PIN_MODELS
@@ -3490,6 +3494,14 @@ def validate_causal_runtime(
             or isinstance(sim_ns, bool)
             or not isinstance(sim_ns, int)
             or sim_ns < 0
+            or angular_method != ANGULAR_VELOCITY_METHOD
+            or isinstance(angular_from_stamp, bool)
+            or not isinstance(angular_from_stamp, int)
+            or angular_from_stamp < 0
+            or isinstance(angular_dt_ns, bool)
+            or not isinstance(angular_dt_ns, int)
+            or angular_dt_ns <= 0
+            or angular_from_stamp + angular_dt_ns != sim_ns
             or not isinstance(host_ns, int)
             or not 0 <= host_ns - source_ns <= 50_000_000
             or any(not isinstance(value, list) for value in vectors)

@@ -36,6 +36,9 @@ from network.scripts.m4_runtime_orchestrator import (  # noqa: E402
     ACTUAL_SITL_AUDIT_LOG_PATHS,
 )
 from network.validation.m4_common import M4ValidationError  # noqa: E402
+from network.validation.m4_airborne_motion import (  # noqa: E402
+    ANGULAR_VELOCITY_METHOD,
+)
 from network.validation.m4_pose_observations import (  # noqa: E402
     PoseObservationWriter,
     scan_pose_observation_stream,
@@ -497,6 +500,10 @@ def runtime_fixture(windows: dict[str, dict[str, object]]) -> list[dict[str, obj
                         "orientation_quat_xyzw": [0.0, 0.0, 0.0, 1.0],
                         "linear_velocity_mps": [0.0, 0.0, 0.0],
                         "angular_velocity_radps": [0.0, 0.0, 0.0],
+                        "angular_velocity_method": ANGULAR_VELOCITY_METHOD,
+                        "angular_velocity_from_sim_stamp_ns": host_ns
+                        - 20_000_000,
+                        "angular_velocity_dt_ns": 20_000_000,
                     }
                 )
         prior = window_id
@@ -1162,6 +1169,9 @@ class CausalWindowTests(unittest.TestCase):
         collector_source = collector.read_text(encoding="utf-8")
         self.assertIn("linear_velocity_mps=", collector_source)
         self.assertIn("angular_velocity_radps=", collector_source)
+        self.assertIn("angular_velocity_from_quaternion_delta", collector_source)
+        self.assertIn("finite_quaternion_delta_body/v1", collector_source)
+        self.assertNotIn("twist.angular", collector_source)
         self.assertNotIn("technical_synthetic_fixture", source)
         capacity_source = capacity_runner.read_text(encoding="utf-8")
         for token in (
@@ -2354,6 +2364,8 @@ class CausalWindowTests(unittest.TestCase):
             "late_pose_response",
             "observed_velocity",
             "wrong_odometry_header",
+            "wrong_angular_method",
+            "wrong_angular_delta",
             "odometry_gap",
         ):
             with self.subTest(mutation=mutation):
@@ -2414,6 +2426,18 @@ class CausalWindowTests(unittest.TestCase):
                         for record in records
                         if record.get("event") == "odometry_sample"
                     )["source_header_frame"] = "map"
+                elif mutation == "wrong_angular_method":
+                    next(
+                        record
+                        for record in records
+                        if record.get("event") == "odometry_sample"
+                    )["angular_velocity_method"] = "raw_odometry_twist/v1"
+                elif mutation == "wrong_angular_delta":
+                    next(
+                        record
+                        for record in records
+                        if record.get("event") == "odometry_sample"
+                    )["angular_velocity_dt_ns"] = 1
                 else:
                     gap_window = windows["terrain_good"]
                     gap_start = int(gap_window["start_monotonic_ns"])
@@ -2445,6 +2469,8 @@ class CausalWindowTests(unittest.TestCase):
                     "late_pose_response": "ordering differs",
                     "observed_velocity": "observed pinned odometry sample",
                     "wrong_odometry_header": "observed pinned odometry sample",
+                    "wrong_angular_method": "observed pinned odometry sample",
+                    "wrong_angular_delta": "observed pinned odometry sample",
                     "odometry_gap": "observed zero-velocity coverage differs",
                 }[mutation]
                 self.assertTrue(

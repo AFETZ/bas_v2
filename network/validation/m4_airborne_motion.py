@@ -10,7 +10,7 @@ from typing import Any, Iterable, Mapping
 from network.validation.m4_common import M4ValidationError
 
 
-MOTION_CONTRACT = "ams.m4.capacity-gazebo-motion/v1"
+MOTION_CONTRACT = "ams.m4.capacity-gazebo-motion/v2"
 EXPECTED_UAVS = tuple(range(1, 6))
 MAXIMUM_ODOMETRY_AGE_NS = 1_000_000_000
 MINIMUM_MEASUREMENT_PATH_M = 0.50
@@ -23,6 +23,7 @@ ODOMETRY_SOURCE_FRAME = "ros_odometry_world_enu"
 COORDINATE_TRANSFORM_VERSION = "ams-m4-coordinate-frames-v1"
 ODOMETRY_HEADER_FRAME = "odom"
 ODOMETRY_CHILD_FRAME = "base_link"
+ANGULAR_VELOCITY_METHOD = "finite_quaternion_delta_body/v1"
 
 
 def motion_requirements() -> dict[str, Any]:
@@ -44,6 +45,9 @@ def motion_requirements() -> dict[str, Any]:
         "transform_version": COORDINATE_TRANSFORM_VERSION,
         "source_header_frame": ODOMETRY_HEADER_FRAME,
         "source_child_frame": ODOMETRY_CHILD_FRAME,
+        "angular_velocity_method": ANGULAR_VELOCITY_METHOD,
+        "angular_velocity_frame": ODOMETRY_CHILD_FRAME,
+        "angular_velocity_stamp_delta": "strictly_positive_sim_stamp_delta",
     }
 
 
@@ -102,6 +106,9 @@ def validate_measurement_motion(
         "orientation_quat_xyzw",
         "linear_velocity_mps",
         "angular_velocity_radps",
+        "angular_velocity_method",
+        "angular_velocity_from_sim_stamp_ns",
+        "angular_velocity_dt_ns",
     }
     histories: dict[int, list[dict[str, Any]]] = {
         uav: [] for uav in EXPECTED_UAVS
@@ -119,6 +126,10 @@ def validate_measurement_motion(
         callback_ns = record.get("source_callback_monotonic_ns")
         host_ns = record.get("host_monotonic_ns")
         sim_ns = record.get("sim_stamp_ns")
+        angular_velocity_from_sim_stamp_ns = record.get(
+            "angular_velocity_from_sim_stamp_ns"
+        )
+        angular_velocity_dt_ns = record.get("angular_velocity_dt_ns")
         if (
             set(record) != common_keys
             or uav not in EXPECTED_UAVS
@@ -136,6 +147,15 @@ def validate_measurement_motion(
             or not isinstance(sim_ns, int)
             or callback_ns <= 0
             or sim_ns < 0
+            or record.get("angular_velocity_method") != ANGULAR_VELOCITY_METHOD
+            or isinstance(angular_velocity_from_sim_stamp_ns, bool)
+            or not isinstance(angular_velocity_from_sim_stamp_ns, int)
+            or angular_velocity_from_sim_stamp_ns < 0
+            or isinstance(angular_velocity_dt_ns, bool)
+            or not isinstance(angular_velocity_dt_ns, int)
+            or angular_velocity_dt_ns <= 0
+            or angular_velocity_from_sim_stamp_ns + angular_velocity_dt_ns
+            != sim_ns
             or not callback_ns <= host_ns <= callback_ns + 100_000_000
         ):
             raise M4ValidationError("odometry sample identity/clock/keys differ")

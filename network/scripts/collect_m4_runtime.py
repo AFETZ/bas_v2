@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import signal
 import threading
@@ -50,6 +51,131 @@ COORDINATE_TRANSFORM_VERSION = "ams-m4-coordinate-frames-v1"
 ODOMETRY_HEADER_FRAME = "odom"
 ODOMETRY_CHILD_FRAME = "base_link"
 MAIN_RUNTIME_ODOMETRY_SAMPLE_PERIOD_NS = 200_000_000
+_QUATERNION_DELTA_EPSILON = 1.0e-12
+ANGULAR_VELOCITY_METHOD = "finite_quaternion_delta_body/v1"
+
+
+def _finite_unit_quaternion(value: list[float], *, label: str) -> tuple[float, ...]:
+    if len(value) != 4:
+        raise M4ValidationError(f"{label} must have four components")
+    quaternion: list[float] = []
+    for component in value:
+        if isinstance(component, bool) or not isinstance(component, (int, float)):
+            raise M4ValidationError(f"{label} has a nonnumeric component")
+        converted = float(component)
+        if not math.isfinite(converted):
+            raise M4ValidationError(f"{label} has a non-finite component")
+        quaternion.append(converted)
+    norm = math.sqrt(sum(component * component for component in quaternion))
+    if norm <= _QUATERNION_DELTA_EPSILON:
+        raise M4ValidationError(f"{label} has zero norm")
+    return tuple(component / norm for component in quaternion)
+
+
+def _world_vector_to_body(
+    world_vector: tuple[float, float, float],
+    orientation_xyzw: tuple[float, float, float, float],
+) -> list[float]:
+    """Rotate a world-frame vector into the current base-link frame."""
+
+    x, y, z, w = orientation_xyzw
+    world_x, world_y, world_z = world_vector
+    # The pose quaternion maps base_link into odom/world.  Its transpose maps
+    # the angular-rate vector back into the Odometry child frame.
+    body_vector = [
+        (1.0 - 2.0 * (y * y + z * z)) * world_x
+        + 2.0 * (x * y + z * w) * world_y
+        + 2.0 * (x * z - y * w) * world_z,
+        2.0 * (x * y - z * w) * world_x
+        + (1.0 - 2.0 * (x * x + z * z)) * world_y
+        + 2.0 * (y * z + x * w) * world_z,
+        2.0 * (x * z + y * w) * world_x
+        + 2.0 * (y * z - x * w) * world_y
+        + (1.0 - 2.0 * (x * x + y * y)) * world_z,
+    ]
+    if not all(math.isfinite(component) for component in body_vector):
+        raise M4ValidationError("odometry quaternion delta body rate is non-finite")
+    return body_vector
+
+
+def angular_velocity_from_quaternion_delta(
+    previous_orientation_xyzw: list[float],
+    orientation_xyzw: list[float],
+    elapsed_ns: int,
+) -> list[float]:
+    """Return shortest-arc angular rate in the current base-link frame."""
+
+    if (
+        isinstance(elapsed_ns, bool)
+        or not isinstance(elapsed_ns, int)
+        or elapsed_ns <= 0
+    ):
+        raise M4ValidationError("odometry quaternion delta elapsed time is invalid")
+    previous_x, previous_y, previous_z, previous_w = _finite_unit_quaternion(
+        previous_orientation_xyzw,
+        label="previous odometry orientation",
+    )
+    current_x, current_y, current_z, current_w = _finite_unit_quaternion(
+        orientation_xyzw,
+        label="odometry orientation",
+    )
+    # q_delta = q_current * conjugate(q_previous).  Negating q_delta when its
+    # scalar component is negative picks the equivalent shortest arc.
+    delta_x = (
+        -current_w * previous_x
+        + current_x * previous_w
+        - current_y * previous_z
+        + current_z * previous_y
+    )
+    delta_y = (
+        -current_w * previous_y
+        + current_x * previous_z
+        + current_y * previous_w
+        - current_z * previous_x
+    )
+    delta_z = (
+        -current_w * previous_z
+        - current_x * previous_y
+        + current_y * previous_x
+        + current_z * previous_w
+    )
+    delta_w = (
+        current_w * previous_w
+        + current_x * previous_x
+        + current_y * previous_y
+        + current_z * previous_z
+    )
+    delta_norm = math.sqrt(
+        delta_x * delta_x
+        + delta_y * delta_y
+        + delta_z * delta_z
+        + delta_w * delta_w
+    )
+    if delta_norm <= _QUATERNION_DELTA_EPSILON:
+        raise M4ValidationError("odometry quaternion delta has zero norm")
+    delta_x /= delta_norm
+    delta_y /= delta_norm
+    delta_z /= delta_norm
+    delta_w /= delta_norm
+    if delta_w < 0.0:
+        delta_x = -delta_x
+        delta_y = -delta_y
+        delta_z = -delta_z
+        delta_w = -delta_w
+    axis_norm = math.sqrt(
+        delta_x * delta_x + delta_y * delta_y + delta_z * delta_z
+    )
+    if axis_norm <= _QUATERNION_DELTA_EPSILON:
+        return [0.0, 0.0, 0.0]
+    angle = 2.0 * math.atan2(axis_norm, delta_w)
+    scale = angle / (axis_norm * (elapsed_ns / 1_000_000_000))
+    world_angular_velocity = (delta_x * scale, delta_y * scale, delta_z * scale)
+    if not all(math.isfinite(component) for component in world_angular_velocity):
+        raise M4ValidationError("odometry quaternion delta angular rate is non-finite")
+    return _world_vector_to_body(
+        world_angular_velocity,
+        (current_x, current_y, current_z, current_w),
+    )
 
 
 def canonical_line(value: Any) -> bytes:
@@ -302,6 +428,8 @@ def main() -> int:
             "last_stamp_ns": 0,
             "last_emit_ns": 0,
             "frame_valid": True,
+            "previous_orientation_xyzw": None,
+            "previous_orientation_stamp_ns": None,
         }
         for uav in UAV_IDS
     }
@@ -379,6 +507,32 @@ def main() -> int:
                 pose.orientation.z,
                 pose.orientation.w,
             ]
+            previous_orientation = state["previous_orientation_xyzw"]
+            previous_stamp = state["previous_orientation_stamp_ns"]
+            derived_angular_velocity: list[float] | None = None
+            angular_velocity_from_stamp: int | None = None
+            angular_velocity_dt_ns: int | None = None
+            if previous_orientation is None or previous_stamp is None:
+                state["previous_orientation_xyzw"] = list(orientation)
+                state["previous_orientation_stamp_ns"] = stamp
+            elif stamp > previous_stamp:
+                # Gazebo Sim's odometry angular-rate derivation can emit a
+                # non-finite axis for an identity/near-identity rotation.
+                # The finite odometry pose is preserved below; derive this
+                # required base-link rate from adjacent finite quaternions.
+                # The incoming raw angular-twist field is never serialized,
+                # clamped, or otherwise normalized.
+                angular_velocity_from_stamp = int(previous_stamp)
+                angular_velocity_dt_ns = stamp - angular_velocity_from_stamp
+                derived_angular_velocity = angular_velocity_from_quaternion_delta(
+                    previous_orientation,
+                    orientation,
+                    angular_velocity_dt_ns,
+                )
+                state["previous_orientation_xyzw"] = list(orientation)
+                state["previous_orientation_stamp_ns"] = stamp
+            elif stamp < previous_stamp:
+                raise M4ValidationError("odometry orientation stamp regressed")
             # Preserve every independent DDS occurrence without blocking the
             # ROS callback on a flush.  The main runtime log retains only its
             # bounded 5-Hz motion/readiness sample.
@@ -397,7 +551,16 @@ def main() -> int:
                 position_m=position,
                 orientation_quat_xyzw=orientation,
             )
-            if now - state["last_emit_ns"] >= MAIN_RUNTIME_ODOMETRY_SAMPLE_PERIOD_NS:
+            if (
+                derived_angular_velocity is not None
+                and now - state["last_emit_ns"]
+                >= MAIN_RUNTIME_ODOMETRY_SAMPLE_PERIOD_NS
+            ):
+                if (
+                    angular_velocity_from_stamp is None
+                    or angular_velocity_dt_ns is None
+                ):
+                    raise M4ValidationError("odometry angular-rate provenance is absent")
                 writer.emit(
                     "odometry_sample",
                     uav=uav,
@@ -415,11 +578,10 @@ def main() -> int:
                         twist.linear.y,
                         twist.linear.z,
                     ],
-                    angular_velocity_radps=[
-                        twist.angular.x,
-                        twist.angular.y,
-                        twist.angular.z,
-                    ],
+                    angular_velocity_radps=derived_angular_velocity,
+                    angular_velocity_method=ANGULAR_VELOCITY_METHOD,
+                    angular_velocity_from_sim_stamp_ns=angular_velocity_from_stamp,
+                    angular_velocity_dt_ns=angular_velocity_dt_ns,
                 )
                 state["last_emit_ns"] = now
 

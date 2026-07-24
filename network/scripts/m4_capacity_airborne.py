@@ -530,8 +530,8 @@ def airborne_gate_contract(schedule: Mapping[str, Any]) -> dict[str, Any]:
         },
         "gazebo_ground_z_m": {
             "uav1": 44.266,
-            "uav2": 84.25,
-            "uav3": 144.25,
+            "uav2": 84.266,
+            "uav3": 144.236,
             "uav4": 104.25,
             "uav5": 60.25,
         },

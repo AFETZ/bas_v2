@@ -4,7 +4,11 @@ import copy
 import math
 import unittest
 
+from network.scripts.collect_m4_runtime import (
+    angular_velocity_from_quaternion_delta,
+)
 from network.validation.m4_airborne_motion import (
+    ANGULAR_VELOCITY_METHOD,
     motion_requirements,
     validate_measurement_motion,
 )
@@ -40,7 +44,7 @@ class M4AirborneMotionTests(unittest.TestCase):
                         "source_header_frame": "odom",
                         "source_child_frame": "base_link",
                         "source_callback_monotonic_ns": callback_ns,
-                        "sim_stamp_ns": sample * 500_000_000,
+                        "sim_stamp_ns": (sample + 1) * 500_000_000,
                         "position_m": [
                             # 0.01 m per 0.5 s is exactly the declared
                             # 0.02 m/s velocity; the validator deliberately
@@ -52,6 +56,10 @@ class M4AirborneMotionTests(unittest.TestCase):
                         "orientation_quat_xyzw": [0.0, 0.0, 0.0, 1.0],
                         "linear_velocity_mps": [0.02, 0.0, 0.0],
                         "angular_velocity_radps": [0.0, 0.0, 0.0],
+                        "angular_velocity_method": ANGULAR_VELOCITY_METHOD,
+                        "angular_velocity_from_sim_stamp_ns": sample
+                        * 500_000_000,
+                        "angular_velocity_dt_ns": 500_000_000,
                     }
                 )
         return records
@@ -105,6 +113,50 @@ class M4AirborneMotionTests(unittest.TestCase):
             self._validate([record for record in self.records if record["uav"] != "uav5"])
 
     def test_nonfinite_or_extra_odometry_fact_fails(self) -> None:
+        self.assertEqual(
+            angular_velocity_from_quaternion_delta(
+                [0.0, 0.0, 0.0, 1.0],
+                [0.0, 0.0, 0.0, 1.0],
+                20_000_000,
+            ),
+            [0.0, 0.0, 0.0],
+        )
+        self.assertEqual(
+            angular_velocity_from_quaternion_delta(
+                [0.0, 0.0, 0.0, 1.0],
+                [0.0, 0.0, 0.0, -1.0],
+                20_000_000,
+            ),
+            [0.0, 0.0, 0.0],
+        )
+        quarter_turn = angular_velocity_from_quaternion_delta(
+            [0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, math.sqrt(0.5), math.sqrt(0.5)],
+            1_000_000_000,
+        )
+        self.assertAlmostEqual(quarter_turn[0], 0.0)
+        self.assertAlmostEqual(quarter_turn[1], 0.0)
+        self.assertAlmostEqual(quarter_turn[2], math.pi / 2.0)
+        body_turn = angular_velocity_from_quaternion_delta(
+            [-0.5, 0.5, 0.5, 0.5],
+            [0.0, 0.0, math.sqrt(0.5), math.sqrt(0.5)],
+            1_000_000_000,
+        )
+        self.assertAlmostEqual(body_turn[0], 0.0)
+        self.assertAlmostEqual(body_turn[1], -math.pi / 2.0)
+        self.assertAlmostEqual(body_turn[2], 0.0)
+        with self.assertRaisesRegex(M4ValidationError, "elapsed time"):
+            angular_velocity_from_quaternion_delta(
+                [0.0, 0.0, 0.0, 1.0],
+                [0.0, 0.0, 0.0, 1.0],
+                0,
+            )
+        with self.assertRaisesRegex(M4ValidationError, "zero norm"):
+            angular_velocity_from_quaternion_delta(
+                [0.0, 0.0, 0.0, 1.0],
+                [0.0, 0.0, 0.0, 0.0],
+                1,
+            )
         records = copy.deepcopy(self.records)
         records[0]["linear_velocity_mps"] = [math.nan, 0.0, 0.0]
         with self.assertRaisesRegex(M4ValidationError, "non-finite"):
@@ -112,6 +164,14 @@ class M4AirborneMotionTests(unittest.TestCase):
         records = copy.deepcopy(self.records)
         records[0]["producer_passed"] = True
         with self.assertRaisesRegex(M4ValidationError, "keys differ"):
+            self._validate(records)
+        records = copy.deepcopy(self.records)
+        records[0]["angular_velocity_method"] = "raw_odometry_twist/v1"
+        with self.assertRaisesRegex(M4ValidationError, "identity/clock/keys differ"):
+            self._validate(records)
+        records = copy.deepcopy(self.records)
+        records[0]["angular_velocity_dt_ns"] = 1
+        with self.assertRaisesRegex(M4ValidationError, "identity/clock/keys differ"):
             self._validate(records)
 
     def test_odometry_topic_frame_or_transform_mutation_fails(self) -> None:
@@ -167,7 +227,7 @@ class M4AirborneMotionTests(unittest.TestCase):
                         "source_header_frame": "odom",
                         "source_child_frame": "base_link",
                         "source_callback_monotonic_ns": callback_ns,
-                        "sim_stamp_ns": sample * 500_000_000,
+                        "sim_stamp_ns": (sample + 1) * 500_000_000,
                         # The only position change is between the continuity
                         # sample before start and the first in-window sample.
                         "position_m": [
@@ -178,6 +238,10 @@ class M4AirborneMotionTests(unittest.TestCase):
                         "orientation_quat_xyzw": [0.0, 0.0, 0.0, 1.0],
                         "linear_velocity_mps": [0.02, 0.0, 0.0],
                         "angular_velocity_radps": [0.0, 0.0, 0.0],
+                        "angular_velocity_method": ANGULAR_VELOCITY_METHOD,
+                        "angular_velocity_from_sim_stamp_ns": sample
+                        * 500_000_000,
+                        "angular_velocity_dt_ns": 500_000_000,
                     }
                 )
         with self.assertRaisesRegex(M4ValidationError, "nonzero flight motion"):
