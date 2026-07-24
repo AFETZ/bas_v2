@@ -34,8 +34,8 @@ def process(
 class GazeboIdentityTests(unittest.TestCase):
     def test_selects_ruby_server_beneath_dash_launcher(self) -> None:
         records = [
-            process(1414, 1406, "dash", "/bin/sh", "/usr/bin/gz", "sim", "-s", WORLD),
-            process(1418, 1414, "ruby3.0", "/usr/bin/ruby3.0", "/usr/bin/gz", "sim", "-s", WORLD),
+            process(1414, 1406, "dash", "/bin/sh", "-c", "ruby /usr/bin/gz sim -s"),
+            process(1418, 1414, "ruby", "gz sim", "-v4", "-s", "-r", WORLD),
         ]
 
         selected = select_gazebo_server(records, flight_pid=1406, world_path=WORLD)
@@ -45,8 +45,8 @@ class GazeboIdentityTests(unittest.TestCase):
 
     def test_duplicate_ruby_servers_fail_closed(self) -> None:
         records = [
-            process(1414, 1406, "dash", "/bin/sh", "/usr/bin/gz", "sim", "-s", WORLD),
-            process(1418, 1414, "ruby3.0", "/usr/bin/ruby3.0", "/usr/bin/gz", "sim", "-s", WORLD),
+            process(1414, 1406, "dash", "/bin/sh", "-c", "ruby /usr/bin/gz sim -s"),
+            process(1418, 1414, "ruby", "gz sim", "-v4", "-s", "-r", WORLD),
             process(1419, 1414, "ruby3.0", "/usr/bin/ruby3.0", "/usr/bin/gz", "sim", "-s", WORLD),
         ]
 
@@ -56,8 +56,9 @@ class GazeboIdentityTests(unittest.TestCase):
 
     def test_foreign_or_wrong_world_server_fails_closed(self) -> None:
         records = [
-            process(1418, 1, "ruby3.0", "/usr/bin/ruby3.0", "/usr/bin/gz", "sim", "-s", WORLD),
-            process(1420, 1406, "ruby3.0", "/usr/bin/ruby3.0", "/usr/bin/gz", "sim", "-s", "/tmp/other.sdf"),
+            process(1418, 1, "ruby", "gz sim", "-v4", "-s", "-r", WORLD),
+            process(1420, 1406, "ruby", "gz sim", "-v4", "-s", "-r", "/tmp/other.sdf"),
+            process(1421, 1406, "ruby", "/usr/bin/ruby3.0", "--title", "gz sim", "-s", WORLD),
         ]
 
         self.assertIsNone(

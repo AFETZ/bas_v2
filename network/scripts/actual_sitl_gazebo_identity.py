@@ -32,10 +32,22 @@ class ProcessRecord:
 
 
 def _has_gz_sim(argv: tuple[str, ...]) -> bool:
-    return any(
-        Path(argv[index]).name == "gz" and argv[index + 1] == "sim"
-        for index in range(len(argv) - 1)
-    )
+    """Accept the two exact argv forms emitted by the owned Harmonic server."""
+
+    # Ruby normally sets its process title to one argv[0] value, ``gz sim``.
+    # The shell launcher retains the conventional split executable/command
+    # form.  Both remain constrained by Ruby identity, launch lineage, server
+    # mode, and the resolved world below.
+    if argv and Path(argv[0]).name == "gz sim":
+        return True
+    for index, value in enumerate(argv):
+        if (
+            Path(value).name == "gz"
+            and index + 1 < len(argv)
+            and argv[index + 1] == "sim"
+        ):
+            return True
+    return False
 
 
 def _is_descendant(record: ProcessRecord, records: dict[int, ProcessRecord], root: int) -> bool:
