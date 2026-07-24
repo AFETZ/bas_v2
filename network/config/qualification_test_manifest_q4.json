@@ -6,6 +6,9 @@
   },
   "node": "Q4",
   "ordered_test_ids": [
+    "test_actual_sitl_gazebo_identity.GazeboIdentityTests.test_duplicate_ruby_servers_fail_closed",
+    "test_actual_sitl_gazebo_identity.GazeboIdentityTests.test_foreign_or_wrong_world_server_fails_closed",
+    "test_actual_sitl_gazebo_identity.GazeboIdentityTests.test_selects_ruby_server_beneath_dash_launcher",
     "test_m4_airborne_motion.M4AirborneMotionTests.test_declared_threshold_mutation_fails",
     "test_m4_airborne_motion.M4AirborneMotionTests.test_five_continuous_moving_odometry_streams_pass",
     "test_m4_airborne_motion.M4AirborneMotionTests.test_frozen_elevated_positions_fail_even_with_reported_velocity",

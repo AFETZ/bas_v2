@@ -4793,6 +4793,7 @@ class M3ExternalMatrixStaticTests(unittest.TestCase):
         )
         for required in (
             "discover_gazebo_ref()",
+            "actual_sitl_gazebo_identity.py",
             "gazebo_child_alive()",
             "required_children_alive()",
             "Gazebo flight child exited",

@@ -181,6 +181,7 @@ REQUIRED_SOURCE_PATHS = {
     "network/bridge/opaque_udp_relay.py",
     "network/scripts/actual_sitl_control_probe.py",
     "network/scripts/actual_sitl_endpoint_orchestrator.py",
+    "network/scripts/actual_sitl_gazebo_identity.py",
     "network/scripts/actual_sitl_stack_orchestrator.sh",
     "network/scripts/m3_external_matrix_probe.py",
     "network/scripts/m3_topology_monitor.py",

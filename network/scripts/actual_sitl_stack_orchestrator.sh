@@ -9,6 +9,7 @@ umask 0002
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ADAPTER="$ROOT_DIR/network/bridge/actual_sitl_mavlink_endpoint.py"
 ENDPOINT_SUPERVISOR="$ROOT_DIR/network/scripts/actual_sitl_endpoint_orchestrator.py"
+GAZEBO_IDENTITY_TOOL="$ROOT_DIR/network/scripts/actual_sitl_gazebo_identity.py"
 
 RUN_DIR=""
 RUN_ID=""
@@ -85,7 +86,7 @@ fi
 for command in ip python3 ros2 setsid; do
   command -v "$command" >/dev/null || { printf 'FAIL actual-SITL stack command absent: %s\n' "$command" >&2; exit 2; }
 done
-for path in "$RUN_DIR" "$INSTALLED_SHARE" "$FLIGHT_SCENARIO" "$ADAPTER" "$ENDPOINT_SUPERVISOR"; do
+for path in "$RUN_DIR" "$INSTALLED_SHARE" "$FLIGHT_SCENARIO" "$ADAPTER" "$ENDPOINT_SUPERVISOR" "$GAZEBO_IDENTITY_TOOL"; do
   [[ -e "$path" ]] || { printf 'FAIL actual-SITL stack path absent: %s\n' "$path" >&2; exit 2; }
 done
 for namespace in ams-gcs ams-uav1 ams-uav2 ams-uav3 ams-uav4 ams-uav5; do
@@ -192,38 +193,8 @@ PY
 }
 
 discover_gazebo_ref() {
-  python3 - "$FLIGHT_PGID" <<'PY'
-import os, sys, time
-from pathlib import Path
-pgid = int(sys.argv[1])
-deadline = time.monotonic() + 120.0
-def ticks(entry):
-    raw = (entry / "stat").read_text()
-    return int(raw[raw.rfind(")") + 2:].split()[19])
-while time.monotonic() < deadline:
-    matches = []
-    for entry in Path("/proc").iterdir():
-        if not entry.name.isdigit():
-            continue
-        try:
-            pid = int(entry.name)
-            if os.getpgid(pid) != pgid:
-                continue
-            argv = [value.decode(errors="replace") for value in (entry / "cmdline").read_bytes().split(b"\0") if value]
-            if not any(
-                Path(argv[index]).name == "gz" and argv[index + 1] == "sim"
-                for index in range(len(argv) - 1)
-            ):
-                continue
-            matches.append((pid, ticks(entry)))
-        except (OSError, ProcessLookupError, PermissionError, ValueError, IndexError):
-            continue
-    if len(matches) == 1:
-        print(f"{matches[0][0]}:{matches[0][1]}")
-        raise SystemExit(0)
-    time.sleep(0.2)
-raise SystemExit(1)
-PY
+  python3 "$GAZEBO_IDENTITY_TOOL" --flight-pid "$FLIGHT_PID" \
+    --world "$INSTALLED_SHARE/worlds/$WORLD_FILE" --timeout-s 120
 }
 
 gazebo_child_alive() {

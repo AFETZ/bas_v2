@@ -689,6 +689,7 @@ class RealProviderWireBindingTests(unittest.TestCase):
                 "network/config/endpoint_transaction_schema.json",
                 "network/ns3/ns3_build_receipt.py",
                 "network/scripts/collect_flight_capacity.py",
+                "network/scripts/actual_sitl_gazebo_identity.py",
                 "network/scripts/write_run_provenance.py",
                 "network/validation/component_profiles.py",
                 "network/validation/endpoint_transaction.py",
