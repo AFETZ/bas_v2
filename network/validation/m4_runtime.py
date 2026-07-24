@@ -39,7 +39,7 @@ ROOT = Path(__file__).resolve().parents[2]
 FROZEN_BUNDLE_PATH = ROOT / "network/config/m4_canonical_scene_bundle.json"
 FROZEN_BUNDLE_ID = "ams-m4-canonical-km-v2"
 FROZEN_BUNDLE_SHA256 = (
-    "17a9d5254a0ad680ebd71a446df68c3a4de1ceda7c46efdafe06d73ab5f4c319"
+    "53526d730d3779ef5ea0404b4eb50b96cb03518552bb9c850f17ad59aeaab356"
 )
 QUERY_PERIOD_NS = 1_000_000_000
 VALIDITY_TTL_NS = 2_000_000_000

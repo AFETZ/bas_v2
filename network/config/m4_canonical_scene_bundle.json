@@ -23,7 +23,7 @@
       "sha256": "7a725a48ee17607a09b7a98ecfe00abbafeb53c4efb0c843bda20fe50c7c872f"
     }
   },
-  "asset_manifest_sha256": "104bb7851c8e0a57c847d4d8e5c2f7b31b4d4fc7499341d25619757be44191f1",
+  "asset_manifest_sha256": "719e768f62f9fb093f69703f70bb701f5ad60c6cdc409823157a52401a876d76",
   "assets": [
     {
       "mesh_bounds_m": null,
@@ -43,8 +43,8 @@
       "mesh_bounds_m": null,
       "path": "network/config/scenario_m4_canonical.yaml",
       "role": "six_node_flight_scenario",
-      "sha256": "9be13217d195fa60c6aafd1db50fdb1ffd43d5948fadbe297e695450df534f7f",
-      "size_bytes": 1895
+      "sha256": "1d23ab745e2eaa0365cc3abf5a5bbdd420e72c122d1a60e5110c9fc4aa929f77",
+      "size_bytes": 1896
     },
     {
       "mesh_bounds_m": {
@@ -292,7 +292,7 @@
   ],
   "bundle_hash_policy": "sha256-canonical-json-with-bundle_sha256-zeroed/v1",
   "bundle_id": "ams-m4-canonical-km-v2",
-  "bundle_sha256": "17a9d5254a0ad680ebd71a446df68c3a4de1ceda7c46efdafe06d73ab5f4c319",
+  "bundle_sha256": "53526d730d3779ef5ea0404b4eb50b96cb03518552bb9c850f17ad59aeaab356",
   "causal_scenarios": {
     "building_blocked": {
       "control_link": "cp>uav5",

@@ -356,6 +356,21 @@ class M4SceneBundleTests(unittest.TestCase):
             validate_scene_bundle(self.bundle_path, self.root), "runtime_configs"
         )
 
+    def test_uav1_spawn_cannot_overlap_terrain_mesh_seam(self) -> None:
+        path = self.root / "network/config/scenario_m4_canonical.yaml"
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                "[-7000.0, -2499.0, 44.266,",
+                "[-7000.0, -2500.0, 44.250,",
+            ),
+            encoding="utf-8",
+        )
+        bundle = self.load_bundle()
+        self.refresh_and_write(bundle, refresh_assets=True)
+        self.assert_failed_gate(
+            validate_scene_bundle(self.bundle_path, self.root), "runtime_configs"
+        )
+
     def test_missing_gazebo_jammer_entity_fails_after_hash_rebind(self) -> None:
         path = self.root / "src/multiagent_simulation/worlds/m4_canonical/m4_canonical.sdf"
         path.write_text(

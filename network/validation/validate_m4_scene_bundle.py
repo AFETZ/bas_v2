@@ -38,6 +38,9 @@ M4_SITL_PHYSICS_RATE_HZ = 800.0
 M4_SITL_PHYSICS_STEP_S = 1.0 / M4_SITL_PHYSICS_RATE_HZ
 M4_SITL_PHYSICS_ENGINE = "gz-physics-bullet-featherstone-plugin"
 M4_SITL_SPAWN_CLEARANCE_M = 0.25
+M4_SITL_UAV1_TERRAIN_SEAM_Y_M = -2500.0
+M4_SITL_UAV_COLLISION_FOOTPRINT_RADIUS_M = 0.32
+M4_SITL_UAV1_NOMINAL_RADIO_POSITION_M = (-7000.0, -2500.0, 300.0)
 IDENTITY_4X4 = [
     [1.0, 0.0, 0.0, 0.0],
     [0.0, 1.0, 0.0, 0.0],
@@ -1065,6 +1068,18 @@ def validate_scene_bundle(bundle_path: Path = DEFAULT_BUNDLE, root: Path = ROOT)
                 raise SceneValidationError(
                     f"{robot.get('name')} nominal radio pose is not above terrain"
                 )
+            if robot.get("name") == "uav1":
+                if (
+                    abs(spawn[1] - M4_SITL_UAV1_TERRAIN_SEAM_Y_M)
+                    <= M4_SITL_UAV_COLLISION_FOOTPRINT_RADIUS_M
+                ):
+                    raise SceneValidationError(
+                        "uav1 physical spawn overlaps the terrain mesh seam"
+                    )
+                if radio_position != M4_SITL_UAV1_NOMINAL_RADIO_POSITION_M:
+                    raise SceneValidationError(
+                        "uav1 nominal radio position differs from the canonical geometry"
+                    )
         scene = radio["sionna"]["scene"]
         if scene != {"id": bundle.get("bundle_id"), "source": "mitsuba_xml", "path": bundle.get("sionna_scene_xml")} or radio["sionna"].get("required_for_acceptance") is not True or radio["ns3"].get("require_sionna") is not True:
             raise SceneValidationError("radio config does not require exact real canonical Sionna scene")
