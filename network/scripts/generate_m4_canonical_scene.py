@@ -213,23 +213,23 @@ def gazebo_world() -> bytes:
     # ArduPilot's enabled pre-arm checks require a gyro backend rate of at
     # least 1.8 times its 400 Hz scheduler rate.  Keep a modest margin above
     # the resulting 720 Hz floor without disabling any flight safety checks.
-    # The locked Gazebo Sim runtime selects DART; its Bullet collision detector
-    # and PGS constraint solver avoid the Dantzig/ODE LCP abort seen during a
-    # simultaneous five-UAV take-off while retaining DART multirotor force and
-    # joint support.
+    # Gazebo Sim defaults to DART unless its Physics system selects an engine
+    # explicitly.  DART's mesh-contact path let a canonical Iris fall through
+    # the terrain under a five-UAV load.  Select the installed Bullet
+    # Featherstone backend explicitly: it retains static triangle-mesh contact
+    # support and avoids the prior DART LCP abort without weakening flight
+    # safety checks.
     return b'''<?xml version="1.0" ?>
 <sdf version="1.9">
   <world name="map">
-    <physics name="m4_capacity_physics" type="dart">
+    <physics name="m4_capacity_physics" type="bullet">
       <max_step_size>0.00125</max_step_size>
       <real_time_factor>1.0</real_time_factor>
       <real_time_update_rate>800</real_time_update_rate>
-      <dart>
-        <collision_detector>bullet</collision_detector>
-        <solver><solver_type>pgs</solver_type></solver>
-      </dart>
     </physics>
-    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics">
+      <engine><filename>gz-physics-bullet-featherstone-plugin</filename></engine>
+    </plugin>
     <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors"><render_engine>ogre2</render_engine></plugin>
     <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
     <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>

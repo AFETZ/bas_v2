@@ -114,15 +114,15 @@ class M4SceneBundleTests(unittest.TestCase):
             validate_scene_bundle(self.bundle_path, self.root), "gazebo_physics"
         )
 
-    def test_m4_physics_cannot_revert_to_dantzig_solver(self) -> None:
+    def test_m4_physics_cannot_revert_to_dart_engine(self) -> None:
         path = (
             self.root
             / "src/multiagent_simulation/worlds/m4_canonical/m4_canonical.sdf"
         )
         path.write_text(
             path.read_text(encoding="utf-8").replace(
-                "<solver_type>pgs</solver_type>",
-                "<solver_type>dantzig</solver_type>",
+                "gz-physics-bullet-featherstone-plugin",
+                "gz-physics-dartsim-plugin",
             ),
             encoding="utf-8",
         )
@@ -132,15 +132,15 @@ class M4SceneBundleTests(unittest.TestCase):
             validate_scene_bundle(self.bundle_path, self.root), "gazebo_physics"
         )
 
-    def test_m4_physics_requires_bullet_collision_detector(self) -> None:
+    def test_m4_physics_requires_bullet_featherstone_engine(self) -> None:
         path = (
             self.root
             / "src/multiagent_simulation/worlds/m4_canonical/m4_canonical.sdf"
         )
         path.write_text(
             path.read_text(encoding="utf-8").replace(
-                "<collision_detector>bullet</collision_detector>",
-                "<collision_detector>fcl</collision_detector>",
+                "gz-physics-bullet-featherstone-plugin",
+                "gz-physics-bullet-plugin",
             ),
             encoding="utf-8",
         )
