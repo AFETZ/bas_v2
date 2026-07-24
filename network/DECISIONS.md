@@ -205,15 +205,17 @@ Updated: 2026-07-20 UTC.
   newer attempt's token echo.  This is a fail-closed transaction-correlation
   strengthening; it neither extends the bounded retry budget nor permits
   timing-based cross-attempt stitching.
-- The failed M4 capacity attempts `m4_capacity_v5_20260724T100323Z` and
-  `m4_capacity_v7_20260724T111627Z` are retained without final receipts.
+- The failed M4 capacity attempts `m4_capacity_v5_20260724T100323Z`,
+  `m4_capacity_v7_20260724T111627Z`, and
+  `m4_capacity_v8_20260724T120935Z` are retained without final receipts.
   Gazebo, five ArduCopter instances, and five MAVProxy instances started in
-  both attempts, but the first guard treated the Harmonic dash `gz sim`
-  launcher and its Ruby `gz sim -s` server as an ambiguous generic singleton.
-  The first repair then missed the real Ruby process title, whose `/proc`
-  argv[0] is the single value `gz sim` rather than split `gz`, `sim`, and
-  reported zero candidates.  The guard now accepts only those two exact
-  command-title forms while still requiring one Ruby server descending from the
+  the latter two attempts, but the first guard treated the Harmonic dash
+  `gz sim` launcher and its Ruby `gz sim -s` server as an ambiguous generic
+  singleton.  The first repair then missed the real Ruby title.  `/usr/bin/gz`
+  calls `Process.setproctitle("gz #{ARGV.join(' ')}")`, so `/proc/cmdline`
+  exposes the entire server command as one field rather than individual
+  `gz`, `sim`, `-s`, and world fields.  The guard now normalizes only that
+  exact leading title form before enforcing one Ruby server descending from the
   owned ROS launch, server mode, the resolved world path, and PID/start-tick
   liveness.  This repairs identity selection without weakening the
   physical-flight requirement or attributing either startup failure to CPU/GPU

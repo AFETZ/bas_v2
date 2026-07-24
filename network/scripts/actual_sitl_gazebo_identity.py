@@ -31,14 +31,30 @@ class ProcessRecord:
     argv: tuple[str, ...]
 
 
-def _has_gz_sim(argv: tuple[str, ...]) -> bool:
-    """Accept the two exact argv forms emitted by the owned Harmonic server."""
+def _matching_argv(argv: tuple[str, ...]) -> tuple[str, ...]:
+    """Normalize only the title form written by Gazebo's Ruby launcher.
 
-    # Ruby normally sets its process title to one argv[0] value, ``gz sim``.
+    ``/usr/bin/gz`` uses ``Process.setproctitle`` and joins its complete command
+    into argv[0].  The normal exec forms remain untouched so a Ruby option such
+    as ``--title 'gz sim'`` cannot become a Gazebo command by tokenization.
+    """
+
+    if len(argv) == 1 and argv[0].startswith("gz sim "):
+        return tuple(argv[0].split())
+    return argv
+
+
+def _has_gz_sim(argv: tuple[str, ...]) -> bool:
+    """Accept the exact argv forms emitted by the owned Harmonic server."""
+
+    argv = _matching_argv(argv)
+
+    # Ruby normally sets its process title to one argv[0] value beginning
+    # with ``gz sim``.
     # The shell launcher retains the conventional split executable/command
     # form.  Both remain constrained by Ruby identity, launch lineage, server
     # mode, and the resolved world below.
-    if argv and Path(argv[0]).name == "gz sim":
+    if len(argv) >= 2 and Path(argv[0]).name == "gz" and argv[1] == "sim":
         return True
     for index, value in enumerate(argv):
         if (
@@ -72,12 +88,13 @@ def select_gazebo_server(
     snapshot = {record.pid: record for record in records}
     matches = []
     for record in snapshot.values():
-        executable = Path(record.argv[0]).name.lower() if record.argv else ""
+        argv = _matching_argv(record.argv)
+        executable = Path(argv[0]).name.lower() if argv else ""
         if not (
             (record.comm.lower().startswith("ruby") or executable.startswith("ruby"))
-            and _has_gz_sim(record.argv)
-            and "-s" in record.argv
-            and world_path in record.argv
+            and _has_gz_sim(argv)
+            and "-s" in argv
+            and world_path in argv
             and _is_descendant(record, snapshot, flight_pid)
         ):
             continue
@@ -122,13 +139,15 @@ def _diagnostic(
 ) -> str:
     candidates = []
     for record in records:
-        if not _has_gz_sim(record.argv):
+        argv = _matching_argv(record.argv)
+        if not _has_gz_sim(argv):
             continue
         candidates.append(
             {
-                "argv": list(record.argv[:16]),
+                "argv": list(argv[:16]),
+                "raw_argv": list(record.argv[:16]),
                 "comm": record.comm,
-                "matches_world": world_path in record.argv,
+                "matches_world": world_path in argv,
                 "pgid": record.pgid,
                 "pid": record.pid,
                 "ppid": record.ppid,
