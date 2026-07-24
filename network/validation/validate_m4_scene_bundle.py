@@ -36,6 +36,9 @@ M4_SITL_SCHEDULER_RATE_HZ = 400.0
 M4_SITL_GYRO_RATE_MULTIPLIER = 1.8
 M4_SITL_PHYSICS_RATE_HZ = 800.0
 M4_SITL_PHYSICS_STEP_S = 1.0 / M4_SITL_PHYSICS_RATE_HZ
+M4_SITL_DART_COLLISION_DETECTOR = "bullet"
+M4_SITL_DART_SOLVER_TYPE = "pgs"
+M4_SITL_SPAWN_CLEARANCE_M = 0.25
 IDENTITY_4X4 = [
     [1.0, 0.0, 0.0, 0.0],
     [0.0, 1.0, 0.0, 0.0],
@@ -577,7 +580,7 @@ def validate_scene_bundle(bundle_path: Path = DEFAULT_BUNDLE, root: Path = ROOT)
         physics = world.find("physics") if world is not None else None
         if physics is None or physics.attrib != {
             "name": "m4_capacity_physics",
-            "type": "ode",
+            "type": "dart",
         }:
             raise SceneValidationError("M4 Gazebo physics identity differs")
         step_s = float(physics.findtext("max_step_size") or "nan")
@@ -590,6 +593,16 @@ def validate_scene_bundle(bundle_path: Path = DEFAULT_BUNDLE, root: Path = ROOT)
             M4_SITL_SCHEDULER_RATE_HZ * M4_SITL_GYRO_RATE_MULTIPLIER
         ):
             raise SceneValidationError("M4 Gazebo gyro source is below ArduPilot pre-arm minimum")
+        dart = physics.find("dart")
+        solver = dart.find("solver") if dart is not None else None
+        if (
+            dart is None
+            or dart.findtext("collision_detector")
+            != M4_SITL_DART_COLLISION_DETECTOR
+            or solver is None
+            or solver.findtext("solver_type") != M4_SITL_DART_SOLVER_TYPE
+        ):
+            raise SceneValidationError("M4 DART collision/constraint solver differs")
     except (TypeError, ValueError, SceneValidationError) as exc:
         physics_failures.append(str(exc))
     gates["gazebo_physics"] = make_gate(
@@ -597,6 +610,8 @@ def validate_scene_bundle(bundle_path: Path = DEFAULT_BUNDLE, root: Path = ROOT)
         {
             "max_step_size_s": M4_SITL_PHYSICS_STEP_S,
             "real_time_update_rate_hz": M4_SITL_PHYSICS_RATE_HZ,
+            "collision_detector": M4_SITL_DART_COLLISION_DETECTOR,
+            "solver_type": M4_SITL_DART_SOLVER_TYPE,
         },
     )
 
@@ -1034,9 +1049,9 @@ def validate_scene_bundle(bundle_path: Path = DEFAULT_BUNDLE, root: Path = ROOT)
         for robot in robots:
             spawn = vector(robot.get("position", [])[:3], f"{robot.get('name')}.spawn")
             ground = terrain.terrain_height(spawn[0], spawn[1])
-            if not close(spawn[2], ground, 1e-5):
+            if not close(spawn[2], ground + M4_SITL_SPAWN_CLEARANCE_M, 1e-5):
                 raise SceneValidationError(
-                    f"{robot.get('name')} spawn is not on the actual collision terrain"
+                    f"{robot.get('name')} spawn does not preserve collision-terrain clearance"
                 )
             radio_position = vector(
                 robot.get("nominal_radio_position_m"),

@@ -1,10 +1,14 @@
 <?xml version="1.0" ?>
 <sdf version="1.9">
   <world name="map">
-    <physics name="m4_capacity_physics" type="ode">
+    <physics name="m4_capacity_physics" type="dart">
       <max_step_size>0.00125</max_step_size>
       <real_time_factor>1.0</real_time_factor>
       <real_time_update_rate>800</real_time_update_rate>
+      <dart>
+        <collision_detector>bullet</collision_detector>
+        <solver><solver_type>pgs</solver_type></solver>
+      </dart>
     </physics>
     <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
     <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors"><render_engine>ogre2</render_engine></plugin>

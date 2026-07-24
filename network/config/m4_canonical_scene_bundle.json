@@ -23,7 +23,7 @@
       "sha256": "7a725a48ee17607a09b7a98ecfe00abbafeb53c4efb0c843bda20fe50c7c872f"
     }
   },
-  "asset_manifest_sha256": "f4bb519d31ace1528d5eba7cedaba3c9c1ed00797774a4dd0ad6e4bf18c4a6f8",
+  "asset_manifest_sha256": "b145fb2925629507d57c41f99dd6edd24f37b99f989bcfb2abf775c11468fc38",
   "assets": [
     {
       "mesh_bounds_m": null,
@@ -43,8 +43,8 @@
       "mesh_bounds_m": null,
       "path": "network/config/scenario_m4_canonical.yaml",
       "role": "six_node_flight_scenario",
-      "sha256": "4ec96b721b60bfa47d18a6d04304465adfd8a93441d737712a2377f86e83fbdd",
-      "size_bytes": 1890
+      "sha256": "9be13217d195fa60c6aafd1db50fdb1ffd43d5948fadbe297e695450df534f7f",
+      "size_bytes": 1895
     },
     {
       "mesh_bounds_m": {
@@ -97,8 +97,8 @@
       "mesh_bounds_m": null,
       "path": "src/multiagent_simulation/worlds/m4_canonical/m4_canonical.sdf",
       "role": "gazebo_world",
-      "sha256": "6332c44ada93e69c86fa41dbab4c49ce25c98e56978a46fe2d10ac33d25a43c8",
-      "size_bytes": 3428
+      "sha256": "71cfcb31222722ba00100e393aef88003821435e5376cfcd737dd3f2500c5957",
+      "size_bytes": 3568
     },
     {
       "mesh_bounds_m": null,
@@ -292,7 +292,7 @@
   ],
   "bundle_hash_policy": "sha256-canonical-json-with-bundle_sha256-zeroed/v1",
   "bundle_id": "ams-m4-canonical-km-v2",
-  "bundle_sha256": "3b6edf0e601e854d055430fcefa426925ce4136c3bf7f7d4cb2983129e327a7f",
+  "bundle_sha256": "9a33d605cd5f3428da503ad4a63b7532d77f5db5dc880cd402838f77377f7eec",
   "causal_scenarios": {
     "building_blocked": {
       "control_link": "cp>uav5",

@@ -114,6 +114,42 @@ class M4SceneBundleTests(unittest.TestCase):
             validate_scene_bundle(self.bundle_path, self.root), "gazebo_physics"
         )
 
+    def test_m4_physics_cannot_revert_to_dantzig_solver(self) -> None:
+        path = (
+            self.root
+            / "src/multiagent_simulation/worlds/m4_canonical/m4_canonical.sdf"
+        )
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                "<solver_type>pgs</solver_type>",
+                "<solver_type>dantzig</solver_type>",
+            ),
+            encoding="utf-8",
+        )
+        bundle = self.load_bundle()
+        self.refresh_and_write(bundle, refresh_assets=True)
+        self.assert_failed_gate(
+            validate_scene_bundle(self.bundle_path, self.root), "gazebo_physics"
+        )
+
+    def test_m4_physics_requires_bullet_collision_detector(self) -> None:
+        path = (
+            self.root
+            / "src/multiagent_simulation/worlds/m4_canonical/m4_canonical.sdf"
+        )
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                "<collision_detector>bullet</collision_detector>",
+                "<collision_detector>fcl</collision_detector>",
+            ),
+            encoding="utf-8",
+        )
+        bundle = self.load_bundle()
+        self.refresh_and_write(bundle, refresh_assets=True)
+        self.assert_failed_gate(
+            validate_scene_bundle(self.bundle_path, self.root), "gazebo_physics"
+        )
+
     def test_capacity_baseline_requires_jammer_disabled(self) -> None:
         jammer_path = self.root / "network/config/jammers_m4_canonical.yaml"
         jammer_path.write_text(
@@ -306,11 +342,11 @@ class M4SceneBundleTests(unittest.TestCase):
             validate_scene_bundle(self.bundle_path, self.root), "runtime_configs"
         )
 
-    def test_uav_spawn_below_terrain_fails_after_hash_rebind(self) -> None:
+    def test_uav_spawn_without_collision_clearance_fails_after_hash_rebind(self) -> None:
         path = self.root / "network/config/scenario_m4_canonical.yaml"
         path.write_text(
             path.read_text(encoding="utf-8").replace(
-                "[-4000.0, -2000.0, 84.0,", "[-4000.0, -2000.0, 0.0,"
+                "[-4000.0, -2000.0, 84.25,", "[-4000.0, -2000.0, 84.0,"
             ),
             encoding="utf-8",
         )

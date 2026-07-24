@@ -108,6 +108,8 @@ done
 
 FLIGHT_PID=""
 FLIGHT_PGID=""
+GAZEBO_PID=""
+GAZEBO_START_TICKS=""
 SUPERVISOR_PID=""
 ADAPTER_PIDS=()
 CLEAN_STOP=0
@@ -189,8 +191,89 @@ raise SystemExit(1)
 PY
 }
 
+discover_gazebo_ref() {
+  python3 - "$FLIGHT_PGID" <<'PY'
+import os, sys, time
+from pathlib import Path
+pgid = int(sys.argv[1])
+deadline = time.monotonic() + 120.0
+def ticks(entry):
+    raw = (entry / "stat").read_text()
+    return int(raw[raw.rfind(")") + 2:].split()[19])
+while time.monotonic() < deadline:
+    matches = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            pid = int(entry.name)
+            if os.getpgid(pid) != pgid:
+                continue
+            argv = [value.decode(errors="replace") for value in (entry / "cmdline").read_bytes().split(b"\0") if value]
+            if not any(
+                Path(argv[index]).name == "gz" and argv[index + 1] == "sim"
+                for index in range(len(argv) - 1)
+            ):
+                continue
+            matches.append((pid, ticks(entry)))
+        except (OSError, ProcessLookupError, PermissionError, ValueError, IndexError):
+            continue
+    if len(matches) == 1:
+        print(f"{matches[0][0]}:{matches[0][1]}")
+        raise SystemExit(0)
+    time.sleep(0.2)
+raise SystemExit(1)
+PY
+}
+
+gazebo_child_alive() {
+  local raw tail
+  local -a fields
+  [[ -n "$GAZEBO_PID" && -n "$GAZEBO_START_TICKS" && -r "/proc/$GAZEBO_PID/stat" ]] || return 1
+  raw="$(<"/proc/$GAZEBO_PID/stat")" || return 1
+  tail="${raw##*) }"
+  read -r -a fields <<< "$tail"
+  [[ "${#fields[@]}" -gt 19 && "${fields[19]}" == "$GAZEBO_START_TICKS" ]]
+}
+
+required_children_alive() {
+  local index pid
+  if ! gazebo_child_alive; then
+    printf 'FAIL actual-SITL Gazebo flight child exited: pid=%s:start_ticks=%s\n' "$GAZEBO_PID" "$GAZEBO_START_TICKS" >&2
+    return 1
+  fi
+  if ! kill -0 "$FLIGHT_PID" 2>/dev/null; then
+    printf 'FAIL actual-SITL launch child exited: pid=%s\n' "$FLIGHT_PID" >&2
+    return 1
+  fi
+  if ! kill -0 "$SUPERVISOR_PID" 2>/dev/null; then
+    printf 'FAIL actual-SITL endpoint-supervisor child exited: pid=%s\n' "$SUPERVISOR_PID" >&2
+    return 1
+  fi
+  for index in 1 2 3 4 5; do
+    pid="${ADAPTER_PIDS[$((index - 1))]}"
+    if ! kill -0 "$pid" 2>/dev/null; then
+      printf 'FAIL actual-SITL uav%s adapter child exited: pid=%s\n' "$index" "$pid" >&2
+      return 1
+    fi
+  done
+}
+
+GAZEBO_REF="$(discover_gazebo_ref)" || {
+  printf 'FAIL exact Gazebo flight process identity was not discovered\n' >&2
+  exit 2
+}
+[[ "$GAZEBO_REF" =~ ^[1-9][0-9]*:[1-9][0-9]*$ ]] || {
+  printf 'FAIL Gazebo flight process identity is malformed\n' >&2
+  exit 2
+}
+IFS=: read -r GAZEBO_PID GAZEBO_START_TICKS <<< "$GAZEBO_REF"
 mapfile -t SITL_REFS < <(discover_refs sitl)
 mapfile -t MAVPROXY_REFS < <(discover_refs mavproxy)
+if ! gazebo_child_alive; then
+  printf 'FAIL actual-SITL Gazebo flight child exited: pid=%s:start_ticks=%s\n' "$GAZEBO_PID" "$GAZEBO_START_TICKS" >&2
+  exit 2
+fi
 [[ "${#SITL_REFS[@]}" == 5 && "${#MAVPROXY_REFS[@]}" == 5 ]] || {
   printf 'FAIL exact 5+5 flight process identities were not discovered\n' >&2
   exit 2
@@ -227,10 +310,7 @@ SUPERVISOR_PID=$!
 
 deadline=$((SECONDS + 90))
 while [[ ! -s "$ENDPOINT_READY" ]]; do
-  kill -0 "$FLIGHT_PID" "$SUPERVISOR_PID" "${ADAPTER_PIDS[@]}" 2>/dev/null || {
-    printf 'FAIL actual-SITL child exited before aggregate readiness\n' >&2
-    exit 2
-  }
+  required_children_alive || exit 2
   ((SECONDS < deadline)) || { printf 'FAIL actual-SITL aggregate readiness timeout\n' >&2; exit 2; }
   sleep 0.1
 done
@@ -264,10 +344,7 @@ with os.fdopen(fd, "wb") as stream:
 PY
 
 while [[ ! -e "$STOP_FILE" ]]; do
-  kill -0 "$FLIGHT_PID" "$SUPERVISOR_PID" "${ADAPTER_PIDS[@]}" 2>/dev/null || {
-    printf 'FAIL actual-SITL child exited during supervised runtime\n' >&2
-    exit 2
-  }
+  required_children_alive || exit 2
   sleep 0.25
 done
 

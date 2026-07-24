@@ -529,11 +529,11 @@ def airborne_gate_contract(schedule: Mapping[str, Any]) -> dict[str, Any]:
             "prearm_local_z_abs_max_m": PREARM_ALTITUDE_TOLERANCE_M,
         },
         "gazebo_ground_z_m": {
-            "uav1": 44.0,
-            "uav2": 84.0,
-            "uav3": 144.0,
-            "uav4": 104.0,
-            "uav5": 60.0,
+            "uav1": 44.25,
+            "uav2": 84.25,
+            "uav3": 144.25,
+            "uav4": 104.25,
+            "uav5": 60.25,
         },
     }
 

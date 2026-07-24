@@ -52,6 +52,14 @@ Z_GRID = (
     (15.0, 55.0, 130.0, 65.0, 20.0),
     (0.0, 15.0, 25.0, 10.0, 0.0),
 )
+M4_SITL_SPAWN_CLEARANCE_M = 0.25
+M4_SITL_UAVS = (
+    ("uav1", 0, 1, -7000.0, -2500.0, 300.0),
+    ("uav2", 1, 2, -4000.0, -2000.0, 320.0),
+    ("uav3", 2, 3, 0.0, -1500.0, 350.0),
+    ("uav4", 3, 4, 4000.0, -1000.0, 350.0),
+    ("uav5", 4, 5, 8000.0, -500.0, 400.0),
+)
 
 
 @dataclass(frozen=True)
@@ -205,13 +213,21 @@ def gazebo_world() -> bytes:
     # ArduPilot's enabled pre-arm checks require a gyro backend rate of at
     # least 1.8 times its 400 Hz scheduler rate.  Keep a modest margin above
     # the resulting 720 Hz floor without disabling any flight safety checks.
+    # The locked Gazebo Sim runtime selects DART; its Bullet collision detector
+    # and PGS constraint solver avoid the Dantzig/ODE LCP abort seen during a
+    # simultaneous five-UAV take-off while retaining DART multirotor force and
+    # joint support.
     return b'''<?xml version="1.0" ?>
 <sdf version="1.9">
   <world name="map">
-    <physics name="m4_capacity_physics" type="ode">
+    <physics name="m4_capacity_physics" type="dart">
       <max_step_size>0.00125</max_step_size>
       <real_time_factor>1.0</real_time_factor>
       <real_time_update_rate>800</real_time_update_rate>
+      <dart>
+        <collision_detector>bullet</collision_detector>
+        <solver><solver_type>pgs</solver_type></solver>
+      </dart>
     </physics>
     <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
     <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors"><render_engine>ogre2</render_engine></plugin>
@@ -264,8 +280,33 @@ def sionna_scene() -> bytes:
 '''
 
 
+def scenario_robot_rows() -> str:
+    """Render collision-clear SITL starts from the shared terrain source."""
+    rows = []
+    for name, instance, system_id, x_m, y_m, radio_z_m in M4_SITL_UAVS:
+        spawn_z_m = terrain_z(x_m, y_m) + M4_SITL_SPAWN_CLEARANCE_M
+        rows.append(
+            "  - {name: %s, role: uav, instance: %d, system_id: %d, "
+            "position: [%.1f, %.1f, %.2f, 0.0, 0.0, 0.0], "
+            "nominal_radio_position_m: [%.1f, %.1f, %.1f], antenna: omni}"
+            % (
+                name,
+                instance,
+                system_id,
+                x_m,
+                y_m,
+                spawn_z_m,
+                x_m,
+                y_m,
+                radio_z_m,
+            )
+        )
+    return "\n".join(rows)
+
+
 def scenario_yaml() -> bytes:
-    return b'''schema_version: 1
+    robot_rows = scenario_robot_rows()
+    return ('''schema_version: 1
 scenario:
   name: scenario_m4_canonical
   description: Final immutable kilometre-scale six-node/jammer M4-M8 scene.
@@ -292,11 +333,7 @@ command_post:
   orientation_quat_xyzw: [0.0, 0.0, 0.0, 1.0]
   antenna: omni
 robots:
-  - {name: uav1, role: uav, instance: 0, system_id: 1, position: [-7000.0, -2500.0, 44.0, 0.0, 0.0, 0.0], nominal_radio_position_m: [-7000.0, -2500.0, 300.0], antenna: omni}
-  - {name: uav2, role: uav, instance: 1, system_id: 2, position: [-4000.0, -2000.0, 84.0, 0.0, 0.0, 0.0], nominal_radio_position_m: [-4000.0, -2000.0, 320.0], antenna: omni}
-  - {name: uav3, role: uav, instance: 2, system_id: 3, position: [0.0, -1500.0, 144.0, 0.0, 0.0, 0.0], nominal_radio_position_m: [0.0, -1500.0, 350.0], antenna: omni}
-  - {name: uav4, role: uav, instance: 3, system_id: 4, position: [4000.0, -1000.0, 104.0, 0.0, 0.0, 0.0], nominal_radio_position_m: [4000.0, -1000.0, 350.0], antenna: omni}
-  - {name: uav5, role: uav, instance: 4, system_id: 5, position: [8000.0, -500.0, 60.0, 0.0, 0.0, 0.0], nominal_radio_position_m: [8000.0, -500.0, 400.0], antenna: omni}
+{robot_rows}
 radio:
   carrier_hz: 2400000000
   bandwidth_hz: 20000000
@@ -304,7 +341,7 @@ radio:
   tx_power_w_range: [1.0, 2.0]
   service_tiers_file: network/config/service_tiers.yaml
 traffic_classes: [control, payload, additional_data]
-'''
+'''.replace("{robot_rows}", robot_rows).encode())
 
 
 def radio_yaml() -> bytes:

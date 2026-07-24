@@ -4783,6 +4783,28 @@ class M3ExternalMatrixStaticTests(unittest.TestCase):
         self.assertIn('mavproxy_cmd.extend(["--streamrate", mavproxy_streamrate])', launch_source)
         self.assertIn("mavproxy_streamrate:=1", runner)
 
+    def test_actual_sitl_stack_supervises_each_child_and_gazebo_identity(self) -> None:
+        source = (
+            ROOT / "network/scripts/actual_sitl_stack_orchestrator.sh"
+        ).read_text()
+        self.assertNotIn(
+            'kill -0 "$FLIGHT_PID" "$SUPERVISOR_PID" "${ADAPTER_PIDS[@]}"',
+            source,
+        )
+        for required in (
+            "discover_gazebo_ref()",
+            "gazebo_child_alive()",
+            "required_children_alive()",
+            "Gazebo flight child exited",
+            "GAZEBO_START_TICKS",
+            'required_children_alive || exit 2',
+        ):
+            self.assertIn(required, source)
+        self.assertLess(
+            source.index('GAZEBO_REF="$(discover_gazebo_ref)"'),
+            source.index("mapfile -t SITL_REFS"),
+        )
+
     def test_validator_has_an_independent_decoder_not_a_producer_import(self) -> None:
         source = (
             ROOT / "network/validation/validate_m3_external_matrix.py"
