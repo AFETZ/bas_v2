@@ -26,6 +26,15 @@ from network.scripts.collect_flight_capacity import (  # noqa: E402
     static_runtime_identity,
 )
 from network.bridge.runtime_clock_beacon import beacon  # noqa: E402
+from network.scripts.m4_capacity_airborne import (  # noqa: E402
+    PREFLIGHT_ADMISSION_CONTRACT,
+    PREFLIGHT_ADMISSION_RELATIVE_PATH,
+    PREFLIGHT_FINAL_STABILITY_NS,
+    PREFLIGHT_READINESS_CONTRACT,
+    PREFLIGHT_READINESS_MAX_LATENESS_NS,
+    PREFLIGHT_READINESS_SAMPLE_PERIOD_NS,
+    PREFLIGHT_ADMISSION_STABILITY_NS,
+)
 from network.scripts.m4_runtime_orchestrator import write_exclusive  # noqa: E402
 from network.scripts.m4_gazebo_pose_source import GazeboPoseVSource  # noqa: E402
 from network.validation.m4_common import M4ValidationError, strict_json  # noqa: E402
@@ -386,10 +395,29 @@ def main() -> int:
     parser.add_argument("--required-ready", action="append", type=Path, default=[])
     parser.add_argument("--event-dir", type=Path)
     parser.add_argument("--causal-done-file", type=Path)
+    parser.add_argument("--capacity-preflight-admission-file", type=Path)
     args = parser.parse_args()
     run_dir = args.run_dir.resolve()
     contract = strict_json(args.contract.resolve())
     schedule = contract.get("schedule")
+    capacity_preflight_admission_file: Path | None = None
+    if contract.get("profile") == "m4_capacity_prerequisite":
+        expected_admission_file = (
+            run_dir / PREFLIGHT_ADMISSION_RELATIVE_PATH
+        ).resolve()
+        if (
+            args.capacity_preflight_admission_file is None
+            or args.capacity_preflight_admission_file.resolve()
+            != expected_admission_file
+        ):
+            raise M4ValidationError(
+                "capacity collector admission file path differs"
+            )
+        capacity_preflight_admission_file = expected_admission_file
+    elif args.capacity_preflight_admission_file is not None:
+        raise M4ValidationError(
+            "non-capacity collector received a capacity admission file"
+        )
     accepted_pgids = set(args.process_group)
     if args.include_own_process_group:
         accepted_pgids.add(os.getpgrp())
@@ -805,25 +833,108 @@ def main() -> int:
             return 0
         if not isinstance(schedule, dict):
             raise M4ValidationError("capacity schedule is absent")
+        readiness_stability_ns = int(schedule["readiness_stability_ns"])
+        if readiness_stability_ns != PREFLIGHT_ADMISSION_STABILITY_NS:
+            raise M4ValidationError("capacity admission stability duration differs")
+        warmup_start_ns = int(schedule["warmup_start_monotonic_ns"])
+        if PREFLIGHT_FINAL_STABILITY_NS != readiness_stability_ns:
+            raise M4ValidationError("capacity final readiness stability differs")
         stable_since: int | None = None
         readiness_emitted = False
-        readiness_broken = False
-        next_readiness = time.monotonic_ns()
-        warmup_start_ns = int(schedule["warmup_start_monotonic_ns"])
-        while time.monotonic_ns() < warmup_start_ns and not stop.is_set():
-            spin(0.02)
+        admission_sha256: str | None = None
+        initial_now = time.monotonic_ns()
+        if initial_now >= warmup_start_ns:
+            raise M4ValidationError("capacity preflight collector started after warm-up")
+        # Align every prewarmup observation to the warm-up boundary instead of
+        # an arbitrary collector-start instant.  The final slot is sampled at
+        # the boundary itself, so a later readiness flap must earn a fresh
+        # independently verifiable ten-second suffix before flight may start.
+        next_readiness = warmup_start_ns - (
+            (warmup_start_ns - initial_now) // PREFLIGHT_READINESS_SAMPLE_PERIOD_NS
+        ) * PREFLIGHT_READINESS_SAMPLE_PERIOD_NS
+        readiness_sample_index = 0
+
+        def sample_preflight_readiness(
+            *, scheduled_ns: int, sample_index: int
+        ) -> tuple[int, dict[str, Any]]:
             now = time.monotonic_ns()
-            if now < next_readiness:
-                continue
+            if now < scheduled_ns or now - scheduled_ns > PREFLIGHT_READINESS_MAX_LATENESS_NS:
+                raise M4ValidationError(
+                    "capacity preflight readiness sampler missed 100-ms deadline"
+                )
             processes = process_sample(accepted_pgids, executable_cache)
             observation = readiness_observation(now, processes)
-            writer.emit("readiness_sample", **observation)
+            writer.emit(
+                "prewarmup_readiness_sample",
+                prewarmup_readiness_contract=PREFLIGHT_READINESS_CONTRACT,
+                phase="prewarmup",
+                sample_index=sample_index,
+                scheduled_monotonic_ns=scheduled_ns,
+                observed_monotonic_ns=now,
+                **observation,
+            )
+            return now, observation
+
+        while next_readiness < warmup_start_ns and not stop.is_set():
+            while time.monotonic_ns() < next_readiness and not stop.is_set():
+                spin(0.02)
+            if stop.is_set():
+                break
+            now, observation = sample_preflight_readiness(
+                scheduled_ns=next_readiness,
+                sample_index=readiness_sample_index,
+            )
             if observation["ready"]:
                 stable_since = stable_since if stable_since is not None else now
                 if (
                     not readiness_emitted
-                    and now - stable_since >= int(schedule["readiness_stability_ns"])
+                    and now - stable_since >= readiness_stability_ns
                 ):
+                    if capacity_preflight_admission_file is None:
+                        raise M4ValidationError(
+                            "capacity admission file was not configured"
+                        )
+                    gate = contract.get("airborne_gate")
+                    if not isinstance(gate, dict):
+                        raise M4ValidationError(
+                            "capacity admission lacks an airborne gate"
+                        )
+                    admission_issued_ns = time.monotonic_ns()
+                    admission = {
+                        "contract": PREFLIGHT_ADMISSION_CONTRACT,
+                        "run_id": contract["run_id"],
+                        "runtime_id": contract["runtime_id"],
+                        "run_nonce": contract["run_nonce"],
+                        "profile": contract["profile"],
+                        "airborne_gate_sha256": hashlib.sha256(
+                            canonical_line(gate)
+                        ).hexdigest(),
+                        "readiness_stability_ns": readiness_stability_ns,
+                        "stable_since_monotonic_ns": stable_since,
+                        "ready_observed_monotonic_ns": now,
+                        "issued_monotonic_ns": admission_issued_ns,
+                        "required_process_counts": dict(
+                            processes["required_counts"]
+                        ),
+                        "process_counts": dict(processes["counts"]),
+                        "process_roles_exact": processes["roles_exact"],
+                        "process_unclassified_count": processes[
+                            "unclassified_count"
+                        ],
+                        "process_count": processes["process_count"],
+                        "full_readiness": {
+                            "ready": observation["ready"],
+                            "files_ready": observation["files_ready"],
+                            "clocks_fresh": observation["clocks_fresh"],
+                            "clocks_coherent": observation["clocks_coherent"],
+                            "odometry_fresh": observation["odometry_fresh"],
+                            "world_poses_fresh": observation[
+                                "world_poses_fresh"
+                            ],
+                        },
+                    }
+                    admission_payload = canonical_line(admission)
+                    admission_sha256 = hashlib.sha256(admission_payload).hexdigest()
                     writer.emit(
                         "readiness_complete",
                         stable_since_monotonic_ns=stable_since,
@@ -837,16 +948,64 @@ def main() -> int:
                         "runtime_entities_observed",
                         entities=observed_entities,
                     )
+                    # Publish the event before the file becomes observable.
+                    # The control probe cannot start flight preflight until it
+                    # reads the immutable file, so this order creates an
+                    # auditable collector-to-control happens-before edge.
+                    writer.emit(
+                        "capacity_preflight_admission_issued",
+                        admission_contract=PREFLIGHT_ADMISSION_CONTRACT,
+                        admission_path=PREFLIGHT_ADMISSION_RELATIVE_PATH,
+                        admission_sha256=admission_sha256,
+                        airborne_gate_sha256=admission[
+                            "airborne_gate_sha256"
+                        ],
+                        stable_since_monotonic_ns=stable_since,
+                        ready_observed_monotonic_ns=now,
+                        issued_monotonic_ns=admission_issued_ns,
+                        readiness_stability_ns=readiness_stability_ns,
+                    )
+                    write_exclusive(
+                        capacity_preflight_admission_file, admission_payload
+                    )
                     readiness_emitted = True
             else:
-                if readiness_emitted:
-                    readiness_broken = True
                 stable_since = None
-            next_readiness += 1_000_000_000
-        if stop.is_set() or not readiness_emitted or readiness_broken:
-            raise M4ValidationError("M4 readiness was absent or not continuously stable")
+            readiness_sample_index += 1
+            next_readiness += PREFLIGHT_READINESS_SAMPLE_PERIOD_NS
+        if stop.is_set():
+            raise M4ValidationError("M4 readiness collector stopped before warm-up")
 
         wait_until(warmup_start_ns, spin, stop)
+        if stop.is_set():
+            raise M4ValidationError("M4 readiness collector stopped at warm-up")
+        terminal_now, terminal_observation = sample_preflight_readiness(
+            scheduled_ns=warmup_start_ns,
+            sample_index=readiness_sample_index,
+        )
+        if terminal_observation["ready"]:
+            stable_since = (
+                stable_since if stable_since is not None else terminal_now
+            )
+        else:
+            stable_since = None
+        if (
+            not readiness_emitted
+            or admission_sha256 is None
+            or stable_since is None
+            or terminal_now - stable_since < PREFLIGHT_FINAL_STABILITY_NS
+        ):
+            raise M4ValidationError("M4 readiness was absent or not continuously stable")
+        writer.emit(
+            "capacity_preflight_final_readiness",
+            prewarmup_readiness_contract=PREFLIGHT_READINESS_CONTRACT,
+            admission_sha256=admission_sha256,
+            terminal_sample_index=readiness_sample_index,
+            terminal_scheduled_monotonic_ns=warmup_start_ns,
+            terminal_observed_monotonic_ns=terminal_now,
+            final_stable_since_monotonic_ns=stable_since,
+            final_stability_ns=PREFLIGHT_FINAL_STABILITY_NS,
+        )
         warmup_end_ns = int(schedule["measurement_start_monotonic_ns"])
         writer.emit("warmup_start", target_end_monotonic_ns=warmup_end_ns)
         next_warmup_resource = warmup_start_ns

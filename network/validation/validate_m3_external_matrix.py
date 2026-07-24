@@ -3711,7 +3711,7 @@ def m3_actual_control_api(matrix_sha256: str | None) -> dict[str, Any]:
                 "transport_nonce32_derivation": "identity/full_run_nonce32",
             },
             "m4_capacity": {
-                "run_contract": "ams.m4.capacity_run/v3",
+                "run_contract": "ams.m4.capacity_run/v5",
                 "run_nonce_hex_length": 64,
                 "transport_nonce32_derivation": "sha256(raw_full_run_nonce64)[:32]",
             },

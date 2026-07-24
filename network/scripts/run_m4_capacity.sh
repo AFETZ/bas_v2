@@ -163,6 +163,7 @@ ACTUAL_ENDPOINT_READY="$RUN_DIR/raw/state/actual-sitl-endpoints.ready.json"
 ACTUAL_STACK_READY="$RUN_DIR/raw/state/actual-sitl-stack.ready.json"
 ACTUAL_STACK_STOP="$RUN_DIR/raw/state/actual-sitl-endpoints.stop"
 ACTUAL_STACK_STOPPED="$RUN_DIR/raw/state/actual-sitl-stack.stopped.json"
+PREFLIGHT_ADMISSION_FILE="$RUN_DIR/raw/state/capacity-preflight-admission.json"
 mkdir -p "$OVERLAY_EVIDENCE"
 BUILD_COMMAND=(
   /usr/bin/colcon --log-base "$OVERLAY_LOG" build
@@ -420,6 +421,7 @@ setsid ip netns exec ams-gcs python3 -u "$CONTROL_PROBE" \
   --run-dir "$RUN_DIR" --run-id "$RUN_ID" --runtime-id "$RUNTIME_ID" \
   --run-nonce "$RUN_NONCE" --profile m4_capacity \
   --m3-result "$RUN_DIR/raw/prerequisites/m3-result.json" \
+  --capacity-preflight-admission-file "$PREFLIGHT_ADMISSION_FILE" \
   --clock-socket "$CLOCK_SOCKET" --matrix "$MATRIX" \
   > "$RUN_DIR/logs/actual-control.stdout" \
   2> "$RUN_DIR/logs/actual-control.stderr" &
@@ -467,6 +469,7 @@ RUNTIME_STOP_FILE="$RUN_DIR/raw/control/runtime-collector.stop"
 COLLECTOR_ARGS=(
   --run-dir "$RUN_DIR" --contract "$CONTRACT" --ready-file "$RUNTIME_READY"
   --stop-file "$RUNTIME_STOP_FILE" --clock-socket "$CLOCK_SOCKET"
+  --capacity-preflight-admission-file "$PREFLIGHT_ADMISSION_FILE"
   --include-own-process-group
   --required-ready "$CLOCK_READY" --required-ready "$ACTUAL_STACK_READY"
   --required-ready "$TOPOLOGY_READY" --required-ready "$PROVIDER_READY"

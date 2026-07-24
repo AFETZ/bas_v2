@@ -193,9 +193,9 @@ class CapacityExecutionBudgetTests(unittest.TestCase):
     def test_exact_budget_binds_schedule_engine_and_live_process(self) -> None:
         details, failures = self._validate()
         self.assertEqual(failures, [])
-        self.assertEqual(BOUNDED_PREFLIGHT_NS, 279_000_000_000)
-        self.assertEqual(READINESS_RESERVE_NS, 25_500_000_000)
-        self.assertEqual(CONTRACT_TO_CLEAN_SHUTDOWN_NS, 1_540_000_000_000)
+        self.assertEqual(BOUNDED_PREFLIGHT_NS, 301_000_000_000)
+        self.assertEqual(READINESS_RESERVE_NS, 13_500_000_000)
+        self.assertEqual(CONTRACT_TO_CLEAN_SHUTDOWN_NS, 1_550_000_000_000)
         self.assertEqual(NS3_ENGINE_DURATION_NS, 1_600_000_000_000)
         self.assertEqual(WRAPPER_TIMEOUT_NS, 1_800_000_000_000)
         self.assertEqual(AIRBORNE_STATE_WAIT_NS, 60_000_000_000)
@@ -206,6 +206,10 @@ class CapacityExecutionBudgetTests(unittest.TestCase):
         self.assertEqual(derivation["pre_measurement_stage_count"], 8)
         self.assertEqual(derivation["extended_sys_state_maximum_attempts"], 6)
         self.assertEqual(derivation["extended_sys_state_execution_ns"], 33_000_000_000)
+        self.assertEqual(derivation["preflight_recovery_maximum_attempts"], 6)
+        self.assertEqual(derivation["preflight_recovery_extra_execution_ns"], 12_000_000_000)
+        self.assertEqual(derivation["flight_bounded_preflight_ns"], 291_000_000_000)
+        self.assertEqual(derivation["preflight_admission_stability_ns"], 10_000_000_000)
         self.assertEqual(derivation["reused_command_guard_count"], 3)
         self.assertEqual(derivation["reused_command_guard_total_ns"], 9_000_000_000)
 
@@ -231,7 +235,7 @@ class CapacityExecutionBudgetTests(unittest.TestCase):
         self.run["schedule"]["measurement_start_monotonic_ns"] += 1
         _details, failures = self._validate()
         self.assertTrue(any("keys differ" in item for item in failures), failures)
-        self.assertTrue(any("720+30+600" in item for item in failures), failures)
+        self.assertTrue(any("730+30+600" in item for item in failures), failures)
 
     def test_component_profile_timeout_is_independently_bound(self) -> None:
         profile = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))

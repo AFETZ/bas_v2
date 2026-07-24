@@ -28,8 +28,8 @@ from network.validation.m4_common import (
 
 
 ROOT = Path(__file__).resolve().parents[2]
-EXECUTION_BUDGET_CONTRACT = "ams.m4.capacity-execution-budget/v1"
-STAGE_TIMING_BUDGET_CONTRACT = "ams.m4.capacity-flight-stage-budget/v1"
+EXECUTION_BUDGET_CONTRACT = "ams.m4.capacity-execution-budget/v2"
+STAGE_TIMING_BUDGET_CONTRACT = "ams.m4.capacity-flight-stage-budget/v3"
 
 NS_PER_SECOND = 1_000_000_000
 PRE_MEASUREMENT_STAGE_COUNT = 8
@@ -44,19 +44,32 @@ EXTENDED_SYS_STATE_MAX_EXECUTION_NS = (
     EXTENDED_SYS_STATE_MAX_COMMAND_ATTEMPTS * COMMAND_OUTCOME_TIMEOUT_NS
     + (EXTENDED_SYS_STATE_MAX_COMMAND_ATTEMPTS - 1) * COMMAND_OUTCOME_TIMEOUT_NS
 )
+PREFLIGHT_RECOVERY_MAX_ATTEMPTS = 6
+PREFLIGHT_RECOVERY_EXTRA_ATTEMPTS = (
+    PREFLIGHT_RECOVERY_MAX_ATTEMPTS - MAX_COMMAND_ATTEMPTS
+)
+PREFLIGHT_RECOVERY_EXTRA_EXECUTION_NS = (
+    PREFLIGHT_RECOVERY_EXTRA_ATTEMPTS * COMMAND_OUTCOME_TIMEOUT_NS
+    + PREFLIGHT_RECOVERY_EXTRA_ATTEMPTS * COMMAND_OUTCOME_TIMEOUT_NS
+)
+PREFLIGHT_ADMISSION_STABILITY_NS = 10 * NS_PER_SECOND
 REUSED_COMMAND_GUARD_COUNT = 3
 REUSED_COMMAND_GUARD_NS = 3 * NS_PER_SECOND
 PREARM_STATE_WAIT_NS = 30 * NS_PER_SECOND
 AIRBORNE_STATE_WAIT_NS = 60 * NS_PER_SECOND
 
-READINESS_RUNWAY_NS = 720 * NS_PER_SECOND
+READINESS_RUNWAY_NS = 730 * NS_PER_SECOND
 DECLARED_SEQUENTIAL_READINESS_WAITS_NS = 415_500_000_000
-BOUNDED_PREFLIGHT_NS = (
+FLIGHT_BOUNDED_PREFLIGHT_NS = (
     EXTENDED_SYS_STATE_MAX_EXECUTION_NS
     + (PRE_MEASUREMENT_STAGE_COUNT - 1) * MAX_STAGE_EXECUTION_NS
     + REUSED_COMMAND_GUARD_COUNT * REUSED_COMMAND_GUARD_NS
+    + PREFLIGHT_RECOVERY_EXTRA_EXECUTION_NS
     + PREARM_STATE_WAIT_NS
     + AIRBORNE_STATE_WAIT_NS
+)
+BOUNDED_PREFLIGHT_NS = (
+    PREFLIGHT_ADMISSION_STABILITY_NS + FLIGHT_BOUNDED_PREFLIGHT_NS
 )
 READINESS_RESERVE_NS = (
     READINESS_RUNWAY_NS
@@ -93,6 +106,7 @@ EXPECTED_EXECUTION_BUDGET = {
     "declared_sequential_readiness_waits_ns": (
         DECLARED_SEQUENTIAL_READINESS_WAITS_NS
     ),
+    "preflight_admission_stability_ns": PREFLIGHT_ADMISSION_STABILITY_NS,
     "bounded_preflight_ns": BOUNDED_PREFLIGHT_NS,
     "readiness_reserve_ns": READINESS_RESERVE_NS,
     "warmup_ns": WARMUP_NS,
@@ -114,6 +128,12 @@ EXPECTED_STAGE_TIMING_BUDGET = {
     "contract": STAGE_TIMING_BUDGET_CONTRACT,
     "maximum_attempts_per_stage": MAX_COMMAND_ATTEMPTS,
     "extended_sys_state_max_attempts": EXTENDED_SYS_STATE_MAX_COMMAND_ATTEMPTS,
+    "preflight_recovery_max_attempts": PREFLIGHT_RECOVERY_MAX_ATTEMPTS,
+    "preflight_recovery_extra_attempts": PREFLIGHT_RECOVERY_EXTRA_ATTEMPTS,
+    "preflight_recovery_max_grants": 1,
+    "preflight_recovery_extra_execution_ns": (
+        PREFLIGHT_RECOVERY_EXTRA_EXECUTION_NS
+    ),
     "outcome_timeout_ns": COMMAND_OUTCOME_TIMEOUT_NS,
     "retry_quiet_drain_ns": COMMAND_OUTCOME_TIMEOUT_NS,
     "per_stage_max_ns": MAX_STAGE_EXECUTION_NS,
@@ -129,7 +149,7 @@ EXPECTED_STAGE_TIMING_BUDGET = {
     ),
     "prearm_state_timeout_ns": PREARM_STATE_WAIT_NS,
     "airborne_state_timeout_ns": AIRBORNE_STATE_WAIT_NS,
-    "bounded_preflight_ns": BOUNDED_PREFLIGHT_NS,
+    "bounded_preflight_ns": FLIGHT_BOUNDED_PREFLIGHT_NS,
     "warmup_motion_stage_count": 1,
     "bounded_warmup_motion_ns": BOUNDED_WARMUP_MOTION_NS,
     "post_measurement_stage_count": 2,
@@ -202,6 +222,12 @@ def execution_budget_derivation() -> dict[str, Any]:
             EXTENDED_SYS_STATE_MAX_EXECUTION_NS
             + (PRE_MEASUREMENT_STAGE_COUNT - 1) * MAX_STAGE_EXECUTION_NS
         ),
+        "preflight_recovery_maximum_attempts": (
+            PREFLIGHT_RECOVERY_MAX_ATTEMPTS
+        ),
+        "preflight_recovery_extra_execution_ns": (
+            PREFLIGHT_RECOVERY_EXTRA_EXECUTION_NS
+        ),
         "reused_command_guard_count": REUSED_COMMAND_GUARD_COUNT,
         "reused_command_guard_ns": REUSED_COMMAND_GUARD_NS,
         "reused_command_guard_total_ns": (
@@ -209,6 +235,8 @@ def execution_budget_derivation() -> dict[str, Any]:
         ),
         "prearm_state_wait_ns": PREARM_STATE_WAIT_NS,
         "airborne_state_wait_ns": AIRBORNE_STATE_WAIT_NS,
+        "flight_bounded_preflight_ns": FLIGHT_BOUNDED_PREFLIGHT_NS,
+        "preflight_admission_stability_ns": PREFLIGHT_ADMISSION_STABILITY_NS,
         "bounded_preflight_ns": BOUNDED_PREFLIGHT_NS,
         "readiness_reserve_ns": READINESS_RESERVE_NS,
         "warmup_after_motion_reserve_ns": WARMUP_AFTER_MOTION_RESERVE_NS,
@@ -272,7 +300,7 @@ def _validate_budget_and_schedule(run: Mapping[str, Any]) -> list[str]:
         or schedule.get("warmup_ns") != WARMUP_NS
         or schedule.get("measurement_ns") != MEASUREMENT_NS
     ):
-        failures.append("M4 capacity schedule differs from the 720+30+600 s budget")
+        failures.append("M4 capacity schedule differs from the 730+30+600 s budget")
 
     gate = run.get("airborne_gate")
     if not isinstance(gate, Mapping):

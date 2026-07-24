@@ -359,7 +359,7 @@ def build_adapter(
     contract = strict_json(args.contract)
     fixed_query_schedule_start_ns: int | None = None
     fixed_query_schedule_end_ns: int | None = None
-    if contract.get("contract") == "ams.m4.capacity_run/v3":
+    if contract.get("contract") == "ams.m4.capacity_run/v5":
         if contract.get("profile") != "m4_capacity_prerequisite":
             raise M4ValidationError("capacity adapter contract profile differs")
         schedule = contract.get("schedule")

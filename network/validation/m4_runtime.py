@@ -1566,6 +1566,204 @@ def validate_continuous_readiness_schedule(
     }, failures
 
 
+PREFLIGHT_READINESS_FIELDS = (
+    "ready",
+    "files_ready",
+    "clocks_fresh",
+    "clocks_coherent",
+    "odometry_fresh",
+    "world_poses_fresh",
+)
+
+
+def validate_capacity_preflight_readiness(
+    records: Iterable[Mapping[str, Any]],
+    *,
+    warmup_start_ns: int,
+    stability_ns: int,
+    sample_period_ns: int,
+    max_lateness_ns: int,
+    contract: str,
+    admission_stable_since_ns: int | None = None,
+    admission_ready_observed_ns: int | None = None,
+    admission_sha256: str | None = None,
+) -> tuple[dict[str, Any], list[str]]:
+    """Derive capacity readiness from fixed-slot raw samples.
+
+    The collector's admission file is immutable but producer-authored.  This
+    verifier reconstructs both its initial 10-second witness and the final
+    post-flap witness directly from raw process/readiness samples, including a
+    terminal sample at the warm-up boundary.
+    """
+
+    samples = [
+        record
+        for record in records
+        if record.get("event") == "prewarmup_readiness_sample"
+    ]
+    final_events = [
+        record
+        for record in records
+        if record.get("event") == "capacity_preflight_final_readiness"
+    ]
+    warmup_events = [record for record in records if record.get("event") == "warmup_start"]
+    details: dict[str, Any] = {"sample_count": len(samples)}
+    failures: list[str] = []
+    if (
+        isinstance(warmup_start_ns, bool)
+        or not isinstance(warmup_start_ns, int)
+        or isinstance(stability_ns, bool)
+        or not isinstance(stability_ns, int)
+        or isinstance(sample_period_ns, bool)
+        or not isinstance(sample_period_ns, int)
+        or isinstance(max_lateness_ns, bool)
+        or not isinstance(max_lateness_ns, int)
+        or warmup_start_ns <= 0
+        or stability_ns <= 0
+        or sample_period_ns <= 0
+        or max_lateness_ns < 0
+        or stability_ns % sample_period_ns != 0
+    ):
+        return details, ["capacity preflight readiness contract bounds differ"]
+
+    complete: list[bool] = []
+    scheduled: list[int] = []
+    observed: list[int] = []
+    for index, record in enumerate(samples):
+        scheduled_ns = record.get("scheduled_monotonic_ns")
+        observed_ns = record.get("observed_monotonic_ns")
+        host_ns = record.get("host_monotonic_ns")
+        process = record.get("processes")
+        process_exact = (
+            isinstance(process, Mapping)
+            and process.get("required_counts") == REQUIRED_PROCESS_COUNTS
+            and process.get("counts") == REQUIRED_PROCESS_COUNTS
+            and process.get("roles_exact") is True
+            and process.get("unclassified_count") == 0
+            and process.get("process_count") == sum(REQUIRED_PROCESS_COUNTS.values())
+        )
+        fields_ready = all(record.get(field) is True for field in PREFLIGHT_READINESS_FIELDS)
+        expected_scheduled = (
+            scheduled[0] + index * sample_period_ns if scheduled else scheduled_ns
+        )
+        valid = (
+            record.get("prewarmup_readiness_contract") == contract
+            and record.get("phase") == "prewarmup"
+            and record.get("sample_index") == index
+            and isinstance(scheduled_ns, int)
+            and not isinstance(scheduled_ns, bool)
+            and isinstance(observed_ns, int)
+            and not isinstance(observed_ns, bool)
+            and isinstance(host_ns, int)
+            and not isinstance(host_ns, bool)
+            and scheduled_ns == expected_scheduled
+            and (warmup_start_ns - scheduled_ns) % sample_period_ns == 0
+            and scheduled_ns <= observed_ns <= scheduled_ns + max_lateness_ns
+            and observed_ns <= host_ns
+        )
+        if not valid:
+            failures.append(f"capacity preflight readiness slot differs: {index}")
+        scheduled.append(int(scheduled_ns) if isinstance(scheduled_ns, int) else -1)
+        observed.append(int(observed_ns) if isinstance(observed_ns, int) else -1)
+        complete.append(bool(fields_ready and process_exact))
+
+    terminal_slot_count = stability_ns // sample_period_ns + 2
+    if (
+        len(samples) < terminal_slot_count
+        or not scheduled
+        or scheduled[-1] != warmup_start_ns
+        or any(not value for value in complete[-terminal_slot_count:])
+        or observed[-1] < warmup_start_ns
+        or observed[-1] > warmup_start_ns + max_lateness_ns
+    ):
+        failures.append("capacity terminal preflight readiness witness differs")
+
+    last_incomplete = max(
+        (index for index, value in enumerate(complete) if not value), default=-1
+    )
+    final_start_index = last_incomplete + 1
+    if (
+        final_start_index >= len(observed)
+        or observed[-1] - observed[final_start_index] < stability_ns
+    ):
+        failures.append("capacity final preflight stability is under ten seconds")
+    details.update(
+        {
+            "terminal_sample_index": len(samples) - 1,
+            "terminal_scheduled_monotonic_ns": scheduled[-1] if scheduled else None,
+            "terminal_observed_monotonic_ns": observed[-1] if observed else None,
+            "final_stable_since_monotonic_ns": (
+                observed[final_start_index]
+                if 0 <= final_start_index < len(observed)
+                else None
+            ),
+        }
+    )
+
+    if len(final_events) != 1 or len(warmup_events) != 1 or not samples:
+        failures.append("capacity final preflight readiness event cardinality differs")
+    else:
+        final = final_events[0]
+        terminal = samples[-1]
+        warmup = warmup_events[0]
+        if (
+            final.get("prewarmup_readiness_contract") != contract
+            or final.get("terminal_sample_index") != len(samples) - 1
+            or final.get("terminal_scheduled_monotonic_ns") != scheduled[-1]
+            or final.get("terminal_observed_monotonic_ns") != observed[-1]
+            or final.get("final_stable_since_monotonic_ns")
+            != details["final_stable_since_monotonic_ns"]
+            or final.get("final_stability_ns") != stability_ns
+            or (
+                admission_sha256 is not None
+                and final.get("admission_sha256") != admission_sha256
+            )
+            or not isinstance(final.get("event_sequence"), int)
+            or not isinstance(terminal.get("event_sequence"), int)
+            or not isinstance(warmup.get("event_sequence"), int)
+            or not terminal["event_sequence"] < final["event_sequence"] < warmup["event_sequence"]
+            or not isinstance(final.get("host_monotonic_ns"), int)
+            or final["host_monotonic_ns"] > warmup_start_ns + max_lateness_ns
+        ):
+            failures.append("capacity final preflight readiness event differs")
+
+    if admission_stable_since_ns is not None or admission_ready_observed_ns is not None:
+        if (
+            isinstance(admission_stable_since_ns, bool)
+            or not isinstance(admission_stable_since_ns, int)
+            or isinstance(admission_ready_observed_ns, bool)
+            or not isinstance(admission_ready_observed_ns, int)
+        ):
+            failures.append("capacity admission raw readiness identity differs")
+        else:
+            matching = [
+                index
+                for index, value in enumerate(observed)
+                if value == admission_ready_observed_ns
+            ]
+            if len(matching) != 1:
+                failures.append("capacity admission ready sample is not unique")
+            else:
+                ready_index = matching[0]
+                start_index = ready_index
+                while start_index > 0 and complete[start_index - 1]:
+                    start_index -= 1
+                if (
+                    not complete[ready_index]
+                    or observed[start_index] != admission_stable_since_ns
+                    or observed[ready_index] - observed[start_index] < stability_ns
+                ):
+                    failures.append("capacity admission raw readiness witness differs")
+                else:
+                    details["admission_witness"] = {
+                        "sample_index_start": start_index,
+                        "sample_index_end": ready_index,
+                        "stable_since_monotonic_ns": observed[start_index],
+                        "ready_observed_monotonic_ns": observed[ready_index],
+                    }
+    return details, failures
+
+
 def validate_capacity_runtime(
     records: list[dict[str, Any]],
     *,
@@ -1747,6 +1945,15 @@ def validate_capacity_runtime(
         measurement_end_ns=end_ns,
     )
     failures.extend(readiness_failures)
+    preflight_details, preflight_failures = validate_capacity_preflight_readiness(
+        records,
+        warmup_start_ns=warmup_start_ns,
+        stability_ns=10_000_000_000,
+        sample_period_ns=1_000_000_000,
+        max_lateness_ns=100_000_000,
+        contract="ams.m4.capacity-prewarmup-readiness/v1",
+    )
+    failures.extend(preflight_failures)
     try:
         collector = _one_event(records, "collector_start")
         identity = collector.get("static_runtime_identity")
@@ -1791,6 +1998,10 @@ def validate_capacity_runtime(
             "measurement_readiness_sample_count": readiness_details[
                 "measurement_sample_count"
             ],
+            "preflight_readiness_sample_count": preflight_details["sample_count"],
+            "preflight_final_stable_since_monotonic_ns": preflight_details.get(
+                "final_stable_since_monotonic_ns"
+            ),
             "frozen_process_identity_count": len(frozen_process_identities or ()),
         }
     )
@@ -3669,6 +3880,7 @@ __all__ = [
     "sha256_file",
     "unique_wire_messages",
     "validate_capacity_freshness",
+    "validate_capacity_preflight_readiness",
     "validate_capacity_runtime",
     "validate_capacity_workload",
     "validate_continuous_readiness_schedule",

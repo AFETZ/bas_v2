@@ -45,6 +45,7 @@ from network.validation.m4_runtime import (
     QUERY_DEADLINE_NS,
     QUERY_PERIOD_NS,
     REQUIRED_CLOCK_PRODUCERS,
+    REQUIRED_PROCESS_COUNTS,
     VALIDITY_TTL_NS,
     bind_actual_control_frame,
     index_actual_control_datagrams,
@@ -53,6 +54,7 @@ from network.validation.m4_runtime import (
     load_runtime_events,
     sha256_file,
     validate_capacity_freshness,
+    validate_capacity_preflight_readiness,
     validate_capacity_runtime,
     validate_capacity_workload,
     validate_clock_correlations,
@@ -71,8 +73,12 @@ from network.validation.m4_capacity_budget import (
 )
 from network.scripts.m4_capacity_airborne import (
     AIRBORNE_GATE_CONTRACT,
+    COMMAND_ACK_TARGET_CONTRACT,
     COPTER_MODE_GUIDED,
     EXPECTED_UAVS,
+    FLIGHT_COMMAND_SOURCE_SYSTEM,
+    FLIGHT_REPLY_COMPONENT_MAX,
+    FLIGHT_REPLY_COMPONENT_MIN,
     HEARTBEAT_FRESHNESS_NS,
     HIGH_RATE_STATE_FRESHNESS_NS,
     MAV_LANDED_STATE_IN_AIR,
@@ -83,6 +89,16 @@ from network.scripts.m4_capacity_airborne import (
     MINIMUM_RELATIVE_ALT_M,
     MINIMUM_SEPARATION_M,
     OUTCOME_TIMEOUT_NS,
+    PREFLIGHT_ADMISSION_CONTRACT,
+    PREFLIGHT_ADMISSION_RELATIVE_PATH,
+    PREFLIGHT_ADMISSION_STABILITY_NS,
+    PREFLIGHT_FINAL_STABILITY_NS,
+    PREFLIGHT_READINESS_CONTRACT,
+    PREFLIGHT_READINESS_MAX_LATENESS_NS,
+    PREFLIGHT_READINESS_SAMPLE_PERIOD_NS,
+    PREFLIGHT_RECOVERY_EXTRA_ATTEMPTS,
+    PREFLIGHT_RECOVERY_MAX_ATTEMPTS,
+    PREFLIGHT_RECOVERY_MAX_GRANTS,
     POSE_FRESHNESS_NS,
     POST_MEASUREMENT_STAGES,
     PRE_MEASUREMENT_STAGES,
@@ -91,12 +107,13 @@ from network.scripts.m4_capacity_airborne import (
     WARMUP_MOTION_STAGES,
     airborne_gate_contract,
     finite_vector3,
+    flight_reply_component_id,
     flight_timesync_token,
 )
 
 
 ROOT = Path(__file__).resolve().parents[2]
-RUN_CONTRACT = "ams.m4.capacity_run/v3"
+RUN_CONTRACT = "ams.m4.capacity_run/v5"
 RESULT_CONTRACT = "ams.m4-capacity.validation/v2"
 DEFAULT_OUTPUT = Path("metrics/m4_capacity_validation.json")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
@@ -3075,6 +3092,7 @@ def _decode_flight_mavlink_frame(payload: bytes) -> dict[str, Any]:
         if len(payload) != body_size + 12:
             raise M4ValidationError("flight MAVLink v2 frame length differs")
         message_id = int.from_bytes(payload[7:10], "little")
+        sequence = payload[4]
         system_id, component_id = payload[5], payload[6]
         body = payload[10 : 10 + body_size]
         checksum_offset = 10 + body_size
@@ -3086,6 +3104,7 @@ def _decode_flight_mavlink_frame(payload: bytes) -> dict[str, Any]:
         if len(payload) != body_size + 8:
             raise M4ValidationError("flight MAVLink v1 frame length differs")
         message_id = payload[5]
+        sequence = payload[2]
         system_id, component_id = payload[3], payload[4]
         body = payload[6 : 6 + body_size]
         checksum_offset = 6 + body_size
@@ -3101,6 +3120,7 @@ def _decode_flight_mavlink_frame(payload: bytes) -> dict[str, Any]:
         raise M4ValidationError("flight MAVLink frame CRC differs")
     return {
         "message_id": message_id,
+        "sequence": sequence,
         "system_id": system_id,
         "component_id": component_id,
         "payload": body,
@@ -3179,6 +3199,163 @@ def _validate_m4_airborne_gate(
             expected_gate["post_measurement_control_ns"]
         )
 
+        admission_path = run_dir / PREFLIGHT_ADMISSION_RELATIVE_PATH
+        admission = strict_json(admission_path)
+        expected_admission_keys = {
+            "contract",
+            "run_id",
+            "runtime_id",
+            "run_nonce",
+            "profile",
+            "airborne_gate_sha256",
+            "readiness_stability_ns",
+            "stable_since_monotonic_ns",
+            "ready_observed_monotonic_ns",
+            "issued_monotonic_ns",
+            "required_process_counts",
+            "process_counts",
+            "process_roles_exact",
+            "process_unclassified_count",
+            "process_count",
+            "full_readiness",
+        }
+        admission_key_failures = exact_keys(
+            admission,
+            expected_admission_keys,
+            "capacity preflight admission",
+        )
+        if admission_key_failures:
+            raise M4ValidationError(admission_key_failures[0])
+        expected_gate_sha256 = hashlib.sha256(
+            canonical_json(expected_gate)
+        ).hexdigest()
+        stable_since_ns = admission.get("stable_since_monotonic_ns")
+        ready_observed_ns = admission.get("ready_observed_monotonic_ns")
+        issued_ns = admission.get("issued_monotonic_ns")
+        full_readiness = admission.get("full_readiness")
+        if (
+            admission.get("contract") != PREFLIGHT_ADMISSION_CONTRACT
+            or admission.get("run_id") != run.get("run_id")
+            or admission.get("runtime_id") != run.get("runtime_id")
+            or admission.get("run_nonce") != run.get("run_nonce")
+            or admission.get("profile") != "m4_capacity_prerequisite"
+            or admission.get("airborne_gate_sha256") != expected_gate_sha256
+            or admission.get("readiness_stability_ns")
+            != PREFLIGHT_ADMISSION_STABILITY_NS
+            or expected_gate.get("preflight_admission_contract")
+            != PREFLIGHT_ADMISSION_CONTRACT
+            or expected_gate.get("preflight_admission_path")
+            != PREFLIGHT_ADMISSION_RELATIVE_PATH
+            or expected_gate.get("preflight_admission_stability_ns")
+            != PREFLIGHT_ADMISSION_STABILITY_NS
+            or expected_gate.get("prewarmup_readiness_contract")
+            != PREFLIGHT_READINESS_CONTRACT
+            or expected_gate.get("prewarmup_readiness_sample_period_ns")
+            != PREFLIGHT_READINESS_SAMPLE_PERIOD_NS
+            or expected_gate.get("prewarmup_readiness_max_lateness_ns")
+            != PREFLIGHT_READINESS_MAX_LATENESS_NS
+            or expected_gate.get("prewarmup_final_stability_ns")
+            != PREFLIGHT_FINAL_STABILITY_NS
+            or expected_gate.get("command_ack_target_contract")
+            != COMMAND_ACK_TARGET_CONTRACT
+            or expected_gate.get("command_ack_target_system")
+            != FLIGHT_COMMAND_SOURCE_SYSTEM
+            or expected_gate.get("command_ack_target_component_min")
+            != FLIGHT_REPLY_COMPONENT_MIN
+            or expected_gate.get("command_ack_target_component_max")
+            != FLIGHT_REPLY_COMPONENT_MAX
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value <= 0
+                for value in (stable_since_ns, ready_observed_ns, issued_ns)
+            )
+            or not int(stable_since_ns) < int(ready_observed_ns) <= int(issued_ns)
+            or int(ready_observed_ns) - int(stable_since_ns)
+            < PREFLIGHT_ADMISSION_STABILITY_NS
+            or int(issued_ns) >= ready_deadline_ns
+            or admission.get("required_process_counts") != REQUIRED_PROCESS_COUNTS
+            or admission.get("process_counts") != REQUIRED_PROCESS_COUNTS
+            or admission.get("process_roles_exact") is not True
+            or admission.get("process_unclassified_count") != 0
+            or admission.get("process_count") != sum(REQUIRED_PROCESS_COUNTS.values())
+            or not isinstance(full_readiness, dict)
+            or set(full_readiness)
+            != {
+                "ready",
+                "files_ready",
+                "clocks_fresh",
+                "clocks_coherent",
+                "odometry_fresh",
+                "world_poses_fresh",
+            }
+            or any(value is not True for value in full_readiness.values())
+        ):
+            raise M4ValidationError("capacity preflight admission differs")
+        runtime_events = load_runtime_events(
+            run_dir / "logs/m4_runtime_events.jsonl",
+            run_id=str(run.get("run_id")),
+            runtime_id=str(run.get("runtime_id")),
+        )
+        admission_sha256 = sha256_file(admission_path)
+        preflight_readiness, preflight_readiness_failures = (
+            validate_capacity_preflight_readiness(
+                runtime_events,
+                warmup_start_ns=ready_deadline_ns,
+                stability_ns=PREFLIGHT_ADMISSION_STABILITY_NS,
+                sample_period_ns=PREFLIGHT_READINESS_SAMPLE_PERIOD_NS,
+                max_lateness_ns=PREFLIGHT_READINESS_MAX_LATENESS_NS,
+                contract=PREFLIGHT_READINESS_CONTRACT,
+                admission_stable_since_ns=int(stable_since_ns),
+                admission_ready_observed_ns=int(ready_observed_ns),
+                admission_sha256=admission_sha256,
+            )
+        )
+        if preflight_readiness_failures:
+            raise M4ValidationError(preflight_readiness_failures[0])
+        admission_events = [
+            record
+            for record in runtime_events
+            if record.get("event") == "capacity_preflight_admission_issued"
+        ]
+        readiness_events = [
+            record
+            for record in runtime_events
+            if record.get("event") == "readiness_complete"
+        ]
+        if (
+            len(admission_events) != 1
+            or len(readiness_events) != 1
+            or readiness_events[0].get("stable_since_monotonic_ns")
+            != stable_since_ns
+            or readiness_events[0].get("event_sequence", 0)
+            >= admission_events[0].get("event_sequence", 0)
+            or admission_events[0].get("admission_contract")
+            != PREFLIGHT_ADMISSION_CONTRACT
+            or admission_events[0].get("admission_path")
+            != PREFLIGHT_ADMISSION_RELATIVE_PATH
+            or admission_events[0].get("admission_sha256") != admission_sha256
+            or admission_events[0].get("airborne_gate_sha256")
+            != expected_gate_sha256
+            or admission_events[0].get("stable_since_monotonic_ns")
+            != stable_since_ns
+            or admission_events[0].get("ready_observed_monotonic_ns")
+            != ready_observed_ns
+            or admission_events[0].get("issued_monotonic_ns") != issued_ns
+            or admission_events[0].get("readiness_stability_ns")
+            != PREFLIGHT_ADMISSION_STABILITY_NS
+            or not isinstance(admission_events[0].get("host_monotonic_ns"), int)
+            or admission_events[0]["host_monotonic_ns"] < issued_ns
+        ):
+            raise M4ValidationError("capacity preflight admission event differs")
+        details["preflight_admission"] = {
+            "path": PREFLIGHT_ADMISSION_RELATIVE_PATH,
+            "sha256": admission_sha256,
+            "stable_since_monotonic_ns": stable_since_ns,
+            "issued_monotonic_ns": issued_ns,
+        }
+        details["preflight_readiness"] = preflight_readiness
+
         events = strict_jsonl(
             run_dir / "raw/actual_control/events.jsonl",
             max_line_bytes=2 * 1024 * 1024,
@@ -3192,6 +3369,7 @@ def _validate_m4_airborne_gate(
             "real_heartbeat",
             "actual_control_link_ready",
             "ambient_timesync_request",
+            "flight_preflight_admitted",
             "flight_plan_started",
             "flight_command_offered",
             "flight_command_ack",
@@ -3200,6 +3378,7 @@ def _validate_m4_airborne_gate(
             "flight_command_retryable_rejection_complete",
             "flight_command_outcome_timeout",
             "flight_command_quiet_drain",
+            "flight_preflight_recovery_granted",
             "late_flight_command_ack",
             "late_flight_timesync_echo",
             "flight_vehicle_heartbeat",
@@ -3261,6 +3440,29 @@ def _validate_m4_airborne_gate(
         if len(plan_starts) != 1:
             raise M4ValidationError("flight plan start cardinality differs")
         plan_start = plan_starts[0]
+        preflight_admitted = event_groups.get("flight_preflight_admitted", [])
+        if (
+            len(preflight_admitted) != 1
+            or preflight_admitted[0].get("admission_contract")
+            != PREFLIGHT_ADMISSION_CONTRACT
+            or preflight_admitted[0].get("admission_path")
+            != PREFLIGHT_ADMISSION_RELATIVE_PATH
+            or preflight_admitted[0].get("admission_sha256") != admission_sha256
+            or preflight_admitted[0].get("airborne_gate_sha256")
+            != expected_gate_sha256
+            or preflight_admitted[0].get("readiness_stability_ns")
+            != PREFLIGHT_ADMISSION_STABILITY_NS
+            or preflight_admitted[0].get("stable_since_monotonic_ns")
+            != stable_since_ns
+            or preflight_admitted[0].get("ready_observed_monotonic_ns")
+            != ready_observed_ns
+            or preflight_admitted[0].get("issued_monotonic_ns") != issued_ns
+            or not isinstance(preflight_admitted[0].get("monotonic_ns"), int)
+            or preflight_admitted[0]["monotonic_ns"]
+            < admission_events[0]["host_monotonic_ns"]
+        ):
+            raise M4ValidationError("flight preflight admission binding differs")
+        admitted = preflight_admitted[0]
         if (
             plan_start.get("airborne_gate_contract") != AIRBORNE_GATE_CONTRACT
             or plan_start.get("declared_airborne_gate") != expected_gate
@@ -3270,6 +3472,8 @@ def _validate_m4_airborne_gate(
             or plan_start.get("measurement_end_monotonic_ns") != end_ns
             or isinstance(plan_start.get("monotonic_ns"), bool)
             or not isinstance(plan_start.get("monotonic_ns"), int)
+            or plan_start["monotonic_ns"] <= admitted["monotonic_ns"]
+            or plan_start.get("event_sequence", 0) <= admitted.get("event_sequence", 0)
             or plan_start["monotonic_ns"] >= ready_deadline_ns
         ):
             raise M4ValidationError("flight plan start/gate binding differs")
@@ -3336,14 +3540,21 @@ def _validate_m4_airborne_gate(
             attempt = offer.get("attempt")
             if stage == "stream_extended_sys_state":
                 attempt_key = "extended_sys_state_max_attempts"
+                offer_maximum_attempts = int(expected_gate[attempt_key])
             elif stage in PRE_MEASUREMENT_STAGES:
                 attempt_key = "pre_measurement_max_attempts"
+                offer_maximum_attempts = int(
+                    expected_gate["preflight_recovery_max_attempts"]
+                )
             elif stage in WARMUP_MOTION_STAGES:
                 attempt_key = "warmup_motion_max_attempts"
+                offer_maximum_attempts = int(expected_gate[attempt_key])
             elif stage in POST_MEASUREMENT_STAGES:
                 attempt_key = "post_measurement_max_attempts"
+                offer_maximum_attempts = int(expected_gate[attempt_key])
             else:
                 attempt_key = ""
+                offer_maximum_attempts = 0
             if (
                 not isinstance(transaction_id, str)
                 or transaction_id in offers_by_transaction
@@ -3353,7 +3564,7 @@ def _validate_m4_airborne_gate(
                 or isinstance(attempt, bool)
                 or not isinstance(attempt, int)
                 or not attempt_key
-                or not 1 <= attempt <= int(expected_gate[attempt_key])
+                or not 1 <= attempt <= offer_maximum_attempts
                 or transaction_id
                 != f"m4-capacity-flight:{stage}:uav{uav}:attempt{attempt}"
             ):
@@ -3407,6 +3618,9 @@ def _validate_m4_airborne_gate(
                 stage_code=int(definition["stage_code"]),
                 uav=int(uav),
                 ordinal=int(attempt),
+            )
+            reply_component_id = flight_reply_component_id(
+                stage=str(stage), attempt=int(attempt)
             )
             encoding = str(definition["encoding"])
             if encoding == "COMMAND_LONG":
@@ -3483,11 +3697,11 @@ def _validate_m4_airborne_gate(
                 raise M4ValidationError("flight command encoding differs")
             if (
                 not command_matches
-                or command["system_id"] != 255
-                or command["component_id"] != 190
+                or command["system_id"] != FLIGHT_COMMAND_SOURCE_SYSTEM
+                or command["component_id"] != reply_component_id
                 or timesync["message_id"] != 111
-                or timesync["system_id"] != 255
-                or timesync["component_id"] != 190
+                or timesync["system_id"] != FLIGHT_COMMAND_SOURCE_SYSTEM
+                or timesync["component_id"] != reply_component_id
                 or struct.unpack("<qq", timesync["payload"]) != (0, token)
                 or len(request_frames) != 2
                 or [frame["message_id"] for frame in request_frames]
@@ -3497,6 +3711,14 @@ def _validate_m4_airborne_gate(
                 or request != command_frame + timesync_frame
                 or offer.get("command_frame_sha256") != command["sha256"]
                 or offer.get("timesync_frame_sha256") != timesync["sha256"]
+                or offer.get("command_source_system")
+                != FLIGHT_COMMAND_SOURCE_SYSTEM
+                or offer.get("command_source_component") != reply_component_id
+                or offer.get("timesync_source_system")
+                != FLIGHT_COMMAND_SOURCE_SYSTEM
+                or offer.get("timesync_source_component") != reply_component_id
+                or offer.get("ack_target_system") != FLIGHT_COMMAND_SOURCE_SYSTEM
+                or offer.get("ack_target_component") != reply_component_id
                 or offer.get("timesync_request_tc1") != 0
                 or offer.get("timesync_request_ts1") != token
                 or offer.get("request_transport_payload_sha256")
@@ -3515,11 +3737,16 @@ def _validate_m4_airborne_gate(
             decoded, parent = bound_flight_event_frame(ack, 77)
             required_uplink_parents[int(parent["event_sequence"])] = parent
             received_ns = ack.get("received_monotonic_ns")
-            if len(decoded["payload"]) > 10 or len(decoded["payload"]) < 3:
-                raise M4ValidationError("flight COMMAND_ACK payload is truncated")
-            payload_command, payload_result = struct.unpack(
-                "<HB", decoded["payload"][:3].ljust(3, b"\0")
-            )
+            if len(decoded["payload"]) != 10:
+                raise M4ValidationError("flight COMMAND_ACK target extension is absent")
+            (
+                payload_command,
+                payload_result,
+                _payload_progress,
+                _payload_result_param2,
+                payload_target_system,
+                payload_target_component,
+            ) = struct.unpack("<HBBiBB", decoded["payload"])
             if (
                 offer is None
                 or transaction_id in ack_by_transaction
@@ -3529,6 +3756,10 @@ def _validate_m4_airborne_gate(
                 or ack.get("command_result") not in {0, 1}
                 or payload_command != offer["command_id"]
                 or payload_result != ack.get("command_result")
+                or payload_target_system != offer["ack_target_system"]
+                or payload_target_component != offer["ack_target_component"]
+                or ack.get("ack_target_system") != payload_target_system
+                or ack.get("ack_target_component") != payload_target_component
                 or isinstance(received_ns, bool)
                 or not isinstance(received_ns, int)
                 or not offer["sent_monotonic_ns"]
@@ -3572,9 +3803,16 @@ def _validate_m4_airborne_gate(
             offer = offers_by_transaction.get(transaction_id)
             decoded, parent = bound_flight_event_frame(late_ack, 77)
             required_uplink_parents[int(parent["event_sequence"])] = parent
-            payload_command, payload_result = struct.unpack(
-                "<HB", decoded["payload"][:3].ljust(3, b"\0")
-            )
+            if len(decoded["payload"]) != 10:
+                raise M4ValidationError("late flight ACK target extension is absent")
+            (
+                payload_command,
+                payload_result,
+                _payload_progress,
+                _payload_result_param2,
+                payload_target_system,
+                payload_target_component,
+            ) = struct.unpack("<HBBiBB", decoded["payload"])
             received_ns = late_ack.get("received_monotonic_ns")
             if (
                 offer is None
@@ -3586,6 +3824,10 @@ def _validate_m4_airborne_gate(
                 or late_ack.get("command_id") != offer["command_id"]
                 or late_ack.get("command_result") not in {0, 1}
                 or payload_result != late_ack.get("command_result")
+                or payload_target_system != offer["ack_target_system"]
+                or payload_target_component != offer["ack_target_component"]
+                or late_ack.get("ack_target_system") != payload_target_system
+                or late_ack.get("ack_target_component") != payload_target_component
                 or not isinstance(received_ns, int)
                 or isinstance(received_ns, bool)
                 or received_ns
@@ -3665,6 +3907,8 @@ def _validate_m4_airborne_gate(
                         "command_result",
                         "source_system",
                         "source_component",
+                        "target_system",
+                        "target_component",
                         "transport_payload_sha256",
                         "mavlink_frame_sha256",
                     )
@@ -3752,6 +3996,65 @@ def _validate_m4_airborne_gate(
         if set(attempts_by_stage_uav) != expected_keys:
             raise M4ValidationError("flight stage/UAV offer coverage differs")
 
+        recovery_grants = event_groups.get("flight_preflight_recovery_granted", [])
+        if len(recovery_grants) > PREFLIGHT_RECOVERY_MAX_GRANTS:
+            raise M4ValidationError("flight preflight recovery grant count differs")
+        recovery_stage: str | None = None
+        recovery_remaining_uavs: set[int] = set()
+        if recovery_grants:
+            grant = recovery_grants[0]
+            recovery_stage = str(grant.get("flight_stage"))
+            normal_maximum_attempts = int(
+                expected_gate["pre_measurement_max_attempts"]
+            )
+            expected_recovery_remaining: set[int] = set()
+            for uav in EXPECTED_UAVS:
+                normal_attempts = sorted(
+                    attempt
+                    for attempt in attempts_by_stage_uav[(recovery_stage, uav)]
+                    if attempt <= normal_maximum_attempts
+                )
+                if not normal_attempts:
+                    raise M4ValidationError(
+                        "flight preflight recovery lacks normal attempts"
+                    )
+                final_normal_transaction = (
+                    f"m4-capacity-flight:{recovery_stage}:uav{uav}:attempt"
+                    f"{normal_attempts[-1]}"
+                )
+                if terminal_kind[final_normal_transaction] != "accepted":
+                    if normal_attempts != list(
+                        range(1, normal_maximum_attempts + 1)
+                    ):
+                        raise M4ValidationError(
+                            "flight preflight recovery normal attempt sequence differs"
+                        )
+                    expected_recovery_remaining.add(uav)
+            expected_recovery_labels = [
+                f"uav{uav}" for uav in sorted(expected_recovery_remaining)
+            ]
+            if (
+                recovery_stage not in PRE_MEASUREMENT_STAGES
+                or recovery_stage == "stream_extended_sys_state"
+                or grant.get("command_id")
+                != STAGE_BY_NAME[recovery_stage]["command_id"]
+                or grant.get("exhausted_attempt") != normal_maximum_attempts
+                or grant.get("normal_max_attempts") != normal_maximum_attempts
+                or grant.get("recovery_max_attempts")
+                != PREFLIGHT_RECOVERY_MAX_ATTEMPTS
+                or grant.get("recovery_extra_attempts")
+                != PREFLIGHT_RECOVERY_EXTRA_ATTEMPTS
+                or grant.get("shared_recovery_max_grants")
+                != PREFLIGHT_RECOVERY_MAX_GRANTS
+                or grant.get("recovery_remaining_uavs")
+                != expected_recovery_labels
+                or not expected_recovery_remaining
+                or isinstance(grant.get("monotonic_ns"), bool)
+                or not isinstance(grant.get("monotonic_ns"), int)
+            ):
+                raise M4ValidationError("flight preflight recovery grant differs")
+            recovery_remaining_uavs = expected_recovery_remaining
+
         for transaction_id in late_ack_by_transaction:
             terminal = terminal_by_transaction.get(transaction_id, {})
             if (
@@ -3773,21 +4076,31 @@ def _validate_m4_airborne_gate(
             accepted_attempts = [
                 int(item["attempt"]) for item in accepted_by_stage_uav[key]
             ]
-            maximum_attempts = int(
-                expected_gate[
-                    "extended_sys_state_max_attempts"
-                    if key[0] == "stream_extended_sys_state"
-                    else (
-                        "pre_measurement_max_attempts"
-                        if key[0] in PRE_MEASUREMENT_STAGES
-                        else (
-                            "warmup_motion_max_attempts"
-                            if key[0] in WARMUP_MOTION_STAGES
-                            else "post_measurement_max_attempts"
-                        )
-                    )
-                ]
-            )
+            if key[0] == "stream_extended_sys_state":
+                maximum_attempts = int(
+                    expected_gate["extended_sys_state_max_attempts"]
+                )
+                normal_maximum_attempts = maximum_attempts
+            elif key[0] in PRE_MEASUREMENT_STAGES:
+                normal_maximum_attempts = int(
+                    expected_gate["pre_measurement_max_attempts"]
+                )
+                maximum_attempts = (
+                    PREFLIGHT_RECOVERY_MAX_ATTEMPTS
+                    if key[0] == recovery_stage
+                    and key[1] in recovery_remaining_uavs
+                    else normal_maximum_attempts
+                )
+            elif key[0] in WARMUP_MOTION_STAGES:
+                maximum_attempts = int(
+                    expected_gate["warmup_motion_max_attempts"]
+                )
+                normal_maximum_attempts = maximum_attempts
+            else:
+                maximum_attempts = int(
+                    expected_gate["post_measurement_max_attempts"]
+                )
+                normal_maximum_attempts = maximum_attempts
             if (
                 attempts != list(range(1, len(attempts) + 1))
                 or len(attempts) > maximum_attempts
@@ -3801,6 +4114,14 @@ def _validate_m4_airborne_gate(
                 )
             ):
                 raise M4ValidationError(f"flight attempts/final acceptance differ: {key}")
+            if (
+                any(attempt > normal_maximum_attempts for attempt in attempts)
+                and not (
+                    key[0] == recovery_stage
+                    and key[1] in recovery_remaining_uavs
+                )
+            ):
+                raise M4ValidationError("flight recovery attempt is not granted")
 
         def terminal_time_ns(transaction_id: str) -> int:
             terminal = terminal_by_transaction[transaction_id]
@@ -3813,6 +4134,23 @@ def _validate_m4_airborne_gate(
             if isinstance(value, bool) or not isinstance(value, int):
                 raise M4ValidationError("flight terminal timestamp differs")
             return value
+
+        if recovery_grants:
+            grant = recovery_grants[0]
+            normal_maximum_attempts = int(
+                expected_gate["pre_measurement_max_attempts"]
+            )
+            exhausted_terminal_ns = max(
+                terminal_time_ns(
+                    f"m4-capacity-flight:{recovery_stage}:uav{uav}:attempt"
+                    f"{normal_maximum_attempts}"
+                )
+                for uav in recovery_remaining_uavs
+            )
+            if grant["monotonic_ns"] < exhausted_terminal_ns:
+                raise M4ValidationError(
+                    "flight preflight recovery precedes its exhausted attempts"
+                )
 
         ordered_stages = [str(item["stage"]) for item in STAGE_DEFINITIONS]
         for previous_stage, following_stage in zip(
@@ -3844,7 +4182,11 @@ def _validate_m4_airborne_gate(
                 or not isinstance(drain.get("completed_monotonic_ns"), int)
                 or drain.get("required_quiet_ns") != OUTCOME_TIMEOUT_NS
                 or drain.get("reason")
-                not in {"bounded_retry", "same_command_id_stage_boundary"}
+                not in {
+                    "bounded_retry",
+                    "preflight_recovery",
+                    "same_command_id_stage_boundary",
+                }
                 or not isinstance(drain.get("guarded_uavs"), list)
                 or len(drain["guarded_uavs"]) != len(set(drain["guarded_uavs"]))
                 or not set(drain["guarded_uavs"])
@@ -3893,6 +4235,36 @@ def _validate_m4_airborne_gate(
                 raise M4ValidationError(
                     "flight command quiet drain last response is not raw-derived"
                 )
+        recovery_drains = [
+            drain
+            for drain in drains
+            if drain.get("reason") == "preflight_recovery"
+        ]
+        if not recovery_grants and recovery_drains:
+            raise M4ValidationError("flight recovery drain lacks a grant")
+        if recovery_grants:
+            grant = recovery_grants[0]
+            assert recovery_stage is not None
+            expected_recovery_drain_count = 1 + int(
+                any(
+                    offer.get("flight_stage") == recovery_stage
+                    and offer.get("attempt") == PREFLIGHT_RECOVERY_MAX_ATTEMPTS
+                    for offer in offers_by_transaction.values()
+                )
+            )
+            if (
+                len(recovery_drains) != expected_recovery_drain_count
+                or any(
+                    drain.get("command_id")
+                    != STAGE_BY_NAME[recovery_stage]["command_id"]
+                    or not set(drain.get("guarded_uavs", []))
+                    <= {f"uav{uav}" for uav in recovery_remaining_uavs}
+                    or drain.get("started_monotonic_ns", -1)
+                    < grant["monotonic_ns"]
+                    for drain in recovery_drains
+                )
+            ):
+                raise M4ValidationError("flight recovery drain binding differs")
         for key, attempts in attempts_by_stage_uav.items():
             if len(attempts) <= 1:
                 continue
@@ -3904,8 +4276,15 @@ def _validate_m4_airborne_gate(
                 previous_terminal_ns = terminal_time_ns(
                     str(previous["transaction_id"])
                 )
+                expected_reason = (
+                    "preflight_recovery"
+                    if key[0] == recovery_stage
+                    and int(previous["attempt"])
+                    >= int(expected_gate["pre_measurement_max_attempts"])
+                    else "bounded_retry"
+                )
                 if not any(
-                    drain.get("reason") == "bounded_retry"
+                    drain.get("reason") == expected_reason
                     and drain.get("command_id") == previous["command_id"]
                     and f"uav{key[1]}" in drain.get("guarded_uavs", [])
                     and previous_terminal_ns
@@ -4597,6 +4976,19 @@ def _validate_m4_airborne_gate(
             "accepted_flight_command_count": len(accepted),
             "flight_command_attempt_count": len(offers_by_transaction),
             "flight_command_retry_count": len(offers_by_transaction) - len(expected_keys),
+            "preflight_admission": {
+                "path": PREFLIGHT_ADMISSION_RELATIVE_PATH,
+                "sha256": admission_sha256,
+                "stable_since_monotonic_ns": stable_since_ns,
+                "issued_monotonic_ns": issued_ns,
+            },
+            "preflight_recovery": {
+                "grant_count": len(recovery_grants),
+                "stage": recovery_stage,
+                "remaining_uavs": [
+                    f"uav{uav}" for uav in sorted(recovery_remaining_uavs)
+                ],
+            },
             "clean_landing_shutdown_monotonic_ns": shutdown_ns,
             "network_lineage": network_lineage,
             "frame_alignment": frame_alignment,
@@ -4922,7 +5314,7 @@ def validate(run_dir: Path) -> dict[str, Any]:
         )
     )
     for key, expected in {
-        "schema_version": 3,
+        "schema_version": 4,
         "contract": RUN_CONTRACT,
         "profile": "m4_capacity_prerequisite",
         "provider_mode": "real_sionna",

@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import struct
 import sys
 import tempfile
 import unittest
@@ -36,6 +37,7 @@ from network.validation.m4_runtime import (  # noqa: E402
     _consume_capture_role_occurrences,
     _consume_ordered_occurrence,
     validate_clock_process_binding,
+    validate_capacity_preflight_readiness,
     validate_continuous_readiness_schedule,
     validate_external_captures,
 )
@@ -1410,7 +1412,16 @@ class CapacityAirborneControllerTests(unittest.TestCase):
         return airborne.airborne_gate_contract(schedule)
 
     @staticmethod
-    def response_common(uav: int, message_id: int, digest: str) -> dict[str, object]:
+    def response_common(
+        uav: int, message_id: int, digest: str, *, payload: bytes, sequence: int = 0
+    ) -> dict[str, object]:
+        frame = control_probe.mavlink_v2_frame(
+            message_id,
+            payload,
+            sequence=sequence,
+            system_id=uav,
+            component_id=1,
+        )
         return {
             "uav": uav,
             "peer_ip": f"10.71.{uav}.10",
@@ -1421,9 +1432,9 @@ class CapacityAirborneControllerTests(unittest.TestCase):
             "message_id": message_id,
             "source_system": uav,
             "source_component": 1,
-            "mavlink_frame_hex": "00",
-            "mavlink_frame_sha256": "a" * 64,
-            "mavlink_frame_size": 1,
+            "mavlink_frame_hex": frame.hex(),
+            "mavlink_frame_sha256": hashlib.sha256(frame).hexdigest(),
+            "mavlink_frame_size": len(frame),
         }
 
     @staticmethod
@@ -1469,7 +1480,20 @@ class CapacityAirborneControllerTests(unittest.TestCase):
                     continue
                 if exact_deadline_uav1 and uav == 1:
                     clock.value = pending.sent_monotonic_ns + airborne.OUTCOME_TIMEOUT_NS
-                common = self.response_common(uav, 77, f"{uav}" * 64)
+                common = self.response_common(
+                    uav,
+                    77,
+                    f"{uav}" * 64,
+                    payload=struct.pack(
+                        "<HBBiBB",
+                        pending.command_id,
+                        airborne.MAV_RESULT_ACCEPTED,
+                        0,
+                        0,
+                        airborne.FLIGHT_COMMAND_SOURCE_SYSTEM,
+                        pending.reply_component_id,
+                    ),
+                )
                 common["received_monotonic_ns"] = clock.now()
                 controller.observe_message(
                     message_type="COMMAND_ACK",
@@ -1481,7 +1505,15 @@ class CapacityAirborneControllerTests(unittest.TestCase):
                 if uav not in controller.pending_by_uav:
                     continue
                 pending = controller.pending_by_uav[uav]
-                common = self.response_common(uav, 111, f"{uav + 5}" * 64)
+                common = self.response_common(
+                    uav,
+                    111,
+                    f"{uav + 5}" * 64,
+                    payload=struct.pack(
+                        "<qq", 123_456_789, pending.timesync_token
+                    ),
+                    sequence=1,
+                )
                 common["received_monotonic_ns"] = clock.now()
                 controller.observe_message(
                     message_type="TIMESYNC",
@@ -1526,6 +1558,11 @@ class CapacityAirborneControllerTests(unittest.TestCase):
         self.assertNotEqual(
             first["timesync_request_ts1"], second["timesync_request_ts1"]
         )
+        self.assertNotEqual(
+            first["ack_target_component"], second["ack_target_component"]
+        )
+        self.assertEqual(first["command_frame"][6], first["ack_target_component"])
+        self.assertEqual(first["timesync_frame"][6], first["ack_target_component"])
         self.assertEqual(
             control_probe.struct.unpack(
                 "<qq", first["timesync_frame"][10:-2]
@@ -1624,6 +1661,86 @@ class CapacityAirborneControllerTests(unittest.TestCase):
             {"accepted"},
         )
 
+    def test_late_ack_with_old_target_component_cannot_close_new_attempt(self) -> None:
+        controller, clock, _sock, writer = self.controller_with_pump()
+
+        def pending(attempt: int, token: int) -> airborne.PendingFlightCommand:
+            component = airborne.flight_reply_component_id(
+                stage="takeoff", attempt=attempt
+            )
+            return airborne.PendingFlightCommand(
+                stage="takeoff",
+                stage_code=14,
+                command_id=airborne.MAV_CMD_NAV_TAKEOFF,
+                uav=1,
+                transaction_id=f"m4-capacity-flight:takeoff:uav1:attempt{attempt}",
+                sent_monotonic_ns=clock.now(),
+                request_datagram_sha256="1" * 64,
+                command_frame_sha256="2" * 64,
+                timesync_frame_sha256="3" * 64,
+                timesync_token=token,
+                reply_component_id=component,
+                attempt=attempt,
+            )
+
+        old = pending(1, 101)
+        old_key = (old.uav, old.timesync_token)
+        old_reply_key = (old.uav, old.reply_component_id)
+        controller.pending_by_uav[1] = old
+        controller.pending_by_token[old_key] = old
+        controller.pending_by_reply_component[old_reply_key] = old
+        controller._retire_pending(old, "timeout")
+
+        current = pending(2, 102)
+        controller.pending_by_uav[1] = current
+        controller.pending_by_token[(1, current.timesync_token)] = current
+        controller.pending_by_reply_component[(1, current.reply_component_id)] = current
+        old_ack = self.response_common(
+            1,
+            77,
+            "4" * 64,
+            payload=struct.pack(
+                "<HBBiBB",
+                old.command_id,
+                airborne.MAV_RESULT_ACCEPTED,
+                0,
+                0,
+                airborne.FLIGHT_COMMAND_SOURCE_SYSTEM,
+                old.reply_component_id,
+            ),
+        )
+        self.assertTrue(
+            controller.observe_message(
+                message_type="COMMAND_ACK",
+                uav=1,
+                message=self.ack_message(old.command_id),
+                received_ns=clock.now(),
+                common=old_ack,
+            )
+        )
+        self.assertIsNone(current.ack)
+        current_timesync = self.response_common(
+            1,
+            111,
+            "5" * 64,
+            payload=struct.pack("<qq", 123_456_789, current.timesync_token),
+        )
+        self.assertTrue(
+            controller.observe_message(
+                message_type="TIMESYNC",
+                uav=1,
+                message=self.timesync_message(current.timesync_token),
+                received_ns=clock.now(),
+                common=current_timesync,
+            )
+        )
+        self.assertIsNone(current.ack)
+        self.assertEqual(current.timesync["timesync_ts1"], current.timesync_token)
+        self.assertIn(
+            "late_flight_command_ack",
+            [call.args[0] for call in writer.emit.call_args_list],
+        )
+
     def test_exact_deadline_response_times_out_and_cannot_complete(self) -> None:
         controller, _clock, _sock, writer = self.controller_with_pump(
             exact_deadline_uav1=True
@@ -1675,6 +1792,110 @@ class CapacityAirborneControllerTests(unittest.TestCase):
         ]
         self.assertEqual([item["attempt"] for item in offers], [1, 2, 3, 4])
         self.assertEqual(len({item["timesync_request_ts1"] for item in offers}), 4)
+
+    def test_preflight_recovery_is_single_shared_and_token_distinct(self) -> None:
+        controller, _clock, sock, writer = self.controller_with_pump(
+            drop_uav1_attempts={1, 2, 3, 4}
+        )
+        controller._send_stage("takeoff")
+        offers = [
+            call.kwargs
+            for call in writer.emit.call_args_list
+            if call.args[0] == "flight_command_offered"
+            and call.kwargs["flight_stage"] == "takeoff"
+            and call.kwargs["uav"] == 1
+        ]
+        self.assertEqual([item["attempt"] for item in offers], [1, 2, 3, 4, 5])
+        self.assertEqual(len({item["timesync_request_ts1"] for item in offers}), 5)
+        grants = [
+            call.kwargs
+            for call in writer.emit.call_args_list
+            if call.args[0] == "flight_preflight_recovery_granted"
+        ]
+        self.assertEqual(len(grants), 1)
+        self.assertEqual(grants[0]["flight_stage"], "takeoff")
+        self.assertEqual(grants[0]["recovery_remaining_uavs"], ["uav1"])
+        self.assertEqual(grants[0]["normal_max_attempts"], 4)
+        self.assertEqual(grants[0]["recovery_max_attempts"], 6)
+        self.assertEqual(len(sock.sent), 9)
+
+        with self.assertRaisesRegex(
+            airborne.AirborneControlError,
+            "exhausted bounded attempts",
+        ):
+            controller._send_stage("guided")
+
+
+class CapacityPreflightAdmissionTests(unittest.TestCase):
+    @staticmethod
+    def gate() -> dict[str, object]:
+        return airborne.airborne_gate_contract(
+            {
+                "warmup_start_monotonic_ns": 900_000_000_000,
+                "measurement_start_monotonic_ns": 930_000_000_000,
+                "measurement_end_monotonic_ns": 1_530_000_000_000,
+            }
+        )
+
+    def admission(self, gate: dict[str, object]) -> dict[str, object]:
+        stable_since = 100_000_000_000
+        ready_observed = stable_since + airborne.PREFLIGHT_ADMISSION_STABILITY_NS
+        return {
+            "contract": airborne.PREFLIGHT_ADMISSION_CONTRACT,
+            "run_id": "run",
+            "runtime_id": "11" * 16,
+            "run_nonce": "22" * 32,
+            "profile": "m4_capacity_prerequisite",
+            "airborne_gate_sha256": hashlib.sha256(
+                control_probe.canonical_json(gate)
+            ).hexdigest(),
+            "readiness_stability_ns": airborne.PREFLIGHT_ADMISSION_STABILITY_NS,
+            "stable_since_monotonic_ns": stable_since,
+            "ready_observed_monotonic_ns": ready_observed,
+            "issued_monotonic_ns": ready_observed + 1,
+            "required_process_counts": REQUIRED_PROCESS_COUNTS,
+            "process_counts": REQUIRED_PROCESS_COUNTS,
+            "process_roles_exact": True,
+            "process_unclassified_count": 0,
+            "process_count": sum(REQUIRED_PROCESS_COUNTS.values()),
+            "full_readiness": {
+                "ready": True,
+                "files_ready": True,
+                "clocks_fresh": True,
+                "clocks_coherent": True,
+                "odometry_fresh": True,
+                "world_poses_fresh": True,
+            },
+        }
+
+    def test_admission_binds_full_readiness_and_exact_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "capacity-preflight-admission.json"
+            gate = self.gate()
+            admission = self.admission(gate)
+            path.write_bytes(canonical_bytes(admission))
+            observed = control_probe.validate_capacity_preflight_admission(
+                path,
+                run_id="run",
+                runtime_id="11" * 16,
+                run_nonce="22" * 32,
+                gate=gate,
+            )
+            self.assertEqual(observed, admission)
+
+            admission["process_counts"] = {"forged": 1}
+            path.write_bytes(canonical_bytes(admission))
+            with self.assertRaisesRegex(
+                control_probe.ControlProbeError,
+                "readiness differs",
+            ):
+                control_probe.validate_capacity_preflight_admission(
+                    path,
+                    run_id="run",
+                    runtime_id="11" * 16,
+                    run_nonce="22" * 32,
+                    gate=gate,
+                )
 
 
 class FrozenRuntimeContractTests(unittest.TestCase):
@@ -2072,6 +2293,139 @@ class ContinuousReadinessScheduleTests(unittest.TestCase):
                     ),
                     failures,
                 )
+
+
+class CapacityPrewarmupReadinessTests(unittest.TestCase):
+    warmup_start_ns = 100_000_000_000
+    period_ns = 1_000_000_000
+    lateness_ns = 100_000_000
+    stability_ns = 10_000_000_000
+    contract = airborne.PREFLIGHT_READINESS_CONTRACT
+    admission_sha256 = "a" * 64
+
+    def records(self) -> tuple[list[dict[str, object]], int, int]:
+        samples: list[dict[str, object]] = []
+        for index in range(24):
+            scheduled_ns = self.warmup_start_ns - (23 - index) * self.period_ns
+            observed_ns = scheduled_ns + 10_000_000
+            samples.append(
+                {
+                    "event": "prewarmup_readiness_sample",
+                    "event_sequence": index + 1,
+                    "host_monotonic_ns": observed_ns + 1,
+                    "prewarmup_readiness_contract": self.contract,
+                    "phase": "prewarmup",
+                    "sample_index": index,
+                    "scheduled_monotonic_ns": scheduled_ns,
+                    "observed_monotonic_ns": observed_ns,
+                    "ready": True,
+                    "files_ready": True,
+                    "clocks_fresh": True,
+                    "clocks_coherent": True,
+                    "odometry_fresh": True,
+                    "world_poses_fresh": True,
+                    "processes": {
+                        "required_counts": REQUIRED_PROCESS_COUNTS,
+                        "counts": REQUIRED_PROCESS_COUNTS,
+                        "roles_exact": True,
+                        "unclassified_count": 0,
+                        "process_count": sum(REQUIRED_PROCESS_COUNTS.values()),
+                    },
+                }
+            )
+        stable_since = int(samples[0]["observed_monotonic_ns"])
+        ready_observed = int(samples[10]["observed_monotonic_ns"])
+        terminal = samples[-1]
+        records: list[dict[str, object]] = [
+            *samples,
+            {
+                "event": "capacity_preflight_final_readiness",
+                "event_sequence": 25,
+                "host_monotonic_ns": self.warmup_start_ns + 20_000_000,
+                "prewarmup_readiness_contract": self.contract,
+                "admission_sha256": self.admission_sha256,
+                "terminal_sample_index": 23,
+                "terminal_scheduled_monotonic_ns": self.warmup_start_ns,
+                "terminal_observed_monotonic_ns": terminal[
+                    "observed_monotonic_ns"
+                ],
+                "final_stable_since_monotonic_ns": stable_since,
+                "final_stability_ns": self.stability_ns,
+            },
+            {
+                "event": "warmup_start",
+                "event_sequence": 26,
+                "host_monotonic_ns": self.warmup_start_ns + 30_000_000,
+            },
+        ]
+        return records, stable_since, ready_observed
+
+    def validate(
+        self,
+        records: list[dict[str, object]],
+        stable_since: int,
+        ready_observed: int,
+    ) -> tuple[dict[str, object], list[str]]:
+        return validate_capacity_preflight_readiness(
+            records,
+            warmup_start_ns=self.warmup_start_ns,
+            stability_ns=self.stability_ns,
+            sample_period_ns=self.period_ns,
+            max_lateness_ns=self.lateness_ns,
+            contract=self.contract,
+            admission_stable_since_ns=stable_since,
+            admission_ready_observed_ns=ready_observed,
+            admission_sha256=self.admission_sha256,
+        )
+
+    def test_raw_initial_and_terminal_witnesses_pass(self) -> None:
+        records, stable_since, ready_observed = self.records()
+        details, failures = self.validate(records, stable_since, ready_observed)
+        self.assertEqual(failures, [])
+        self.assertEqual(details["sample_count"], 24)
+        self.assertEqual(details["terminal_sample_index"], 23)
+        self.assertEqual(
+            details["admission_witness"]["stable_since_monotonic_ns"],
+            stable_since,
+        )
+
+    def test_missing_late_or_incomplete_raw_slot_fails_closed(self) -> None:
+        for mutation in ("missing", "late", "incomplete_process", "false"):
+            with self.subTest(mutation=mutation):
+                records, stable_since, ready_observed = self.records()
+                samples = records[:24]
+                if mutation == "missing":
+                    del records[8]
+                elif mutation == "late":
+                    samples[8]["observed_monotonic_ns"] = int(
+                        samples[8]["scheduled_monotonic_ns"]
+                    ) + self.lateness_ns + 1
+                elif mutation == "incomplete_process":
+                    samples[8]["processes"] = {
+                        **samples[8]["processes"],
+                        "roles_exact": False,
+                    }
+                else:
+                    samples[8]["clocks_fresh"] = False
+                _details, failures = self.validate(records, stable_since, ready_observed)
+                self.assertTrue(failures, mutation)
+
+    def test_post_admission_flap_requires_a_fresh_terminal_ten_seconds(self) -> None:
+        records, stable_since, ready_observed = self.records()
+        samples = records[:24]
+        # The admission has already been earned by sample 10.  A later flap
+        # leaves only eight one-second slots before warm-up, so it cannot be
+        # smuggled through using the original admission epoch.
+        samples[15]["ready"] = False
+        records[24]["final_stable_since_monotonic_ns"] = samples[16][
+            "observed_monotonic_ns"
+        ]
+        _details, failures = self.validate(records, stable_since, ready_observed)
+        self.assertTrue(failures)
+        self.assertTrue(
+            any("final preflight stability" in failure for failure in failures),
+            failures,
+        )
 
 
 class ExternalCaptureOccurrenceTests(unittest.TestCase):

@@ -178,6 +178,33 @@ Updated: 2026-07-20 UTC.
   inside its file-size snapshot and retries an incomplete tail on the next
   poll.  A malformed newline-terminated record still fail-closes; this is an
   IPC atomicity repair, not a hold-last, bypass, or validator relaxation.
+- The failed M4 capacity attempt
+  `m4_capacity_angular_20260724T073436Z` is retained without a final receipt.
+  UAV5 armed after its first command, but its ACK and TIMESYNC evidence landed
+  in different attempts; they must not be stitched because the v3 contract
+  requires both facts to be transaction-bound.  Capacity flight therefore now
+  waits for a collector-owned, identity- and gate-hash-bound ten-second full
+  readiness admission before issuing its first preflight command.  One shared,
+  token-distinct two-attempt recovery may be granted only after an ordinary
+  non-bootstrap pre-measurement stage exhausts four attempts; all other stages
+  retain their prior bounds.  The independently checked runway is 730 seconds,
+  with a 301-second bounded preflight and 13.5-second reserve.  This is a
+  bounded startup-order/reliability repair, not cross-attempt evidence reuse,
+  a direct-control bypass, or a relaxation of continuous warm-up/measurement
+  readiness.
+- The post-review M4 capacity hardening keeps that failed attempt preserved and
+  replaces two producer-trusted claims with independently derivable evidence.
+  The collector emits immutable, aligned one-Hz prewarmup readiness samples,
+  including a terminal sample at the warmup boundary; both the admission's
+  initial ten-second epoch and any later post-flap terminal epoch are derived
+  from those samples with exact process-role/count checks.  Each capacity
+  command attempt also uses a distinct MAVLink source component.  ArduPilot's
+  raw MAVLink2 `COMMAND_ACK.target_system/target_component` extension must
+  return that exact receiver-visible identity, so a late ACK from one attempt
+  is retained only as late evidence for that attempt and cannot pair with a
+  newer attempt's token echo.  This is a fail-closed transaction-correlation
+  strengthening; it neither extends the bounded retry budget nor permits
+  timing-based cross-attempt stitching.
 
 ## Open Decisions Requiring External Input
 

@@ -25,7 +25,14 @@ from typing import Any, Callable, Mapping, Protocol
 from network.validation.m4_airborne_motion import motion_requirements
 
 
-AIRBORNE_GATE_CONTRACT = "ams.m4.capacity-airborne-gate/v1"
+AIRBORNE_GATE_CONTRACT = "ams.m4.capacity-airborne-gate/v3"
+PREFLIGHT_ADMISSION_CONTRACT = "ams.m4.capacity-preflight-admission/v1"
+PREFLIGHT_ADMISSION_RELATIVE_PATH = "raw/state/capacity-preflight-admission.json"
+PREFLIGHT_ADMISSION_STABILITY_NS = 10_000_000_000
+PREFLIGHT_READINESS_CONTRACT = "ams.m4.capacity-prewarmup-readiness/v1"
+PREFLIGHT_READINESS_SAMPLE_PERIOD_NS = 1_000_000_000
+PREFLIGHT_READINESS_MAX_LATENESS_NS = 100_000_000
+PREFLIGHT_FINAL_STABILITY_NS = PREFLIGHT_ADMISSION_STABILITY_NS
 EXPECTED_UAVS = tuple(range(1, 6))
 TOS_CONTROL = 184
 OUTCOME_TIMEOUT_NS = 3_000_000_000
@@ -51,11 +58,32 @@ MAX_COMMAND_ATTEMPTS = 4
 # command two additional bounded, token-distinct attempts; later stream and
 # flight commands retain the ordinary four-attempt bound.
 EXTENDED_SYS_STATE_MAX_COMMAND_ATTEMPTS = 6
+# A single failed ordinary pre-measurement command can use this shared reserve.
+# It deliberately does not apply to the bootstrap extended-state command (which
+# has its own six-attempt bound), warm-up motion, or landing/disarm. The reserve
+# preserves transaction-bound ACK+TIMESYNC semantics while absorbing one natural
+# startup-loss burst without making all flight stages unbounded.
+PREFLIGHT_RECOVERY_MAX_ATTEMPTS = 6
+PREFLIGHT_RECOVERY_MAX_GRANTS = 1
+PREFLIGHT_RECOVERY_EXTRA_ATTEMPTS = (
+    PREFLIGHT_RECOVERY_MAX_ATTEMPTS - MAX_COMMAND_ATTEMPTS
+)
+PREFLIGHT_RECOVERY_EXTRA_EXECUTION_NS = (
+    PREFLIGHT_RECOVERY_EXTRA_ATTEMPTS * OUTCOME_TIMEOUT_NS
+    + PREFLIGHT_RECOVERY_EXTRA_ATTEMPTS * OUTCOME_TIMEOUT_NS
+)
 PER_STAGE_MAX_NS = (
     MAX_COMMAND_ATTEMPTS * OUTCOME_TIMEOUT_NS
     + (MAX_COMMAND_ATTEMPTS - 1) * OUTCOME_TIMEOUT_NS
 )
-STAGE_TIMING_BUDGET_CONTRACT = "ams.m4.capacity-flight-stage-budget/v1"
+STAGE_TIMING_BUDGET_CONTRACT = "ams.m4.capacity-flight-stage-budget/v3"
+COMMAND_ACK_TARGET_CONTRACT = "ams.m4.capacity-command-ack-target/v1"
+FLIGHT_COMMAND_SOURCE_SYSTEM = 255
+# Every stage/attempt pair receives a distinct source component.  ArduPilot
+# returns this identity in the MAVLink2 COMMAND_ACK target extension, giving
+# the otherwise untagged ACK an exact, receiver-produced attempt binding.
+FLIGHT_REPLY_COMPONENT_MIN = 180
+FLIGHT_REPLY_COMPONENT_ATTEMPT_STRIDE = PREFLIGHT_RECOVERY_MAX_ATTEMPTS
 
 MAV_MODE_FLAG_CUSTOM_MODE_ENABLED = 1
 MAV_MODE_FLAG_SAFETY_ARMED = 128
@@ -181,6 +209,19 @@ STAGE_DEFINITIONS: tuple[dict[str, Any], ...] = (
     },
 )
 STAGE_BY_NAME = {str(item["stage"]): item for item in STAGE_DEFINITIONS}
+FLIGHT_COMMAND_IDS = frozenset(
+    int(item["command_id"]) for item in STAGE_DEFINITIONS
+)
+STAGE_INDEX_BY_NAME = {
+    str(item["stage"]): index for index, item in enumerate(STAGE_DEFINITIONS)
+}
+FLIGHT_REPLY_COMPONENT_MAX = (
+    FLIGHT_REPLY_COMPONENT_MIN
+    + len(STAGE_DEFINITIONS) * FLIGHT_REPLY_COMPONENT_ATTEMPT_STRIDE
+    - 1
+)
+if FLIGHT_REPLY_COMPONENT_MAX > 255:
+    raise RuntimeError("capacity flight reply-component space exceeds MAVLink")
 PRE_MEASUREMENT_STAGES = tuple(
     str(item["stage"])
     for item in STAGE_DEFINITIONS
@@ -249,6 +290,7 @@ def stage_timing_budget() -> dict[str, Any]:
     bounded_preflight_ns = (
         pre_command_ns
         + boundary_ns
+        + PREFLIGHT_RECOVERY_EXTRA_EXECUTION_NS
         + PREARM_STATE_TIMEOUT_NS
         + AIRBORNE_TIMEOUT_NS
     )
@@ -257,6 +299,12 @@ def stage_timing_budget() -> dict[str, Any]:
         "maximum_attempts_per_stage": MAX_COMMAND_ATTEMPTS,
         "extended_sys_state_max_attempts": (
             EXTENDED_SYS_STATE_MAX_COMMAND_ATTEMPTS
+        ),
+        "preflight_recovery_max_attempts": PREFLIGHT_RECOVERY_MAX_ATTEMPTS,
+        "preflight_recovery_extra_attempts": PREFLIGHT_RECOVERY_EXTRA_ATTEMPTS,
+        "preflight_recovery_max_grants": PREFLIGHT_RECOVERY_MAX_GRANTS,
+        "preflight_recovery_extra_execution_ns": (
+            PREFLIGHT_RECOVERY_EXTRA_EXECUTION_NS
         ),
         "outcome_timeout_ns": OUTCOME_TIMEOUT_NS,
         "retry_quiet_drain_ns": OUTCOME_TIMEOUT_NS,
@@ -294,7 +342,14 @@ class AirborneControlError(RuntimeError):
 
 
 class Sequencer(Protocol):
-    def frame(self, message_id: int, payload: bytes) -> bytes: ...
+    def frame(
+        self,
+        message_id: int,
+        payload: bytes,
+        *,
+        system_id: int = FLIGHT_COMMAND_SOURCE_SYSTEM,
+        component_id: int = 190,
+    ) -> bytes: ...
 
 
 class DatagramSocket(Protocol):
@@ -338,6 +393,25 @@ def flight_timesync_token(
     return token
 
 
+def flight_reply_component_id(*, stage: str, attempt: int) -> int:
+    """Return the immutable receiver-visible ACK identity for one attempt."""
+
+    stage_index = STAGE_INDEX_BY_NAME.get(stage)
+    if (
+        stage_index is None
+        or isinstance(attempt, bool)
+        or not isinstance(attempt, int)
+        or not 1 <= attempt <= FLIGHT_REPLY_COMPONENT_ATTEMPT_STRIDE
+    ):
+        raise AirborneControlError("capacity flight ACK target identity is invalid")
+    return (
+        FLIGHT_REPLY_COMPONENT_MIN
+        + stage_index * FLIGHT_REPLY_COMPONENT_ATTEMPT_STRIDE
+        + attempt
+        - 1
+    )
+
+
 def encode_flight_command_datagram(
     *,
     run_nonce: str,
@@ -353,6 +427,7 @@ def encode_flight_command_datagram(
     definition = STAGE_BY_NAME.get(stage)
     if definition is None or uav not in EXPECTED_UAVS:
         raise AirborneControlError("capacity flight command identity is invalid")
+    reply_component_id = flight_reply_component_id(stage=stage, attempt=attempt)
     params = definition["params"]
     encoding = str(definition["encoding"])
     if encoding == "COMMAND_LONG":
@@ -371,6 +446,8 @@ def encode_flight_command_datagram(
                 1,
                 attempt - 1,
             ),
+            system_id=FLIGHT_COMMAND_SOURCE_SYSTEM,
+            component_id=reply_component_id,
         )
         command_fields: dict[str, Any] = {
             "command_params": list(params),
@@ -411,6 +488,8 @@ def encode_flight_command_datagram(
                 0,
                 0,
             ),
+            system_id=FLIGHT_COMMAND_SOURCE_SYSTEM,
+            component_id=reply_component_id,
         )
         command_fields = {
             "command_params": list(params),
@@ -427,7 +506,12 @@ def encode_flight_command_datagram(
         uav=uav,
         ordinal=attempt,
     )
-    timesync_frame = sequencer.frame(111, struct.pack("<qq", 0, token))
+    timesync_frame = sequencer.frame(
+        111,
+        struct.pack("<qq", 0, token),
+        system_id=FLIGHT_COMMAND_SOURCE_SYSTEM,
+        component_id=reply_component_id,
+    )
     datagram = command_frame + timesync_frame
     return {
         "stage": stage,
@@ -435,6 +519,12 @@ def encode_flight_command_datagram(
         "command_id": int(definition["command_id"]),
         "command_encoding": encoding,
         "command_message_id": command_message_id,
+        "command_source_system": FLIGHT_COMMAND_SOURCE_SYSTEM,
+        "command_source_component": reply_component_id,
+        "timesync_source_system": FLIGHT_COMMAND_SOURCE_SYSTEM,
+        "timesync_source_component": reply_component_id,
+        "ack_target_system": FLIGHT_COMMAND_SOURCE_SYSTEM,
+        "ack_target_component": reply_component_id,
         **command_fields,
         "timesync_request_tc1": 0,
         "timesync_request_ts1": token,
@@ -493,6 +583,20 @@ def airborne_gate_contract(schedule: Mapping[str, Any]) -> dict[str, Any]:
         "extended_sys_state_max_attempts": (
             EXTENDED_SYS_STATE_MAX_COMMAND_ATTEMPTS
         ),
+        "preflight_recovery_max_attempts": PREFLIGHT_RECOVERY_MAX_ATTEMPTS,
+        "preflight_recovery_extra_attempts": PREFLIGHT_RECOVERY_EXTRA_ATTEMPTS,
+        "preflight_recovery_max_grants": PREFLIGHT_RECOVERY_MAX_GRANTS,
+        "preflight_admission_contract": PREFLIGHT_ADMISSION_CONTRACT,
+        "preflight_admission_path": PREFLIGHT_ADMISSION_RELATIVE_PATH,
+        "preflight_admission_stability_ns": PREFLIGHT_ADMISSION_STABILITY_NS,
+        "prewarmup_readiness_contract": PREFLIGHT_READINESS_CONTRACT,
+        "prewarmup_readiness_sample_period_ns": (
+            PREFLIGHT_READINESS_SAMPLE_PERIOD_NS
+        ),
+        "prewarmup_readiness_max_lateness_ns": (
+            PREFLIGHT_READINESS_MAX_LATENESS_NS
+        ),
+        "prewarmup_final_stability_ns": PREFLIGHT_FINAL_STABILITY_NS,
         # LAND and DISARM are idempotent ArduPilot commands.  They use the
         # same bounded, token-distinct retry policy as preparation so a lost
         # ACK/TIMESYNC cannot strand armed vehicles after measurement.
@@ -506,6 +610,10 @@ def airborne_gate_contract(schedule: Mapping[str, Any]) -> dict[str, Any]:
         "motion_requirements": motion_requirements(),
         "flight_command_datagram": "(COMMAND_LONG|COMMAND_INT)||TIMESYNC",
         "timesync_echo_contract": "response.ts1==request.ts1_token",
+        "command_ack_target_contract": COMMAND_ACK_TARGET_CONTRACT,
+        "command_ack_target_system": FLIGHT_COMMAND_SOURCE_SYSTEM,
+        "command_ack_target_component_min": FLIGHT_REPLY_COMPONENT_MIN,
+        "command_ack_target_component_max": FLIGHT_REPLY_COMPONENT_MAX,
         "control_source": {
             "host": "10.71.0.10",
             "port": 14600,
@@ -550,6 +658,7 @@ class PendingFlightCommand:
     command_frame_sha256: str
     timesync_frame_sha256: str
     timesync_token: int
+    reply_component_id: int
     attempt: int
     ack: dict[str, Any] | None = None
     timesync: dict[str, Any] | None = None
@@ -581,7 +690,11 @@ class CapacityAirborneController:
         self.now_ns = now_ns
         self.pending_by_uav: dict[int, PendingFlightCommand] = {}
         self.pending_by_token: dict[tuple[int, int], PendingFlightCommand] = {}
+        self.pending_by_reply_component: dict[
+            tuple[int, int], PendingFlightCommand
+        ] = {}
         self.retired_tokens: dict[tuple[int, int], dict[str, Any]] = {}
+        self.retired_reply_components: dict[tuple[int, int], dict[str, Any]] = {}
         self.latest_heartbeat: dict[int, dict[str, Any]] = {}
         self.latest_extended_state: dict[int, dict[str, Any]] = {}
         self.latest_global_position: dict[int, dict[str, Any]] = {}
@@ -595,6 +708,7 @@ class CapacityAirborneController:
         self.quiet_command_guards: dict[int, tuple[int, int]] = {}
         self.quiet_last_response_ns = 0
         self.completed_stage_command_ids: set[int] = set()
+        self.preflight_recovery_consumed = False
 
     def _send_stage(self, stage: str) -> None:
         if stage in PRE_MEASUREMENT_STAGES:
@@ -622,6 +736,46 @@ class CapacityAirborneController:
                     command_id=int(STAGE_BY_NAME[stage]["command_id"]),
                     uavs=remaining,
                     reason="bounded_retry",
+                )
+        if (
+            stage not in PRE_MEASUREMENT_STAGES
+            or stage == "stream_extended_sys_state"
+            or self.preflight_recovery_consumed
+        ):
+            raise AirborneControlError(
+                f"capacity flight {stage} exhausted bounded attempts for {sorted(remaining)}"
+            )
+        recovery_maximum_attempts = int(
+            self.gate["preflight_recovery_max_attempts"]
+        )
+        if recovery_maximum_attempts <= maximum_attempts:
+            raise AirborneControlError("capacity flight recovery attempt bound differs")
+        self.preflight_recovery_consumed = True
+        self.writer.emit(
+            "flight_preflight_recovery_granted",
+            flight_stage=stage,
+            command_id=int(STAGE_BY_NAME[stage]["command_id"]),
+            exhausted_attempt=maximum_attempts,
+            normal_max_attempts=maximum_attempts,
+            recovery_max_attempts=recovery_maximum_attempts,
+            recovery_extra_attempts=recovery_maximum_attempts - maximum_attempts,
+            shared_recovery_max_grants=PREFLIGHT_RECOVERY_MAX_GRANTS,
+            recovery_remaining_uavs=[f"uav{uav}" for uav in sorted(remaining)],
+        )
+        self._quiet_drain(
+            command_id=int(STAGE_BY_NAME[stage]["command_id"]),
+            uavs=remaining,
+            reason="preflight_recovery",
+        )
+        for attempt in range(maximum_attempts + 1, recovery_maximum_attempts + 1):
+            remaining = self._send_stage_attempt(stage, remaining, attempt)
+            if not remaining:
+                return
+            if attempt < recovery_maximum_attempts:
+                self._quiet_drain(
+                    command_id=int(STAGE_BY_NAME[stage]["command_id"]),
+                    uavs=remaining,
+                    reason="preflight_recovery",
                 )
         raise AirborneControlError(
             f"capacity flight {stage} exhausted bounded attempts for {sorted(remaining)}"
@@ -691,13 +845,21 @@ class CapacityAirborneController:
                 command_frame_sha256=encoded["command_frame_sha256"],
                 timesync_frame_sha256=encoded["timesync_frame_sha256"],
                 timesync_token=encoded["timesync_request_ts1"],
+                reply_component_id=encoded["ack_target_component"],
                 attempt=attempt,
             )
             key = (uav, pending.timesync_token)
-            if uav in self.pending_by_uav or key in self.pending_by_token:
+            reply_key = (uav, pending.reply_component_id)
+            if (
+                uav in self.pending_by_uav
+                or key in self.pending_by_token
+                or reply_key in self.pending_by_reply_component
+                or reply_key in self.retired_reply_components
+            ):
                 raise AirborneControlError("capacity flight transaction identity reused")
             self.pending_by_uav[uav] = pending
             self.pending_by_token[key] = pending
+            self.pending_by_reply_component[reply_key] = pending
             self.writer.emit(
                 "flight_command_offered",
                 flight_stage=stage,
@@ -706,6 +868,12 @@ class CapacityAirborneController:
                 attempt=attempt,
                 uav=uav,
                 command_id=pending.command_id,
+                command_source_system=encoded["command_source_system"],
+                command_source_component=encoded["command_source_component"],
+                timesync_source_system=encoded["timesync_source_system"],
+                timesync_source_component=encoded["timesync_source_component"],
+                ack_target_system=encoded["ack_target_system"],
+                ack_target_component=encoded["ack_target_component"],
                 command_encoding=encoded["command_encoding"],
                 command_message_id=encoded["command_message_id"],
                 command_params=encoded["command_params"],
@@ -747,20 +915,27 @@ class CapacityAirborneController:
 
     def _retire_pending(self, pending: PendingFlightCommand, outcome: str) -> None:
         key = (pending.uav, pending.timesync_token)
+        reply_key = (pending.uav, pending.reply_component_id)
         if key in self.retired_tokens:
             raise AirborneControlError("capacity flight token retired twice")
-        self.retired_tokens[key] = {
+        if reply_key in self.retired_reply_components:
+            raise AirborneControlError("capacity flight ACK target retired twice")
+        retired = {
             "outcome": outcome,
             "transaction_id": pending.transaction_id,
             "command_id": pending.command_id,
+            "reply_component_id": pending.reply_component_id,
             # Preserve which independently required response components were
             # already consumed.  A timeout can occur with only one component;
             # its later duplicate must never be relabeled as a first late fact.
             "ack_seen": pending.ack is not None,
             "timesync_seen": pending.timesync is not None,
         }
+        self.retired_tokens[key] = retired
+        self.retired_reply_components[reply_key] = retired
         self.pending_by_token.pop(key, None)
         self.pending_by_uav.pop(pending.uav, None)
+        self.pending_by_reply_component.pop(reply_key, None)
         self.attempt_outcomes[pending.uav] = outcome
 
     def _expire_pending(self, observed_ns: int) -> None:
@@ -878,23 +1053,58 @@ class CapacityAirborneController:
                     self.quiet_last_response_ns, completed_ns
                 )
 
+    @staticmethod
+    def _command_ack_target_identity(
+        common: Mapping[str, Any],
+    ) -> tuple[int, int, int, int]:
+        """Decode the receiver-produced MAVLink2 ACK target extension.
+
+        The parsed pymavlink object is convenient for command semantics, but
+        transaction ownership must come from the preserved raw frame: an old
+        ACK has the old request's target component and is never eligible for a
+        newer attempt.
+        """
+
+        encoded = common.get("mavlink_frame_hex")
+        if not isinstance(encoded, str):
+            raise AirborneControlError("capacity flight ACK raw frame is absent")
+        try:
+            frame = bytes.fromhex(encoded)
+        except ValueError as exc:
+            raise AirborneControlError(
+                "capacity flight ACK raw frame is not hexadecimal"
+            ) from exc
+        if (
+            len(frame) != 22
+            or frame[0] != 0xFD
+            or frame[1] != 10
+            or frame[2] != 0
+            or int.from_bytes(frame[7:10], "little") != 77
+        ):
+            raise AirborneControlError("capacity flight ACK frame shape differs")
+        command_id, result, _progress, _result_param2, target_system, target_component = (
+            struct.unpack("<HBBiBB", frame[10:20])
+        )
+        return command_id, result, target_system, target_component
+
     def handles_response(self, message_type: str, uav: int, message: Any) -> bool:
-        """Return true iff ACK/TIMESYNC belongs to an active flight command."""
+        """Return true iff ACK/TIMESYNC belongs to a known flight attempt."""
 
         if message_type == "COMMAND_ACK":
-            pending = self.pending_by_uav.get(uav)
+            target_component = getattr(message, "target_component", None)
+            target_system = getattr(message, "target_system", None)
             command = getattr(message, "command", None)
-            guard_key = self.quiet_command_guards.get(uav)
-            guarded = (
-                self.retired_tokens.get(guard_key)
-                if guard_key is not None
-                else None
-            )
+            if (
+                target_system != FLIGHT_COMMAND_SOURCE_SYSTEM
+                or isinstance(target_component, bool)
+                or not isinstance(target_component, int)
+            ):
+                return False
+            pending = self.pending_by_reply_component.get((uav, target_component))
+            retired = self.retired_reply_components.get((uav, target_component))
             return (
                 pending is not None and command == pending.command_id
-            ) or (
-                guarded is not None and guarded["command_id"] == command
-            )
+            ) or (retired is not None and command == retired["command_id"])
         if message_type == "TIMESYNC":
             token = getattr(message, "ts1", None)
             return (
@@ -921,46 +1131,76 @@ class CapacityAirborneController:
         if uav not in EXPECTED_UAVS:
             raise AirborneControlError("capacity flight response UAV differs")
         self._expire_pending(received_ns)
-        guard_key = self.quiet_command_guards.get(uav)
-        guarded = (
-            self.retired_tokens.get(guard_key)
-            if guard_key is not None
-            else None
-        )
-        if (
-            message_type == "COMMAND_ACK"
-            and guarded is not None
-            and guarded["command_id"] == getattr(message, "command", None)
-        ):
-            if guarded["ack_seen"] is True:
+        if message_type == "COMMAND_ACK":
+            command = getattr(message, "command", None)
+            # MAVProxy may emit unrelated discovery ACKs on the same accepted
+            # socket.  Their raw parent remains in the audit stream, but they
+            # cannot own a capacity transaction.
+            if command not in FLIGHT_COMMAND_IDS:
+                return False
+            (
+                payload_command,
+                payload_result,
+                target_system,
+                target_component,
+            ) = self._command_ack_target_identity(common)
+            result = getattr(message, "result", None)
+            if command != payload_command or result != payload_result:
+                raise AirborneControlError("capacity flight ACK parsed fields differ")
+            owner_key = (uav, target_component)
+            pending = self.pending_by_reply_component.get(owner_key)
+            retired = self.retired_reply_components.get(owner_key)
+            if pending is None and retired is None:
+                # Preserve a possible stale/foreign flight ACK as raw control
+                # evidence.  The independent validator requires every
+                # relevant raw occurrence to be assigned exactly once, so it
+                # fails closed without ever letting this ACK close an attempt.
+                return False
+            if target_system != FLIGHT_COMMAND_SOURCE_SYSTEM:
+                raise AirborneControlError("capacity flight ACK target system differs")
+            if retired is not None:
+                if retired["command_id"] != payload_command:
+                    raise AirborneControlError("late capacity flight ACK command differs")
+                if retired["ack_seen"] is True:
+                    self.writer.emit(
+                        "duplicate_flight_command_ack",
+                        transaction_id=retired["transaction_id"],
+                        command_id=payload_command,
+                        command_result=payload_result,
+                        ack_target_system=target_system,
+                        ack_target_component=target_component,
+                        **common,
+                    )
+                    raise AirborneControlError(
+                        "duplicate capacity flight COMMAND_ACK"
+                    )
+                retired["ack_seen"] = True
+                guard_key = self.quiet_command_guards.get(uav)
+                guarded = (
+                    self.retired_tokens.get(guard_key)
+                    if guard_key is not None
+                    else None
+                )
+                if guarded is retired:
+                    self.quiet_last_response_ns = max(
+                        self.quiet_last_response_ns, received_ns
+                    )
                 self.writer.emit(
-                    "duplicate_flight_command_ack",
-                    transaction_id=guarded["transaction_id"],
-                    command_id=getattr(message, "command", None),
-                    command_result=getattr(message, "result", None),
+                    "late_flight_command_ack",
+                    transaction_id=retired["transaction_id"],
+                    command_id=payload_command,
+                    command_result=payload_result,
+                    ack_target_system=target_system,
+                    ack_target_component=target_component,
                     **common,
                 )
-                raise AirborneControlError(
-                    "duplicate capacity flight COMMAND_ACK"
-                )
-            guarded["ack_seen"] = True
-            self.quiet_last_response_ns = max(
-                self.quiet_last_response_ns, received_ns
-            )
-            self.writer.emit(
-                "late_flight_command_ack",
-                transaction_id=guarded["transaction_id"],
-                command_id=getattr(message, "command", None),
-                command_result=getattr(message, "result", None),
-                **common,
-            )
-            return True
-        if message_type == "COMMAND_ACK" and self.handles_response(message_type, uav, message):
-            pending = self.pending_by_uav[uav]
-            result = getattr(message, "result", None)
+                return True
+            assert pending is not None
             retryable = result == MAV_RESULT_TEMPORARILY_REJECTED
             if (
-                isinstance(result, bool)
+                payload_command != pending.command_id
+                or target_component != pending.reply_component_id
+                or isinstance(result, bool)
                 or not isinstance(result, int)
                 or result not in {MAV_RESULT_ACCEPTED, MAV_RESULT_TEMPORARILY_REJECTED}
                 or (
@@ -974,6 +1214,8 @@ class CapacityAirborneController:
                     transaction_id=pending.transaction_id,
                     command_id=pending.command_id,
                     command_result=result,
+                    ack_target_system=target_system,
+                    ack_target_component=target_component,
                     **common,
                 )
                 raise AirborneControlError("capacity flight COMMAND_ACK rejected")
@@ -985,6 +1227,8 @@ class CapacityAirborneController:
                 "command_result": result,
                 "source_system": uav,
                 "source_component": 1,
+                "target_system": target_system,
+                "target_component": target_component,
                 "transport_payload_sha256": common["transport_payload_sha256"],
                 "mavlink_frame_sha256": common["mavlink_frame_sha256"],
             }
@@ -995,6 +1239,8 @@ class CapacityAirborneController:
                 command_id=pending.command_id,
                 command_result=result,
                 retryable=retryable,
+                ack_target_system=target_system,
+                ack_target_component=target_component,
                 **common,
             )
             self._complete_ready()

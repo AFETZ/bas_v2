@@ -60,15 +60,19 @@ from network.validation.validate_m4_causality import (
     matrix_flow_group_identity,
 )
 from network.scripts.m3_external_matrix_probe import resolve_five_uav_flight_scenario
-from network.scripts.m4_capacity_airborne import airborne_gate_contract
+from network.scripts.m4_capacity_airborne import (
+    PREFLIGHT_ADMISSION_STABILITY_NS,
+    airborne_gate_contract,
+)
 
 
-CAPACITY_CONTRACT = "ams.m4.capacity_run/v3"
+CAPACITY_CONTRACT = "ams.m4.capacity_run/v5"
 CAUSALITY_CONTRACT = "ams.m4.causality_run/v2"
-CAPACITY_EXECUTION_BUDGET_CONTRACT = "ams.m4.capacity-execution-budget/v1"
-CAPACITY_READINESS_RUNWAY_NS = 720_000_000_000
+CAPACITY_EXECUTION_BUDGET_CONTRACT = "ams.m4.capacity-execution-budget/v2"
+CAPACITY_READINESS_RUNWAY_NS = 730_000_000_000
 CAPACITY_DECLARED_READINESS_WAITS_NS = 415_500_000_000
-CAPACITY_BOUNDED_PREFLIGHT_NS = 279_000_000_000
+CAPACITY_PREFLIGHT_ADMISSION_STABILITY_NS = PREFLIGHT_ADMISSION_STABILITY_NS
+CAPACITY_BOUNDED_PREFLIGHT_NS = 301_000_000_000
 CAPACITY_WARMUP_NS = 30_000_000_000
 CAPACITY_BOUNDED_WARMUP_MOTION_NS = 21_000_000_000
 CAPACITY_MEASUREMENT_NS = 600_000_000_000
@@ -314,16 +318,17 @@ def initialize_capacity(args: argparse.Namespace) -> int:
     write_exclusive(run_dir / "raw/runtime_asset_manifest.json", runtime_assets)
     # The formal five-UAV flight controller is admitted only after the shared
     # SITL tail, ns-3 engine, Sionna adapter, and three-heartbeat link gate are
-    # live.  The runway covers every declared sequential readiness wait plus
-    # all bounded retry/drain, pre-arm-state, and airborne-state waits.  Keep
-    # the remaining reserve explicit so future timeout edits cannot silently
-    # make the schedule impossible.
+    # live. The runway covers every declared sequential readiness wait, the
+    # collector-issued ten-second admission barrier, and all bounded
+    # retry/drain, pre-arm-state, and airborne-state waits. Keep the remaining
+    # reserve explicit so future timeout edits cannot silently make the
+    # schedule impossible.
     readiness_reserve_ns = (
         CAPACITY_READINESS_RUNWAY_NS
         - CAPACITY_DECLARED_READINESS_WAITS_NS
         - CAPACITY_BOUNDED_PREFLIGHT_NS
     )
-    if readiness_reserve_ns != 25_500_000_000:
+    if readiness_reserve_ns != 13_500_000_000:
         raise M4ValidationError("capacity readiness execution budget differs")
     contract_to_clean_shutdown_ns = (
         CAPACITY_READINESS_RUNWAY_NS
@@ -335,9 +340,9 @@ def initialize_capacity(args: argparse.Namespace) -> int:
     )
     if (
         CAPACITY_NS3_ENGINE_DURATION_NS - contract_to_clean_shutdown_ns
-        != 60_000_000_000
+        != 50_000_000_000
         or CAPACITY_WRAPPER_TIMEOUT_NS - contract_to_clean_shutdown_ns
-        != 260_000_000_000
+        != 250_000_000_000
     ):
         raise M4ValidationError("capacity outer execution budget differs")
     warmup_start = created + CAPACITY_READINESS_RUNWAY_NS
@@ -364,7 +369,7 @@ def initialize_capacity(args: argparse.Namespace) -> int:
     except ImportError as exc:
         raise M4ValidationError(f"Sionna RT import failed before contract: {exc}") from exc
     contract = {
-        "schema_version": 3,
+        "schema_version": 4,
         "contract": CAPACITY_CONTRACT,
         "run_id": args.run_id,
         "runtime_id": args.runtime_id,
@@ -394,6 +399,9 @@ def initialize_capacity(args: argparse.Namespace) -> int:
             "readiness_runway_ns": CAPACITY_READINESS_RUNWAY_NS,
             "declared_sequential_readiness_waits_ns": (
                 CAPACITY_DECLARED_READINESS_WAITS_NS
+            ),
+            "preflight_admission_stability_ns": (
+                CAPACITY_PREFLIGHT_ADMISSION_STABILITY_NS
             ),
             "bounded_preflight_ns": CAPACITY_BOUNDED_PREFLIGHT_NS,
             "readiness_reserve_ns": readiness_reserve_ns,

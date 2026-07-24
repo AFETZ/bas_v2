@@ -38,7 +38,7 @@ ENDPOINT_FORM = "actual_sitl_mavproxy_udp_tail"
 ROLE_SUBJECT = "gcs_control_probe"
 PROFILE_RUN_CONTRACTS = {
     "m3": "ams.m3.external_matrix_run/v1",
-    "m4_capacity": "ams.m4.capacity_run/v3",
+    "m4_capacity": "ams.m4.capacity_run/v5",
     "m4_causality": "ams.m4.causality_run/v2",
 }
 HEX_NONCE = re.compile(r"^(?:[0-9a-f]{32}|[0-9a-f]{64})$")
@@ -170,6 +170,104 @@ def sha256_file(path: Path) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def validate_capacity_preflight_admission(
+    path: Path,
+    *,
+    run_id: str,
+    runtime_id: str,
+    run_nonce: str,
+    gate: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Read one immutable collector admission before capacity flight control.
+
+    The admission is deliberately a collector-owned, identity-bound artifact:
+    link heartbeats alone cannot start the airborne preflight.  This helper is
+    used only by the M4 capacity profile and independently checks the full
+    readiness observation that produced the barrier.
+    """
+
+    from network.scripts.m4_capacity_airborne import (
+        PREFLIGHT_ADMISSION_CONTRACT,
+        PREFLIGHT_ADMISSION_RELATIVE_PATH,
+        PREFLIGHT_ADMISSION_STABILITY_NS,
+    )
+    from network.validation.m4_runtime import REQUIRED_PROCESS_COUNTS
+
+    admission = strict_json(path)
+    expected_keys = {
+        "contract",
+        "run_id",
+        "runtime_id",
+        "run_nonce",
+        "profile",
+        "airborne_gate_sha256",
+        "readiness_stability_ns",
+        "stable_since_monotonic_ns",
+        "ready_observed_monotonic_ns",
+        "issued_monotonic_ns",
+        "required_process_counts",
+        "process_counts",
+        "process_roles_exact",
+        "process_unclassified_count",
+        "process_count",
+        "full_readiness",
+    }
+    if set(admission) != expected_keys:
+        raise ControlProbeError("capacity preflight admission keys differ")
+    expected_gate_sha256 = hashlib.sha256(canonical_json(dict(gate))).hexdigest()
+    if (
+        admission.get("contract") != PREFLIGHT_ADMISSION_CONTRACT
+        or admission.get("run_id") != run_id
+        or admission.get("runtime_id") != runtime_id
+        or admission.get("run_nonce") != run_nonce
+        or admission.get("profile") != "m4_capacity_prerequisite"
+        or admission.get("airborne_gate_sha256") != expected_gate_sha256
+        or gate.get("preflight_admission_contract")
+        != PREFLIGHT_ADMISSION_CONTRACT
+        or gate.get("preflight_admission_path")
+        != PREFLIGHT_ADMISSION_RELATIVE_PATH
+        or gate.get("preflight_admission_stability_ns")
+        != PREFLIGHT_ADMISSION_STABILITY_NS
+        or admission.get("readiness_stability_ns")
+        != PREFLIGHT_ADMISSION_STABILITY_NS
+    ):
+        raise ControlProbeError("capacity preflight admission identity differs")
+    stable_since = admission.get("stable_since_monotonic_ns")
+    ready_observed = admission.get("ready_observed_monotonic_ns")
+    issued = admission.get("issued_monotonic_ns")
+    if (
+        any(
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            for value in (stable_since, ready_observed, issued)
+        )
+        or not int(stable_since) < int(ready_observed) <= int(issued)
+        or int(ready_observed) - int(stable_since)
+        < PREFLIGHT_ADMISSION_STABILITY_NS
+    ):
+        raise ControlProbeError("capacity preflight admission timing differs")
+    readiness = admission.get("full_readiness")
+    if (
+        not isinstance(readiness, dict)
+        or set(readiness)
+        != {
+            "ready",
+            "files_ready",
+            "clocks_fresh",
+            "clocks_coherent",
+            "odometry_fresh",
+            "world_poses_fresh",
+        }
+        or any(value is not True for value in readiness.values())
+        or admission.get("required_process_counts") != REQUIRED_PROCESS_COUNTS
+        or admission.get("process_counts") != REQUIRED_PROCESS_COUNTS
+        or admission.get("process_roles_exact") is not True
+        or admission.get("process_unclassified_count") != 0
+        or admission.get("process_count") != sum(REQUIRED_PROCESS_COUNTS.values())
+    ):
+        raise ControlProbeError("capacity preflight admission readiness differs")
+    return admission
 
 
 def timesync_token(
@@ -333,8 +431,29 @@ def mavlink_v2_frame(
 class MavlinkSequencer:
     value: int = 0
 
-    def frame(self, message_id: int, payload: bytes) -> bytes:
-        frame = mavlink_v2_frame(message_id, payload, sequence=self.value)
+    def frame(
+        self,
+        message_id: int,
+        payload: bytes,
+        *,
+        system_id: int = 255,
+        component_id: int = 190,
+    ) -> bytes:
+        """Encode one frame while retaining one shared MAVLink sequence.
+
+        Capacity flight commands use a transaction-unique source component so
+        ArduPilot's COMMAND_ACK target fields bind an ACK to that exact
+        attempt.  The default remains the accepted GCS identity used by the
+        M3 and ordinary M4 control paths.
+        """
+
+        frame = mavlink_v2_frame(
+            message_id,
+            payload,
+            sequence=self.value,
+            system_id=system_id,
+            component_id=component_id,
+        )
         self.value = (self.value + 1) & 0xFF
         return frame
 
@@ -661,15 +780,36 @@ class ActualSitlControlProbe:
         # Q3 owns this probe.  Import the Q4-only flight helper only for the
         # capacity profile so M3/causality cannot execute unconsumed Q4 bytes.
         self.airborne_controller: Any | None = None
+        self.capacity_preflight_admission_file: Path | None = None
+        if (
+            args.profile != "m4_capacity"
+            and args.capacity_preflight_admission_file is not None
+        ):
+            raise ControlProbeError(
+                "non-capacity actual-control profile received an admission file"
+            )
         if args.profile == "m4_capacity":
             from network.scripts.m4_capacity_airborne import (
                 AIRBORNE_GATE_CONTRACT,
                 CapacityAirborneController,
+                PREFLIGHT_ADMISSION_RELATIVE_PATH,
             )
 
             gate = run.get("airborne_gate")
             if not isinstance(gate, dict) or gate.get("contract") != AIRBORNE_GATE_CONTRACT:
                 raise ControlProbeError("M4 capacity run lacks the airborne gate")
+            expected_admission_file = (
+                args.run_dir / PREFLIGHT_ADMISSION_RELATIVE_PATH
+            ).resolve()
+            if (
+                args.capacity_preflight_admission_file is None
+                or args.capacity_preflight_admission_file.resolve()
+                != expected_admission_file
+            ):
+                raise ControlProbeError(
+                    "M4 capacity admission file path differs"
+                )
+            self.capacity_preflight_admission_file = expected_admission_file
             self.airborne_controller = CapacityAirborneController(
                 run_nonce=args.run_nonce,
                 gate=gate,
@@ -1708,6 +1848,62 @@ class ActualSitlControlProbe:
         }
         self.expected_expired_per_uav = {uav: 0 for uav in range(1, 6)}
 
+    def _wait_for_capacity_preflight_admission(
+        self, airborne: Any
+    ) -> dict[str, Any]:
+        path = self.capacity_preflight_admission_file
+        if path is None:
+            raise ControlProbeError("M4 capacity admission file is not configured")
+        deadline_ns = int(airborne.gate["airborne_ready_deadline_monotonic_ns"])
+        last_failure: ControlProbeError | None = None
+        while time.monotonic_ns() < deadline_ns:
+            if path.exists():
+                try:
+                    admission = validate_capacity_preflight_admission(
+                        path,
+                        run_id=self.args.run_id,
+                        runtime_id=self.args.runtime_id,
+                        run_nonce=self.args.run_nonce,
+                        gate=airborne.gate,
+                    )
+                    if int(admission["issued_monotonic_ns"]) >= deadline_ns:
+                        raise ControlProbeError(
+                            "M4 capacity admission was issued after the flight deadline"
+                        )
+                except ControlProbeError as exc:
+                    # The collector publishes with an exclusive file write.
+                    # A reader may observe that inode while it is still being
+                    # filled; retry until the bounded preflight deadline, then
+                    # fail closed on the final malformed/mismatched artifact.
+                    last_failure = exc
+                else:
+                    admission_sha256 = sha256_file(path)
+                    self.writer.emit(
+                        "flight_preflight_admitted",
+                        admission_contract=admission["contract"],
+                        admission_path="raw/state/capacity-preflight-admission.json",
+                        admission_sha256=admission_sha256,
+                        airborne_gate_sha256=admission["airborne_gate_sha256"],
+                        readiness_stability_ns=admission[
+                            "readiness_stability_ns"
+                        ],
+                        stable_since_monotonic_ns=admission[
+                            "stable_since_monotonic_ns"
+                        ],
+                        ready_observed_monotonic_ns=admission[
+                            "ready_observed_monotonic_ns"
+                        ],
+                        issued_monotonic_ns=admission["issued_monotonic_ns"],
+                    )
+                    return admission
+            self.pump(0.05)
+        detail = ""
+        if last_failure is not None:
+            detail = f": {last_failure}"
+        raise ControlProbeError(
+            "M4 capacity preflight admission was absent or invalid" + detail
+        )
+
     def execute_window(self, command: dict[str, Any], command_hash: str) -> None:
         policy = self.normalize_window(command)
         airborne = getattr(self, "airborne_controller", None)
@@ -1721,6 +1917,7 @@ class ActualSitlControlProbe:
                 raise ControlProbeError(
                     "M4 capacity flight lacks five-UAV actual-control readiness"
                 )
+            self._wait_for_capacity_preflight_admission(airborne)
             airborne.prepare()
         if airborne is not None and not airborne.airborne_ready_confirmed:
             self.pump_until(int(airborne.gate["warmup_start_monotonic_ns"]))
@@ -1979,6 +2176,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--m3-result", type=Path)
     parser.add_argument("--clock-socket", type=Path)
     parser.add_argument("--matrix", type=Path, default=DEFAULT_MATRIX)
+    parser.add_argument("--capacity-preflight-admission-file", type=Path)
     args = parser.parse_args(list(argv) if argv is not None else None)
     try:
         probe = ActualSitlControlProbe(args)
