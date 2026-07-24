@@ -269,6 +269,7 @@
   ],
   "schema_version": 1,
   "test_modules": [
+    "test_actual_sitl_gazebo_identity",
     "test_m4_airborne_motion",
     "test_m4_capacity_budget",
     "test_m4_capacity_validator",
