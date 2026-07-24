@@ -13,6 +13,7 @@ import csv
 import hashlib
 import io
 import json
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,19 +54,16 @@ Z_GRID = (
     (0.0, 15.0, 25.0, 10.0, 0.0),
 )
 M4_SITL_SPAWN_CLEARANCE_M = 0.25
-# The first launch point used to lie exactly on the terrain's horizontal
-# triangle-mesh seam at y=-2500 m.  Its Iris base / rotor contact footprint
-# could straddle the discontinuous contact manifold under Bullet Featherstone,
-# tip the vehicle before pre-arm, and ultimately produce non-finite odometry.
-# Keep radio geometry at the canonical nominal coordinates, but place only the
-# physical SITL model one metre north of that seam.
-M4_SITL_UAV1_TERRAIN_SEAM_Y_M = -2500.0
+# A ground-contact Iris must not straddle any terrain triangle edge.  Bullet
+# Featherstone can turn that discontinuous contact manifold into a tip or a
+# non-finite velocity before pre-arm.  Keep the RF geometry canonical and move
+# only the physical SITL models one metre clear of the affected mesh edges.
 M4_SITL_UAV_COLLISION_FOOTPRINT_RADIUS_M = 0.32
 M4_SITL_UAVS = (
     # name, instance, system ID, physical spawn x/y, nominal radio x/y/z.
     ("uav1", 0, 1, -7000.0, -2499.0, -7000.0, -2500.0, 300.0),
-    ("uav2", 1, 2, -4000.0, -2000.0, -4000.0, -2000.0, 320.0),
-    ("uav3", 2, 3, 0.0, -1500.0, 0.0, -1500.0, 350.0),
+    ("uav2", 1, 2, -4000.0, -1999.0, -4000.0, -2000.0, 320.0),
+    ("uav3", 2, 3, 1.0, -1500.0, 0.0, -1500.0, 350.0),
     ("uav4", 3, 4, 4000.0, -1000.0, 4000.0, -1000.0, 350.0),
     ("uav5", 4, 5, 8000.0, -500.0, 8000.0, -500.0, 400.0),
 )
@@ -146,6 +144,43 @@ def terrain_z(x_m: float, y_m: float) -> float:
     if v <= u:
         return z00 + u * (z10 - z00) + v * (z11 - z10)
     return z00 + u * (z11 - z01) + v * (z01 - z00)
+
+
+def xy_segment_distance_m(
+    x_m: float, y_m: float, start: tuple[float, float], end: tuple[float, float]
+) -> float:
+    """Return the planar distance from a point to one finite mesh edge."""
+    dx = end[0] - start[0]
+    dy = end[1] - start[1]
+    length_squared = dx * dx + dy * dy
+    if length_squared <= 0.0:
+        return math.hypot(x_m - start[0], y_m - start[1])
+    fraction = max(
+        0.0,
+        min(1.0, ((x_m - start[0]) * dx + (y_m - start[1]) * dy) / length_squared),
+    )
+    return math.hypot(x_m - (start[0] + fraction * dx), y_m - (start[1] + fraction * dy))
+
+
+def terrain_triangle_edge_distance_m(x_m: float, y_m: float) -> float:
+    """Return the nearest planar edge of the generated terrain triangulation."""
+    distances: list[float] = []
+    for yi in range(len(Y_GRID) - 1):
+        for xi in range(len(X_GRID) - 1):
+            lower_left = (X_GRID[xi], Y_GRID[yi])
+            lower_right = (X_GRID[xi + 1], Y_GRID[yi])
+            upper_left = (X_GRID[xi], Y_GRID[yi + 1])
+            upper_right = (X_GRID[xi + 1], Y_GRID[yi + 1])
+            distances.extend(
+                (
+                    xy_segment_distance_m(x_m, y_m, lower_left, lower_right),
+                    xy_segment_distance_m(x_m, y_m, lower_right, upper_right),
+                    xy_segment_distance_m(x_m, y_m, upper_right, upper_left),
+                    xy_segment_distance_m(x_m, y_m, upper_left, lower_left),
+                    xy_segment_distance_m(x_m, y_m, lower_left, upper_right),
+                )
+            )
+    return min(distances)
 
 
 def terrain_obj() -> bytes:
@@ -302,6 +337,11 @@ def scenario_robot_rows() -> str:
         radio_y_m,
         radio_z_m,
     ) in M4_SITL_UAVS:
+        edge_distance_m = terrain_triangle_edge_distance_m(x_m, y_m)
+        if edge_distance_m <= M4_SITL_UAV_COLLISION_FOOTPRINT_RADIUS_M:
+            raise ValueError(
+                f"{name} physical spawn overlaps a terrain triangle edge"
+            )
         spawn_z_m = terrain_z(x_m, y_m) + M4_SITL_SPAWN_CLEARANCE_M
         spawn_z_text = f"{spawn_z_m:.3f}".rstrip("0").rstrip(".")
         rows.append(

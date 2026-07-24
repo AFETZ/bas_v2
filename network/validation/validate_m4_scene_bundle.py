@@ -38,7 +38,6 @@ M4_SITL_PHYSICS_RATE_HZ = 800.0
 M4_SITL_PHYSICS_STEP_S = 1.0 / M4_SITL_PHYSICS_RATE_HZ
 M4_SITL_PHYSICS_ENGINE = "gz-physics-bullet-featherstone-plugin"
 M4_SITL_SPAWN_CLEARANCE_M = 0.25
-M4_SITL_UAV1_TERRAIN_SEAM_Y_M = -2500.0
 M4_SITL_UAV_COLLISION_FOOTPRINT_RADIUS_M = 0.32
 M4_SITL_UAV1_NOMINAL_RADIO_POSITION_M = (-7000.0, -2500.0, 300.0)
 IDENTITY_4X4 = [
@@ -134,6 +133,29 @@ def safe_file(root: Path, relative: Any) -> tuple[Path, bytes]:
 
 def close(a: float, b: float, tolerance: float = 1e-6) -> bool:
     return math.isclose(float(a), float(b), rel_tol=0.0, abs_tol=tolerance)
+
+
+def xy_segment_distance_m(
+    x_m: float, y_m: float, start: Sequence[float], end: Sequence[float]
+) -> float:
+    """Return the planar distance from a point to one finite terrain edge."""
+    dx = float(end[0]) - float(start[0])
+    dy = float(end[1]) - float(start[1])
+    length_squared = dx * dx + dy * dy
+    if length_squared <= 0.0:
+        return math.hypot(x_m - float(start[0]), y_m - float(start[1]))
+    fraction = max(
+        0.0,
+        min(
+            1.0,
+            ((x_m - float(start[0])) * dx + (y_m - float(start[1])) * dy)
+            / length_squared,
+        ),
+    )
+    return math.hypot(
+        x_m - (float(start[0]) + fraction * dx),
+        y_m - (float(start[1]) + fraction * dy),
+    )
 
 
 def vector(value: Any, label: str, length: int = 3) -> tuple[float, ...]:
@@ -270,6 +292,20 @@ class ObjMesh:
         if not matches:
             raise SceneValidationError(f"terrain mesh does not cover ({x_m},{y_m})")
         return max(matches)
+
+    def terrain_triangle_edge_distance_m(self, x_m: float, y_m: float) -> float:
+        """Return the nearest planar edge across the actual terrain triangles."""
+        edges = {
+            tuple(sorted((face[index], face[(index + 1) % 3])))
+            for face in self.faces
+            for index in range(3)
+        }
+        if not edges:
+            raise SceneValidationError("terrain mesh has no triangle edges")
+        return min(
+            xy_segment_distance_m(x_m, y_m, self.vertices[first], self.vertices[second])
+            for first, second in edges
+        )
 
 
 def xml_local_references(payload: bytes, root_tag: str, suffix: str) -> tuple[ET.Element, set[str]]:
@@ -1060,6 +1096,13 @@ def validate_scene_bundle(bundle_path: Path = DEFAULT_BUNDLE, root: Path = ROOT)
                 raise SceneValidationError(
                     f"{robot.get('name')} spawn does not preserve collision-terrain clearance"
                 )
+            if (
+                terrain.terrain_triangle_edge_distance_m(spawn[0], spawn[1])
+                <= M4_SITL_UAV_COLLISION_FOOTPRINT_RADIUS_M
+            ):
+                raise SceneValidationError(
+                    f"{robot.get('name')} physical spawn overlaps a terrain triangle edge"
+                )
             radio_position = vector(
                 robot.get("nominal_radio_position_m"),
                 f"{robot.get('name')}.nominal_radio_position",
@@ -1069,13 +1112,6 @@ def validate_scene_bundle(bundle_path: Path = DEFAULT_BUNDLE, root: Path = ROOT)
                     f"{robot.get('name')} nominal radio pose is not above terrain"
                 )
             if robot.get("name") == "uav1":
-                if (
-                    abs(spawn[1] - M4_SITL_UAV1_TERRAIN_SEAM_Y_M)
-                    <= M4_SITL_UAV_COLLISION_FOOTPRINT_RADIUS_M
-                ):
-                    raise SceneValidationError(
-                        "uav1 physical spawn overlaps the terrain mesh seam"
-                    )
                 if radio_position != M4_SITL_UAV1_NOMINAL_RADIO_POSITION_M:
                     raise SceneValidationError(
                         "uav1 nominal radio position differs from the canonical geometry"

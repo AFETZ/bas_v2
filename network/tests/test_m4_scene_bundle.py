@@ -346,7 +346,7 @@ class M4SceneBundleTests(unittest.TestCase):
         path = self.root / "network/config/scenario_m4_canonical.yaml"
         path.write_text(
             path.read_text(encoding="utf-8").replace(
-                "[-4000.0, -2000.0, 84.25,", "[-4000.0, -2000.0, 84.0,"
+                "[-4000.0, -1999.0, 84.266,", "[-4000.0, -1999.0, 84.016,"
             ),
             encoding="utf-8",
         )
@@ -356,20 +356,23 @@ class M4SceneBundleTests(unittest.TestCase):
             validate_scene_bundle(self.bundle_path, self.root), "runtime_configs"
         )
 
-    def test_uav1_spawn_cannot_overlap_terrain_mesh_seam(self) -> None:
+    def test_uav_spawns_cannot_overlap_terrain_mesh_edges(self) -> None:
         path = self.root / "network/config/scenario_m4_canonical.yaml"
-        path.write_text(
-            path.read_text(encoding="utf-8").replace(
-                "[-7000.0, -2499.0, 44.266,",
-                "[-7000.0, -2500.0, 44.250,",
-            ),
-            encoding="utf-8",
+        original = path.read_text(encoding="utf-8")
+        mutations = (
+            ("[-7000.0, -2499.0, 44.266,", "[-7000.0, -2500.0, 44.250,"),
+            ("[-4000.0, -1999.0, 84.266,", "[-4000.0, -2000.0, 84.250,"),
+            ("[1.0, -1500.0, 144.236,", "[0.0, -1500.0, 144.250,"),
         )
-        bundle = self.load_bundle()
-        self.refresh_and_write(bundle, refresh_assets=True)
-        self.assert_failed_gate(
-            validate_scene_bundle(self.bundle_path, self.root), "runtime_configs"
-        )
+        for expected, unsafe in mutations:
+            with self.subTest(unsafe=unsafe):
+                path.write_text(original.replace(expected, unsafe), encoding="utf-8")
+                bundle = self.load_bundle()
+                self.refresh_and_write(bundle, refresh_assets=True)
+                self.assert_failed_gate(
+                    validate_scene_bundle(self.bundle_path, self.root),
+                    "runtime_configs",
+                )
 
     def test_missing_gazebo_jammer_entity_fails_after_hash_rebind(self) -> None:
         path = self.root / "src/multiagent_simulation/worlds/m4_canonical/m4_canonical.sdf"
