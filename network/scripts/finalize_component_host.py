@@ -73,7 +73,7 @@ def environment_map(values: Any) -> dict[str, str]:
     return result
 
 
-def write_exclusive(path: Path, payload: bytes, mode: int = 0o400) -> None:
+def write_exclusive(path: Path, payload: bytes, mode: int = 0o444) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
     descriptor = os.open(path, flags, mode)
@@ -456,12 +456,12 @@ def freeze_tree(root: Path) -> None:
     for path in paths:
         info = path.lstat()
         if stat.S_ISREG(info.st_mode):
-            os.chmod(path, 0o400, follow_symlinks=False)
+            os.chmod(path, 0o444, follow_symlinks=False)
         elif stat.S_ISDIR(info.st_mode):
-            os.chmod(path, 0o500, follow_symlinks=False)
+            os.chmod(path, 0o555, follow_symlinks=False)
         elif not stat.S_ISLNK(info.st_mode):
             raise ValueError(f"special component artifact cannot be frozen: {path}")
-    os.chmod(root, 0o500, follow_symlinks=False)
+    os.chmod(root, 0o555, follow_symlinks=False)
 
 
 def fsync_tree(root: Path) -> None:
@@ -496,8 +496,10 @@ def make_tree_removable(root: Path) -> None:
         path for path in root.rglob("*") if path.is_dir() and not path.is_symlink()
     ]
     for directory in sorted(directories, key=lambda item: len(item.parts)):
-        directory.chmod(0o700)
-    root.chmod(0o700)
+        if directory.lstat().st_uid == os.geteuid():
+            directory.chmod(0o700)
+    if root.lstat().st_uid == os.geteuid():
+        root.chmod(0o700)
 
 
 def publish_durable(
