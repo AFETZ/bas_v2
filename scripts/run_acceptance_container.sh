@@ -182,7 +182,8 @@ if (($# == 7)) && [[ "$1" == "timeout" ]] && \
   fi
   chmod -R a-w "$M1_SOURCE_SNAPSHOT"
   M1_ARTIFACT_STAGING="$(mktemp -d "$ROOT_DIR/runs/.m1-stage-$M1_RUN_ID.XXXXXXXXXX")"
-  setfacl -m u:1000:rwx "$M1_ARTIFACT_STAGING"
+  setfacl -m u:1000:rwx -m "d:u:$(id -u):rwx" -m d:m::rwx \
+    "$M1_ARTIFACT_STAGING"
   M1_CONTROL_STAGING="$(mktemp -d "$ROOT_DIR/../.ams-m1-control-$M1_RUN_ID.XXXXXXXXXX")"
   chmod 0700 "$M1_CONTROL_STAGING"
   if ! network/scripts/run_status_validation.sh \

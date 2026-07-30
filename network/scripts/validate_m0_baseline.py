@@ -3696,6 +3696,7 @@ def _publish_host_receipt(
                 elif path.is_dir():
                     path.chmod(0o500)
             temporary.chmod(0o500)
+            receipt_path.chmod(0o444)
             for path in sorted(temporary.rglob("*")):
                 if path.is_file():
                     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
