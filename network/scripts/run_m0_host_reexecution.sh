@@ -67,8 +67,8 @@ print(json.dumps({
 ' > "$OUTPUT_ROOT/python_guard.json"
 
 FRESH_SUITE_RUN_DIR="$OUTPUT_ROOT/$RUN_ID"
-mkdir -m 0700 "$FRESH_SUITE_RUN_DIR"
-mkdir -m 0700 "$FRESH_SUITE_RUN_DIR/logs" "$FRESH_SUITE_RUN_DIR/metrics"
+mkdir -m 0770 "$FRESH_SUITE_RUN_DIR"
+mkdir -m 0770 "$FRESH_SUITE_RUN_DIR/logs" "$FRESH_SUITE_RUN_DIR/metrics"
 set +e
 "$ROOT_DIR/network/scripts/m0_bin/python3" \
   "$ROOT_DIR/network/scripts/run_m0_validation_suite.py" \
