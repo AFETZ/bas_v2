@@ -1363,6 +1363,7 @@ def _run_host_command(args: list[str], *, timeout: int) -> subprocess.CompletedP
     executable_map = {
         "docker": "/usr/bin/docker",
         "git": "/usr/bin/git",
+        "/usr/bin/setfacl": "/usr/bin/setfacl",
     }
     executable = executable_map.get(args[0], args[0])
     if executable not in executable_map.values():

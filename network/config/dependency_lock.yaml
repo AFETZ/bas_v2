@@ -82,6 +82,7 @@ m0_execution_policy:
     /usr/bin/env: 595f3912fa7d5f91b45cac22a4a772b23232ace24ff9d82ee47cc762c59be5e1
     /usr/bin/git: 2a8c18fbf43da9f692d75474c72bea9dfd796c260b0f3dfe456376abc3bbd668
     /usr/bin/python3.10: cbb7bccfdee4ea3f588ff6b33fc4f75c0db946d8e7c53a2f0bb68dfe2cb32e1e
+    /usr/bin/setfacl: 8c6e90b674671cd3b9d0e61d9177cbd022e1eb9380a2241a189c3d9a51d15922
   host_final_python_sys_path:
     - <repository_root>/network/scripts
     - <repository_root>
