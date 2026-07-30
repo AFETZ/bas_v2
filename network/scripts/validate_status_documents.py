@@ -3073,7 +3073,7 @@ def _validate_control_raw(
                 for key in ("device", "inode", "mode", "entry_count")
             )
             or artifact_initial.get("entry_count") != 0
-            or artifact_initial.get("mode") != 0o700
+            or artifact_initial.get("mode") != 0o770
             or artifact_initial.get("device", 0) < 1
             or artifact_initial.get("inode", 0) < 1
             or artifact_initial.get("content_manifest_sha256") != _sha256(b"[]")
