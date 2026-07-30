@@ -331,7 +331,7 @@ if ((COMPONENT_MODE == 1)); then
   # while the host finalizer must retain access to every created artifact.
   # Named/default ACLs preserve that boundary without making the staging tree
   # world-writable.
-  setfacl -m u:1000:rwx -m "d:u:$(id -u):rwx" -m d:m::rwx \
+  setfacl -m u:0:rwx -m u:1000:rwx -m "d:u:$(id -u):rwx" -m d:m::rwx \
     "$COMPONENT_ARTIFACT_STAGING"
   COMPONENT_CONTROL_STAGING="$(mktemp -d \
     "$ROOT_DIR/../.ams-component-control-$COMPONENT_RUN_ID.XXXXXXXXXX")"
