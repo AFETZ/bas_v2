@@ -138,6 +138,7 @@ if (($# == 3)) && [[ "$1" == "env" ]] && \
   M0_CONTROL_STAGING="$(mktemp -d "$ROOT_DIR/../.ams-m0-control-$M0_RUN_ID.XXXXXXXXXX")"
   M0_ARTIFACT_STAGING="$(cd -- "$M0_ARTIFACT_STAGING" && pwd -P)"
   M0_CONTROL_STAGING="$(cd -- "$M0_CONTROL_STAGING" && pwd -P)"
+  setfacl -m u:1000:rwx "$M0_ARTIFACT_STAGING"
   chmod 0700 "$M0_CONTROL_STAGING"
 fi
 if (($# == 7)) && [[ "$1" == "timeout" ]] && \
@@ -180,6 +181,7 @@ if (($# == 7)) && [[ "$1" == "timeout" ]] && \
   fi
   chmod -R a-w "$M1_SOURCE_SNAPSHOT"
   M1_ARTIFACT_STAGING="$(mktemp -d "$ROOT_DIR/runs/.m1-stage-$M1_RUN_ID.XXXXXXXXXX")"
+  setfacl -m u:1000:rwx "$M1_ARTIFACT_STAGING"
   M1_CONTROL_STAGING="$(mktemp -d "$ROOT_DIR/../.ams-m1-control-$M1_RUN_ID.XXXXXXXXXX")"
   chmod 0700 "$M1_CONTROL_STAGING"
   if ! network/scripts/run_status_validation.sh \
