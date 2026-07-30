@@ -849,8 +849,6 @@ def main(argv: list[str] | None = None) -> int:
         staging_run / "metrics/component_publication_manifest.json",
         pretty(publication_manifest),
     )
-    freeze_tree(staging_run)
-    fsync_tree(staging_run)
     publish_durable(staging_run, publish_run, staging_run.parent, publish_run.parent)
     print(pretty(receipt).decode("utf-8"), end="")
     return 0
