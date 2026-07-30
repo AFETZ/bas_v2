@@ -2834,6 +2834,21 @@ def _run_in_fresh_exact_image(
     identity_path = Path(tempfile.mkstemp(prefix="ams-m0-reexec-id.")[1])
     container_id = ""
     try:
+        acl_result = _run_host_command(
+            [
+                "/usr/bin/setfacl",
+                "-m",
+                "u:1000:rwx",
+                "-m",
+                f"d:u:{os.getuid()}:rwx",
+                "-m",
+                "d:m::rwx",
+                os.fspath(output_root),
+            ],
+            timeout=30,
+        )
+        if acl_result.returncode != 0:
+            raise ValueError("cannot grant the fresh exact-image artifact ACL")
         create = _run_host_command(
             [
                 "docker", "create",
