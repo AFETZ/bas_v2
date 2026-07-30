@@ -1718,12 +1718,15 @@ def main(argv: list[str] | None = None) -> int:
         odom_age = (
             None
             if odom.get("last_wall_s") is None
-            else measurement_ended_mono - float(odom["last_monotonic_s"])
+            # MAVLink callbacks run concurrently with the final ROS spin.
+            # A callback can stamp the final packet just after the end clock
+            # is sampled; an age is a duration and cannot be negative.
+            else max(0.0, measurement_ended_mono - float(odom["last_monotonic_s"]))
         )
         heartbeat_age = (
             None
             if heartbeat.get("last_wall_s") is None
-            else measurement_ended_mono - float(heartbeat["last_monotonic_s"])
+            else max(0.0, measurement_ended_mono - float(heartbeat["last_monotonic_s"]))
         )
         odom_start_delay = (
             None
