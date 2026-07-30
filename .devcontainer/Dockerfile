@@ -168,4 +168,5 @@ RUN printf '%s  %s\n' \
 # Copy post create script
 COPY setup.sh /workspace/setup.sh
 RUN sudo chmod +x /workspace/setup.sh && \
-    sudo git config --system --add safe.directory /workspace/multiagent_simulation
+    sudo git config --system --add safe.directory /workspace/multiagent_simulation && \
+    sudo git config --system --add safe.directory /workspace/multiagent_simulation/.git
