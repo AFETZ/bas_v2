@@ -326,7 +326,7 @@ def write_fsynced(path: Path, payload: bytes) -> None:
         | os.O_EXCL
         | getattr(os, "O_NOFOLLOW", 0)
         | getattr(os, "O_CLOEXEC", 0),
-        0o400,
+        0o444,
     )
     try:
         view = memoryview(payload)
@@ -336,7 +336,7 @@ def write_fsynced(path: Path, payload: bytes) -> None:
                 raise OSError(f"short M1 publication write: {path}")
             view = view[written:]
         os.fsync(descriptor)
-        os.fchmod(descriptor, 0o400)
+        os.fchmod(descriptor, 0o444)
     finally:
         os.close(descriptor)
 
@@ -356,8 +356,11 @@ def freeze_and_fsync_tree(run_dir: Path) -> None:
     for path in sorted(run_dir.rglob("*"), reverse=True):
         if path.is_symlink():
             continue
-        path.chmod(0o400 if path.is_file() else 0o500)
-    run_dir.chmod(0o500)
+        # The final receipt is independently re-derived by the unprivileged
+        # image user.  Preserve immutability while keeping the published
+        # evidence traversable and readable through its read-only bind mount.
+        path.chmod(0o444 if path.is_file() else 0o555)
+    run_dir.chmod(0o555)
     for path in sorted(run_dir.rglob("*")):
         if not path.is_file() or path.is_symlink():
             continue
