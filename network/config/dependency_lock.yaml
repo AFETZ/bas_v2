@@ -8,8 +8,8 @@ status: complete
 # because their source/commit identity is bound by the independent Git,
 # Q-vector, source/install-equality, and external-source records.
 runtime_manifest_sha256:
-  pip_freeze: 36941db39413d66f80191197d8df8d771221dce3a440cbe98f9078cca012b70e
-  dpkg: a15632deb743e50e6ca7f5807382db896a2f69cf854bedc9dbc8a9d47067ae88
+  pip_freeze: 6e25ca2136fcf0740997f652371c8639318744febda654c238a8c902f3412ba4
+  dpkg: decadd82ecdb14979274f0f2a4491a2565ecd3a91c8d3efa2a833aab05ab672d
   ros_packages: 0b1d47e01d3f92b96a85cb04dd867e13579d23caf933092a8113a94fec5503da
 
 # The complete ordered M0 unittest identity is a tracked, hash-locked
@@ -58,7 +58,7 @@ m0_execution_policy:
     /usr/bin/find: 791b89c8bffb8101fd7d4d212b80af66a2332834b05a42721104eb47e8fa2eb1
     /usr/bin/findmnt: 0218be2029f3a4378b60262c346d080418e91640f9381ec8358f3fba54119ceb
     /usr/bin/git: 587ef21868c948b883993e23209b86a72a6ddc06aab1545c697ffc31075acd4a
-    /usr/bin/gawk: b78fdf4db4aea83cc644ef1b3a1bab43600d3f5acec16fe7b529dcc309d4f5b2
+    /usr/bin/gawk: 1c981f9ff43263708684031b8e2c979a75ecc26a4995b25133d7c3d2a3398c6d
     /usr/bin/mkdir: 1bf979d8d0ec5a3b64f24806668b738940c8735790098c96e0bb2a16d81fe516
     /usr/bin/python3.10: d6bca2b84e73c7775a0dd5e6a76899cfe4ee62863d7c8f88513811d1fda23f49
     /usr/bin/sudo: 1e000f41739201f030cdc588fbe50d5438570f5386104c9521543824827fb985

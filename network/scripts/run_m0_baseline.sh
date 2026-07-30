@@ -86,7 +86,7 @@ if [[ "$CAP_BOUNDING" != "0000000000000000" ]] || \
   exit 2
 fi
 
-umask 077
+umask 007
 mkdir -p "$RUN_ROOT"
 if ! mkdir "$RUN_DIR"; then
   printf 'FAIL immutable M0 run directory already exists or cannot be created: %s\n' \

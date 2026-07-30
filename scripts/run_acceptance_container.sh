@@ -138,7 +138,8 @@ if (($# == 3)) && [[ "$1" == "env" ]] && \
   M0_CONTROL_STAGING="$(mktemp -d "$ROOT_DIR/../.ams-m0-control-$M0_RUN_ID.XXXXXXXXXX")"
   M0_ARTIFACT_STAGING="$(cd -- "$M0_ARTIFACT_STAGING" && pwd -P)"
   M0_CONTROL_STAGING="$(cd -- "$M0_CONTROL_STAGING" && pwd -P)"
-  setfacl -m u:1000:rwx "$M0_ARTIFACT_STAGING"
+  setfacl -m u:1000:rwx -m "d:u:$(id -u):rwx" -m d:m::rwx \
+    "$M0_ARTIFACT_STAGING"
   chmod 0700 "$M0_CONTROL_STAGING"
 fi
 if (($# == 7)) && [[ "$1" == "timeout" ]] && \

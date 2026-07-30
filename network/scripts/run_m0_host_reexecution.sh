@@ -35,7 +35,7 @@ if [[ -n "$(find "$OUTPUT_ROOT" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
   exit 2
 fi
 
-umask 077
+umask 007
 set -o noclobber
 
 set +e
