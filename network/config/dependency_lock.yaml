@@ -87,9 +87,9 @@ m0_execution_policy:
     - <repository_root>
     - /usr/local/lib/python3.10/dist-packages
     - /usr/lib/python3/dist-packages
-    - /home/bas/bas_v2/.external/python310/lib/python310.zip
-    - /home/bas/bas_v2/.external/python310/lib/python3.10
-    - /home/bas/bas_v2/.external/python310/lib/python3.10/lib-dynload
+    - <repository_root>/.external/python310/lib/python310.zip
+    - <repository_root>/.external/python310/lib/python3.10
+    - <repository_root>/.external/python310/lib/python3.10/lib-dynload
   host_final_python_imports:
     yaml: {path: /usr/local/lib/python3.10/dist-packages/yaml/__init__.py, bytes: 12311, sha256: 377e52d351cc7ac1537b469144c5a43e3d0f6bc2046c7a44f452bb72be4176dc}
     yaml._yaml: {path: /usr/local/lib/python3.10/dist-packages/yaml/_yaml.cpython-310-x86_64-linux-gnu.so, bytes: 2383664, sha256: db41d5f9c569205b8eb95513990d7e3d021bcadd27f1cb5f5eaec908c21f6eb5}
