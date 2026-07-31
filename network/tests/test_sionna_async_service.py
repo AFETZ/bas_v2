@@ -39,6 +39,8 @@ from network.radio_provider.sionna_async_service import (  # noqa: E402
     WorkerFault,
     create_production_worker,
 )
+from network.radio_provider.provider import RuntimeFiles  # noqa: E402
+from network.scripts import m4_runtime_orchestrator  # noqa: E402
 from network.tests.test_sionna_async_protocol import (  # noqa: E402
     HASH_A,
     HASH_C,
@@ -414,6 +416,71 @@ class WorkerTests(unittest.TestCase):
             with self.subTest(mutation=mutation):
                 with self.assertRaises(AsyncServiceError):
                     RealSionnaBackend(BadProvider()).compute(query())
+
+    def test_real_backend_warm_up_requires_fresh_real_links(self) -> None:
+        response = {"type": "link_state", "links": [{"stale": False}]}
+        provider = SimpleNamespace(
+            settings=SimpleNamespace(mode="real_sionna"),
+            acceptance_eligible=True,
+            query=mock.Mock(return_value=response),
+        )
+        backend = RealSionnaBackend(provider)
+        request = {"type": "link_query", "links": [{"tx": "cp", "rx": "uav1"}]}
+        self.assertEqual(backend.warm_up(request), response)
+        provider.query.assert_called_once_with(request)
+
+        for invalid in (
+            {"type": "link_state", "links": []},
+            {"type": "link_state", "links": [{"stale": True}]},
+        ):
+            provider.query.reset_mock(return_value=True)
+            provider.query.return_value = invalid
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                AsyncServiceError, "warm-up"
+            ):
+                backend.warm_up(request)
+
+    def test_m4_starts_service_only_after_real_backend_warm_up(self) -> None:
+        events: list[object] = []
+        response = {"type": "link_state", "links": [{"stale": False}]}
+        provider = SimpleNamespace(
+            settings=SimpleNamespace(mode="real_sionna"),
+            acceptance_eligible=True,
+            query=mock.Mock(
+                side_effect=lambda request: events.append(("warm", request))
+                or response
+            ),
+        )
+        backend = RealSionnaBackend(provider)
+
+        class Service:
+            worker = SimpleNamespace(backend=backend)
+
+            def start(self) -> None:
+                events.append("start")
+
+        files = RuntimeFiles(
+            scenario=Path("scenario"),
+            radio=Path("radio"),
+            jammers=Path("jammers"),
+            service_tiers=Path("tiers"),
+        )
+        with mock.patch.object(
+            m4_runtime_orchestrator,
+            "build_sample_request",
+            return_value={"type": "link_query", "deadline_ms": 1},
+        ) as sample:
+            m4_runtime_orchestrator._start_warmed_provider_service(Service(), files)
+        sample.assert_called_once_with(
+            files,
+            include_jammers=True,
+            all_uavs=False,
+            traffic_class="control",
+        )
+        self.assertEqual(
+            events,
+            [("warm", {"type": "link_query", "deadline_ms": 30_000}), "start"],
+        )
 
     def test_production_factory_calls_only_real_provider_path(self) -> None:
         from network.radio_provider import provider as provider_module

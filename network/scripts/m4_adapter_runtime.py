@@ -198,16 +198,25 @@ class PoseTracker:
         with self._lock:
             if set(self._poses) != {*NODE_IDS, "jammer_m4"}:
                 return None
+            # DDS and Gazebo callbacks run on separate threads.  Capture the
+            # snapshot boundary only after taking their shared lock: a caller
+            # may have sampled ``now`` immediately before a callback records
+            # a pose.  A snapshot must never predate an included pose.
+            snapshot_now = max(
+                now,
+                time.monotonic_ns(),
+                *(int(item["pose_monotonic_ns"]) for item in self._poses.values()),
+            )
             if (
                 self._latest_snapshot is not None
-                and now - self._last_logged_ns < 100_000_000
+                and snapshot_now - self._last_logged_ns < 100_000_000
             ):
                 return self._latest_snapshot
             nodes = []
             raw_nodes = []
             for node_id in NODE_IDS:
                 raw_value = dict(self._poses[node_id])
-                age = now - int(raw_value["pose_monotonic_ns"])
+                age = snapshot_now - int(raw_value["pose_monotonic_ns"])
                 raw_value["freshness_age_ns"] = age
                 raw_value["stale"] = age < 0 or age > MAX_POSE_AGE_NS
                 raw_value["node_id"] = node_id
@@ -233,7 +242,7 @@ class PoseTracker:
                 )
                 nodes.append(value)
             raw_jammer = dict(self._poses["jammer_m4"])
-            jammer_age = now - int(raw_jammer["pose_monotonic_ns"])
+            jammer_age = snapshot_now - int(raw_jammer["pose_monotonic_ns"])
             raw_jammer["freshness_age_ns"] = jammer_age
             raw_jammer["stale"] = jammer_age < 0 or jammer_age > MAX_POSE_AGE_NS
             jammer = {
@@ -261,7 +270,7 @@ class PoseTracker:
             )
             snapshot = PoseSnapshot.create(
                 snapshot_sequence=self._sequence + 1,
-                snapshot_monotonic_ns=now,
+                snapshot_monotonic_ns=snapshot_now,
                 source_frame=SOURCE_FRAME,
                 transform_version=TRANSFORM_VERSION,
                 nodes=tuple(nodes),
@@ -277,7 +286,7 @@ class PoseTracker:
                         "node_state_seq": snapshot.snapshot_sequence,
                         "node_state_sha256": snapshot.snapshot_sha256,
                         "snapshot_monotonic_ns": snapshot.snapshot_monotonic_ns,
-                        "host_monotonic_ns": now,
+                        "host_monotonic_ns": snapshot_now,
                         "source_frame": SOURCE_FRAME,
                         "transform_version": TRANSFORM_VERSION,
                         "nodes": raw_nodes,
@@ -299,7 +308,7 @@ class PoseTracker:
                 )
             )
             self._log.flush()
-            self._last_logged_ns = now
+            self._last_logged_ns = snapshot_now
             return snapshot
 
 
@@ -698,10 +707,9 @@ def main() -> int:
         loop_period_ns = 5_000_000
         next_loop_tick_ns = time.monotonic_ns()
         while not stop.is_set() and not args.stop_file.exists():
-            started = time.monotonic_ns()
             rclpy.spin_once(node, timeout_sec=0.0)
             world_pose_source.raise_if_failed()
-            snapshot = tracker.snapshot(started)
+            snapshot = tracker.snapshot(time.monotonic_ns())
             if snapshot is not None:
                 adapter.update_poses(snapshot)
             for path, command in [*deferred.items(), *control.poll()]:

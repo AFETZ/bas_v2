@@ -180,6 +180,29 @@ class M4RawPoseLineageTests(unittest.TestCase):
             finally:
                 tracker.close()
 
+    def test_snapshot_boundary_follows_all_callback_poses(self) -> None:
+        """A caller timestamp from before a callback cannot predate its pose."""
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = PoseTracker(Path(directory), self.jammer())
+            try:
+                for uav in range(1, 6):
+                    tracker.update_uav(f"uav{uav}", self.odometry(uav))
+                observations = self.world_poses()
+                future_callback_ns = time.monotonic_ns() + 1_000_000
+                for observation in observations:
+                    observation.source_callback_monotonic_ns = future_callback_ns
+                tracker.update_world(observations)
+                snapshot = tracker.snapshot(0)
+                self.assertIsNotNone(snapshot)
+                assert snapshot is not None
+                pose_times = [
+                    int(item["pose_monotonic_ns"])
+                    for item in [*snapshot.nodes, *snapshot.jammers]
+                ]
+                self.assertGreaterEqual(snapshot.snapshot_monotonic_ns, max(pose_times))
+            finally:
+                tracker.close()
+
 
 if __name__ == "__main__":
     unittest.main()

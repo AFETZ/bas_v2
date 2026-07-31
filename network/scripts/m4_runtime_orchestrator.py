@@ -20,11 +20,12 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from network.radio_provider.provider import RuntimeFiles
+from network.radio_provider.provider import RuntimeFiles, build_sample_request
 from network.radio_provider.sionna_async import ProtocolIdentity, load_protocol_limits
 from network.radio_provider.sionna_async_service import (
     ExactWireLog,
     ProviderServiceConfig,
+    RealSionnaBackend,
     create_production_service,
 )
 from network.bridge.runtime_clock_beacon import beacon
@@ -1034,6 +1035,8 @@ def run_provider(args: argparse.Namespace) -> int:
         port=args.port,
         limits=load_protocol_limits(),
     )
+
+    _start_warmed_provider_service(service, files)
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_unused: stop.set())
     signal.signal(signal.SIGINT, lambda *_unused: stop.set())
@@ -1042,7 +1045,6 @@ def run_provider(args: argparse.Namespace) -> int:
         args=(args.clock_socket.resolve(), "sionna_worker", stop),
         daemon=True,
     )
-    service.start()
     beacon_thread.start()
     write_exclusive(
         args.ready_file,
@@ -1067,6 +1069,25 @@ def run_provider(args: argparse.Namespace) -> int:
         service.stop(timeout_s=10.0)
         beacon_thread.join(2.0)
     return 0
+
+
+def _start_warmed_provider_service(service: Any, files: RuntimeFiles) -> None:
+    """Warm the serving PathSolver before publishing provider readiness."""
+
+    backend = service.worker.backend
+    if not isinstance(backend, RealSionnaBackend):
+        raise M4ValidationError(
+            "provider factory did not retain the real Sionna backend"
+        )
+    warmup_request = build_sample_request(
+        files,
+        include_jammers=True,
+        all_uavs=False,
+        traffic_class="control",
+    )
+    warmup_request["deadline_ms"] = 30_000
+    backend.warm_up(warmup_request)
+    service.start()
 
 
 def run_beacon(args: argparse.Namespace) -> int:
