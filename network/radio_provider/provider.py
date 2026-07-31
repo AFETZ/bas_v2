@@ -639,9 +639,13 @@ class SionnaRadioProvider:
         flat_valid = self._np.asarray(pair_valid, dtype=bool).reshape(-1)
         flat_delays = self._np.asarray(pair_delays, dtype=float).reshape(-1)
         depth = int(pair_interactions.shape[0])
-        flat_interactions = self._np.asarray(pair_interactions).reshape(
-            depth, -1
-        )
+        if depth == 0:
+            # NumPy cannot infer the ``-1`` dimension from a zero-sized tensor.
+            # Zero interactions is valid for both an empty/no-path response and
+            # a direct LOS path, so preserve the path-axis cardinality explicitly.
+            flat_interactions = self._np.empty((0, int(flat_valid.size)), dtype=int)
+        else:
+            flat_interactions = self._np.asarray(pair_interactions).reshape(depth, -1)
         if flat_valid.size != flat_delays.size or flat_interactions.shape[1] != flat_valid.size:
             raise ProviderError("Sionna path evidence tensor shapes do not align")
 

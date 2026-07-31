@@ -103,7 +103,12 @@ class PoseTracker:
 
     def set_jammer_enabled(self, enabled: bool) -> None:
         with self._lock:
-            self._jammer_enabled = bool(enabled)
+            normalized = bool(enabled)
+            if self._jammer_enabled != normalized:
+                self._jammer_enabled = normalized
+                # A control transition must be represented by a new immutable
+                # snapshot even inside the normal 100 ms snapshot cache window.
+                self._latest_snapshot = None
 
     def update_uav(self, node_id: str, message: Any) -> None:
         if node_id not in UAV_IDS:

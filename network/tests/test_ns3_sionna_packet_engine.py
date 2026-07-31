@@ -239,6 +239,39 @@ class SionnaPacketEngineConfigTests(unittest.TestCase):
     BINARY.is_file() and os.access(BINARY, os.X_OK), "compiled ns-3 engine absent"
 )
 class SionnaPacketEngineCompiledTests(unittest.TestCase):
+    def test_unterminated_jsonl_tail_is_retried_without_ipc_fault(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state_file = root / "states.jsonl"
+            write_fresh_states(state_file)
+            # The writer can be observed between a record write and its final
+            # newline.  Valid complete records must remain usable while that
+            # tail is retried, rather than faulting the entire state table.
+            with state_file.open("ab") as stream:
+                stream.write(b'{"incomplete":')
+            events_file = root / "events.jsonl"
+            result = run_engine(enabled_config(state_file, "force_deliver"), events_file)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            events = read_events(events_file)
+
+        decisions = [
+            event
+            for event in events
+            if event["event"] == "channel" and not event["p2mp"]
+        ]
+        self.assertEqual(len(decisions), 31)
+        self.assertEqual(
+            {(event["directed_link"], event["traffic_class"]) for event in decisions},
+            EXPECTED_CELLS,
+        )
+        self.assertFalse(
+            any(
+                event["event"] == "drop"
+                and event["drop_reason"] == "sionna_state_ipc_fault"
+                for event in events
+            )
+        )
+
     def test_thirty_cells_apply_exact_state_lineage_delay_and_loss(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

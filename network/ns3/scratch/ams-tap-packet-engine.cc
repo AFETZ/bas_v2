@@ -666,7 +666,7 @@ class RadioStateTable
                 }
                 else
                 {
-                    std::ifstream input(m_path, std::ios::in);
+                    std::ifstream input(m_path, std::ios::in | std::ios::binary);
                     if (!input)
                     {
                         FailClosed("state_ipc_open_failed");
@@ -676,20 +676,32 @@ class RadioStateTable
                         input.seekg(static_cast<std::streamoff>(m_offset));
                         std::string line;
                         uint32_t processed = 0;
-                        while (processed < m_maxUpdatesPerPoll && std::getline(input, line))
+                        char byte = '\0';
+                        // The producer appends JSONL concurrently.  EOF without a
+                        // newline is therefore an incomplete record, not malformed
+                        // input: keep m_offset at the beginning of that tail and
+                        // retry it on the next poll.  Complete invalid records still
+                        // fail closed below.
+                        while (processed < m_maxUpdatesPerPoll && input.get(byte))
                         {
-                            m_offset += line.size() + 1;
-                            ++processed;
-                            if (line.size() > MAX_SIONNA_LINE_BYTES)
+                            if (byte != '\n')
                             {
-                                FailClosed("state_ipc_line_too_large");
-                                break;
+                                line.push_back(byte);
+                                if (line.size() > MAX_SIONNA_LINE_BYTES)
+                                {
+                                    FailClosed("state_ipc_line_too_large");
+                                    break;
+                                }
+                                continue;
                             }
+                            ++processed;
                             if (!ApplyLine(line))
                             {
                                 FailClosed("state_ipc_invalid_record");
                                 break;
                             }
+                            m_offset += line.size() + 1;
+                            line.clear();
                         }
                     }
                 }
