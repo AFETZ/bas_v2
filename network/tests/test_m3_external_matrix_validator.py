@@ -25,6 +25,7 @@ from network.scripts import raw_packet_capture
 from network.scripts import actual_sitl_control_probe as control_probe
 from network.scripts import actual_sitl_endpoint_orchestrator as actual_orchestrator
 from network.validation import validate_m3_external_matrix as validator
+from network.validation.validate_m4_capacity import _expected_actual_control_api
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -3214,6 +3215,7 @@ class M3ExternalMatrixValidatorTests(unittest.TestCase):
     def test_complete_30_cell_external_fixture_passes(self) -> None:
         result = self.evaluate()
         self.assertTrue(result["passed"], "\n".join(result["failures"][:20]))
+        self.assertEqual(result["actual_control_api"], _expected_actual_control_api())
         capture_stats = validator.strict_json(
             self.run_dir / "logs/capture-loopback-container-root.json"
         )
