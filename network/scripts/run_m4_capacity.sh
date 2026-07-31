@@ -95,6 +95,15 @@ terminate_group() {
   kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
 }
 
+handoff_component_artifacts() {
+  [[ -d "$RUN_DIR" ]] || return 0
+  # Root-created restrictive files inherit the host finalizer ACL with a zero
+  # mask.  Restore only its group-class mask before ownership is transferred.
+  find "$RUN_DIR" -type d -exec chmod g+rwx {} +
+  find "$RUN_DIR" -type f -exec chmod g+r {} +
+  chown -R 1000:1000 "$RUN_DIR"
+}
+
 cleanup() {
   local exit_code=$?
   set +e
@@ -119,7 +128,7 @@ cleanup() {
     done
   fi
   rm -f "$CLOCK_SOCKET"
-  [[ -d "$RUN_DIR" ]] && chown -R 1000:1000 "$RUN_DIR" 2>/dev/null || true
+  ((SUCCESS == 1)) || handoff_component_artifacts || true
   ((SUCCESS == 1)) && exit 0
   exit "$exit_code"
 }
@@ -568,6 +577,6 @@ python3 "$VALIDATOR" --run-dir "$RUN_DIR" --no-write \
 cmp "$RUN_DIR/metrics/m4_capacity_validation.json" "$INDEPENDENT_RESULT"
 rm -f "$INDEPENDENT_RESULT"
 
-chown -R 1000:1000 "$RUN_DIR"
+handoff_component_artifacts
 SUCCESS=1
 printf 'PASS M4 formal capacity prerequisite: %s\n' "$RUN_DIR"

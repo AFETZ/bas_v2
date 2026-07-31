@@ -483,6 +483,15 @@ stop_launch() {
   LAUNCH_PID=""
 }
 
+handoff_component_artifacts() {
+  [[ -d "$RUN_DIR" ]] || return 0
+  # Root-created restrictive files inherit the host finalizer ACL with a zero
+  # mask.  Restore only its group-class mask before ownership is transferred.
+  find "$RUN_DIR" -type d -exec chmod g+rwx {} +
+  find "$RUN_DIR" -type f -exec chmod g+r {} +
+  chown -R 1000:1000 "$RUN_DIR"
+}
+
 cleanup() {
   if (( CLEANUP_ACTIVE )); then
     return
@@ -1154,7 +1163,7 @@ python3 "$ROOT_DIR/network/validation/validate_m2_vertical_slice.py" \
 # The formal producer runs as root with a minimal capability set because Linux
 # namespace/TUN setup requires it.  Return ownership only to the fixed host
 # acceptance uid/gid so the no-sudo host finalizer can freeze and publish.
-chown -R 1000:1000 "$RUN_DIR"
+handoff_component_artifacts
 
 trap - EXIT
 printf 'M2 one-UAV vertical-slice component run complete: %s\n' "$RUN_DIR"

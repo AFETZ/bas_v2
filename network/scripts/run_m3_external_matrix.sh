@@ -119,6 +119,15 @@ TOPOLOGY_TRANSITION_SEQUENCE=0
 NAMESPACES_CREATED=0
 SUCCESS=0
 
+handoff_component_artifacts() {
+  [[ -d "$RUN_DIR" ]] || return 0
+  # Root-created restrictive files inherit the host finalizer ACL with a zero
+  # mask.  Restore only its group-class mask before ownership is transferred.
+  find "$RUN_DIR" -type d -exec chmod g+rwx {} +
+  find "$RUN_DIR" -type f -exec chmod g+r {} +
+  chown -R 1000:1000 "$RUN_DIR"
+}
+
 cleanup() {
   local exit_code=$?
   set +e
@@ -155,8 +164,8 @@ cleanup() {
       ip link del "ams-tail$index" 2>/dev/null
     done
   fi
-  if [[ -d "$RUN_DIR" ]]; then
-    chown -R 1000:1000 "$RUN_DIR" 2>/dev/null
+  if [[ "$SUCCESS" != "1" ]]; then
+    handoff_component_artifacts || true
   fi
   if [[ "$SUCCESS" == "1" ]]; then
     exit 0
@@ -967,7 +976,7 @@ python3 "$VALIDATOR" "${VALIDATOR_ARGS[@]}" --no-write \
 cmp "$RESULT_PATH" "$INDEPENDENT_RESULT"
 rm -f "$INDEPENDENT_RESULT"
 
-chown -R 1000:1000 "$RUN_DIR"
+handoff_component_artifacts
 SUCCESS=1
 if [[ "$M3_TECHNICAL_SMOKE" == "1" ]]; then
   [[ ! -e "$RUN_DIR/metrics/m3_validation_results.json" ]] || {
