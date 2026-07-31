@@ -755,7 +755,7 @@ def _validate_real_provider_wire_binding(
         details.update(correlation_details)
         failures.extend(correlation_failures)
         installed_versions = {
-            "sionna_rt_version": importlib.metadata.version("sionna"),
+            "sionna_rt_version": importlib.metadata.version("sionna-rt"),
             "mitsuba_version": importlib.metadata.version("mitsuba"),
         }
         dependency_lock = yaml.safe_load(

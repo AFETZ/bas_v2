@@ -1101,6 +1101,9 @@ class CausalWindowTests(unittest.TestCase):
         self.assertIn("--mavproxy-streamrate 1", source)
         self.assertIn("--mavproxy-streamrate 1", capacity_runner.read_text())
         self.assertIn('mavproxy_streamrate:="$MAVPROXY_STREAMRATE"', stack.read_text())
+        for runner_source in (source, capacity_runner.read_text(encoding="utf-8")):
+            self.assertIn('CONTROLLED_PYTHONPATH="${PYTHONPATH:?', runner_source)
+            self.assertIn('export PYTHONPATH="$CONTROLLED_PYTHONPATH"', runner_source)
         profiles = json.loads(
             (ROOT / "network/config/component_acceptance_profiles.json").read_text()
         )["profiles"]

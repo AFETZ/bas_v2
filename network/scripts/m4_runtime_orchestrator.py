@@ -1001,7 +1001,7 @@ def run_provider(args: argparse.Namespace) -> int:
     bundle = strict_json(ROOT / "network/config/m4_canonical_scene_bundle.json")
     executable = Path(__file__).resolve()
     try:
-        sionna_version = importlib.metadata.version("sionna")
+        sionna_version = importlib.metadata.version("sionna-rt")
         mitsuba_version = importlib.metadata.version("mitsuba")
     except importlib.metadata.PackageNotFoundError as exc:
         raise M4ValidationError(f"provider package identity missing: {exc}") from exc
