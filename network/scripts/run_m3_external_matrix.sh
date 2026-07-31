@@ -353,6 +353,10 @@ for endpoint in "${ENDPOINTS[@]}"; do
   ip -n "$endpoint_ns" address add "10.71.$index.10/24" dev eth0
   ip -n "$endpoint_ns" link set eth0 up
   ip -n "$endpoint_ns" route add default via "10.71.$index.1" dev eth0
+  # Keep source frames observable throughout the deliberate stopped epoch.
+  # This is the NS-3 endpoint gateway identity, not a host-side bypass.
+  ip -n "$endpoint_ns" neigh replace "10.71.$index.1" \
+    lladdr "02:71:$(printf '%02x' "$index"):00:00:01" nud permanent dev eth0
 
   if [[ "$endpoint" != "gcs" ]]; then
     tail_root="ams-tail$index"

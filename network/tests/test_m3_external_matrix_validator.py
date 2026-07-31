@@ -1479,7 +1479,11 @@ class Fixture:
                     sim_counter[1 if phase == "positive" else 2] += 20
 
                     ack_sequence = response_sequence[uav]
-                    if phase == "recovery" and uav == 1 and sequence == 1:
+                    if phase == "positive" and uav == 2 and sequence == 19:
+                        # Byte-identical MAVLink ACKs can legitimately repeat
+                        # within an epoch; distinct engine UIDs identify them.
+                        ack_sequence = 9
+                    elif phase == "recovery" and uav == 1 and sequence == 1:
                         # A MAVLink sequence can wrap/repeat.  This exact ACK
                         # intentionally duplicates positive/uav1/1 bytes and
                         # must correlate by peer and transaction time.
