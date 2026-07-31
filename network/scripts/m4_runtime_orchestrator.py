@@ -87,6 +87,7 @@ ACTUAL_SITL_AUDIT_LOG_PATHS = frozenset(
         *(f"logs/actual_sitl_uav{index}.jsonl" for index in range(1, 6)),
     }
 )
+INITIAL_JAMMER_CONTROL_FILE = "000-initial-jammer-off.json"
 
 
 def canonical(value: Any) -> bytes:
@@ -115,6 +116,21 @@ def copy_exclusive(source: Path, destination: Path) -> str:
     payload = source.read_bytes()
     write_exclusive(destination, payload)
     return hashlib.sha256(payload).hexdigest()
+
+
+def write_initial_jammer_off_control(run_dir: Path) -> Path:
+    """Predeclare the off state required before any M4 control-link gate."""
+
+    path = run_dir / "raw/control/adapter" / INITIAL_JAMMER_CONTROL_FILE
+    write_exclusive(
+        path,
+        {
+            "action": "set_jammer_enabled",
+            "not_before_monotonic_ns": 0,
+            "enabled": False,
+        },
+    )
+    return path
 
 
 def identity_for_contract(contract_path: Path) -> tuple[ProtocolIdentity, str, str]:
@@ -501,6 +517,7 @@ def initialize_capacity(args: argparse.Namespace) -> int:
     contract_path = run_dir / "raw/m4_capacity_contract.json"
     write_exclusive(contract_path, contract)
     write_exclusive(run_dir / "raw/run_contract.json", contract)
+    write_initial_jammer_off_control(run_dir)
 
     # The frozen nominal workload starts exactly at the measurement boundary;
     # warm-up is reserved for the modeled-path reposition command.  Four
@@ -913,6 +930,7 @@ def initialize_causality(args: argparse.Namespace) -> int:
     }
     write_exclusive(run_dir / "raw/m4_causality_contract.json", contract)
     write_exclusive(run_dir / "raw/run_contract.json", contract)
+    write_initial_jammer_off_control(run_dir)
 
     flow_groups = {
         f"uav{index}": matrix_flow_group_identity(

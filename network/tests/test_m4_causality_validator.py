@@ -34,6 +34,8 @@ from network.scripts.actual_sitl_control_probe import (  # noqa: E402
 )
 from network.scripts.m4_runtime_orchestrator import (  # noqa: E402
     ACTUAL_SITL_AUDIT_LOG_PATHS,
+    INITIAL_JAMMER_CONTROL_FILE,
+    write_initial_jammer_off_control,
 )
 from network.validation.m4_common import M4ValidationError  # noqa: E402
 from network.validation.m4_pose_observations import (  # noqa: E402
@@ -97,6 +99,40 @@ TEST_ENDPOINT_FORM = "actual_sitl_mavproxy_udp_tail"
 TEST_MATRIX_SHA256 = hashlib.sha256(
     (ROOT / "network/config/endpoint_matrix_5uav.json").read_bytes()
 ).hexdigest()
+
+
+class InitialJammerControlTests(unittest.TestCase):
+    class Tracker:
+        def __init__(self) -> None:
+            self.enabled = True
+
+        def set_jammer_enabled(self, enabled: bool) -> None:
+            self.enabled = enabled
+
+    def test_predeclares_off_before_link_readiness(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = write_initial_jammer_off_control(Path(temporary))
+            self.assertEqual(path.name, INITIAL_JAMMER_CONTROL_FILE)
+            self.assertEqual(
+                json.loads(path.read_text(encoding="utf-8")),
+                {
+                    "action": "set_jammer_enabled",
+                    "not_before_monotonic_ns": 0,
+                    "enabled": False,
+                },
+            )
+            tracker = self.Tracker()
+            action, detail = apply_control(
+                path,
+                json.loads(path.read_text(encoding="utf-8")),
+                tracker,
+                None,
+                set(),
+                set(),
+            )
+            self.assertEqual(action, "set_jammer_enabled")
+            self.assertEqual(detail, {"enabled": False})
+            self.assertFalse(tracker.enabled)
 
 
 def window_manifest() -> list[dict[str, object]]:

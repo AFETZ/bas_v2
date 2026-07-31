@@ -675,13 +675,30 @@ def main() -> int:
                 break
         if initial is None:
             raise M4ValidationError("six-node/jammer ROS/Gazebo pose readiness timed out")
+        control = ControlReader(
+            args.control_dir, args.run_dir / "logs/m4_adapter_controls.jsonl"
+        )
+        fault_seed_cells: set[tuple[str, str]] = set()
+        fault_parallel_cells: set[tuple[str, str]] = set()
+        for path, command in control.poll():
+            action, detail = apply_control(
+                path,
+                command,
+                tracker,
+                None,
+                fault_seed_cells,
+                fault_parallel_cells,
+            )
+            if action == "deferred":
+                raise M4ValidationError("adapter bootstrap control is deferred")
+            control.record(path, action, detail)
+        initial = tracker.snapshot(time.monotonic_ns())
+        if initial is None:
+            raise M4ValidationError("adapter bootstrap pose snapshot is absent")
         adapter, client, injector = build_adapter(args, tracker, initial)
         tailer = PacketEventTailer(
             args.packet_events,
             max_line_bytes=int(contract["limits"]["max_packet_event_line_bytes"]),
-        )
-        control = ControlReader(
-            args.control_dir, args.run_dir / "logs/m4_adapter_controls.jsonl"
         )
         client.start()
         client_deadline = time.monotonic_ns() + 10_000_000_000
@@ -702,8 +719,6 @@ def main() -> int:
             },
         )
         deferred: dict[Path, dict[str, Any]] = {}
-        fault_seed_cells: set[tuple[str, str]] = set()
-        fault_parallel_cells: set[tuple[str, str]] = set()
         loop_period_ns = 5_000_000
         next_loop_tick_ns = time.monotonic_ns()
         while not stop.is_set() and not args.stop_file.exists():
