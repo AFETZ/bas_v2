@@ -1,0 +1,58 @@
+schema_version: 1
+
+scenario:
+  name: communication_vertical_slice
+  map:
+    world_file: modelflughafen/model.sdf
+
+base_simulation:
+  launch_package: multiagent_simulation
+  launch_file: multiagent_simulation.launch.py
+  sitl_home: "46.607213,14.278461,446,10"
+
+command_post:
+  id: cp
+  role: command_post
+  gazebo_model_name: command_post
+  position_m: [0.0, 0.0, -0.2662]
+  orientation_quat_xyzw: [0.0, 0.0, 0.0, 1.0]
+  antenna: omni
+
+robots:
+  - name: uav1
+    role: uav
+    instance: 0
+    system_id: 1
+    dds_udp_port: 2019
+    master_tcp_port: 5760
+    sitl_udp_port: 5501
+    fdm_udp_port: 9002
+    mavproxy_out: 127.0.0.1:14601
+    position: [0.0, -40.0, 2.0, 0.0, 0.0, 0.0]
+    nominal_radio_position_m: [0.0, -40.0, 2.0]
+
+communication:
+  control:
+    ardupilot_serial: SERIAL1
+    transport: uart
+    protocol: mavlink2
+    baud: 115200
+    gcs_udp: 10.71.0.10:14600
+    uav_udp: 10.71.1.10:14601
+  payload:
+    ardupilot_serial: SERIAL2
+    transport: uart
+    protocol: mavlink2
+    baud: 115200
+    gcs_udp: 10.71.0.10:14700
+    uav_udp: 10.71.1.10:14701
+  additional_data:
+    transport: udp
+    port: 14800
+    p2p: [10.71.1.10, 10.71.1.11, 10.71.1.12]
+    p2mp_broadcast: 10.71.1.255
+  ns3:
+    shared_medium: csma
+    radio_rate: 64kbps
+    radio_delay: 5ms
+    queue_max_packets: 20

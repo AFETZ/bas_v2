@@ -41,6 +41,35 @@ command_post:
     payload_udp_base: 14700
     additional_data_udp_base: 14800
 
+communication_vertical_slice:
+  scenario: network/config/communication_vertical_slice.yaml
+  launch:
+    start_mavproxy: false
+    control_uart_argument: control_uart
+    payload_uart_argument: payload_uart
+  control:
+    ardupilot_serial: SERIAL1
+    transport: uart_mavlink2
+    baud: 115200
+    gcs_endpoint: 10.71.0.10:14600
+    uav_endpoint: 10.71.1.10:14601
+  payload:
+    ardupilot_serial: SERIAL2
+    transport: uart_mavlink2
+    baud: 115200
+    gcs_endpoint: 10.71.0.10:14700
+    uav_endpoint: 10.71.1.10:14701
+  additional_data:
+    transport: udp
+    port: 14800
+    shared_subnet: 10.71.1.0/24
+    p2p_nodes: [10.71.1.10, 10.71.1.11, 10.71.1.12]
+    p2mp_broadcast: 10.71.1.255
+  modeled_path:
+    namespaces: [ams-gcs, ams-ns3, ams-uav1, ams-uav2, ams-uav3]
+    medium: ns3_csma
+    direct_localhost_shortcut: false
+
 bridge:
   status: day4_adapter
   mavlink_router:

@@ -1,4 +1,5 @@
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -53,6 +54,38 @@ def create_dds_udp_params_file(port):
     return temp_file.name
 
 
+def create_mavlink_uart_params_file():
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".parm", mode="w")
+    with temp_file:
+        temp_file.write(
+            "SERIAL1_PROTOCOL 2\n"
+            "SERIAL1_BAUD 115\n"
+            "SERIAL2_PROTOCOL 2\n"
+            "SERIAL2_BAUD 115\n"
+        )
+    return temp_file.name
+
+
+def command_post_sdf(model_name):
+    return f"""<?xml version='1.0'?>
+<sdf version='1.9'>
+  <model name='{model_name}'>
+    <static>true</static>
+    <link name='base'>
+      <visual name='mast'>
+        <pose>0 0 0.25 0 0 0</pose>
+        <geometry><cylinder><radius>0.25</radius><length>0.5</length></cylinder></geometry>
+        <material><ambient>0.15 0.25 0.8 1</ambient><diffuse>0.15 0.25 0.8 1</diffuse></material>
+      </visual>
+      <collision name='mast'>
+        <pose>0 0 0.25 0 0 0</pose>
+        <geometry><cylinder><radius>0.25</radius><length>0.5</length></cylinder></geometry>
+      </collision>
+    </link>
+  </model>
+</sdf>"""
+
+
 def prepend_unique_env_paths(name, paths):
     existing = [p for p in os.environ.get(name, "").split(":") if p]
     for path in reversed([p for p in paths if p]):
@@ -77,6 +110,23 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
     scenario_config = load_robots_from_file(robots_file)
     robots = scenario_config['robots']
     sitl_home = scenario_config.get('base_simulation', {}).get('sitl_home', '')
+
+    mavproxy_executable = os.environ.get("MAVPROXY_EXECUTABLE") or shutil.which(
+        "mavproxy.py"
+    )
+
+    endpoint_fields = (
+        "system_id",
+        "dds_udp_port",
+        "master_tcp_port",
+        "sitl_udp_port",
+        "fdm_udp_port",
+        "mavproxy_out",
+    )
+    for field in endpoint_fields:
+        values = [robot.get(field) for robot in robots if field in robot]
+        if len(values) != len(set(values)):
+            raise RuntimeError(f"robot field {field} must be unique: {values}")
 
     # Convert camera and lidar xacro files to SDF.
     lidar_file = os.path.join(
@@ -138,6 +188,20 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
         "yes",
         "on",
     }
+    start_mavproxy = LaunchConfiguration("start_mavproxy").perform(context).lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if start_mavproxy and not mavproxy_executable:
+        raise RuntimeError("mavproxy.py is unavailable on PATH")
+    control_uart_template = LaunchConfiguration("control_uart").perform(context).strip()
+    payload_uart_template = LaunchConfiguration("payload_uart").perform(context).strip()
+    if bool(control_uart_template) != bool(payload_uart_template):
+        raise RuntimeError("control_uart and payload_uart must be configured together")
+    if enable_serial2 and payload_uart_template:
+        raise RuntimeError("enable_serial2 cannot be combined with payload_uart")
     mavproxy_streamrate = LaunchConfiguration("mavproxy_streamrate").perform(
         context
     ).strip()
@@ -193,17 +257,36 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
             ),
             launch_arguments={"gz_args": "-v4 -g"}.items(),
             condition=IfCondition(LaunchConfiguration("gui")),
-        )
+        ),
     ]
 
+    command_post = scenario_config.get("command_post", {})
+    command_post_position = command_post.get("position_m", [0.0, 0.0, 0.0])
+    command_post_model = command_post.get("gazebo_model_name", "command_post")
+    launch_actions.append(
+        Node(
+            package="ros_gz_sim",
+            executable="create",
+            namespace="command_post",
+            arguments=[
+                "-world", "", "-name", command_post_model,
+                "-string", command_post_sdf(command_post_model),
+                "-x", str(command_post_position[0]),
+                "-y", str(command_post_position[1]),
+                "-z", str(command_post_position[2]),
+            ],
+            output="screen",
+        )
+    )
+
     for i, robot in enumerate(robots):
-        instance = i
+        instance = int(robot.get("instance", i))
         sysid = int(robot.get("system_id", i + 1))
         
         port_offset = 10 * instance
-        master_port = 5760 + port_offset
-        sitl_port = 5501 + port_offset
-        control_port = 9002 + port_offset
+        master_port = int(robot.get("master_tcp_port", 5760 + port_offset))
+        sitl_port = int(robot.get("sitl_udp_port", 5501 + port_offset))
+        control_port = int(robot.get("fdm_udp_port", 9002 + port_offset))
         dds_udp_port = int(robot.get("dds_udp_port", 2019 + instance))
         sim_address = "127.0.0.1"
         
@@ -214,13 +297,14 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
         dds_udp_params = create_dds_udp_params_file(dds_udp_port)
         mavproxy_dir = Path.cwd() / "mavproxy" / str(robot["name"])
         mavproxy_dir.mkdir(parents=True, exist_ok=True)
-        defaults_file = ",".join(
-            [
-                os.path.join(pkg_multiagent_simulation, "config", "gazebo-iris.parm"),
-                os.path.join(pkg_ardupilot_sitl, "config", "default_params", "dds_udp.parm"),
-                dds_udp_params,
-            ]
-        )
+        defaults_files = [
+            os.path.join(pkg_multiagent_simulation, "config", "gazebo-iris.parm"),
+            os.path.join(pkg_ardupilot_sitl, "config", "default_params", "dds_udp.parm"),
+            dds_udp_params,
+        ]
+        if control_uart_template:
+            defaults_files.append(create_mavlink_uart_params_file())
+        defaults_file = ",".join(defaults_files)
         
         name = robot['name']
         position = robot['position']
@@ -278,7 +362,16 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
             "sim_address": "127.0.0.1",
             "home": str(robot.get("home", sitl_home)),
         }
-        if enable_serial2:
+        if not start_mavproxy:
+            # ArduPilot's default SERIAL0 is tcp:<master>:wait.  Without a
+            # MAVProxy client that blocks boot before SERIAL1/2 are opened.
+            sitl_launch_arguments["serial0"] = "none"
+        if control_uart_template:
+            control_uart = control_uart_template.format(instance=instance, name=name)
+            payload_uart = payload_uart_template.format(instance=instance, name=name)
+            sitl_launch_arguments["serial1"] = f"uart:{control_uart}"
+            sitl_launch_arguments["serial2"] = f"uart:{payload_uart}"
+        elif enable_serial2:
             sitl_launch_arguments["serial2"] = f"uart:{tty1}"
 
         sitl = IncludeLaunchDescription(
@@ -293,31 +386,33 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
         )
         launch_actions.append(sitl)
 
-        mavproxy_cmd = [
-            "/home/ubuntu/.local/bin/mavproxy.py",
-            "--out",
-            str(robot.get("mavproxy_out", "127.0.0.1:14550")),
-            "--master",
-            f"tcp:{sim_address}:{master_port}",
-            "--sitl",
-            f"{sim_address}:{sitl_port}",
-            # M1 writes authoritative MAVLink observations through its
-            # structured collector; MAVProxy does not persist a second
-            # telemetry/state record for this component profile.
-            "--no-state",
-            "--non-interactive",
-            "--default-modules",
-            MAVPROXY_OFFLINE_DEFAULT_MODULES,
-        ]
-        if mavproxy_streamrate:
-            mavproxy_cmd.extend(["--streamrate", mavproxy_streamrate])
-        mavproxy = ExecuteProcess(
-            cmd=mavproxy_cmd,
-            cwd=str(mavproxy_dir),
-            output="both",
-            respawn=False,
-        )
-        launch_actions.append(mavproxy)
+        if start_mavproxy:
+            mavproxy_cmd = [
+                mavproxy_executable,
+                "--out",
+                str(robot.get("mavproxy_out", f"127.0.0.1:{14601 + instance}")),
+                "--master",
+                f"tcp:{sim_address}:{master_port}",
+                "--sitl",
+                f"{sim_address}:{sitl_port}",
+                # M1 writes authoritative MAVLink observations through its
+                # structured collector; MAVProxy does not persist a second
+                # telemetry/state record for this component profile.
+                "--no-state",
+                "--non-interactive",
+                "--default-modules",
+                MAVPROXY_OFFLINE_DEFAULT_MODULES,
+            ]
+            if mavproxy_streamrate:
+                mavproxy_cmd.extend(["--streamrate", mavproxy_streamrate])
+            launch_actions.append(
+                ExecuteProcess(
+                    cmd=mavproxy_cmd,
+                    cwd=str(mavproxy_dir),
+                    output="both",
+                    respawn=False,
+                )
+            )
 
         # Publish /tf and /tf_static.
         with open(sdf_file, "r") as infp:
@@ -492,6 +587,27 @@ def generate_launch_description():
                 description=(
                     "Attach ArduPilot SERIAL2 to a pre-created ttyROS PTY. "
                     "Keep disabled unless the launch also owns that PTY."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "start_mavproxy",
+                default_value="true",
+                description="Start the per-UAV MAVProxy SERIAL0 client.",
+            ),
+            DeclareLaunchArgument(
+                "control_uart",
+                default_value="",
+                description=(
+                    "PTY path for the dedicated MAVLink2 control UART (SERIAL1). "
+                    "Supports {name} and {instance} placeholders."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "payload_uart",
+                default_value="",
+                description=(
+                    "PTY path for the separate MAVLink2 payload UART (SERIAL2). "
+                    "Supports {name} and {instance} placeholders."
                 ),
             ),
             DeclareLaunchArgument(
