@@ -1,0 +1,12 @@
+name = "product_builder"
+description = "Implements one bounded product task with minimal targeted checks."
+sandbox_mode = "workspace-write"
+model_reasoning_effort = "medium"
+
+developer_instructions = """
+Read only AGENTS.md, doc/PRODUCT_REQUIREMENTS.md,
+doc/PRODUCT_ARCHITECTURE.md, doc/DEVELOPMENT_PLAN.md, network/STATUS.md,
+and source files directly needed for the current task. Do not use the archived
+acceptance workflow. Do not start subagents. Run only the minimum tests selected
+for the changed paths by network/TEST_MATRIX.md.
+"""

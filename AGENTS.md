@@ -1,26 +1,75 @@
-# AGENTS.md
+# Product-First Repository Rules
 
-## Repository Intent
+## Mission
 
-- Treat the repository author's README, launch files, package entry points, and existing source code as the source of truth.
-- Prefer the implementation and workflows already provided by the module developer before adding wrappers, alternate UIs, or replacement control logic.
-- If an author-provided command fails because an environment dependency is missing, fix the environment or dependency first instead of rewriting the feature.
-- Do not replace upstream control flows such as `ros2 run multiagent_simulation move_drone` with custom controller logic unless the user explicitly asks for a new implementation.
-- Keep helper scripts focused on reproducible setup and container launch. Behavioral changes to the simulation or drone control should stay aligned with the author's documented design.
+This repository develops a working five-UAV simulation stand, not a formal
+certification system. Prefer observable product behavior over attestations,
+status machinery, or documentary gates.
 
-## Network/Radio Long-Run Rules
+## Sources of truth
 
-- Before working on the network/radio integration, read
-  `doc/network_radio_integration_plan_v3.md`, the superseded v2 contract,
-  `doc/network_radio_integration_plan_v2.md`, the historical
-  `doc/network_radio_integration_plan.md`, `network/PROGRESS.md`,
-  `network/DECISIONS.md`, `network/VALIDATION_REPORT.md`, and
-  `network/NEXT_TASK.md`.
-- Do not rely on conversation history as the source of truth. Treat the repository state files as durable memory after context compaction, resume, restart, or handoff.
-- At every stop or checkpoint, update `network/PROGRESS.md`, `network/DECISIONS.md` when decisions changed, `network/VALIDATION_REPORT.md`, and `network/NEXT_TASK.md`.
-- Never claim customer-ready status unless every required v3 customer-handoff
-  profile in `doc/network_radio_integration_plan_v3.md` passes and the proof is
-  recorded in `network/VALIDATION_REPORT.md`.
-- Use subagents and swarm workers for read-heavy research, scans, validation, and isolated worktree implementation. Do not let multiple agents edit the same working tree at the same time.
-- For parallel implementation, use `network/swarm/run_swarm.sh` so each worker receives an isolated git worktree and branch.
-- Keep external simulator dependencies outside source or under ignored directories such as `.external/`. Do not vendor ns-3, Sionna, 5G-LENA, or generated run artifacts into the repository.
+Use these sources in priority order:
+
+1. The current user prompt.
+2. `doc/PRODUCT_REQUIREMENTS.md`.
+3. `doc/PRODUCT_ARCHITECTURE.md`.
+4. `doc/DEVELOPMENT_PLAN.md`.
+5. `network/STATUS.md`.
+6. Task-specific source files.
+
+## Legacy exclusion
+
+Without a direct user instruction, do not read, modify, or run:
+
+- `archive/acceptance_v3/**`.
+- Old `network_radio_integration_plan*` documents.
+- `network/validation/evidence.py`.
+- `network/validation/evidence_attestation.py`.
+- `network/validation/qualification_identity.py`.
+- `network/config/qualification_*`.
+- `network/config/*evidence*`.
+- `network/config/provenance_schema.json`.
+- `network/config/m0_test_manifest.json`.
+- `network/config/component_acceptance_profiles.json`.
+- `network/scripts/attest_*`.
+- `network/scripts/finalize_*`.
+- `scripts/acceptance_entrypoint.sh`.
+- `scripts/run_acceptance_container.sh`.
+- Old M0-M8 status validators.
+- `network/swarm/**`.
+
+## Development rules
+
+- One agent works on one product task.
+- Do not use subagents unless the user directly requests them.
+- Reproduce the problem first.
+- Make the smallest change that fixes it.
+- Run only tests affected by the change.
+- Do not run the full regression suite after a local change.
+- Do not refactor adjacent components for cosmetic reasons.
+- Do not create new infrastructure when the existing runtime can be fixed directly.
+- Do not create a validator before a working product path exists.
+- Markdown, receipts, JSON schemas, and PASS flags are not proof that the product works.
+- Confirm work with observable behavior, CSV, PCAP, a log, a metric, or a command.
+- After three identical failed attempts, record the root cause and choose a different minimal approach.
+- Do not repeat a successful expensive test when changed files cannot affect it.
+- Rebuild Docker only after Dockerfile, lock-file, or system-dependency changes.
+- Update only `network/STATUS.md`, once at the end of a task.
+- Do not create status-only commits.
+- Keep each commit to one completed product change.
+- Do not make false readiness claims.
+- Do not require cryptographic proof of results.
+
+## Testing rules
+
+Select the minimum checks from `network/TEST_MATRIX.md`.
+
+## Documentation limits
+
+Keep active documents short:
+
+- Requirements: at most 300 lines.
+- Architecture: at most 400 lines.
+- Development plan: at most 300 lines.
+- Status: at most 150 lines.
+- Task report: at most 100 lines.
