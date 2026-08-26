@@ -27,6 +27,21 @@ selects Sionna RT or a declared engineering model and publishes timestamped
 per-link physical state. ns-3 consumes that state while forwarding real
 endpoint packets and applying shared-medium behavior.
 
+## Customer map asset flow
+
+Official CAVISE bundles are the canonical customer-map geometry. Sionna loads
+the bundle's existing `map/scene.xml` and PLY meshes. The bundle's Blender file
+is the editable master; Gazebo visual and simplified collision meshes are
+derived from that same geometry and coordinate frame. ZIP, PLY, and Blender
+assets stay outside Git and may be loaded by ROI or tile.
+
+`map/transforms.xml` is the transformation authority. Selection records the
+source, Sionna, and Gazebo frames, any SUMO offset, and whether static vertices
+are already baked before a Gazebo derivative is made. The legacy synthetic
+`m4_canonical` scene is a smoke fixture only and cannot satisfy the customer
+10 km by 10 km map requirement. See
+[CAVISE map integration](CAVISE_MAP_INTEGRATION.md).
+
 ## Responsibility boundaries
 
 | Component | Owns | Does not own |
@@ -83,5 +98,7 @@ components.
 - ns-3 currently offers a CSMA shared-medium engineering surrogate.
 - The TCP JSON-lines Sionna provider is the current in-repository channel
   service path; a separate pybind path remains diagnostic.
-- The exact 10 km by 10 km shared Gazebo/Sionna scene is not yet implemented.
+- The CAVISE inventory and external-asset workflow exist, but no local bundle
+  was available to select a measured 10 km by 10 km ROI.
+- No Gazebo derivative or Gazebo/Sionna alignment test exists yet.
 - Live physical HitL serial/Ethernet gateways are not yet complete.

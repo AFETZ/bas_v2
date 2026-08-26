@@ -11,6 +11,7 @@ terrain
 .idea
 .codex-log/
 .external/
+.external/cavise_maps/
 runs/
 artifacts/
 network/swarm/.last_run

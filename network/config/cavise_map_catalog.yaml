@@ -1,0 +1,83 @@
+schema_version: 1
+source_registry_url: https://drive.google.com/drive/folders/1HyksBPnwaKs1Ks1g4OKbnrQuidzO3m41
+local_root_env: CAVISE_MAPS_DIR
+inventory_date: 2026-08-26
+expected_package_structure: &official_package_structure
+  - <Town>/<Town>_Editor_lod0_Full.blend
+  - <Town>/README.md
+  - <Town>/SHA256SUMS
+  - <Town>/map/scene.xml
+  - <Town>/map/transforms.xml
+  - <Town>/map/cameras.xml
+  - <Town>/map/editor_fbx_scene.json
+  - <Town>/map/editor_fbx_placements.json
+  - <Town>/map/meshes/*.ply
+bundles:
+  - town: Town01
+    canonical_filename: CAVISE_SIONNA_Town01_EditorLOD0_Full_Official_20260712.zip
+    source_url: https://drive.google.com/drive/folders/1HyksBPnwaKs1Ks1g4OKbnrQuidzO3m41
+    expected_package_structure: *official_package_structure
+    local_availability: false
+    inspected_metadata: null
+    suitability_status: unsuitable
+    reason: >-
+      The supplied task context confirms retained bounds of approximately
+      3.2 by 3.2 km, which cannot contain a continuous 10 by 10 km ROI; the
+      local archive was unavailable for a fresh inspector run.
+  - town: Town03
+    canonical_filename: CAVISE_SIONNA_Town03_EditorLOD0_Full_Official_20260712.zip
+    source_url: https://drive.google.com/drive/folders/1HyksBPnwaKs1Ks1g4OKbnrQuidzO3m41
+    expected_package_structure: *official_package_structure
+    local_availability: false
+    inspected_metadata: null
+    suitability_status: metadata_missing
+    reason: Local bundle not found; retained bounds and required category counts are unverified.
+  - town: Town04
+    canonical_filename: CAVISE_SIONNA_Town04_EditorLOD0_Full_Official_20260712.zip
+    source_url: https://drive.google.com/drive/folders/1HyksBPnwaKs1Ks1g4OKbnrQuidzO3m41
+    expected_package_structure: *official_package_structure
+    local_availability: false
+    inspected_metadata: null
+    suitability_status: metadata_missing
+    reason: Local bundle not found; retained bounds and required category counts are unverified.
+  - town: Town05
+    canonical_filename: CAVISE_SIONNA_Town05_EditorLOD0_Full_Official_20260712.zip
+    source_url: https://drive.google.com/drive/folders/1HyksBPnwaKs1Ks1g4OKbnrQuidzO3m41
+    expected_package_structure: *official_package_structure
+    local_availability: false
+    inspected_metadata: null
+    suitability_status: metadata_missing
+    reason: Local bundle not found; retained bounds and required category counts are unverified.
+  - town: Town06
+    canonical_filename: CAVISE_SIONNA_Town06_EditorLOD0_Full_Official_20260712.zip
+    source_url: https://drive.google.com/drive/folders/1HyksBPnwaKs1Ks1g4OKbnrQuidzO3m41
+    expected_package_structure: *official_package_structure
+    local_availability: false
+    inspected_metadata: null
+    suitability_status: metadata_missing
+    reason: Local bundle not found; retained bounds and required category counts are unverified.
+  - town: Town12
+    canonical_filename: CAVISE_SIONNA_Town12_EditorLOD0_Full_Official_20260730.zip
+    source_url: https://drive.google.com/drive/folders/1HyksBPnwaKs1Ks1g4OKbnrQuidzO3m41
+    expected_package_structure: *official_package_structure
+    local_availability: false
+    inspected_metadata: null
+    suitability_status: metadata_missing
+    reason: Local bundle not found; retained bounds and required category counts are unverified.
+  - town: Town13
+    canonical_filename: CAVISE_SIONNA_Town13_EditorLOD0_Full_Official_20260731.zip
+    source_url: https://drive.google.com/drive/folders/1HyksBPnwaKs1Ks1g4OKbnrQuidzO3m41
+    expected_package_structure: *official_package_structure
+    local_availability: false
+    inspected_metadata: null
+    suitability_status: metadata_missing
+    reason: >-
+      Local bundle not found. Its package size is not evidence of map bounds,
+      so Town13 remains only the next candidate to inspect, not a selection.
+selection:
+  selected_town: null
+  selected_roi: null
+  blocker: >-
+    No canonical CAVISE ZIP or extracted bundle was found locally, so no map
+    or 10 by 10 km ROI can be selected from measured metadata.
+  next_archive_to_inspect: CAVISE_SIONNA_Town13_EditorLOD0_Full_Official_20260731.zip

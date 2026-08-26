@@ -30,11 +30,20 @@ behavior is observable through the command and artifact listed in
 
 ## P3 Shared 10 km by 10 km scene
 
-- Add a terrain heightmap or mesh with up to 200 m relief.
-- Add at least one urban-type settlement and buildings up to 15 floors.
-- Derive Gazebo and Sionna geometry from one geometric basis.
+- Inventory existing official CAVISE bundles without extracting large assets.
+- Select one town and a measured continuous 10 km by 10 km ROI containing
+  terrain and a settlement; do not generate or stitch geometry.
+- Keep the existing Sionna `scene.xml`/PLY geometry and Blender master as the
+  canonical basis.
+- Derive tiled Gazebo visuals and simplified collisions from the selected
+  CAVISE geometry without changing its coordinate frame.
 - Add a coordinate-alignment behavior test.
 - Add a LOS/NLOS transition test driven by motion.
+
+P3A ends after inventory, metadata inspection, selection, ROI, and external
+asset preparation. P3B creates the Gazebo derivative and alignment test only
+after P3A has a metadata-backed selection. The checked-in synthetic
+`m4_canonical` fixture is legacy smoke and is excluded from this path.
 
 ## P4 Interference and medium access
 

@@ -1,7 +1,8 @@
+# LEGACY SYNTHETIC SMOKE FIXTURE ONLY. Not the customer 10x10 km map.
 schema_version: 1
 scenario:
   name: scenario_m4_canonical
-  description: Final immutable kilometre-scale six-node/jammer M4-M8 scene.
+  description: Legacy synthetic smoke-only kilometre-scale six-node/jammer fixture.
   map:
     world_file: m4_canonical/m4_canonical.sdf
     size_m: [20000, 10000]
