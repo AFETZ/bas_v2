@@ -1,0 +1,56 @@
+schema_version: 1
+scenario: scenario_5uav_town01
+
+serial_transport:
+  protocol_version: 1
+  chunk_payload_bytes: 192
+  reassembly_timeout_ms: 500
+  metrics_period_ms: 1000
+
+scheduler:
+  control_burst_limit: 8
+
+channel_state:
+  maximum_age_ms: 20000
+  stale_policy: drop
+
+classes:
+  control:
+    priority: 0
+    tos: 184
+    deadline_ms: 250
+    max_queue_age_ms: 200
+    queue_limit_packets: 256
+    baud_rate: 115200
+    required_pdr: 0.99
+    max_p95_latency_ms: 250
+  payload:
+    priority: 1
+    tos: 40
+    deadline_ms: 1000
+    max_queue_age_ms: 750
+    queue_limit_packets: 128
+    baud_rate: 115200
+  additional_data:
+    priority: 2
+    tos: 0
+    deadline_ms: 2000
+    max_queue_age_ms: 1500
+    queue_limit_packets: 128
+
+profiles:
+  nominal:
+    duration_s: 6
+    control: {packets_per_second_per_uav: 10, packet_bytes: 256}
+    payload: {packets_per_second_per_uav: 50, packet_bytes: 1024}
+    additional_data: {packets_per_second_per_uav: 25, packet_bytes: 1024}
+  contention:
+    duration_s: 8
+    control: {packets_per_second_per_uav: 20, packet_bytes: 256}
+    payload: {packets_per_second_per_uav: 150, packet_bytes: 1024}
+    additional_data: {packets_per_second_per_uav: 150, packet_bytes: 1024}
+  overload:
+    duration_s: 10
+    control: {packets_per_second_per_uav: 20, packet_bytes: 256}
+    payload: {packets_per_second_per_uav: 300, packet_bytes: 1400}
+    additional_data: {packets_per_second_per_uav: 300, packet_bytes: 1400}

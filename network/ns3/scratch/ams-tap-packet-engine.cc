@@ -37,7 +37,7 @@ NS_LOG_COMPONENT_DEFINE("AmsTapPacketEngine");
 namespace
 {
 
-constexpr const char* CONTRACT = "ams.tap_packet_engine/v1";
+constexpr const char* CONTRACT = "ams.tap_packet_engine/v2";
 constexpr const char* EVENT_SCHEMA = "ams.ns3.packet_event/v1";
 constexpr uint32_t MAX_UAVS = 5;
 constexpr uint32_t MAX_QUEUE_PACKETS = 1000000;
@@ -45,9 +45,9 @@ constexpr uint64_t MAX_DURATION_MS = 86400000;
 constexpr uint32_t MAX_SIONNA_STATE_CELLS = 64;
 constexpr uint32_t MAX_SIONNA_LINE_BYTES = 65536;
 constexpr uint32_t MAX_RADIO_LINEAGE_CACHE = 100000;
-constexpr uint8_t CONTROL_TOS = 184;
-constexpr uint8_t PAYLOAD_TOS = 40;
-constexpr uint8_t ADDITIONAL_DATA_TOS = 0;
+uint8_t g_controlTos = 184;
+uint8_t g_payloadTos = 40;
+uint8_t g_additionalDataTos = 0;
 
 class Sha256
 {
@@ -343,17 +343,17 @@ InspectFrame(Ptr<const Packet> packet)
     metadata.tos = ipv4.GetTos();
     metadata.dscp = static_cast<int32_t>(metadata.tos >> 2);
     metadata.transportProtocol = ipv4.GetProtocol();
-    if (metadata.tos == CONTROL_TOS)
+    if (metadata.tos == g_controlTos)
     {
         metadata.classMapped = true;
         metadata.trafficClass = "control";
     }
-    else if (metadata.tos == PAYLOAD_TOS)
+    else if (metadata.tos == g_payloadTos)
     {
         metadata.classMapped = true;
         metadata.trafficClass = "payload";
     }
-    else if (metadata.tos == ADDITIONAL_DATA_TOS)
+    else if (metadata.tos == g_additionalDataTos)
     {
         metadata.classMapped = true;
         metadata.trafficClass = "additional_data";
@@ -1133,6 +1133,7 @@ using QueueEventSink = std::function<void(const std::string&,
                                           Ptr<const Packet>,
                                           int64_t,
                                           int64_t,
+                                          uint64_t,
                                           const std::string&)>;
 
 class BoundedPriorityScheduler
@@ -1143,18 +1144,18 @@ class BoundedPriorityScheduler
     static constexpr uint32_t ADDITIONAL_DATA_CLASS = 2;
     static constexpr uint32_t NO_CLASS = 3;
 
-    // Eight packets preserve a strong control preference without permitting
-    // an always-backlogged control stream to starve the other two classes.
-    // Under three-class saturation one lower-class packet is selected after
-    // every bounded control burst, and the two lower classes alternate.
-    static constexpr uint32_t CONTROL_BURST_LIMIT = 8;
+    void SetControlBurstLimit(uint32_t limit)
+    {
+        m_controlBurstLimit = limit;
+        Reset();
+    }
 
     uint32_t Select(const std::array<uint32_t, 3>& counts) const
     {
         const bool lowerWaiting = counts[PAYLOAD_CLASS] > 0 ||
                                   counts[ADDITIONAL_DATA_CLASS] > 0;
         if (counts[CONTROL_CLASS] > 0 &&
-            (!lowerWaiting || m_controlBurst < CONTROL_BURST_LIMIT))
+            (!lowerWaiting || m_controlBurst < m_controlBurstLimit))
         {
             return CONTROL_CLASS;
         }
@@ -1196,6 +1197,7 @@ class BoundedPriorityScheduler
 
   private:
     uint32_t m_controlBurst = 0;
+    uint32_t m_controlBurstLimit = 8;
     uint32_t m_nextLowerClass = PAYLOAD_CLASS;
 };
 
@@ -1249,7 +1251,23 @@ BoundedPriorityScheduler::DeterministicSelfTest()
     --counts[CONTROL_CLASS];
     scheduler.Record(CONTROL_CLASS, counts);
     counts[PAYLOAD_CLASS] = 1;
-    return scheduler.Select(counts) == CONTROL_CLASS;
+    if (scheduler.Select(counts) != CONTROL_CLASS)
+    {
+        return false;
+    }
+
+    BoundedPriorityScheduler configured;
+    configured.SetControlBurstLimit(2);
+    counts = {5, 1, 1};
+    std::vector<uint32_t> configuredSelections;
+    while (configured.Select(counts) != NO_CLASS)
+    {
+        const uint32_t selected = configured.Select(counts);
+        --counts[selected];
+        configured.Record(selected, counts);
+        configuredSelections.push_back(selected);
+    }
+    return configuredSelections == std::vector<uint32_t>({0, 0, 1, 0, 0, 2, 0});
 }
 
 class AmsThreeClassQueue : public Queue<Packet>
@@ -1271,7 +1289,28 @@ class AmsThreeClassQueue : public Queue<Packet>
 
     void SetLimits(uint32_t control, uint32_t payload, uint32_t additionalData)
     {
+        SetQos(control, payload, additionalData, 250, 1000, 2000, 200, 750, 1500, 8);
+    }
+
+    void SetQos(uint32_t control,
+                uint32_t payload,
+                uint32_t additionalData,
+                uint32_t controlDeadlineMs,
+                uint32_t payloadDeadlineMs,
+                uint32_t additionalDeadlineMs,
+                uint32_t controlMaxAgeMs,
+                uint32_t payloadMaxAgeMs,
+                uint32_t additionalMaxAgeMs,
+                uint32_t controlBurstLimit)
+    {
         m_limits = {control, payload, additionalData};
+        m_deadlinesNs = {static_cast<uint64_t>(controlDeadlineMs) * 1000000ULL,
+                         static_cast<uint64_t>(payloadDeadlineMs) * 1000000ULL,
+                         static_cast<uint64_t>(additionalDeadlineMs) * 1000000ULL};
+        m_maxAgesNs = {static_cast<uint64_t>(controlMaxAgeMs) * 1000000ULL,
+                       static_cast<uint64_t>(payloadMaxAgeMs) * 1000000ULL,
+                       static_cast<uint64_t>(additionalMaxAgeMs) * 1000000ULL};
+        m_scheduler.SetControlBurstLimit(controlBurstLimit);
         m_scheduler.Reset();
         SetMaxSize(QueueSize(std::to_string(control + payload + additionalData) + "p"));
     }
@@ -1358,6 +1397,7 @@ class AmsThreeClassQueue : public Queue<Packet>
             return false;
         }
         ++m_counts[classIndex];
+        m_enqueuedAtNs[packet->GetUid()] = Simulator::Now().GetNanoSeconds();
         Emit("enqueue", packet, m_counts[classIndex], m_limits[classIndex], "");
         return true;
     }
@@ -1369,7 +1409,39 @@ class AmsThreeClassQueue : public Queue<Packet>
             const auto selected = SelectNextIterator();
             NS_ASSERT(selected != GetContainer().end());
             Ptr<const Packet> candidate = *selected;
-            const uint32_t classIndex = ClassIndex(InspectFrame(candidate));
+            const FrameMetadata metadata = InspectFrame(candidate);
+            const uint32_t classIndex = ClassIndex(metadata);
+            const uint64_t queueAgeNs = QueueAgeNs(candidate);
+            const uint64_t ageLimitNs =
+                classIndex < m_deadlinesNs.size()
+                    ? std::min(m_deadlinesNs[classIndex], m_maxAgesNs[classIndex])
+                    : 0;
+            if (ageLimitNs > 0 && queueAgeNs > ageLimitNs)
+            {
+                Ptr<Packet> packet = DoDequeue(selected);
+                if (!packet || classIndex >= m_counts.size())
+                {
+                    return packet;
+                }
+                NS_ASSERT(m_counts[classIndex] > 0);
+                --m_counts[classIndex];
+                m_scheduler.Record(classIndex, m_counts);
+                m_enqueuedAtNs.erase(packet->GetUid());
+                DropAfterDequeue(packet);
+                Emit("drop",
+                     packet,
+                     m_counts[classIndex],
+                     m_limits[classIndex],
+                     "deadline_drop_" + metadata.trafficClass,
+                     queueAgeNs);
+                if (GetContainer().empty() && m_radioDevice)
+                {
+                    m_radioDevice->SetSendEnable(false);
+                    Simulator::ScheduleNow(&AmsThreeClassQueue::EnsureSendEnabled, m_radioDevice);
+                    return packet;
+                }
+                continue;
+            }
             RadioDecision transmitDecision;
             if (m_radioTransmitSink)
             {
@@ -1386,6 +1458,7 @@ class AmsThreeClassQueue : public Queue<Packet>
             NS_ASSERT(m_counts[classIndex] > 0);
             --m_counts[classIndex];
             m_scheduler.Record(classIndex, m_counts);
+            m_enqueuedAtNs.erase(packet->GetUid());
             if (transmitDecision.drop)
             {
                 DropAfterDequeue(packet);
@@ -1393,7 +1466,8 @@ class AmsThreeClassQueue : public Queue<Packet>
                      packet,
                      m_counts[classIndex],
                      m_limits[classIndex],
-                     transmitDecision.dropReason);
+                     transmitDecision.dropReason,
+                     queueAgeNs);
                 if (GetContainer().empty() && m_radioDevice)
                 {
                     // Queue::Dequeue must return a packet after the caller saw
@@ -1408,7 +1482,7 @@ class AmsThreeClassQueue : public Queue<Packet>
                 }
                 continue;
             }
-            Emit("dequeue", packet, m_counts[classIndex], m_limits[classIndex], "");
+            Emit("dequeue", packet, m_counts[classIndex], m_limits[classIndex], "", queueAgeNs);
             return packet;
         }
         return nullptr;
@@ -1424,13 +1498,20 @@ class AmsThreeClassQueue : public Queue<Packet>
         NS_ASSERT(selected != GetContainer().end());
         Ptr<const Packet> candidate = *selected;
         const uint32_t classIndex = ClassIndex(InspectFrame(candidate));
+        const uint64_t queueAgeNs = QueueAgeNs(candidate);
         Ptr<Packet> packet = DoRemove(selected);
         if (packet && classIndex < m_counts.size())
         {
             NS_ASSERT(m_counts[classIndex] > 0);
             --m_counts[classIndex];
             m_scheduler.Record(classIndex, m_counts);
-            Emit("drop", packet, m_counts[classIndex], m_limits[classIndex], "queue_flush");
+            m_enqueuedAtNs.erase(packet->GetUid());
+            Emit("drop",
+                 packet,
+                 m_counts[classIndex],
+                 m_limits[classIndex],
+                 "queue_flush",
+                 queueAgeNs);
         }
         return packet;
     }
@@ -1468,15 +1549,23 @@ class AmsThreeClassQueue : public Queue<Packet>
         }
     }
 
+    uint64_t QueueAgeNs(Ptr<const Packet> packet) const
+    {
+        const auto found = m_enqueuedAtNs.find(packet->GetUid());
+        const uint64_t now = Simulator::Now().GetNanoSeconds();
+        return found != m_enqueuedAtNs.end() && now >= found->second ? now - found->second : 0;
+    }
+
     void Emit(const std::string& event,
               Ptr<const Packet> packet,
               int64_t depth,
               int64_t limit,
-              const std::string& reason)
+              const std::string& reason,
+              uint64_t queueAgeNs = 0)
     {
         if (m_sink)
         {
-            m_sink(event, m_deviceId, packet, depth, limit, reason);
+            m_sink(event, m_deviceId, packet, depth, limit, queueAgeNs, reason);
         }
     }
 
@@ -1490,6 +1579,9 @@ class AmsThreeClassQueue : public Queue<Packet>
 
     std::array<uint32_t, 3> m_limits{};
     std::array<uint32_t, 3> m_counts{};
+    std::array<uint64_t, 3> m_deadlinesNs{};
+    std::array<uint64_t, 3> m_maxAgesNs{};
+    std::map<uint64_t, uint64_t> m_enqueuedAtNs;
     BoundedPriorityScheduler m_scheduler;
     std::string m_deviceId;
     QueueEventSink m_sink;
@@ -1509,6 +1601,19 @@ struct EngineConfig
     uint32_t queueControlMaxPackets = 256;
     uint32_t queuePayloadMaxPackets = 128;
     uint32_t queueAdditionalDataMaxPackets = 128;
+    uint32_t queueControlDeadlineMs = 250;
+    uint32_t queuePayloadDeadlineMs = 1000;
+    uint32_t queueAdditionalDataDeadlineMs = 2000;
+    uint32_t queueControlMaxAgeMs = 200;
+    uint32_t queuePayloadMaxAgeMs = 750;
+    uint32_t queueAdditionalDataMaxAgeMs = 1500;
+    uint32_t controlBurstLimit = 8;
+    uint32_t controlPriority = 0;
+    uint32_t payloadPriority = 1;
+    uint32_t additionalDataPriority = 2;
+    uint32_t controlTos = 184;
+    uint32_t payloadTos = 40;
+    uint32_t additionalDataTos = 0;
     uint32_t seed = 42;
     uint64_t run = 1;
     uint64_t eventEpoch = 1;
@@ -1591,6 +1696,19 @@ CanonicalConfig(const EngineConfig& config, const std::vector<std::string>& tapU
         << "queue_control_max_packets=" << config.queueControlMaxPackets << '\n'
         << "queue_payload_max_packets=" << config.queuePayloadMaxPackets << '\n'
         << "queue_additional_data_max_packets=" << config.queueAdditionalDataMaxPackets << '\n'
+        << "queue_control_deadline_ms=" << config.queueControlDeadlineMs << '\n'
+        << "queue_payload_deadline_ms=" << config.queuePayloadDeadlineMs << '\n'
+        << "queue_additional_data_deadline_ms=" << config.queueAdditionalDataDeadlineMs << '\n'
+        << "queue_control_max_age_ms=" << config.queueControlMaxAgeMs << '\n'
+        << "queue_payload_max_age_ms=" << config.queuePayloadMaxAgeMs << '\n'
+        << "queue_additional_data_max_age_ms=" << config.queueAdditionalDataMaxAgeMs << '\n'
+        << "control_burst_limit=" << config.controlBurstLimit << '\n'
+        << "control_priority=" << config.controlPriority << '\n'
+        << "payload_priority=" << config.payloadPriority << '\n'
+        << "additional_data_priority=" << config.additionalDataPriority << '\n'
+        << "control_tos=" << config.controlTos << '\n'
+        << "payload_tos=" << config.payloadTos << '\n'
+        << "additional_data_tos=" << config.additionalDataTos << '\n'
         << "seed=" << config.seed << '\n'
         << "run=" << config.run << '\n'
         << "event_epoch=" << config.eventEpoch << '\n'
@@ -1670,6 +1788,37 @@ ValidateConfig(const EngineConfig& config, const std::vector<std::string>& tapUa
         }))
     {
         return "every queue bound must be in 1..1000000";
+    }
+    const std::array<uint32_t, 3> deadlines = {config.queueControlDeadlineMs,
+                                               config.queuePayloadDeadlineMs,
+                                               config.queueAdditionalDataDeadlineMs};
+    const std::array<uint32_t, 3> maxAges = {config.queueControlMaxAgeMs,
+                                             config.queuePayloadMaxAgeMs,
+                                             config.queueAdditionalDataMaxAgeMs};
+    for (uint32_t index = 0; index < deadlines.size(); ++index)
+    {
+        if (deadlines[index] < 1 || deadlines[index] > 60000 || maxAges[index] < 1 ||
+            maxAges[index] > deadlines[index])
+        {
+            return "queue deadlines/max ages must satisfy 1 <= maxAge <= deadline <= 60000";
+        }
+    }
+    if (config.controlBurstLimit < 1 || config.controlBurstLimit > 1024)
+    {
+        return "controlBurstLimit must be in 1..1024";
+    }
+    if (!(config.controlPriority < config.payloadPriority &&
+          config.payloadPriority < config.additionalDataPriority))
+    {
+        return "priorities must satisfy control < payload < additionalData";
+    }
+    const std::set<uint32_t> tosValues = {config.controlTos,
+                                          config.payloadTos,
+                                          config.additionalDataTos};
+    if (tosValues.size() != 3 || config.controlTos > 255 || config.payloadTos > 255 ||
+        config.additionalDataTos > 255)
+    {
+        return "class TOS values must be unique bytes";
     }
     if (config.seed == 0)
     {
@@ -1865,14 +2014,17 @@ class PacketEventLogger
                       uint32_t seed,
                       uint64_t run,
                       uint32_t uavCount,
-                      RadioController* radioController)
+                      RadioController* radioController,
+                      bool realtimeObservability)
         : m_output(path, std::ios::out | std::ios::trunc),
           m_eventEpoch(eventEpoch),
           m_configHash(std::move(configHash)),
           m_seed(seed),
           m_run(run),
           m_uavCount(uavCount),
-          m_radioController(radioController)
+          m_radioController(radioController),
+          m_realtimeObservability(realtimeObservability),
+          m_hostStartNs(SteadyNowNs())
     {
         if (!m_output)
         {
@@ -1885,10 +2037,16 @@ class PacketEventLogger
              Ptr<const Packet> packet,
              int64_t queueDepth = -1,
              int64_t queueLimit = -1,
-             const std::string& reason = "")
+             const std::string& reason = "",
+             uint64_t queueAgeNs = 0)
     {
         const FrameMetadata metadata = InspectFrame(packet);
-        const uint64_t hostMonotonicNs = SteadyNowNs();
+        const uint64_t hostMonotonicNs = m_realtimeObservability ? SteadyNowNs() : 0;
+        const int64_t schedulerLagNs =
+            m_realtimeObservability
+                ? static_cast<int64_t>(hostMonotonicNs - m_hostStartNs) -
+                      Simulator::Now().GetNanoSeconds()
+                : 0;
         const std::string sourceDevice =
             CanonicalDevice(ResolveSourceDevice(metadata, observedDevice, event));
         const std::string destinationDevice =
@@ -1913,6 +2071,9 @@ class PacketEventLogger
         m_output << '{' << "\"schema\":\"" << EVENT_SCHEMA << "\","
                  << "\"event_epoch\":" << m_eventEpoch << ',' << "\"event_sequence\":" << m_sequence
                  << ',' << "\"sim_time_ns\":" << Simulator::Now().GetNanoSeconds() << ','
+                 << "\"host_monotonic_ns\":" << hostMonotonicNs << ','
+                 << "\"host_clock_domain\":\"host-monotonic\","
+                 << "\"scheduler_lag_ns\":" << schedulerLagNs << ','
                  << "\"event\":\"" << JsonEscape(event) << "\","
                  << "\"packet_wire_hash_algorithm\":\"sha256\","
                  << "\"packet_wire_hash\":\"" << wireHash << "\","
@@ -1994,6 +2155,7 @@ class PacketEventLogger
         {
             m_output << queueLimit;
         }
+        m_output << ",\"queue_age_ns\":" << queueAgeNs;
         m_output << ",\"drop_reason\":";
         if (reason.empty())
         {
@@ -2005,8 +2167,6 @@ class PacketEventLogger
         }
         if (m_radioController && m_radioController->Enabled())
         {
-            m_output << ",\"host_monotonic_ns\":" << hostMonotonicNs
-                     << ",\"host_clock_domain\":\"host-monotonic\"";
             const auto decision = m_radioController->DecisionFor(packet);
             m_output << ",\"radio_state_status\":\""
                      << JsonEscape(decision ? decision->status : "not_decided") << '"';
@@ -2209,6 +2369,8 @@ class PacketEventLogger
     uint64_t m_run;
     uint32_t m_uavCount;
     RadioController* m_radioController;
+    bool m_realtimeObservability;
+    uint64_t m_hostStartNs;
     uint64_t m_sequence = 0;
     uint64_t m_p2mpRootTransmissions = 0;
     std::set<std::string> m_p2mpEgressDevices;
@@ -2260,6 +2422,18 @@ void
 TraceEgress(PacketEventLogger* logger, std::string context, Ptr<const Packet> packet)
 {
     logger->Log("egress", context, packet);
+}
+
+void
+TraceBackoff(PacketEventLogger* logger, std::string context, Ptr<const Packet> packet)
+{
+    logger->Log("backoff", context, packet);
+}
+
+void
+TracePhyTxEnd(PacketEventLogger* logger, std::string context, Ptr<const Packet> packet)
+{
+    logger->Log("phy_tx_end", context, packet);
 }
 
 void
@@ -2354,11 +2528,11 @@ SelfTestDestinationPort(const SelfTestFrame& frame)
         return 14900;
     }
     uint16_t base = 14800;
-    if (frame.tos == CONTROL_TOS)
+    if (frame.tos == g_controlTos)
     {
         base = 14600;
     }
-    else if (frame.tos == PAYLOAD_TOS)
+    else if (frame.tos == g_payloadTos)
     {
         base = 14700;
     }
@@ -2416,7 +2590,7 @@ ScheduleSelfTest(const NetDeviceContainer& endpointDevices,
 {
     uint32_t sequence = 1;
     uint64_t nextUs = 1000;
-    const std::array<uint8_t, 3> tosValues = {CONTROL_TOS, PAYLOAD_TOS, ADDITIONAL_DATA_TOS};
+    const std::array<uint8_t, 3> tosValues = {g_controlTos, g_payloadTos, g_additionalDataTos};
     for (uint32_t uav = 1; uav <= uavCount; ++uav)
     {
         Ptr<CsmaNetDevice> gcs = DynamicCast<CsmaNetDevice>(endpointDevices.Get(0));
@@ -2455,7 +2629,7 @@ ScheduleSelfTest(const NetDeviceContainer& endpointDevices,
                                       Mac48Address::GetMulticast(multicastIp),
                                       Ipv4Address(EndpointIp(0).c_str()),
                                       multicastIp,
-                                      ADDITIONAL_DATA_TOS,
+                                      g_additionalDataTos,
                                       sequence++});
     nextUs += 5000;
 
@@ -2469,7 +2643,7 @@ ScheduleSelfTest(const NetDeviceContainer& endpointDevices,
                                       RouterExternalMacAddress(0),
                                       Ipv4Address(EndpointIp(0).c_str()),
                                       Ipv4Address(EndpointIp(1).c_str()),
-                                      CONTROL_TOS,
+                                      g_controlTos,
                                       sequence++,
                                       14550});
     nextUs += 5000;
@@ -2484,7 +2658,7 @@ ScheduleSelfTest(const NetDeviceContainer& endpointDevices,
                                       RouterExternalMacAddress(0),
                                       Ipv4Address(EndpointIp(0).c_str()),
                                       Ipv4Address("198.18.0.1"),
-                                      ADDITIONAL_DATA_TOS,
+                                      g_additionalDataTos,
                                       sequence++,
                                       15300});
     nextUs += 5000;
@@ -2498,7 +2672,7 @@ ScheduleSelfTest(const NetDeviceContainer& endpointDevices,
                                           RouterExternalMacAddress(0),
                                           Ipv4Address(EndpointIp(0).c_str()),
                                           Ipv4Address(EndpointIp(1).c_str()),
-                                          PAYLOAD_TOS,
+                                          g_payloadTos,
                                           sequence++});
     }
     nextUs += 5000;
@@ -2599,7 +2773,7 @@ WriteReadyFile(const std::string& readyFile,
     }
     output << "{\"status\":\"ready\",\"contract\":\"" << CONTRACT << "\",\"config_sha256\":\""
            << configHash << "\",\"event_epoch\":" << eventEpoch << ",\"uav_count\":" << uavCount
-           << "}\n";
+           << ",\"pid\":" << static_cast<uint64_t>(::getpid()) << "}\n";
 }
 
 class ClockDatagramProducer
@@ -2693,6 +2867,37 @@ main(int argc, char* argv[])
     command.AddValue("queueAdditionalDataMaxPackets",
                      "Bound for the additional-data transmit queue",
                      config.queueAdditionalDataMaxPackets);
+    command.AddValue("queueControlDeadlineMs",
+                     "Control queue deadline in milliseconds",
+                     config.queueControlDeadlineMs);
+    command.AddValue("queuePayloadDeadlineMs",
+                     "Payload queue deadline in milliseconds",
+                     config.queuePayloadDeadlineMs);
+    command.AddValue("queueAdditionalDataDeadlineMs",
+                     "Additional-data queue deadline in milliseconds",
+                     config.queueAdditionalDataDeadlineMs);
+    command.AddValue("queueControlMaxAgeMs",
+                     "Maximum control queue age in milliseconds",
+                     config.queueControlMaxAgeMs);
+    command.AddValue("queuePayloadMaxAgeMs",
+                     "Maximum payload queue age in milliseconds",
+                     config.queuePayloadMaxAgeMs);
+    command.AddValue("queueAdditionalDataMaxAgeMs",
+                     "Maximum additional-data queue age in milliseconds",
+                     config.queueAdditionalDataMaxAgeMs);
+    command.AddValue("controlBurstLimit",
+                     "Bounded-priority control burst before lower-class service",
+                     config.controlBurstLimit);
+    command.AddValue("controlPriority", "Configured control priority", config.controlPriority);
+    command.AddValue("payloadPriority", "Configured payload priority", config.payloadPriority);
+    command.AddValue("additionalDataPriority",
+                     "Configured additional-data priority",
+                     config.additionalDataPriority);
+    command.AddValue("controlTos", "Control IPv4 TOS byte", config.controlTos);
+    command.AddValue("payloadTos", "Payload IPv4 TOS byte", config.payloadTos);
+    command.AddValue("additionalDataTos",
+                     "Additional-data IPv4 TOS byte",
+                     config.additionalDataTos);
     command.AddValue("seed", "Deterministic ns-3 RNG seed", config.seed);
     command.AddValue("run", "Deterministic ns-3 RNG run/substream", config.run);
     command.AddValue("eventEpoch",
@@ -2745,6 +2950,9 @@ main(int argc, char* argv[])
         std::cerr << "FAIL " << validationError << '\n';
         return 2;
     }
+    g_controlTos = static_cast<uint8_t>(config.controlTos);
+    g_payloadTos = static_cast<uint8_t>(config.payloadTos);
+    g_additionalDataTos = static_cast<uint8_t>(config.additionalDataTos);
     const std::string canonicalConfig = CanonicalConfig(config, tapUavs);
     const std::string resolvedHash =
         Sha256Hex(reinterpret_cast<const uint8_t*>(canonicalConfig.data()), canonicalConfig.size());
@@ -2805,7 +3013,8 @@ main(int argc, char* argv[])
                                  config.seed,
                                  config.run,
                                  config.uavCount,
-                                 &radioController);
+                                 &radioController,
+                                 !config.selfTest || config.sionnaIpcEnabled);
         ClockDatagramProducer clockDatagrams(config.clockDatagramSocket);
         NodeContainer routers;
         NodeContainer endpointGhosts;
@@ -2853,17 +3062,26 @@ main(int argc, char* argv[])
             device->SetAddress(RadioMacAddress(index));
             AddRouterInterface(routers.Get(index), device, RadioIp(index), "255.255.255.0");
             Ptr<AmsThreeClassQueue> queue = CreateObject<AmsThreeClassQueue>();
-            queue->SetLimits(config.queueControlMaxPackets,
-                             config.queuePayloadMaxPackets,
-                             config.queueAdditionalDataMaxPackets);
+            queue->SetQos(config.queueControlMaxPackets,
+                          config.queuePayloadMaxPackets,
+                          config.queueAdditionalDataMaxPackets,
+                          config.queueControlDeadlineMs,
+                          config.queuePayloadDeadlineMs,
+                          config.queueAdditionalDataDeadlineMs,
+                          config.queueControlMaxAgeMs,
+                          config.queuePayloadMaxAgeMs,
+                          config.queueAdditionalDataMaxAgeMs,
+                          config.controlBurstLimit);
             queue->SetIdentity(deviceId,
                                [&logger](const std::string& event,
                                          const std::string& observedDevice,
                                          Ptr<const Packet> packet,
                                          int64_t depth,
                                          int64_t limit,
+                                         uint64_t queueAgeNs,
                                          const std::string& reason) {
-                                   logger.Log(event, observedDevice, packet, depth, limit, reason);
+                                   logger.Log(
+                                       event, observedDevice, packet, depth, limit, reason, queueAgeNs);
                                });
             if (config.sionnaIpcEnabled)
             {
@@ -2901,6 +3119,12 @@ main(int argc, char* argv[])
             device->TraceConnect("PhyRxDrop",
                                  deviceId,
                                  MakeBoundCallback(&TracePhyRxDrop, &radioController, &logger));
+            device->TraceConnect("MacTxBackoff",
+                                 deviceId,
+                                 MakeBoundCallback(&TraceBackoff, &logger));
+            device->TraceConnect("PhyTxEnd",
+                                 deviceId,
+                                 MakeBoundCallback(&TracePhyTxEnd, &logger));
 
             routerExternalDevices.Get(index)->TraceConnect(
                 "MacRx",

@@ -17,6 +17,7 @@ SELF_TEST="${SELF_TEST:-0}"
 CONFIG_REPORT="${CONFIG_REPORT:-$RUN_DIR/logs/ns3_packet_engine_config.json}"
 ARGV_FILE="${ARGV_FILE:-$RUN_DIR/logs/ns3_packet_engine.argv}"
 RADIO_FILE="${RADIO_FILE:-$ROOT_DIR/network/config/radio_24ghz.yaml}"
+QOS_FILE="${QOS_FILE:-$ROOT_DIR/network/config/communication_qos.yaml}"
 
 test -x "$BINARY"
 test -f "$CONFIG_TOOL"
@@ -33,6 +34,7 @@ CONFIG_ARGS=(
   --events-file "$EVENTS_FILE"
   --pcap-prefix "$PCAP_PREFIX"
   --radio "$RADIO_FILE"
+  --qos "$QOS_FILE"
 )
 if [[ -n "${TAP_UAVS:-}" ]]; then
   CONFIG_ARGS+=(--tap-uavs "$TAP_UAVS")
@@ -50,9 +52,11 @@ if [[ "${SIONNA_IPC_ENABLED:-0}" == "1" ]]; then
     --sionna-state-file "$SIONNA_STATE_FILE"
     --sionna-poll-interval-ms "${SIONNA_POLL_INTERVAL_MS:-1}"
     --sionna-max-updates-per-poll "${SIONNA_MAX_UPDATES_PER_POLL:-64}"
-    --sionna-max-state-ttl-ms "${SIONNA_MAX_STATE_TTL_MS:-1000}"
     --sionna-intervention "${SIONNA_INTERVENTION:-natural}"
   )
+  if [[ -n "${SIONNA_MAX_STATE_TTL_MS:-}" ]]; then
+    CONFIG_ARGS+=(--sionna-max-state-ttl-ms "$SIONNA_MAX_STATE_TTL_MS")
+  fi
   if [[ -n "${M4_CLOCK_DATAGRAM_SOCKET:-}" ]]; then
     CONFIG_ARGS+=(--clock-datagram-socket "$M4_CLOCK_DATAGRAM_SOCKET")
   fi

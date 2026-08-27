@@ -15,7 +15,7 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
-CONTRACT = "ams.tap_packet_engine/v1"
+CONTRACT = "ams.tap_packet_engine/v2"
 MAX_UAVS = 5
 MAX_QUEUE_PACKETS = 1_000_000
 MAX_DURATION_MS = 86_400_000
@@ -41,6 +41,19 @@ class EngineConfig:
     queue_control_max_packets: int
     queue_payload_max_packets: int
     queue_additional_data_max_packets: int
+    queue_control_deadline_ms: int
+    queue_payload_deadline_ms: int
+    queue_additional_data_deadline_ms: int
+    queue_control_max_age_ms: int
+    queue_payload_max_age_ms: int
+    queue_additional_data_max_age_ms: int
+    control_burst_limit: int
+    control_priority: int
+    payload_priority: int
+    additional_data_priority: int
+    control_tos: int
+    payload_tos: int
+    additional_data_tos: int
     seed: int
     run: int
     event_epoch: int
@@ -82,6 +95,32 @@ class EngineConfig:
         )
         if any(not 1 <= value <= MAX_QUEUE_PACKETS for value in queue_limits):
             raise ConfigError(f"every queue bound must be in 1..{MAX_QUEUE_PACKETS}")
+        deadlines = (
+            self.queue_control_deadline_ms,
+            self.queue_payload_deadline_ms,
+            self.queue_additional_data_deadline_ms,
+        )
+        max_ages = (
+            self.queue_control_max_age_ms,
+            self.queue_payload_max_age_ms,
+            self.queue_additional_data_max_age_ms,
+        )
+        if any(not 1 <= value <= 60000 for value in (*deadlines, *max_ages)):
+            raise ConfigError("queue deadlines and maximum ages must be in 1..60000 ms")
+        if any(max_age > deadline for max_age, deadline in zip(max_ages, deadlines)):
+            raise ConfigError("queue maximum age must not exceed its class deadline")
+        if not 1 <= self.control_burst_limit <= 1024:
+            raise ConfigError("control_burst_limit must be in 1..1024")
+        priorities = (
+            self.control_priority,
+            self.payload_priority,
+            self.additional_data_priority,
+        )
+        if priorities != tuple(sorted(set(priorities))) or priorities[0] < 0:
+            raise ConfigError("priorities must be unique and control < payload < additional")
+        tos_values = (self.control_tos, self.payload_tos, self.additional_data_tos)
+        if any(not 0 <= value <= 255 for value in tos_values) or len(set(tos_values)) != 3:
+            raise ConfigError("class TOS values must be unique bytes")
         if not 1 <= self.seed <= 0xFFFFFFFF:
             raise ConfigError("seed must be in 1..4294967295")
         if not 1 <= self.run <= 0x7FFFFFFFFFFFFFFF:
@@ -132,6 +171,25 @@ class EngineConfig:
                 "queue_additional_data_max_packets",
                 str(self.queue_additional_data_max_packets),
             ),
+            ("queue_control_deadline_ms", str(self.queue_control_deadline_ms)),
+            ("queue_payload_deadline_ms", str(self.queue_payload_deadline_ms)),
+            (
+                "queue_additional_data_deadline_ms",
+                str(self.queue_additional_data_deadline_ms),
+            ),
+            ("queue_control_max_age_ms", str(self.queue_control_max_age_ms)),
+            ("queue_payload_max_age_ms", str(self.queue_payload_max_age_ms)),
+            (
+                "queue_additional_data_max_age_ms",
+                str(self.queue_additional_data_max_age_ms),
+            ),
+            ("control_burst_limit", str(self.control_burst_limit)),
+            ("control_priority", str(self.control_priority)),
+            ("payload_priority", str(self.payload_priority)),
+            ("additional_data_priority", str(self.additional_data_priority)),
+            ("control_tos", str(self.control_tos)),
+            ("payload_tos", str(self.payload_tos)),
+            ("additional_data_tos", str(self.additional_data_tos)),
             ("seed", str(self.seed)),
             ("run", str(self.run)),
             ("event_epoch", str(self.event_epoch)),
@@ -172,6 +230,19 @@ class EngineConfig:
             "queueControlMaxPackets": self.queue_control_max_packets,
             "queuePayloadMaxPackets": self.queue_payload_max_packets,
             "queueAdditionalDataMaxPackets": self.queue_additional_data_max_packets,
+            "queueControlDeadlineMs": self.queue_control_deadline_ms,
+            "queuePayloadDeadlineMs": self.queue_payload_deadline_ms,
+            "queueAdditionalDataDeadlineMs": self.queue_additional_data_deadline_ms,
+            "queueControlMaxAgeMs": self.queue_control_max_age_ms,
+            "queuePayloadMaxAgeMs": self.queue_payload_max_age_ms,
+            "queueAdditionalDataMaxAgeMs": self.queue_additional_data_max_age_ms,
+            "controlBurstLimit": self.control_burst_limit,
+            "controlPriority": self.control_priority,
+            "payloadPriority": self.payload_priority,
+            "additionalDataPriority": self.additional_data_priority,
+            "controlTos": self.control_tos,
+            "payloadTos": self.payload_tos,
+            "additionalDataTos": self.additional_data_tos,
             "seed": self.seed,
             "run": self.run,
             "eventEpoch": self.event_epoch,
@@ -241,17 +312,21 @@ def from_repository(
     sionna_state_file: str = "",
     sionna_poll_interval_ms: int = 1,
     sionna_max_updates_per_poll: int = 64,
-    sionna_max_state_ttl_ms: int = 1000,
+    sionna_max_state_ttl_ms: int | None = None,
     sionna_intervention: str = "natural",
     clock_datagram_socket: str = "",
     endpoints_path: Path = ROOT / "network/config/endpoints.yaml",
     radio_path: Path = ROOT / "network/config/radio_24ghz.yaml",
+    qos_path: Path = ROOT / "network/config/communication_qos.yaml",
 ) -> EngineConfig:
     endpoints = _strict_mapping(endpoints_path)
     radio = _strict_mapping(radio_path)
+    qos = _strict_mapping(qos_path)
     uavs = endpoints.get("uavs")
-    queues = endpoints.get("bridge", {}).get("queues", {})
     ns3 = radio.get("ns3", {})
+    classes = qos.get("classes", {})
+    scheduler = qos.get("scheduler", {})
+    channel_state = qos.get("channel_state", {})
     if not isinstance(uavs, list) or len(uavs) != MAX_UAVS:
         raise ConfigError("endpoints.yaml must define exactly five UAVs")
     expected_names = [f"uav{index}" for index in range(1, MAX_UAVS + 1)]
@@ -271,11 +346,28 @@ def from_repository(
             duration_ms=duration_ms,
             radio_rate=f"{int(ns3['channel_rate_bps'])}bps",
             radio_delay=f"{int(ns3['channel_delay_ms'])}ms",
-            queue_control_max_packets=int(queues["control"]["max_packets"]),
-            queue_payload_max_packets=int(queues["payload"]["max_packets"]),
+            queue_control_max_packets=int(classes["control"]["queue_limit_packets"]),
+            queue_payload_max_packets=int(classes["payload"]["queue_limit_packets"]),
             queue_additional_data_max_packets=int(
-                queues["additional_data"]["max_packets"]
+                classes["additional_data"]["queue_limit_packets"]
             ),
+            queue_control_deadline_ms=int(classes["control"]["deadline_ms"]),
+            queue_payload_deadline_ms=int(classes["payload"]["deadline_ms"]),
+            queue_additional_data_deadline_ms=int(
+                classes["additional_data"]["deadline_ms"]
+            ),
+            queue_control_max_age_ms=int(classes["control"]["max_queue_age_ms"]),
+            queue_payload_max_age_ms=int(classes["payload"]["max_queue_age_ms"]),
+            queue_additional_data_max_age_ms=int(
+                classes["additional_data"]["max_queue_age_ms"]
+            ),
+            control_burst_limit=int(scheduler["control_burst_limit"]),
+            control_priority=int(classes["control"]["priority"]),
+            payload_priority=int(classes["payload"]["priority"]),
+            additional_data_priority=int(classes["additional_data"]["priority"]),
+            control_tos=int(classes["control"]["tos"]),
+            payload_tos=int(classes["payload"]["tos"]),
+            additional_data_tos=int(classes["additional_data"]["tos"]),
             seed=seed,
             run=run,
             event_epoch=event_epoch,
@@ -286,13 +378,17 @@ def from_repository(
             sionna_state_file=sionna_state_file,
             sionna_poll_interval_ms=sionna_poll_interval_ms,
             sionna_max_updates_per_poll=sionna_max_updates_per_poll,
-            sionna_max_state_ttl_ms=sionna_max_state_ttl_ms,
+            sionna_max_state_ttl_ms=(
+                int(channel_state["maximum_age_ms"])
+                if sionna_max_state_ttl_ms is None
+                else sionna_max_state_ttl_ms
+            ),
             sionna_intervention=sionna_intervention,
             clock_datagram_socket=clock_datagram_socket,
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ConfigError(
-            f"invalid repository queue/radio configuration: {exc}"
+            f"invalid repository QoS/radio configuration: {exc}"
         ) from exc
     config.validate()
     return config
@@ -320,7 +416,7 @@ def main() -> int:
     parser.add_argument("--sionna-state-file", default="")
     parser.add_argument("--sionna-poll-interval-ms", type=int, default=1)
     parser.add_argument("--sionna-max-updates-per-poll", type=int, default=64)
-    parser.add_argument("--sionna-max-state-ttl-ms", type=int, default=1000)
+    parser.add_argument("--sionna-max-state-ttl-ms", type=int)
     parser.add_argument(
         "--sionna-intervention",
         choices=("natural", "force_drop", "force_deliver"),
@@ -334,6 +430,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--radio", type=Path, default=ROOT / "network/config/radio_24ghz.yaml"
+    )
+    parser.add_argument(
+        "--qos", type=Path, default=ROOT / "network/config/communication_qos.yaml"
     )
     parser.add_argument("--print-hash", action="store_true")
     parser.add_argument("--print-argv", action="store_true")
@@ -361,6 +460,7 @@ def main() -> int:
             tap_uavs=_parse_taps(args.tap_uavs),
             endpoints_path=args.endpoints,
             radio_path=args.radio,
+            qos_path=args.qos,
         )
     except ConfigError as exc:
         parser.error(str(exc))
@@ -378,6 +478,7 @@ def main() -> int:
                 args.endpoints.read_bytes()
             ).hexdigest(),
             str(args.radio): hashlib.sha256(args.radio.read_bytes()).hexdigest(),
+            str(args.qos): hashlib.sha256(args.qos.read_bytes()).hexdigest(),
         },
     }
     if args.json_output:

@@ -105,6 +105,7 @@ UART_DIR="$RUNTIME_DIR/uart"
 WORK_DIR="$RUNTIME_DIR/work"
 SCENARIO="$ROOT_DIR/network/config/scenario_5uav_town01.yaml"
 RADIO="$ROOT_DIR/network/config/radio_24ghz_town01.yaml"
+QOS="$ROOT_DIR/network/config/communication_qos.yaml"
 WORLD="$ROOT_DIR/.external/cavise_maps/Town01/gazebo/town01.sdf"
 NODE_STATE="$RUN_DIR/metrics/node_state.json"
 NODE_EVENTS="$RUN_DIR/metrics/node_state.jsonl"
@@ -112,6 +113,27 @@ SIONNA_STATES="$RUN_DIR/logs/sionna_packet_states.jsonl"
 SIONNA_READY="$RUN_DIR/logs/sionna_packet_states.ready"
 NS3_READY="$RUN_DIR/logs/ns3_packet_engine.ready"
 NS3_STOP="$RUN_DIR/logs/ns3_packet_engine.stop"
+
+mapfile -t QOS_VALUES < <(
+  python3 - "$QOS" <<'PY'
+import sys, yaml
+value = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
+serial = value["serial_transport"]
+classes = value["classes"]
+print(serial["chunk_payload_bytes"])
+print(serial["reassembly_timeout_ms"])
+print(serial["metrics_period_ms"])
+print(classes["control"]["baud_rate"])
+print(classes["payload"]["baud_rate"])
+print(value["channel_state"]["maximum_age_ms"] / 1000)
+PY
+)
+UART_CHUNK_BYTES="${QOS_VALUES[0]}"
+UART_REASSEMBLY_MS="${QOS_VALUES[1]}"
+UART_METRICS_MS="${QOS_VALUES[2]}"
+CONTROL_BAUD="${QOS_VALUES[3]}"
+PAYLOAD_BAUD="${QOS_VALUES[4]}"
+CHANNEL_STATE_TTL_S="${QOS_VALUES[5]}"
 
 mkdir -p "$RUN_DIR"/{logs,metrics,pcap,heatmaps} "$UART_DIR" "$WORK_DIR"
 printf '%q ' "$0" "$@" > "$RUN_DIR/command.txt"
@@ -304,20 +326,34 @@ for index in 1 2 3 4 5; do
   setsid ip netns exec "ams-uav$index" python3 -u \
     "$ROOT_DIR/network/scripts/communication_vertical.py" uart-adapter \
     --channel control \
+    --uav-id "$index" \
+    --framed \
+    --baud-rate "$CONTROL_BAUD" \
+    --chunk-payload-bytes "$UART_CHUNK_BYTES" \
+    --reassembly-timeout-ms "$UART_REASSEMBLY_MS" \
+    --metrics-period-ms "$UART_METRICS_MS" \
     --tty "$UART_DIR/control-adapter-$instance" \
     --bind "10.71.$index.10:$((14600 + index))" \
     --peer 10.71.0.10:14600 \
     --event-log "$RUN_DIR/logs/control_uart_uav$index.jsonl" \
+    --metrics-output "$RUN_DIR/metrics/control_uart_uav$index.json" \
     --ready-file "$RUN_DIR/logs/control_uart_uav$index.ready" \
     > "$RUN_DIR/logs/control_uart_uav$index.log" 2>&1 &
   managed_pids+=("$!")
   setsid ip netns exec "ams-uav$index" python3 -u \
     "$ROOT_DIR/network/scripts/communication_vertical.py" uart-adapter \
     --channel payload \
+    --uav-id "$index" \
+    --framed \
+    --baud-rate "$PAYLOAD_BAUD" \
+    --chunk-payload-bytes "$UART_CHUNK_BYTES" \
+    --reassembly-timeout-ms "$UART_REASSEMBLY_MS" \
+    --metrics-period-ms "$UART_METRICS_MS" \
     --tty "$UART_DIR/payload-adapter-$instance" \
     --bind "10.71.$index.10:$((14700 + index))" \
     --peer 10.71.0.10:14700 \
     --event-log "$RUN_DIR/logs/payload_uart_uav$index.jsonl" \
+    --metrics-output "$RUN_DIR/metrics/payload_uart_uav$index.json" \
     --ready-file "$RUN_DIR/logs/payload_uart_uav$index.ready" \
     > "$RUN_DIR/logs/payload_uart_uav$index.log" 2>&1 &
   managed_pids+=("$!")
@@ -393,7 +429,7 @@ setsid python3 -u "$ROOT_DIR/scripts/product/town01_radio_state.py" \
   --metrics-output "$RUN_DIR/metrics/radio_links.csv" \
   --ready-file "$SIONNA_READY" \
   --period-s 5 \
-  --ttl-s 20 \
+  --ttl-s "$CHANNEL_STATE_TTL_S" \
   > "$RUN_DIR/logs/town01_radio_state.log" 2>&1 &
 managed_pids+=("$!")
 wait_for_file "$SIONNA_READY" 120 "first 30-cell Sionna state"
@@ -410,15 +446,21 @@ setsid env \
   TAP_UAVS=tap-uav1,tap-uav2,tap-uav3,tap-uav4,tap-uav5 \
   DURATION_MS=600000 \
   RADIO_FILE="$RADIO" \
+  QOS_FILE="$QOS" \
   SIONNA_IPC_ENABLED=1 \
   SIONNA_STATE_FILE="$SIONNA_STATES" \
-  SIONNA_MAX_STATE_TTL_MS=60000 \
   SIONNA_MAX_UPDATES_PER_POLL=128 \
   "$ROOT_DIR/network/ns3/run_ns3_tap_packet_engine.sh" \
   > "$RUN_DIR/logs/ns3_packet_engine.log" 2>&1 &
 NS3_PID=$!
 managed_pids+=("$NS3_PID")
 wait_for_file "$NS3_READY" 30 "ns-3 packet engine"
+
+setsid python3 -u "$ROOT_DIR/scripts/product/town01_runtime_monitor.py" \
+  --output "$RUN_DIR/logs/runtime_resources.jsonl" \
+  --stop-file "$NS3_STOP" \
+  > "$RUN_DIR/logs/runtime_monitor.log" 2>&1 &
+managed_pids+=("$!")
 
 set +e
 ip netns exec ams-gcs python3 -u "$ROOT_DIR/scripts/product/town01_full_stack_scenario.py" run \
@@ -428,12 +470,30 @@ ip netns exec ams-gcs python3 -u "$ROOT_DIR/scripts/product/town01_full_stack_sc
 SCENARIO_STATUS=$?
 set -e
 
+PROFILE_STATUS=1
+if ((SCENARIO_STATUS == 0)); then
+  set +e
+  python3 -u "$ROOT_DIR/scripts/product/town01_communication_profiles.py" run \
+    --run-dir "$RUN_DIR" \
+    --qos "$QOS" \
+    > "$RUN_DIR/logs/communication_profiles.log" 2>&1
+  PROFILE_STATUS=$?
+  set -e
+fi
+
 set +e
 python3 "$ROOT_DIR/scripts/product/town01_heatmaps.py" \
   --run-dir "$RUN_DIR" \
   --points 7 \
   > "$RUN_DIR/logs/heatmaps.log" 2>&1
 HEATMAP_STATUS=$?
+set -e
+
+set +e
+python3 "$ROOT_DIR/scripts/product/collect_town01_runtime_topology.py" \
+  --run-dir "$RUN_DIR" \
+  > "$RUN_DIR/logs/runtime_topology.log" 2>&1
+TOPOLOGY_STATUS=$?
 set -e
 
 touch "$NS3_STOP"
@@ -445,6 +505,10 @@ done
 ip netns exec ams-gcs python3 "$ROOT_DIR/network/scripts/communication_vertical.py" down-probe \
   --bind 10.71.0.10:14600 \
   --target 10.71.1.10:14601 \
+  --framed \
+  --channel control \
+  --uav-id 1 \
+  --chunk-payload-bytes "$UART_CHUNK_BYTES" \
   --timeout-s 3 \
   --output "$RUN_DIR/metrics/ns3_stopped_probe.json" \
   > "$RUN_DIR/logs/ns3_stopped_probe.log" 2>&1
@@ -456,8 +520,9 @@ SUMMARY_STATUS=$?
 set -e
 
 printf 'Town01 full-stack run complete: %s\n' "$RUN_DIR"
-printf 'Scenario status=%s heatmap status=%s summary status=%s\n' \
-  "$SCENARIO_STATUS" "$HEATMAP_STATUS" "$SUMMARY_STATUS"
-if ((SCENARIO_STATUS != 0 || HEATMAP_STATUS != 0 || SUMMARY_STATUS != 0)); then
+printf 'Scenario status=%s profiles status=%s topology status=%s heatmap status=%s summary status=%s\n' \
+  "$SCENARIO_STATUS" "$PROFILE_STATUS" "$TOPOLOGY_STATUS" "$HEATMAP_STATUS" "$SUMMARY_STATUS"
+if ((SCENARIO_STATUS != 0 || PROFILE_STATUS != 0 || TOPOLOGY_STATUS != 0 \
+  || HEATMAP_STATUS != 0 || SUMMARY_STATUS != 0)); then
   exit 1
 fi

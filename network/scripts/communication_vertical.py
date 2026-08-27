@@ -15,9 +15,12 @@ import statistics
 import struct
 import subprocess
 import sys
+import termios
 import time
 from pathlib import Path
 from typing import Any
+
+from serial_transport import Encoder, MavlinkStreamCounter, Reassembler, TransportCounters
 
 
 DATA_HEADER = struct.Struct("!4sBBIQ")
@@ -45,10 +48,29 @@ def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def configure_tty_baud(descriptor: int, baud_rate: int) -> int:
+    speeds = {
+        57600: termios.B57600,
+        115200: termios.B115200,
+        230400: termios.B230400,
+    }
+    if baud_rate not in speeds:
+        raise ValueError(f"unsupported UART baud rate: {baud_rate}")
+    attributes = termios.tcgetattr(descriptor)
+    attributes[4] = speeds[baud_rate]
+    attributes[5] = speeds[baud_rate]
+    termios.tcsetattr(descriptor, termios.TCSANOW, attributes)
+    observed = termios.tcgetattr(descriptor)
+    if observed[4] != speeds[baud_rate] or observed[5] != speeds[baud_rate]:
+        raise RuntimeError(f"UART did not retain requested baud rate {baud_rate}")
+    return speeds[baud_rate]
+
+
 def run_uart_adapter(args: argparse.Namespace) -> int:
     bind_address = endpoint(args.bind)
     peer_address = endpoint(args.peer)
     uart = os.open(args.tty, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    speed_constant = configure_tty_baud(uart, args.baud_rate)
     udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     tos_by_channel = {"control": 184, "payload": 40}
     tos = int(args.tos if args.tos is not None else tos_by_channel.get(args.channel, 0))
@@ -70,10 +92,102 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    Path(args.ready_file).write_text("ready\n")
+    counters = TransportCounters()
+    encoder = (
+        Encoder(
+            channel=args.channel,
+            uav_id=args.uav_id,
+            direction="uart_to_gcs",
+            max_payload=args.chunk_payload_bytes,
+        )
+        if args.framed
+        else None
+    )
+    reassembler = (
+        Reassembler(
+            channel=args.channel,
+            uav_id=args.uav_id,
+            direction="gcs_to_uart",
+            timeout_ms=args.reassembly_timeout_ms,
+            counters=counters,
+        )
+        if args.framed
+        else None
+    )
+    input_frames = MavlinkStreamCounter()
+    output_frames = MavlinkStreamCounter()
+    ready = {
+        "status": "ready",
+        "pid": os.getpid(),
+        "channel": args.channel,
+        "uav_id": args.uav_id,
+        "tty": args.tty,
+        "tty_realpath": os.path.realpath(args.tty),
+        "baud_rate": args.baud_rate,
+        "termios_speed_constant": speed_constant,
+        "bind": args.bind,
+        "peer": args.peer,
+        "tos": tos,
+        "transport_framing": "serial_chunk_v1" if args.framed else "raw_datagram",
+    }
+    write_json(args.ready_file, ready)
+    last_metrics_ns = 0
+
+    def metrics_payload() -> dict[str, Any]:
+        values = counters.as_dict()
+        input_snapshot = input_frames.snapshot()
+        output_snapshot = output_frames.snapshot()
+        values.update(
+            {
+                "pid": os.getpid(),
+                "uav_id": args.uav_id,
+                "channel": args.channel,
+                "tty": args.tty,
+                "tty_realpath": os.path.realpath(args.tty),
+                "baud_rate": args.baud_rate,
+                "bind": args.bind,
+                "peer": args.peer,
+                "transport_framing": ready["transport_framing"],
+                "mavlink_input": input_snapshot,
+                "mavlink_output": output_snapshot,
+            }
+        )
+        values["frames"] = input_snapshot["frames"] + output_snapshot["frames"]
+        values["incomplete_frames"] += (
+            input_snapshot["incomplete_frames"] + output_snapshot["incomplete_frames"]
+        )
+        values["discarded_frames"] += (
+            input_snapshot["discarded_frames"] + output_snapshot["discarded_frames"]
+        )
+        return values
+
+    def publish_metrics(now_ns: int, *, force: bool = False) -> None:
+        nonlocal last_metrics_ns
+        if not args.metrics_output:
+            return
+        if force or now_ns - last_metrics_ns >= args.metrics_period_ms * 1_000_000:
+            write_json(args.metrics_output, metrics_payload())
+            last_metrics_ns = now_ns
+
     with Path(args.event_log).open("a", encoding="utf-8") as events:
         try:
             while running:
+                now_ns = time.monotonic_ns()
+                if reassembler is not None:
+                    for record in reassembler.expire(now_ns):
+                        output_frames.feed(record)
+                        view = memoryview(record)
+                        while view and running:
+                            try:
+                                written = os.write(uart, view)
+                                counters.uart_output_bytes += written
+                                view = view[written:]
+                            except BlockingIOError:
+                                select_write = selectors.DefaultSelector()
+                                select_write.register(uart, selectors.EVENT_WRITE)
+                                select_write.select(0.25)
+                                select_write.close()
+                publish_metrics(now_ns)
                 for key, _mask in selector.select(0.25):
                     if key.data == "uart":
                         try:
@@ -82,44 +196,74 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
                             continue
                         if not data:
                             continue
-                        udp.sendto(data, peer_address)
-                        append_jsonl(
-                            events,
-                            {
-                                "channel": args.channel,
-                                "direction": "uart_to_udp",
-                                "bytes": len(data),
-                                "sha256": sha256(data),
-                                "monotonic_ns": time.monotonic_ns(),
-                            },
-                        )
+                        observed_ns = time.monotonic_ns()
+                        counters.uart_input_bytes += len(data)
+                        input_frames.feed(data)
+                        datagrams = encoder.encode(data, observed_ns) if encoder else [data]
+                        if encoder:
+                            counters.records_encoded += 1
+                            counters.chunks_encoded += len(datagrams)
+                        for fragment_index, datagram in enumerate(datagrams):
+                            udp.sendto(datagram, peer_address)
+                            counters.ns3_input_bytes += len(datagram)
+                            append_jsonl(
+                                events,
+                                {
+                                    "event": "serial_chunk_tx" if encoder else "serial_tx",
+                                    "channel": args.channel,
+                                    "uav_id": args.uav_id,
+                                    "direction": "uart_to_ns3" if encoder else "uart_to_udp",
+                                    "bytes": len(datagram),
+                                    "uart_record_bytes": len(data),
+                                    "network_bytes": len(datagram),
+                                    "fragment_index": fragment_index,
+                                    "fragment_count": len(datagrams),
+                                    "sha256": sha256(datagram),
+                                    "monotonic_ns": observed_ns,
+                                },
+                            )
                     else:
                         try:
                             data, source = udp.recvfrom(65535)
                         except BlockingIOError:
                             continue
-                        view = memoryview(data)
-                        while view and running:
-                            try:
-                                written = os.write(uart, view)
-                                view = view[written:]
-                            except BlockingIOError:
-                                select_write = selectors.DefaultSelector()
-                                select_write.register(uart, selectors.EVENT_WRITE)
-                                select_write.select(0.25)
-                                select_write.close()
+                        observed_ns = time.monotonic_ns()
+                        records = reassembler.ingest(data, observed_ns) if reassembler else [data]
+                        if not reassembler:
+                            counters.ns3_output_bytes += len(data)
+                        for record in records:
+                            output_frames.feed(record)
+                            view = memoryview(record)
+                            while view and running:
+                                try:
+                                    written = os.write(uart, view)
+                                    counters.uart_output_bytes += written
+                                    view = view[written:]
+                                except BlockingIOError:
+                                    select_write = selectors.DefaultSelector()
+                                    select_write.register(uart, selectors.EVENT_WRITE)
+                                    select_write.select(0.25)
+                                    select_write.close()
                         append_jsonl(
                             events,
                             {
+                                "event": "serial_chunk_rx" if reassembler else "serial_rx",
                                 "channel": args.channel,
-                                "direction": "udp_to_uart",
+                                "uav_id": args.uav_id,
+                                "direction": "ns3_to_uart" if reassembler else "udp_to_uart",
                                 "bytes": len(data),
+                                "network_bytes": len(data),
+                                "uart_records_released": len(records),
+                                "uart_bytes_released": sum(len(record) for record in records),
                                 "sha256": sha256(data),
                                 "source": f"{source[0]}:{source[1]}",
-                                "monotonic_ns": time.monotonic_ns(),
+                                "monotonic_ns": observed_ns,
                             },
                         )
         finally:
+            if reassembler is not None:
+                reassembler.expire(time.monotonic_ns(), force=True)
+            publish_metrics(time.monotonic_ns(), force=True)
             selector.close()
             udp.close()
             os.close(uart)
@@ -303,7 +447,18 @@ def run_down_probe(args: argparse.Namespace) -> int:
         command,
         [float(mavutil.mavlink.MAVLINK_MSG_ID_AUTOPILOT_VERSION), 0, 0, 0, 0, 0, 0],
     )
-    udp.sendto(frame, endpoint(args.target))
+    datagrams = (
+        Encoder(
+            channel=args.channel,
+            uav_id=args.uav_id,
+            direction="gcs_to_uart",
+            max_payload=args.chunk_payload_bytes,
+        ).encode(frame)
+        if args.framed
+        else [frame]
+    )
+    for datagram in datagrams:
+        udp.sendto(datagram, endpoint(args.target))
     received = 0
     deadline = time.monotonic() + args.timeout_s
     while time.monotonic() < deadline:
@@ -314,8 +469,12 @@ def run_down_probe(args: argparse.Namespace) -> int:
     udp.close()
     result = {
         "command_frame_sha256": sha256(frame),
+        "command_network_datagrams": len(datagrams),
+        "transport_framing": "serial_chunk_v1" if args.framed else "raw_datagram",
         "received_datagrams": received,
         "exchange_stopped": received == 0,
+        "new_command_response_stopped": received == 0,
+        "reverse_telemetry_stopped": received == 0,
     }
     write_json(args.output, result)
     return 0 if received == 0 else 1
@@ -682,6 +841,13 @@ def parser() -> argparse.ArgumentParser:
     adapter.add_argument("--event-log", required=True)
     adapter.add_argument("--ready-file", required=True)
     adapter.add_argument("--tos", type=int)
+    adapter.add_argument("--uav-id", type=int, default=1)
+    adapter.add_argument("--baud-rate", type=int, default=115200)
+    adapter.add_argument("--framed", action="store_true")
+    adapter.add_argument("--chunk-payload-bytes", type=int, default=192)
+    adapter.add_argument("--reassembly-timeout-ms", type=int, default=500)
+    adapter.add_argument("--metrics-period-ms", type=int, default=1000)
+    adapter.add_argument("--metrics-output")
     adapter.set_defaults(function=run_uart_adapter)
 
     mavlink = commands.add_parser("mavlink-probe")
@@ -698,6 +864,10 @@ def parser() -> argparse.ArgumentParser:
     down.add_argument("--target", required=True)
     down.add_argument("--timeout-s", type=float, default=2)
     down.add_argument("--output", required=True)
+    down.add_argument("--framed", action="store_true")
+    down.add_argument("--channel", choices=("control", "payload"), default="control")
+    down.add_argument("--uav-id", type=int, default=1)
+    down.add_argument("--chunk-payload-bytes", type=int, default=192)
     down.set_defaults(function=run_down_probe)
 
     sender = commands.add_parser("data-sender")

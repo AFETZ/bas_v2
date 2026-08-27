@@ -104,6 +104,11 @@ class TapPacketEngineConfigTests(unittest.TestCase):
             dataclasses.replace(baseline, queue_control_max_packets=255),
             dataclasses.replace(baseline, queue_payload_max_packets=127),
             dataclasses.replace(baseline, queue_additional_data_max_packets=127),
+            dataclasses.replace(baseline, queue_control_deadline_ms=251),
+            dataclasses.replace(baseline, queue_payload_max_age_ms=751),
+            dataclasses.replace(baseline, control_burst_limit=7),
+            dataclasses.replace(baseline, control_priority=3, payload_priority=4, additional_data_priority=5),
+            dataclasses.replace(baseline, control_tos=185),
             dataclasses.replace(baseline, seed=43),
             dataclasses.replace(baseline, run=2),
             dataclasses.replace(baseline, event_epoch=8),
@@ -128,6 +133,11 @@ class TapPacketEngineConfigTests(unittest.TestCase):
             dataclasses.replace(baseline, radio_delay="0ms"),
             dataclasses.replace(baseline, queue_control_max_packets=0),
             dataclasses.replace(baseline, queue_payload_max_packets=1_000_001),
+            dataclasses.replace(baseline, queue_control_deadline_ms=0),
+            dataclasses.replace(baseline, queue_control_max_age_ms=251),
+            dataclasses.replace(baseline, control_burst_limit=0),
+            dataclasses.replace(baseline, payload_priority=0),
+            dataclasses.replace(baseline, payload_tos=184),
             dataclasses.replace(baseline, seed=0),
             dataclasses.replace(baseline, run=0),
             dataclasses.replace(baseline, event_epoch=0),
@@ -152,6 +162,10 @@ class TapPacketEngineConfigTests(unittest.TestCase):
             "--queueControlMaxPackets=256",
             "--queuePayloadMaxPackets=128",
             "--queueAdditionalDataMaxPackets=128",
+            "--queueControlDeadlineMs=250",
+            "--queuePayloadMaxAgeMs=750",
+            "--controlBurstLimit=8",
+            "--controlTos=184",
         ):
             self.assertIn(expected, joined)
 
@@ -163,11 +177,9 @@ class TapPacketEngineStaticTests(unittest.TestCase):
         queue_end = source.index("struct EngineConfig", queue_start)
         queue_source = source[queue_start:queue_end]
 
-        self.assertRegex(
-            queue_source,
-            r"CONTROL_BURST_LIMIT\s*=\s*8",
-        )
-        self.assertIn("m_controlBurst < CONTROL_BURST_LIMIT", queue_source)
+        self.assertRegex(queue_source, r"m_controlBurstLimit\s*=\s*8")
+        self.assertIn("SetControlBurstLimit", queue_source)
+        self.assertIn("m_controlBurst < m_controlBurstLimit", queue_source)
         self.assertIn("counts[m_nextLowerClass] > 0", queue_source)
         self.assertIn(
             "m_nextLowerClass = selectedClass == PAYLOAD_CLASS",
@@ -186,6 +198,8 @@ class TapPacketEngineStaticTests(unittest.TestCase):
             "BoundedPriorityScheduler::DeterministicSelfTest()",
             source,
         )
+        self.assertIn("configured.SetControlBurstLimit(2)", queue_source)
+        self.assertIn("deadline_drop_", queue_source)
 
     def test_source_uses_external_tap_netdevices_and_no_ns3_applications(self) -> None:
         source = SOURCE.read_text(encoding="utf-8")
@@ -237,6 +251,8 @@ class TapPacketEngineStaticTests(unittest.TestCase):
             "device_id",
             "config_sha256",
             "root_transmission",
+            "queue_age_ns",
+            "scheduler_lag_ns",
         ):
             self.assertIn(field, source)
 

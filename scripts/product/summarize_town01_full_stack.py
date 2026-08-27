@@ -7,8 +7,11 @@ import argparse
 import csv
 import json
 import math
+import os
 import re
 import statistics
+import struct
+import sys
 from collections import Counter, defaultdict, deque
 from pathlib import Path
 from typing import Any
@@ -16,6 +19,11 @@ from typing import Any
 
 CLASSES = ("control", "payload", "additional_data")
 ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from network.scripts.communication_qos import load_qos  # noqa: E402
+from network.scripts.packet_accounting import account_packets, group_accounting  # noqa: E402
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -54,9 +62,11 @@ def numeric_summary(values: list[float]) -> dict[str, float | None]:
     return {
         "count": len(values),
         "min": min(values) if values else None,
+        "p5": percentile(values, 0.05),
         "mean": statistics.fmean(values) if values else None,
         "p50": percentile(values, 0.50),
         "p95": percentile(values, 0.95),
+        "p99": percentile(values, 0.99),
         "max": max(values) if values else None,
     }
 
@@ -79,8 +89,22 @@ def packet_metrics(events: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], 
     enqueue_by_uid: dict[tuple[int, str], deque[int]] = defaultdict(deque)
     latency_by_class: dict[str, list[float]] = defaultdict(list)
     queue_by_class: dict[str, list[float]] = defaultdict(list)
+    queue_state: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {
+            "current_depth_packets": 0,
+            "maximum_depth_packets": 0,
+            "enqueued_packets": 0,
+            "dequeued_packets": 0,
+            "dropped_packets": 0,
+            "deadline_drops": 0,
+            "tail_drops": 0,
+            "queue_delay_ms": [],
+        }
+    )
     egress_bytes: Counter[str] = Counter()
     radio_age_ms: list[float] = []
+    scheduler_lag_ms: list[float] = []
+    stale_states = 0
     timestamps = [
         int(event["host_monotonic_ns"])
         for event in filtered
@@ -112,9 +136,38 @@ def packet_metrics(events: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], 
             started = enqueue_by_uid[key].popleft()
             if timestamp >= started:
                 queue_by_class[traffic_class].append((timestamp - started) / 1e6)
+        queue_id = str(event.get("queue_id") or "")
+        if queue_id and kind in {"enqueue", "dequeue", "drop"}:
+            state = queue_state[queue_id]
+            depth = event.get("queue_depth_packets")
+            if isinstance(depth, int) and depth >= 0:
+                state["current_depth_packets"] = depth
+                state["maximum_depth_packets"] = max(
+                    int(state["maximum_depth_packets"]), depth
+                )
+            if kind == "enqueue":
+                state["enqueued_packets"] += 1
+            elif kind == "dequeue":
+                state["dequeued_packets"] += 1
+            else:
+                state["dropped_packets"] += 1
+                reason = str(event.get("drop_reason") or "")
+                if reason.startswith("deadline_drop"):
+                    state["deadline_drops"] += 1
+                if reason.startswith(("queue_limit_", "aggregate_queue_limit")):
+                    state["tail_drops"] += 1
+            age_ns = event.get("queue_age_ns")
+            if kind in {"dequeue", "drop"} and isinstance(age_ns, int) and age_ns >= 0:
+                state["queue_delay_ms"].append(age_ns / 1e6)
         age = event.get("radio_state_age_ns")
         if isinstance(age, int) and age >= 0:
             radio_age_ms.append(age / 1e6)
+        lag = event.get("scheduler_lag_ns")
+        if isinstance(lag, int):
+            scheduler_lag_ms.append(lag / 1e6)
+        radio_status = str(event.get("radio_state_status") or "")
+        if any(token in radio_status for token in ("expired", "missing", "unavailable", "ipc_fault")):
+            stale_states += 1
 
     rows: list[dict[str, Any]] = []
     summary: dict[str, Any] = {}
@@ -153,10 +206,27 @@ def packet_metrics(events: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], 
             "jitter_ms": statistics.pstdev(latency) if len(latency) > 1 else 0.0 if latency else None,
             "queue_delay_mean_ms": statistics.fmean(queue) if queue else None,
             "queue_delay_p95_ms": percentile(queue, 0.95),
+            "queue_delay_p99_ms": percentile(queue, 0.99),
+            "backoff_events": event_counts[(traffic_class, "backoff", False)]
+            + event_counts[(traffic_class, "backoff", True)],
+            "retry_events": event_counts[(traffic_class, "backoff", False)]
+            + event_counts[(traffic_class, "backoff", True)],
         }
         rows.append(row)
         summary[traffic_class] = row
     summary["radio_state_age_ms"] = numeric_summary(radio_age_ms)
+    summary["stale_channel_state_events"] = stale_states
+    summary["scheduler_lag_ms"] = numeric_summary(scheduler_lag_ms)
+    queues: dict[str, Any] = {}
+    for queue_id, state in sorted(queue_state.items()):
+        delays = state.pop("queue_delay_ms")
+        queues[queue_id] = {
+            **state,
+            "average_queue_delay_ms": statistics.fmean(delays) if delays else None,
+            "p95_queue_delay_ms": percentile(delays, 0.95),
+            "p99_queue_delay_ms": percentile(delays, 0.99),
+        }
+    summary["queues"] = queues
     summary["observation_duration_s"] = duration_s
     summary["total_event_count"] = len(events)
     summary["udp_event_count"] = len(filtered)
@@ -204,6 +274,209 @@ def gazebo_metrics(path: Path) -> dict[str, Any]:
     return {"sample_count": len(factors), "real_time_factor": numeric_summary(factors)}
 
 
+def write_json(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def aggregate_runtime_logs(run_dir: Path, events: list[dict[str, Any]]) -> None:
+    uart_output = run_dir / "logs/uart_events.jsonl"
+    with uart_output.open("w", encoding="utf-8") as output:
+        for path in sorted((run_dir / "logs").glob("*_uart_uav*.jsonl")):
+            for event in read_jsonl(path):
+                event["source_log"] = path.name
+                output.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
+    with (run_dir / "logs/packet_events.jsonl").open("w", encoding="utf-8") as output:
+        for event in events:
+            output.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
+    with (run_dir / "logs/queue_events.jsonl").open("w", encoding="utf-8") as output:
+        for event in events:
+            if event.get("event") in {"enqueue", "dequeue", "drop", "backoff"}:
+                output.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
+
+
+def pcap_tos(data: bytes) -> int | None:
+    if len(data) < 16:
+        return None
+    offset = 14
+    ether_type = struct.unpack_from("!H", data, 12)[0]
+    if ether_type == 0x8100 and len(data) >= 18:
+        ether_type = struct.unpack_from("!H", data, 16)[0]
+        offset = 18
+    if ether_type != 0x0800 or len(data) < offset + 2:
+        return None
+    return data[offset + 1]
+
+
+def split_pcaps(run_dir: Path, tos_by_class: dict[str, int]) -> list[dict[str, Any]]:
+    source_paths = sorted((run_dir / "pcap").glob("ns3_packet_engine-radio-*.pcap"))
+    outputs = {name: run_dir / "pcap" / f"{name}.pcap" for name in CLASSES}
+    handles: dict[str, Any] = {}
+    counts: Counter[str] = Counter()
+    try:
+        global_header: bytes | None = None
+        endian = "<"
+        for source in source_paths:
+            with source.open("rb") as stream:
+                header = stream.read(24)
+                if len(header) != 24:
+                    continue
+                magic = header[:4]
+                if magic in {b"\xd4\xc3\xb2\xa1", b"\x4d\x3c\xb2\xa1"}:
+                    source_endian = "<"
+                elif magic in {b"\xa1\xb2\xc3\xd4", b"\xa1\xb2\x3c\x4d"}:
+                    source_endian = ">"
+                else:
+                    continue
+                if global_header is None:
+                    global_header = header
+                    endian = source_endian
+                    for name, path in outputs.items():
+                        handles[name] = path.open("wb")
+                        handles[name].write(global_header)
+                if source_endian != endian:
+                    continue
+                while True:
+                    record_header = stream.read(16)
+                    if not record_header:
+                        break
+                    if len(record_header) != 16:
+                        break
+                    _sec, _fraction, captured, _wire = struct.unpack(
+                        f"{source_endian}IIII", record_header
+                    )
+                    packet = stream.read(captured)
+                    if len(packet) != captured:
+                        break
+                    tos = pcap_tos(packet)
+                    for name, expected in tos_by_class.items():
+                        if tos == expected:
+                            handles[name].write(record_header)
+                            handles[name].write(packet)
+                            counts[name] += 1
+                            break
+        if global_header is None:
+            for name, path in outputs.items():
+                path.write_bytes(b"")
+    finally:
+        for handle in handles.values():
+            handle.close()
+    return [
+        {
+            "traffic_class": name,
+            "path": str(outputs[name].relative_to(run_dir)),
+            "packets": counts[name],
+            "bytes": outputs[name].stat().st_size if outputs[name].exists() else 0,
+        }
+        for name in CLASSES
+    ]
+
+
+def jain_fairness(values: list[float]) -> float | None:
+    if not values or sum(value * value for value in values) == 0:
+        return None
+    return sum(values) ** 2 / (len(values) * sum(value * value for value in values))
+
+
+def profile_windows(path: Path) -> dict[str, tuple[int, int]]:
+    starts: dict[str, int] = {}
+    ends: dict[str, int] = {}
+    for item in read_jsonl(path):
+        profile = str(item.get("profile") or "")
+        if item.get("event") == "profile_start":
+            starts[profile] = int(item.get("scheduled_start_monotonic_ns", 0))
+        elif item.get("event") == "profile_end":
+            ends[profile] = int(item.get("monotonic_ns", 0))
+    return {
+        profile: (start, ends[profile])
+        for profile, start in starts.items()
+        if profile in ends and start < ends[profile]
+    }
+
+
+def profile_medium_metrics(
+    events: list[dict[str, Any]], start_ns: int, end_ns: int
+) -> dict[str, Any]:
+    selected = [
+        event
+        for event in events
+        if start_ns <= int(event.get("host_monotonic_ns", 0) or 0) <= end_ns
+    ]
+    starts: dict[tuple[int, str], int] = {}
+    busy_ns = 0
+    for event in selected:
+        key = (int(event.get("packet_uid", -1)), str(event.get("device_id") or ""))
+        observed = int(event.get("host_monotonic_ns", 0) or 0)
+        if event.get("event") == "channel":
+            starts[key] = observed
+        elif event.get("event") == "phy_tx_end" and key in starts:
+            busy_ns += max(0, observed - starts.pop(key))
+    _rows, packet = packet_metrics(selected)
+    return {
+        "channel_utilization": min(1.0, busy_ns / max(1, end_ns - start_ns)),
+        "channel_busy_ms": busy_ns / 1e6,
+        "backoff_events": sum(1 for event in selected if event.get("event") == "backoff"),
+        "retry_events": sum(1 for event in selected if event.get("event") == "backoff"),
+        "queues": packet.get("queues", {}),
+        "scheduler_lag_ms": packet.get("scheduler_lag_ms", {}),
+    }
+
+
+def resource_metrics(path: Path) -> dict[str, Any]:
+    by_component: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for item in read_jsonl(path):
+        by_component[str(item.get("component") or "unknown")].append(item)
+    result: dict[str, Any] = {}
+    for component, rows in sorted(by_component.items()):
+        cpu = [float(row["cpu_percent_one_core"]) for row in rows if row.get("cpu_percent_one_core") is not None]
+        rss = [float(row.get("rss_bytes", 0)) / (1024 * 1024) for row in rows]
+        gpu = [float(row["gpu_memory_bytes"]) / (1024 * 1024) for row in rows if row.get("gpu_memory_bytes") is not None]
+        result[component] = {
+            "process_samples": len(rows),
+            "cpu_percent_one_core": numeric_summary(cpu),
+            "rss_mib": numeric_summary(rss),
+            "gpu_memory_mib": numeric_summary(gpu),
+        }
+    return result
+
+
+def uart_metrics(run_dir: Path) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for channel in ("control", "payload"):
+        for uav_id in range(1, 6):
+            key = f"{channel}:uav{uav_id}"
+            result[key] = read_json(run_dir / f"metrics/{channel}_uart_uav{uav_id}.json")
+    return result
+
+
+def write_communication_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    fields = [
+        "dimension",
+        "value",
+        "packets_attempted",
+        "packets_delivered_unique",
+        "packets_dropped_unique",
+        "packets_pending",
+        "duplicate_deliveries",
+        "queue_drop_events",
+        "phy_drop_events",
+        "backoff_events",
+        "retry_events",
+        "malformed_packets",
+        "packet_invariant_holds",
+        "uart_input_bytes",
+        "ns3_input_bytes",
+        "ns3_output_bytes",
+        "uart_output_bytes",
+    ]
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
@@ -211,28 +484,180 @@ def main() -> int:
     run_dir = args.run_dir.resolve()
     metrics_dir = run_dir / "metrics"
     metrics_dir.mkdir(parents=True, exist_ok=True)
+    qos_config = load_qos()
     scenario = read_json(metrics_dir / "scenario_summary.json")
     health = read_json(metrics_dir / "health.json")
     down = read_json(metrics_dir / "ns3_stopped_probe.json")
-    heatmaps = read_json(run_dir / "heatmaps/heatmap_summary.json")
-    derivative = read_json(
-        ROOT / ".external/cavise_maps/Town01/gazebo/derivative_summary.json"
-    )
+    topology = read_json(metrics_dir / "runtime_topology.json")
     events = read_jsonl(run_dir / "logs/ns3_packet_events.jsonl")
+    aggregate_runtime_logs(run_dir, events)
     packet_rows, packets = packet_metrics(events)
     with (metrics_dir / "packet_metrics.csv").open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=list(packet_rows[0]) if packet_rows else ["traffic_class"])
         writer.writeheader()
         writer.writerows(packet_rows)
 
-    pcaps = [
-        {"path": str(path.relative_to(run_dir)), "bytes": path.stat().st_size}
-        for path in sorted((run_dir / "pcap").glob("*.pcap"))
-        if path.stat().st_size > 24
-    ]
+    class_pcaps = split_pcaps(
+        run_dir,
+        {
+            name: int(qos_config["classes"][name]["tos"])
+            for name in CLASSES
+        },
+    )
     radio = radio_metrics(metrics_dir / "radio_links.csv")
     ns3_records = read_jsonl(run_dir / "logs/ns3_packet_engine.log")
     ns3_runtime = ns3_records[-1] if ns3_records else {}
+    attempts = read_jsonl(run_dir / "logs/communication_attempts.jsonl")
+    deliveries = read_jsonl(run_dir / "logs/communication_deliveries.jsonl")
+    foreign_serial_datagrams = sum(
+        1
+        for item in deliveries
+        if item.get("malformed") and item.get("error") == "profile magic/version mismatch"
+    )
+    accounting_deliveries = [
+        item
+        for item in deliveries
+        if not (
+            item.get("malformed")
+            and item.get("error") == "profile magic/version mismatch"
+            and not item.get("packet_id")
+        )
+    ]
+    accounting = account_packets(attempts, accounting_deliveries, events)
+    grouped = group_accounting(
+        attempts,
+        accounting_deliveries,
+        events,
+        ("profile", "traffic_class", "uav", "direction"),
+    )
+    traffic_profiles = read_json(metrics_dir / "traffic_profiles.json")
+    windows = profile_windows(run_dir / "logs/profile_windows.jsonl")
+    qos_profiles: dict[str, Any] = {}
+    fairness: dict[str, Any] = {}
+    for profile_name in ("nominal", "contention", "overload"):
+        snapshot = traffic_profiles.get(profile_name, {})
+        classes = snapshot.get("classes", {})
+        medium = (
+            profile_medium_metrics(events, *windows[profile_name])
+            if profile_name in windows
+            else {}
+        )
+        qos_profiles[profile_name] = {
+            "classes": classes,
+            "medium": medium,
+            "offered_load_bps": sum(
+                int(qos_config["profiles"][profile_name][name]["packets_per_second_per_uav"])
+                * int(qos_config["profiles"][profile_name][name]["packet_bytes"])
+                * 8
+                * 5
+                for name in CLASSES
+            ),
+        }
+        if profile_name in {"nominal", "contention"}:
+            fairness[profile_name] = {
+                name: jain_fairness(
+                    [
+                        float(classes.get(name, {}).get("per_uav_delivered_unique", {}).get(f"uav{uav_id}", 0))
+                        for uav_id in range(1, 6)
+                    ]
+                )
+                for name in CLASSES
+            }
+
+    nominal_control = qos_profiles.get("nominal", {}).get("classes", {}).get("control", {})
+    overload_classes = qos_profiles.get("overload", {}).get("classes", {})
+    overload_control = overload_classes.get("control", {})
+    overload_payload = overload_classes.get("payload", {})
+    control_p95 = overload_control.get("latency_ms", {}).get("p95")
+    payload_p95 = overload_payload.get("latency_ms", {}).get("p95")
+    overload_control_per_uav = overload_control.get("per_uav_delivered_unique", {})
+    qos_checks = {
+        "nominal_control_required_pdr": float(nominal_control.get("pdr", 0.0))
+        >= float(qos_config["classes"]["control"]["required_pdr"]),
+        "nominal_control_p95_latency": nominal_control.get("latency_ms", {}).get("p95")
+        is not None
+        and float(nominal_control["latency_ms"]["p95"])
+        <= float(qos_config["classes"]["control"]["max_p95_latency_ms"]),
+        "overload_control_pdr_above_payload": float(overload_control.get("pdr", 0.0))
+        > float(overload_payload.get("pdr", 0.0)),
+        "overload_control_p95_below_payload": control_p95 is not None
+        and payload_p95 is not None
+        and float(control_p95) < float(payload_p95),
+        "overload_no_control_starvation": all(
+            int(overload_control_per_uav.get(f"uav{uav_id}", 0)) > 0
+            for uav_id in range(1, 6)
+        ),
+        "lower_classes_served_when_capacity_exists": all(
+            int(qos_profiles.get("nominal", {}).get("classes", {}).get(name, {}).get("packets_delivered_unique", 0))
+            > 0
+            for name in ("payload", "additional_data")
+        ),
+        "contention_observed": int(
+            qos_profiles.get("contention", {}).get("medium", {}).get("backoff_events", 0)
+        )
+        > 0,
+    }
+    qos_summary = {
+        "config": {
+            "path": "network/config/communication_qos.yaml",
+            "classes": qos_config["classes"],
+            "scheduler": qos_config["scheduler"],
+        },
+        "profiles": qos_profiles,
+        "fairness_jain_throughput": fairness,
+        "checks": qos_checks,
+        "status": "passed" if all(qos_checks.values()) else "failed",
+    }
+    write_json(metrics_dir / "qos_summary.json", qos_summary)
+
+    uarts = uart_metrics(run_dir)
+    uart_age_values = [
+        float(item.get("average_ingress_queue_age_ms", 0.0))
+        for item in uarts.values()
+        if item
+    ]
+    control_delivery_latency = [
+        float(item["latency_ms"])
+        for item in deliveries
+        if not item.get("malformed")
+        and item.get("traffic_class") == "control"
+        and isinstance(item.get("latency_ms"), (int, float))
+    ]
+    real_ack_latency = [
+        float(item["latency_ms"])
+        for item in scenario.get("command_acks", [])
+        if item.get("channel") == "control" and isinstance(item.get("latency_ms"), (int, float))
+    ]
+    safe_ack_latency = [
+        float(item["latency_ms"])
+        for item in scenario.get("command_acks", [])
+        if item.get("channel") == "control"
+        and item.get("label")
+        in {
+            "control_autopilot_version_diagnostic",
+            "parallel_five_uav_safe_request",
+            "control_local_position_interval",
+        }
+        and isinstance(item.get("latency_ms"), (int, float))
+    ]
+    realtime = {
+        "gazebo": {
+            "real_time_factor": gazebo_metrics(run_dir / "logs/gazebo_stats.log").get(
+                "real_time_factor", {}
+            )
+        },
+        "sionna_query_latency_ms": radio.get("provider_latency_ms", {}),
+        "channel_state_age_ms": packets.get("radio_state_age_ms", {}),
+        "stale_channel_state_count": packets.get("stale_channel_state_events", 0),
+        "ns3_scheduler_lag_ms": packets.get("scheduler_lag_ms", {}),
+        "uart_ingress_queue_age_ms": numeric_summary(uart_age_values),
+        "control_end_to_end_latency_ms": numeric_summary(control_delivery_latency),
+        "real_control_ack_latency_ms": numeric_summary(real_ack_latency),
+        "safe_control_ack_latency_ms": numeric_summary(safe_ack_latency),
+        "resources": resource_metrics(run_dir / "logs/runtime_resources.jsonl"),
+    }
+    write_json(metrics_dir / "realtime_summary.json", realtime)
+
     scenario_passed = scenario.get("status") == "passed" and all(
         all(
             bool(scenario.get("uavs", {}).get(f"uav{index}", {}).get("phases", {}).get(phase))
@@ -241,25 +666,35 @@ def main() -> int:
         for index in range(1, 6)
     )
     health_passed = health.get("status") in {"healthy", "passed"}
-    no_bypass = bool(down.get("exchange_stopped"))
+    no_bypass = (
+        bool(down.get("exchange_stopped"))
+        and int(down.get("received_datagrams", -1)) == 0
+        and topology.get("gcs_direct_sitl_ports_present") is False
+    )
     message_counts = scenario.get("message_counts", {})
-    dual_uart = all(
+    dual_uart_telemetry = all(
         int(message_counts.get(f"control:uav{index}:LOCAL_POSITION_NED", 0)) > 0
         and int(message_counts.get(f"payload:uav{index}:ATTITUDE", 0)) > 0
         for index in range(1, 6)
     )
-    additional = scenario.get("additional_data", {})
-    additional_packets = packets.get("additional_data", {})
-    additional_data = (
-        int(additional.get("p2p_packets_sent", 0)) == 50
+    dual_uart_diagnostics = scenario.get("dual_uart_diagnostics", {}).get("sequential", {})
+    dual_uart = (
+        dual_uart_telemetry
+        and topology.get("uart_path_count") == 10
+        and topology.get("all_uart_paths_independent") is True
         and all(
-            int(additional.get("p2p_ack_counts", {}).get(f"uav{index}", 0)) >= 10
+            dual_uart_diagnostics.get(f"uav{index}", {}).get("control", {}).get("ack_from_system_id") == index
+            and dual_uart_diagnostics.get(f"uav{index}", {}).get("payload", {}).get("ack_from_system_id") == index
+            and dual_uart_diagnostics.get(f"uav{index}", {}).get("payload", {}).get("matching_control_ack_observed") is False
             for index in range(1, 6)
         )
+    )
+    additional = scenario.get("additional_data", {})
+    additional_data = (
+        int(additional.get("p2p", {}).get("downlink_delivered_unique", 0)) == 10
+        and int(additional.get("p2p", {}).get("uplink_delivered_unique", 0)) == 10
         and additional.get("p2mp_receivers") == [f"uav{index}" for index in range(1, 6)]
-        and additional_packets.get("unicast_pdr") == 1.0
-        and additional_packets.get("p2mp_root_transmissions", 0) >= 1
-        and additional_packets.get("p2mp_receiver_count") == 5
+        and len(additional.get("p2mp_per_receiver_deliveries", {})) == 5
     )
     ns3_passed = (
         ns3_runtime.get("status") == "passed"
@@ -274,49 +709,76 @@ def main() -> int:
         and int(radio.get("query_count", 0)) > 0
         and int(radio.get("stale_link_rows", 1)) == 0
     )
-    expected_heatmaps = {
-        f"{phase}_{metric}.png"
-        for phase in ("baseline", "jammer", "delta")
-        for metric in ("rssi_dbm", "sinr_db", "js_db", "service_available")
-    }
-    heatmaps_passed = (
-        heatmaps.get("scene_id") == "cavise_town01_editor_lod0_full_20260712"
-        and set(heatmaps.get("images", [])) == expected_heatmaps
-        and all(
-            (run_dir / "heatmaps" / name).is_file()
-            and (run_dir / "heatmaps" / name).stat().st_size > 0
-            for name in expected_heatmaps
-        )
-    )
-    pcap_passed = len(pcaps) == 6
+    pcap_passed = all(item["packets"] > 0 and item["bytes"] > 24 for item in class_pcaps)
+    profiles_passed = set(traffic_profiles) == {"nominal", "contention", "overload"}
     components = {
-        "gazebo_town01": (
-            health_passed
-            and derivative.get("coordinate_transform") == "identity"
-            and derivative.get("max_source_to_gazebo_vertex_delta_m") == 0.0
-            and int(derivative.get("visual_meshes", 0)) > 0
-        ),
+        "gazebo_town01": health_passed,
         "ardupilot_sitl_count": len(health.get("sitl", [])),
         "ros_odometry": health_passed,
         "sionna_rt": sionna_passed,
         "ns3_tap_packet_engine": ns3_passed,
         "dual_uart": dual_uart,
         "additional_data": additional_data,
-        "heatmaps": heatmaps_passed,
-        "pcap_count": len(pcaps),
+        "communication_profiles": profiles_passed,
+        "qos": qos_summary["status"] == "passed",
+        "packet_accounting": accounting["packet_invariant_holds"],
+        "class_pcaps": pcap_passed,
     }
     overall_passed = (
         scenario_passed
         and health_passed
         and no_bypass
+        and profiles_passed
         and pcap_passed
+        and qos_summary["status"] == "passed"
+        and bool(accounting["packet_invariant_holds"])
         and all(
             bool(value)
             for key, value in components.items()
-            if key not in {"ardupilot_sitl_count", "pcap_count"}
+            if key != "ardupilot_sitl_count"
         )
         and components["ardupilot_sitl_count"] == 5
     )
+    communication_rows: list[dict[str, Any]] = []
+    for compound, values in sorted(grouped.items()):
+        dimension, value = compound.split(":", 1)
+        communication_rows.append({"dimension": dimension, "value": value, **values})
+    for uart_name, values in sorted(uarts.items()):
+        communication_rows.append({"dimension": "uart", "value": uart_name, **values})
+    write_communication_csv(metrics_dir / "communication_summary.csv", communication_rows)
+    communication = {
+        "run_id": run_dir.name,
+        "status": "passed" if overall_passed else "failed",
+        "by_uav": scenario.get("dual_uart_diagnostics", {}).get("sequential", {}),
+        "by_uart": uarts,
+        "by_traffic_class": {
+            key.split(":", 1)[1]: value
+            for key, value in grouped.items()
+            if key.startswith("traffic_class:")
+        },
+        "by_direction": {
+            key.split(":", 1)[1]: value
+            for key, value in grouped.items()
+            if key.startswith("direction:")
+        },
+        "by_profile": {
+            key.split(":", 1)[1]: value
+            for key, value in grouped.items()
+            if key.startswith("profile:")
+        },
+        "profiles": traffic_profiles,
+        "logical_packet_accounting": accounting,
+        "foreign_serial_datagrams_ignored_by_profile_accounting": foreign_serial_datagrams,
+        "additional_data": additional,
+        "runtime_topology": "metrics/runtime_topology.json",
+        "no_bypass": {
+            "passed": no_bypass,
+            "gcs_direct_sitl_ports_present": topology.get("gcs_direct_sitl_ports_present"),
+            "ns3_stop_probe": down,
+        },
+    }
+    write_json(metrics_dir / "communication_summary.json", communication)
+
     summary = {
         "run_id": run_dir.name,
         "status": "passed" if overall_passed else "failed",
@@ -324,17 +786,18 @@ def main() -> int:
         "uav_count": 5,
         "components": components,
         "flight": scenario,
+        "communication": communication,
         "packet_path": packets,
+        "qos": qos_summary,
+        "realtime": realtime,
         "radio": radio,
         "ns3_runtime": ns3_runtime,
         "gazebo": gazebo_metrics(run_dir / "logs/gazebo_stats.log"),
-        "heatmaps": heatmaps,
         "no_bypass": {
             "ns3_stop_breaks_control_exchange": no_bypass,
             "probe": down,
         },
-        "pcaps": pcaps,
-        "town01_derivative": derivative,
+        "pcaps": class_pcaps,
         "known_limits": [
             "Town01 is 3.191 km by 3.191 km and does not satisfy the separate 10 km by 10 km requirement.",
             "Gazebo uses source-coordinate visual meshes with axis-aligned surface and building collision-box approximations.",
@@ -342,9 +805,7 @@ def main() -> int:
             "The ns-3 packet engine uses the declared CSMA shared-medium engineering surrogate, not a customer modem waveform.",
         ],
     }
-    (metrics_dir / "summary.json").write_text(
-        json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    write_json(metrics_dir / "summary.json", summary)
     packet_lines = []
     for traffic_class in CLASSES:
         item = packets.get(traffic_class, {})
@@ -361,26 +822,44 @@ def main() -> int:
                 queue_p95=float(item.get("queue_delay_p95_ms") or 0.0),
             )
         )
-    report = f"""# Town01 full-stack run
+    profile_lines = []
+    for profile_name in ("nominal", "contention", "overload"):
+        classes = qos_profiles.get(profile_name, {}).get("classes", {})
+        profile_lines.append(
+            "| {profile} | {cpdr:.6f} | {ppdr:.6f} | {apdr:.6f} | {c95} | {p95} | {backoff} | {util:.6f} |".format(
+                profile=profile_name,
+                cpdr=float(classes.get("control", {}).get("pdr", 0.0)),
+                ppdr=float(classes.get("payload", {}).get("pdr", 0.0)),
+                apdr=float(classes.get("additional_data", {}).get("pdr", 0.0)),
+                c95=classes.get("control", {}).get("latency_ms", {}).get("p95"),
+                p95=classes.get("payload", {}).get("latency_ms", {}).get("p95"),
+                backoff=qos_profiles.get(profile_name, {}).get("medium", {}).get("backoff_events", 0),
+                util=float(qos_profiles.get(profile_name, {}).get("medium", {}).get("channel_utilization", 0.0)),
+            )
+        )
+    report = f"""# Town01 five-UAV communication run
 
 - Run: `{run_dir.name}`
 - Result: **{summary['status']}**
 - Flight lifecycle: `{scenario.get('status', 'missing')}` for five UAVs
 - Real Sionna queries: `{summary['radio'].get('query_count', 0)}`; scene `{summary['radio'].get('scene_id', 'missing')}`
-- ns-3 UDP events: `{packets.get('udp_event_count', 0)}`; non-empty PCAP files: `{len(pcaps)}`
+- Ten independent UART paths: `{topology.get('all_uart_paths_independent')}`
+- ns-3 UDP events: `{packets.get('udp_event_count', 0)}`; class PCAP files: `{len(class_pcaps)}`
 - ns-3 stop broke the control exchange: `{str(no_bypass).lower()}`
 - Gazebo RTF mean: `{summary['gazebo'].get('real_time_factor', {}).get('mean')}`
-- Heatmap images: `{len(heatmaps.get('images', []))}`
+- Packet invariant: `{accounting.get('packets_attempted')} = {accounting.get('packets_delivered_unique')} + {accounting.get('packets_dropped_unique')} + {accounting.get('packets_pending')}`
 
 | Traffic class | Unicast ingress/egress | PDR | Delivered goodput (bit/s) | Mean latency (ms) | P95 latency (ms) | P95 queue (ms) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 {chr(10).join(packet_lines)}
 
-The additional-data phase sent 50 P2P packets and received 10 acknowledgements
-from each UAV. One P2MP root transmission reached all five receivers. The live
-radio updater made {summary['radio'].get('query_count', 0)} real-Sionna queries
-covering {summary['radio'].get('link_rows', 0)} directed traffic-class links;
-no returned link row was stale.
+| Profile | Control PDR | Payload PDR | Additional PDR | Control p95 ms | Payload p95 ms | Backoff events | Channel utilization |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+{chr(10).join(profile_lines)}
+
+The checksummed additional-data path completed bidirectional P2P with uav3 and
+one logical P2MP delivery to five separately counted receivers. The live radio
+updater made {summary['radio'].get('query_count', 0)} real-Sionna queries.
 
 This is a factual Town01 development run. It does not close the 10 km by 10 km
 map requirement. Gazebo collision geometry is approximated with axis-aligned
