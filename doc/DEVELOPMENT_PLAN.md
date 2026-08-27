@@ -44,6 +44,8 @@ P3A ends after inventory, metadata inspection, selection, ROI, and external
 asset preparation. P3B creates the Gazebo derivative and alignment test only
 after P3A has a metadata-backed selection. The checked-in synthetic
 `m4_canonical` fixture is legacy smoke and is excluded from this path.
+Town01 may be used for that development path, but its measured 3.191 km square
+footprint cannot close the 10 km by 10 km product criterion.
 
 ## P4 Interference and medium access
 

@@ -98,7 +98,9 @@ components.
 - ns-3 currently offers a CSMA shared-medium engineering surrogate.
 - The TCP JSON-lines Sionna provider is the current in-repository channel
   service path; a separate pybind path remains diagnostic.
-- The CAVISE inventory and external-asset workflow exist, but no local bundle
-  was available to select a measured 10 km by 10 km ROI.
+- Town01 is inspected, checksum-verified, externally prepared, and selected as
+  the active development map with its measured 3.191 km by 3.191 km footprint.
+- Town01 exercises the canonical asset path but does not satisfy the separate
+  10 km by 10 km or up-to-200 m product requirements.
 - No Gazebo derivative or Gazebo/Sionna alignment test exists yet.
 - Live physical HitL serial/Ethernet gateways are not yet complete.

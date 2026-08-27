@@ -27,19 +27,23 @@ transitions that are absent from the selected CAVISE town.
 ## P3A selection state
 
 `network/config/cavise_map_catalog.yaml` records the official filenames and
-local inventory state without user-specific absolute paths. No official ZIP or
-extracted bundle was available during the 2026-08-26 inventory, so P3A has not
-selected a town or a 10 by 10 km ROI. Archive size is not treated as evidence
-of retained map bounds.
+local inventory state without user-specific absolute paths. On 2026-08-27,
+Town01 was downloaded from its canonical Drive file ID, inspected, verified
+against all 310 entries in `SHA256SUMS`, and prepared outside Git.
 
-Town01 is unsuitable because the supplied, previously confirmed retained
-bounds are only approximately 3.2 by 3.2 km. Town13 is only the next likely
-candidate to inspect. It cannot be selected until its compact metadata proves
-the required bounds, terrain, buildings, artifacts, and coordinate transform.
+Town01 is the explicit user-selected development map. Its ROI is the complete
+retained footprint:
 
-The exact unblock action is to place
-`CAVISE_SIONNA_Town13_EditorLOD0_Full_Official_20260731.zip` in the directory
-named by `CAVISE_MAPS_DIR`; it is not downloaded automatically.
+- X: -1577.708829814624 to 1613.447172459159 m;
+- Y: -1474.8671726619064 to 1716.2871790967324 m;
+- Z: -273.01936977670994 to 220.3868920750865 m;
+- 401 buildings, 3 terrain objects, 719 road objects, and 8774 vegetation
+  objects.
+
+This footprint is only 3191.156 by 3191.154 m and its global Z span is
+493.406 m. Town01 therefore does not satisfy the customer 10 by 10 km and
+up-to-200 m requirements. It is selected to implement and test the real asset
+path without synthetic padding, tiling copies, or false compliance claims.
 
 Run the bounded metadata path first:
 
@@ -49,9 +53,9 @@ scripts/product/prepare_cavise_map.sh --metadata-only
 ```
 
 The inspector reads the ZIP central directory and only allow-listed compact
-metadata. It does not open PLY or Blender payloads. After measurable metadata
-supports a selection, add `network/config/customer_map_roi.yaml` and prepare
-only that bundle with an explicit extraction acknowledgement:
+metadata. It does not open PLY or Blender payloads. The measured Town01
+selection is stored in `network/config/customer_map_roi.yaml`. Prepare only
+that bundle with an explicit extraction acknowledgement:
 
 ```bash
 scripts/product/prepare_cavise_map.sh --prepare-selected --allow-large-extract
@@ -63,10 +67,9 @@ normal metadata or prepare runs.
 ## Coordinate contract
 
 The selected bundle's `map/transforms.xml` is the transformation authority.
-P3A must record the source, Sionna, and Gazebo frames, the SUMO offset when one
-is defined, and whether static vertex coordinates are baked. Until those
-values are read, no identity transform, axis swap, origin, or offset is
-assumed.
+Town01 static vertices already include SUMO offset `[0.06, 328.61]`. Its
+dynamic SUMO-to-Sionna remap, rotation, and translation are identity, and the
+metadata declares `static_vertices_baked: true`.
 
 Sionna retains the bundle frame. The Gazebo derivative must use the same frame
 and numerical placements. Any runtime pose adapter must apply the recorded
@@ -86,9 +89,9 @@ product path.
 
 ## Next task: P3B
 
-After a bundle and ROI are selected from measured metadata, P3B will derive a
-tiled or selectively loaded Gazebo visual mesh and simplified collision mesh
-from the selected Blender/CAVISE geometry. It will then add a numeric alignment
-test that samples common landmarks in the original Sionna scene and the Gazebo
-derivative. Heavy Sionna path tracing and full scene conversion remain outside
-P3A.
+P3B will derive a tiled or selectively loaded Town01 Gazebo visual mesh and
+simplified collision mesh from the selected Blender/CAVISE geometry. It will
+then add a numeric alignment test that samples common landmarks in the
+original Sionna scene and the Gazebo derivative. This exercises the real asset
+path but cannot close the separate 10 by 10 km product requirement. Heavy
+Sionna path tracing remains outside P3A.

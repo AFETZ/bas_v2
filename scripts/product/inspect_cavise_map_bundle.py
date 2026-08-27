@@ -248,19 +248,25 @@ def bounds_from_text(text: str) -> dict[str, list[float]] | None:
     return axes if "x" in axes and "y" in axes else None
 
 
-def first_version(text: str, product: str) -> str | None:
-    match = re.search(
+def all_versions(text: str, product: str) -> list[str]:
+    matches = re.finditer(
         rf"(?im)\b{product}\b(?:\s+(?:RT|source|version))*\s*[:=v-]*\s*"
         r"([0-9]+(?:\.[0-9]+){1,3}(?:[-+._a-z0-9]*)?)",
         text,
     )
-    return match.group(1) if match else None
+    return list(dict.fromkeys(match.group(1).rstrip(".,;:") for match in matches))
+
+
+def first_version(text: str, product: str) -> str | None:
+    versions = all_versions(text, product)
+    return versions[0] if versions else None
 
 
 def category_counts(value: Any) -> dict[str, int]:
     raw = first_field(
         value,
         "retained_category_counts",
+        "placements_by_category",
         "category_counts",
         "categories_counts",
         "object_categories",
@@ -554,8 +560,7 @@ def inspect_archive(archive: Path) -> dict[str, Any]:
             scene, "sionna_versions", "sionna_version", "sionna_rt_version"
         )
         if sionna_versions is None:
-            found_sionna = first_version(all_text, "Sionna")
-            sionna_versions = [found_sionna] if found_sionna else []
+            sionna_versions = all_versions(all_text, "Sionna")
 
         full_editor_world = boolean_value(first_field(scene, "full_editor_world"))
         if full_editor_world is None:
@@ -585,13 +590,23 @@ def inspect_archive(archive: Path) -> dict[str, Any]:
         source_objects = count_from_metadata(
             scene,
             all_text,
-            ("source_objects", "source_object_count", "objects_source"),
+            (
+                "source_objects",
+                "source_object_count",
+                "source_mesh_objects",
+                "objects_source",
+            ),
             "source[ _-]+objects?",
         )
         retained_objects = count_from_metadata(
             scene,
             all_text,
-            ("retained_objects", "retained_object_count", "objects_retained"),
+            (
+                "retained_objects",
+                "retained_object_count",
+                "kept_mesh_objects",
+                "objects_retained",
+            ),
             "retained[ _-]+objects?",
         )
         batch_count = count_from_metadata(
