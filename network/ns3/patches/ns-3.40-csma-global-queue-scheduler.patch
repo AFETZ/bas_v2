@@ -1,0 +1,307 @@
+--- a/src/csma/model/csma-channel.h
++++ b/src/csma/model/csma-channel.h
+@@ -20,6 +20,7 @@
+ #ifndef CSMA_CHANNEL_H
+ #define CSMA_CHANNEL_H
+ 
++#include "ns3/callback.h"
+ #include "ns3/channel.h"
+ #include "ns3/data-rate.h"
+ #include "ns3/nstime.h"
+@@ -296,6 +297,15 @@
+      */
+     Time GetDelay();
+ 
++    /**
++     * Install an optional callback invoked immediately after the shared
++     * medium returns to IDLE. The default null callback preserves the
++     * standard per-device CSMA queue behavior.
++     *
++     * \param callback callback to invoke when propagation completes
++     */
++    void SetIdleCallback(Callback<void> callback);
++
+   private:
+     /**
+      * The assigned data rate of the channel
+@@ -338,6 +348,11 @@
+      * Current state of the channel
+      */
+     WireState m_state;
++
++    /**
++     * Optional external shared-medium scheduler wakeup.
++     */
++    Callback<void> m_idleCallback;
+ };
+ 
+ } // namespace ns3
+--- a/src/csma/model/csma-channel.cc
++++ b/src/csma/model/csma-channel.cc
+@@ -252,6 +252,19 @@
+ 
+     NS_ASSERT(m_state == PROPAGATING);
+     m_state = IDLE;
++    if (!m_idleCallback.IsNull())
++    {
++        m_idleCallback();
++    }
++}
++
++void
++CsmaChannel::SetIdleCallback(Callback<void> callback)
++{
++    NS_LOG_FUNCTION(this);
++    NS_ASSERT_MSG(m_state == IDLE,
++                  "CsmaChannel::SetIdleCallback(): scheduler must be installed while IDLE");
++    m_idleCallback = callback;
+ }
+ 
+ uint32_t
+--- a/src/csma/model/csma-net-device.h
++++ b/src/csma/model/csma-net-device.h
+@@ -108,14 +108,14 @@
+      * \param slotTime Length of a packet slot (or average packet time)
+      * \param minSlots Minimum number of slots to wait
+      * \param maxSlots Maximum number of slots to wait
+-     * \param maxRetries Maximum number of retries before packet is discard
+-     * \param ceiling Cap on the exponential function when calculating max slots
++     * \param ceiling Cap on the exponential function when calculating max slots
++     * \param maxRetries Maximum number of retries before packet is discarded
+      */
+     void SetBackoffParams(Time slotTime,
+                           uint32_t minSlots,
+                           uint32_t maxSlots,
+-                          uint32_t maxRetries,
+-                          uint32_t ceiling);
++                          uint32_t ceiling,
++                          uint32_t maxRetries);
+ 
+     /**
+      * Attach the device to a channel.
+@@ -150,6 +150,39 @@
+     Ptr<Queue<Packet>> GetQueue() const;
+ 
+     /**
++     * Install an optional external queue scheduler callback. With a null
++     * callback (the default), this device retains the standard ns-3 behavior
++     * and dequeues locally. With a callback installed, queue-ready
++     * transitions only notify the external scheduler.
++     *
++     * \param callback callback to invoke when this device can start a packet
++     */
++    void SetQueueReadyCallback(Callback<void> callback);
++
++    /**
++     * Return whether this device can accept one externally selected packet.
++     *
++     * \return true exactly when the transmitter is READY and send-enabled
++     */
++    bool IsTransmitReady() const;
++
++    /**
++     * Dequeue and start exactly one packet selected by the attached queue.
++     * A null dequeue is handled as a stale/expired external grant and does not
++     * fall back to another packet.
++     *
++     * \return true if a packet entered the transmit state machine
++     */
++    bool StartOneQueuedPacket();
++
++    /**
++     * Request that the current packet be aborted if the next transmit attempt
++     * also observes a busy medium. This leaves the normal TransmitAbort state
++     * transition responsible for returning the device to READY.
++     */
++    void RequestCurrentPacketAbortOnNextBusy();
++
++    /**
+      * Attach a receive ErrorModel to the CsmaNetDevice.
+      *
+      * The CsmaNetDevice may optionally include an ErrorModel in
+@@ -453,6 +486,11 @@
+     void NotifyLinkUp();
+ 
+     /**
++     * Notify the optional external queue scheduler.
++     */
++    void NotifyQueueReady();
++
++    /**
+      * Device ID returned by the attached functions. It is used by the
+      * mp-channel to identify each net device to make sure that only
+      * active net devices are writing to the channel
+@@ -538,6 +576,16 @@
+     Ptr<Queue<Packet>> m_queue;
+ 
+     /**
++     * Optional external shared-medium queue scheduler wakeup.
++     */
++    Callback<void> m_queueReadyCallback;
++
++    /**
++     * Lower-class expiry/retry guard consumed at the next busy check.
++     */
++    bool m_abortCurrentPacketOnNextBusy{false};
++
++    /**
+      * Error model for receive packet events.  When active this model will be
+      * used to model transmission errors by marking some of the packets
+      * received as corrupt.
+--- a/src/csma/model/csma-net-device.cc
++++ b/src/csma/model/csma-net-device.cc
+@@ -219,6 +219,7 @@
+     m_channel = nullptr;
+     m_node = nullptr;
+     m_queue = nullptr;
++    m_queueReadyCallback = Callback<void>();
+     NetDevice::DoDispose();
+ }
+ 
+@@ -462,6 +463,7 @@
+     if (!IsSendEnabled())
+     {
+         m_phyTxDropTrace(m_currentPkt);
++        m_abortCurrentPacketOnNextBusy = false;
+         m_currentPkt = nullptr;
+         return;
+     }
+@@ -487,8 +489,9 @@
+         //
+         m_txMachineState = BACKOFF;
+ 
+-        if (m_backoff.MaxRetriesReached())
++        if (m_abortCurrentPacketOnNextBusy || m_backoff.MaxRetriesReached())
+         {
++            m_abortCurrentPacketOnNextBusy = false;
+             //
+             // Too many retries, abort transmission of packet
+             //
+@@ -511,6 +514,7 @@
+         //
+         // The channel is free, transmit the packet
+         //
++        m_abortCurrentPacketOnNextBusy = false;
+         m_phyTxBeginTrace(m_currentPkt);
+         if (!m_channel->TransmitStart(m_currentPkt, m_deviceId))
+         {
+@@ -518,6 +522,7 @@
+             m_phyTxDropTrace(m_currentPkt);
+             m_currentPkt = nullptr;
+             m_txMachineState = READY;
++            NotifyQueueReady();
+         }
+         else
+         {
+@@ -559,6 +564,7 @@
+     // transmit state machine.
+     //
+     m_backoff.ResetBackoffTime();
++    m_abortCurrentPacketOnNextBusy = false;
+     m_txMachineState = READY;
+ 
+     //
+@@ -566,6 +572,12 @@
+     // get that out.  If the queue is empty we just wait until someone puts one
+     // in.
+     //
++    if (!m_queueReadyCallback.IsNull())
++    {
++        NotifyQueueReady();
++        return;
++    }
++
+     if (m_queue->IsEmpty())
+     {
+         return;
+@@ -638,6 +650,12 @@
+     //
+     // Get the next packet from the queue for transmitting
+     //
++    if (!m_queueReadyCallback.IsNull())
++    {
++        NotifyQueueReady();
++        return;
++    }
++
+     if (m_queue->IsEmpty())
+     {
+         return;
+@@ -688,6 +706,64 @@
+ }
+ 
+ void
++CsmaNetDevice::SetQueueReadyCallback(Callback<void> callback)
++{
++    NS_LOG_FUNCTION(this);
++    NS_ASSERT_MSG(m_txMachineState == READY && !m_currentPkt,
++                  "CsmaNetDevice::SetQueueReadyCallback(): scheduler must be installed while READY");
++    m_queueReadyCallback = callback;
++}
++
++bool
++CsmaNetDevice::IsTransmitReady() const
++{
++    return IsSendEnabled() && m_txMachineState == READY && !m_currentPkt;
++}
++
++bool
++CsmaNetDevice::StartOneQueuedPacket()
++{
++    NS_LOG_FUNCTION(this);
++    if (!IsTransmitReady() || !m_queue || m_queue->IsEmpty())
++    {
++        return false;
++    }
++
++    Ptr<Packet> packet = m_queue->Dequeue();
++    if (!packet)
++    {
++        // An external exact-packet grant may have expired or been invalidated.
++        // Never substitute the local queue head: the shared scheduler will
++        // issue a fresh grant.
++        return false;
++    }
++    m_currentPkt = packet;
++    m_promiscSnifferTrace(m_currentPkt);
++    m_snifferTrace(m_currentPkt);
++    TransmitStart();
++    return m_currentPkt != nullptr;
++}
++
++void
++CsmaNetDevice::RequestCurrentPacketAbortOnNextBusy()
++{
++    NS_LOG_FUNCTION(this);
++    if (m_currentPkt && m_txMachineState == BACKOFF)
++    {
++        m_abortCurrentPacketOnNextBusy = true;
++    }
++}
++
++void
++CsmaNetDevice::NotifyQueueReady()
++{
++    if (!m_queueReadyCallback.IsNull())
++    {
++        m_queueReadyCallback();
++    }
++}
++
++void
+ CsmaNetDevice::SetReceiveErrorModel(Ptr<ErrorModel> em)
+ {
+     NS_LOG_FUNCTION(em);
+@@ -1003,6 +1079,12 @@
+     //
+     if (m_txMachineState == READY)
+     {
++        if (!m_queueReadyCallback.IsNull())
++        {
++            NotifyQueueReady();
++            return true;
++        }
++
+         if (!m_queue->IsEmpty())
+         {
+             Ptr<Packet> packet = m_queue->Dequeue();

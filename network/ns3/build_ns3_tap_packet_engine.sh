@@ -8,6 +8,9 @@ PACKET_TARGET="$NS3_DIR/scratch/ams-tap-packet-engine.cc"
 VERTICAL_SOURCE="$ROOT_DIR/network/ns3/scratch/ams-tap-vertical-slice.cc"
 VERTICAL_TARGET="$NS3_DIR/scratch/ams-tap-vertical-slice.cc"
 RECEIPT_TOOL="$ROOT_DIR/network/ns3/ns3_build_receipt.py"
+CORE_PATCH="$ROOT_DIR/network/ns3/patches/ns-3.40-csma-global-queue-scheduler.patch"
+PATCHED_CORE_TREE_FILES=3764
+PATCHED_CORE_TREE_SHA256="f2a0807e014c69c974f54b80c60cf658f5eb31d4a7325a2f5b7a07c350efc558"
 # This exact canonical union is shared with the locked M2 build so both
 # scratch executables and their receipts coexist in one pinned ns-3 tree.
 # Module availability does not authorize this engine to instantiate ns-3
@@ -28,10 +31,23 @@ NS3_DIR="$NS3_DIR" "$ROOT_DIR/network/ns3/setup_ns3_core.sh"
 test -x "$NS3_DIR/ns3"
 test -f "$PACKET_SOURCE"
 test -f "$VERTICAL_SOURCE"
+test -f "$CORE_PATCH"
 
 NS3_VERSION="$(tr -d '[:space:]' < "$NS3_DIR/VERSION")"
 if [[ "$NS3_VERSION" != "3.40" ]]; then
   printf 'FAIL ns-3 VERSION must be exactly 3.40, observed: %s\n' "$NS3_VERSION" >&2
+  exit 2
+fi
+
+# The packet engine needs one opt-in extension to the stock CSMA state
+# machine. Apply the tracked patch exactly once; reject any base tree which is
+# neither pristine 3.40 nor byte-identical to the expected patched state.
+if patch --batch --forward --dry-run -p1 -d "$NS3_DIR" < "$CORE_PATCH" >/dev/null 2>&1; then
+  patch --batch --forward -p1 -d "$NS3_DIR" < "$CORE_PATCH"
+elif patch --batch --reverse --dry-run -p1 -d "$NS3_DIR" < "$CORE_PATCH" >/dev/null 2>&1; then
+  : # Already applied.
+else
+  printf 'FAIL ns-3 CSMA scheduler patch does not match this source tree\n' >&2
   exit 2
 fi
 
@@ -70,13 +86,17 @@ VERTICAL_RECEIPT="$(python3 "$RECEIPT_TOOL" create \
   --project-source "$VERTICAL_SOURCE" \
   --copied-source "$VERTICAL_TARGET" \
   --executable "$VERTICAL_BINARY" \
-  --required-modules "$REQUIRED_MODULES")"
+  --required-modules "$REQUIRED_MODULES" \
+  --expected-core-tree-files "$PATCHED_CORE_TREE_FILES" \
+  --expected-core-tree-sha256 "$PATCHED_CORE_TREE_SHA256")"
 PACKET_RECEIPT="$(python3 "$RECEIPT_TOOL" create \
   --ns3-dir "$NS3_DIR" \
   --program ams-tap-packet-engine \
   --project-source "$PACKET_SOURCE" \
   --copied-source "$PACKET_TARGET" \
   --executable "$BINARY" \
-  --required-modules "$REQUIRED_MODULES")"
+  --required-modules "$REQUIRED_MODULES" \
+  --expected-core-tree-files "$PATCHED_CORE_TREE_FILES" \
+  --expected-core-tree-sha256 "$PATCHED_CORE_TREE_SHA256")"
 printf 'Built exact ns-%s shared TapBridge targets; vertical receipt: %s; packet receipt: %s\n' \
   "$NS3_VERSION" "$VERTICAL_RECEIPT" "$PACKET_RECEIPT"

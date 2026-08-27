@@ -447,6 +447,7 @@ setsid env \
   DURATION_MS=600000 \
   RADIO_FILE="$RADIO" \
   QOS_FILE="$QOS" \
+  ENGINE_PROFILE=gated \
   SIONNA_IPC_ENABLED=1 \
   SIONNA_STATE_FILE="$SIONNA_STATES" \
   SIONNA_MAX_UPDATES_PER_POLL=128 \
@@ -501,6 +502,11 @@ for _ in {1..100}; do
   kill -0 "$NS3_PID" 2>/dev/null || break
   sleep 0.1
 done
+if kill -0 "$NS3_PID" 2>/dev/null; then
+  printf 'ns-3 packet engine did not stop within 10 seconds; refusing an unflushed summary.\n' >&2
+  exit 1
+fi
+wait "$NS3_PID"
 
 ip netns exec ams-gcs python3 "$ROOT_DIR/network/scripts/communication_vertical.py" down-probe \
   --bind 10.71.0.10:14600 \

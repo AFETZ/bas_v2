@@ -1,0 +1,1540 @@
+{
+  "after": {
+    "acceptance": {
+      "control_p95_latency_at_most_250_ms": true,
+      "control_pdr_at_least_0_99": true,
+      "gazebo_mean_rtf_at_least_0_95": true,
+      "lower_priority_delivered": true,
+      "no_bypass": true,
+      "no_uav_starvation": true,
+      "ns3_cpu_samples_present": true,
+      "pending_zero": true,
+      "queue_delay_samples_present": true,
+      "scheduler_lag_p95_at_most_50_ms": true,
+      "sionna_coupling_enabled": true
+    },
+    "acceptance_thresholds": {
+      "control_max_p95_latency_ms": 250.0,
+      "control_required_pdr": 0.99,
+      "cpu_sample_distribution_required": true,
+      "gazebo_min_mean_rtf": 0.95,
+      "queue_delay_sample_distribution_required_for_classes": [
+        "control",
+        "payload",
+        "additional_data"
+      ],
+      "scheduler_lag_max_p95_ms": 50.0,
+      "source": "/home/bas/bas_v2/network/config/communication_qos.yaml"
+    },
+    "admitted": {
+      "application_bytes": 9624600,
+      "available": true,
+      "bits_per_second": 12832800.0,
+      "bytes": 9624600,
+      "full_matched_lifecycle": {
+        "application_bytes": 9624600,
+        "bits_per_second": 12832800.0,
+        "bytes": 9624600,
+        "offered_window_normalized_bits_per_second": 12832800.0,
+        "offered_window_normalized_packets_per_second": 1227.5,
+        "packets": 7365,
+        "packets_per_second": 1227.5,
+        "profile_wall_interval_bits_per_second": 9058447.05882353,
+        "profile_wall_interval_packets_per_second": 866.4705882352941
+      },
+      "measurement": "explicit_ns3_admit_event",
+      "offered_window_normalized_bits_per_second": 12832800.0,
+      "offered_window_normalized_packets_per_second": 1227.5,
+      "packets": 7365,
+      "packets_per_second": 1227.5,
+      "profile_wall_interval_bits_per_second": 9058447.05882353,
+      "profile_wall_interval_packets_per_second": 866.4705882352941,
+      "shaping_policy": "enabled"
+    },
+    "application_delivered": {
+      "application_bytes": 9613400,
+      "bits_per_second": 12817866.666666666,
+      "bytes": 9613400,
+      "measurement": "unique application deliveries; rates expose both time bases",
+      "offered_window_normalized_bits_per_second": 12817866.666666666,
+      "offered_window_normalized_packets_per_second": 1226.1666666666667,
+      "packets": 7357,
+      "packets_per_second": 1226.1666666666667,
+      "profile_wall_interval_bits_per_second": 9047905.88235294,
+      "profile_wall_interval_packets_per_second": 865.5294117647059
+    },
+    "channel_wire": {
+      "bounded_window_bytes": 9951822,
+      "full_matched_lifecycle_bytes": 9951822,
+      "measurement": "matched channel events inside the bounded profile wall interval",
+      "offered_window_normalized_bits_per_second": 13269096.0,
+      "profile_wall_interval_bits_per_second": 9366420.705882354
+    },
+    "channel_wire_bits_per_second": 13269096.0,
+    "classes": {
+      "additional_data": {
+        "admitted": {
+          "application_bytes": 4746000,
+          "available": true,
+          "bits_per_second": 6328000.0,
+          "bytes": 4746000,
+          "offered_window_normalized_bits_per_second": 6328000.0,
+          "offered_window_normalized_packets_per_second": 565.0,
+          "packets": 3390,
+          "packets_per_second": 565.0,
+          "profile_wall_interval_bits_per_second": 4466823.529411765,
+          "profile_wall_interval_packets_per_second": 398.8235294117647
+        },
+        "admitted_packets": 3390,
+        "delivered": {
+          "application_bytes": 4737600,
+          "bits_per_second": 6316800.0,
+          "bytes": 4737600,
+          "offered_window_normalized_bits_per_second": 6316800.0,
+          "offered_window_normalized_packets_per_second": 564.0,
+          "packets": 3384,
+          "packets_per_second": 564.0,
+          "profile_wall_interval_bits_per_second": 4458917.647058823,
+          "profile_wall_interval_packets_per_second": 398.11764705882354
+        },
+        "delivered_packets": 3384,
+        "delivered_profile_wall_interval_bps": 4458917.647058823,
+        "delivered_throughput_bps": 6316800.0,
+        "dropped_at_ingress": 5610,
+        "dropped_in_medium": 6,
+        "expired_at_drain": 0,
+        "jain_fairness_admitted": 1.0,
+        "jain_fairness_delivered": 0.9999987774495327,
+        "latency_ms": {
+          "count": 3384,
+          "max": 20.833872,
+          "mean": 2.6364847497044916,
+          "p50": 2.4809935,
+          "p95": 5.485097049999999,
+          "p99": 9.579351160000003
+        },
+        "no_uav_starvation": true,
+        "offered": {
+          "application_bytes": 12600000,
+          "bits_per_second": 16800000.0,
+          "bytes": 12600000,
+          "offered_window_normalized_bits_per_second": 16800000.0,
+          "offered_window_normalized_packets_per_second": 1500.0,
+          "packets": 9000,
+          "packets_per_second": 1500.0,
+          "profile_wall_interval_bits_per_second": 11858823.529411765,
+          "profile_wall_interval_packets_per_second": 1058.8235294117646
+        },
+        "offered_packets": 9000,
+        "pdr_from_offered": 0.376,
+        "pending": 0,
+        "per_uav_admitted_packets": {
+          "uav1": 678,
+          "uav2": 678,
+          "uav3": 678,
+          "uav4": 678,
+          "uav5": 678
+        },
+        "per_uav_delivered_packets": {
+          "uav1": 677,
+          "uav2": 678,
+          "uav3": 677,
+          "uav4": 676,
+          "uav5": 676
+        },
+        "per_uav_observed_ingress_packets": {
+          "uav1": 0,
+          "uav2": 0,
+          "uav3": 0,
+          "uav4": 0,
+          "uav5": 0
+        },
+        "queue_delay_ms": {
+          "count": 3384,
+          "max": 20.615823,
+          "mean": 1.9968969397163119,
+          "p50": 1.853526,
+          "p95": 4.8048407,
+          "p99": 9.21799608
+        },
+        "queue_delay_ms_full_matched_lifecycle": {
+          "count": 3384,
+          "max": 20.615823,
+          "mean": 1.9968969397163119,
+          "p50": 1.853526,
+          "p95": 4.8048407,
+          "p99": 9.21799608
+        },
+        "terminal_status_counts": {
+          "delivered": 3384,
+          "dropped_at_ingress": 5610,
+          "dropped_in_medium": 6
+        }
+      },
+      "control": {
+        "admitted": {
+          "application_bytes": 153600,
+          "available": true,
+          "bits_per_second": 204800.0,
+          "bytes": 153600,
+          "offered_window_normalized_bits_per_second": 204800.0,
+          "offered_window_normalized_packets_per_second": 100.0,
+          "packets": 600,
+          "packets_per_second": 100.0,
+          "profile_wall_interval_bits_per_second": 144564.70588235295,
+          "profile_wall_interval_packets_per_second": 70.58823529411765
+        },
+        "admitted_packets": 600,
+        "delivered": {
+          "application_bytes": 153600,
+          "bits_per_second": 204800.0,
+          "bytes": 153600,
+          "offered_window_normalized_bits_per_second": 204800.0,
+          "offered_window_normalized_packets_per_second": 100.0,
+          "packets": 600,
+          "packets_per_second": 100.0,
+          "profile_wall_interval_bits_per_second": 144564.70588235295,
+          "profile_wall_interval_packets_per_second": 70.58823529411765
+        },
+        "delivered_packets": 600,
+        "delivered_profile_wall_interval_bps": 144564.70588235295,
+        "delivered_throughput_bps": 204800.0,
+        "dropped_at_ingress": 0,
+        "dropped_in_medium": 0,
+        "expired_at_drain": 0,
+        "jain_fairness_admitted": 1.0,
+        "jain_fairness_delivered": 1.0,
+        "latency_ms": {
+          "count": 600,
+          "max": 5.81546,
+          "mean": 1.057036415,
+          "p50": 0.9598325000000001,
+          "p95": 1.34868315,
+          "p99": 5.366124069999999
+        },
+        "no_uav_starvation": true,
+        "offered": {
+          "application_bytes": 153600,
+          "bits_per_second": 204800.0,
+          "bytes": 153600,
+          "offered_window_normalized_bits_per_second": 204800.0,
+          "offered_window_normalized_packets_per_second": 100.0,
+          "packets": 600,
+          "packets_per_second": 100.0,
+          "profile_wall_interval_bits_per_second": 144564.70588235295,
+          "profile_wall_interval_packets_per_second": 70.58823529411765
+        },
+        "offered_packets": 600,
+        "pdr_from_offered": 1.0,
+        "pending": 0,
+        "per_uav_admitted_packets": {
+          "uav1": 120,
+          "uav2": 120,
+          "uav3": 120,
+          "uav4": 120,
+          "uav5": 120
+        },
+        "per_uav_delivered_packets": {
+          "uav1": 120,
+          "uav2": 120,
+          "uav3": 120,
+          "uav4": 120,
+          "uav5": 120
+        },
+        "per_uav_observed_ingress_packets": {
+          "uav1": 0,
+          "uav2": 0,
+          "uav3": 0,
+          "uav4": 0,
+          "uav5": 0
+        },
+        "queue_delay_ms": {
+          "count": 600,
+          "max": 5.624883,
+          "mean": 0.8868996733333334,
+          "p50": 0.8401730000000001,
+          "p95": 1.2024804499999997,
+          "p99": 5.26437473
+        },
+        "queue_delay_ms_full_matched_lifecycle": {
+          "count": 600,
+          "max": 5.624883,
+          "mean": 0.8868996733333334,
+          "p50": 0.8401730000000001,
+          "p95": 1.2024804499999997,
+          "p99": 5.26437473
+        },
+        "terminal_status_counts": {
+          "delivered": 600
+        }
+      },
+      "payload": {
+        "admitted": {
+          "application_bytes": 4725000,
+          "available": true,
+          "bits_per_second": 6300000.0,
+          "bytes": 4725000,
+          "offered_window_normalized_bits_per_second": 6300000.0,
+          "offered_window_normalized_packets_per_second": 562.5,
+          "packets": 3375,
+          "packets_per_second": 562.5,
+          "profile_wall_interval_bits_per_second": 4447058.823529412,
+          "profile_wall_interval_packets_per_second": 397.05882352941177
+        },
+        "admitted_packets": 3375,
+        "delivered": {
+          "application_bytes": 4722200,
+          "bits_per_second": 6296266.666666667,
+          "bytes": 4722200,
+          "offered_window_normalized_bits_per_second": 6296266.666666667,
+          "offered_window_normalized_packets_per_second": 562.1666666666666,
+          "packets": 3373,
+          "packets_per_second": 562.1666666666666,
+          "profile_wall_interval_bits_per_second": 4444423.529411765,
+          "profile_wall_interval_packets_per_second": 396.8235294117647
+        },
+        "delivered_packets": 3373,
+        "delivered_profile_wall_interval_bps": 4444423.529411765,
+        "delivered_throughput_bps": 6296266.666666667,
+        "dropped_at_ingress": 5625,
+        "dropped_in_medium": 2,
+        "expired_at_drain": 0,
+        "jain_fairness_admitted": 1.0,
+        "jain_fairness_delivered": 0.9999994726264565,
+        "latency_ms": {
+          "count": 3373,
+          "max": 20.668812,
+          "mean": 2.5710868366439374,
+          "p50": 2.052123,
+          "p95": 5.466371199999999,
+          "p99": 10.684675519999988
+        },
+        "no_uav_starvation": true,
+        "offered": {
+          "application_bytes": 12600000,
+          "bits_per_second": 16800000.0,
+          "bytes": 12600000,
+          "offered_window_normalized_bits_per_second": 16800000.0,
+          "offered_window_normalized_packets_per_second": 1500.0,
+          "packets": 9000,
+          "packets_per_second": 1500.0,
+          "profile_wall_interval_bits_per_second": 11858823.529411765,
+          "profile_wall_interval_packets_per_second": 1058.8235294117646
+        },
+        "offered_packets": 9000,
+        "pdr_from_offered": 0.37477777777777777,
+        "pending": 0,
+        "per_uav_admitted_packets": {
+          "uav1": 675,
+          "uav2": 675,
+          "uav3": 675,
+          "uav4": 675,
+          "uav5": 675
+        },
+        "per_uav_delivered_packets": {
+          "uav1": 675,
+          "uav2": 674,
+          "uav3": 675,
+          "uav4": 674,
+          "uav5": 675
+        },
+        "per_uav_observed_ingress_packets": {
+          "uav1": 0,
+          "uav2": 0,
+          "uav3": 0,
+          "uav4": 0,
+          "uav5": 0
+        },
+        "queue_delay_ms": {
+          "count": 3373,
+          "max": 19.58687,
+          "mean": 1.9309440281648382,
+          "p50": 1.410399,
+          "p95": 4.8023153999999995,
+          "p99": 9.980851839999996
+        },
+        "queue_delay_ms_full_matched_lifecycle": {
+          "count": 3373,
+          "max": 19.58687,
+          "mean": 1.9309440281648382,
+          "p50": 1.410399,
+          "p95": 4.8023153999999995,
+          "p99": 9.980851839999996
+        },
+        "terminal_status_counts": {
+          "delivered": 3373,
+          "dropped_at_ingress": 5625,
+          "dropped_in_medium": 2
+        }
+      }
+    },
+    "duration_s": 6.0,
+    "events": {
+      "bounded_window": {
+        "count_by_type": {
+          "admit": 7365,
+          "channel": 7357,
+          "dequeue": 7357,
+          "drop": 11243,
+          "egress": 7357,
+          "enqueue": 7357,
+          "phy_tx_end": 7357
+        },
+        "per_admitted_logical_packet": 7.521113374066531,
+        "per_delivered_logical_packet": 7.529291830909338,
+        "per_offered_logical_packet": 2.9781182795698924,
+        "total": 55393
+      },
+      "count_by_type": {
+        "admit": 7365,
+        "channel": 7357,
+        "dequeue": 7357,
+        "drop": 11243,
+        "egress": 7357,
+        "enqueue": 7357,
+        "phy_tx_end": 7357
+      },
+      "outside_bounded_window": 0,
+      "per_admitted_logical_packet": 7.521113374066531,
+      "per_delivered_logical_packet": 7.529291830909338,
+      "per_offered_logical_packet": 2.9781182795698924,
+      "scope": "full matched logical-packet lifecycle regardless of bounded profile timestamp",
+      "total": 55393,
+      "without_host_monotonic_timestamp": 0
+    },
+    "gates_overall_status": true,
+    "gazebo_mean_rtf": 0.9924118030089562,
+    "gazebo_rtf_scope": "run_summary_global",
+    "lower_class_profile_wall_interval_bps": 8903341.176470589,
+    "lower_class_throughput_bps": 12613066.666666668,
+    "no_bypass": true,
+    "no_bypass_scope": "run_summary_global",
+    "ns3_cpu_percent_one_core": {
+      "count": 8,
+      "max": 35.41921748983958,
+      "mean": 25.579642471855294,
+      "p50": 32.946150616866376,
+      "p95": 35.07508126329912,
+      "p99": 35.35039024453149
+    },
+    "observed_ns3_ingress": {
+      "application_bytes": 0,
+      "bits_per_second": 0.0,
+      "bytes": 0,
+      "full_matched_lifecycle": {
+        "application_bytes": 0,
+        "bits_per_second": 0.0,
+        "bytes": 0,
+        "offered_window_normalized_bits_per_second": 0.0,
+        "offered_window_normalized_packets_per_second": 0.0,
+        "packets": 0,
+        "packets_per_second": 0.0,
+        "profile_wall_interval_bits_per_second": 0.0,
+        "profile_wall_interval_packets_per_second": 0.0
+      },
+      "measurement": "unique_packets_with_ns3_ingress_event",
+      "offered_window_normalized_bits_per_second": 0.0,
+      "offered_window_normalized_packets_per_second": 0.0,
+      "packets": 0,
+      "packets_per_second": 0.0,
+      "profile_wall_interval_bits_per_second": 0.0,
+      "profile_wall_interval_packets_per_second": 0.0,
+      "unobserved_offered_packets": 18600
+    },
+    "offered": {
+      "application_bytes": 25353600,
+      "attempts_after_scheduled_offered_window": 0,
+      "attempts_inside_scheduled_offered_window": 18600,
+      "attempts_with_unknown_timestamp": 0,
+      "bits_per_second": 33804800.0,
+      "bytes": 25353600,
+      "measurement": "all application attempt records normalized by the scheduled offered window",
+      "offered_window_normalized_bits_per_second": 33804800.0,
+      "offered_window_normalized_packets_per_second": 3100.0,
+      "packets": 18600,
+      "packets_per_second": 3100.0,
+      "profile_wall_interval_bits_per_second": 23862211.76470588,
+      "profile_wall_interval_packets_per_second": 2188.235294117647,
+      "scheduled_window_actual": {
+        "application_bytes": 25353600,
+        "bits_per_second": 33804800.0,
+        "bytes": 25353600,
+        "offered_window_normalized_bits_per_second": 33804800.0,
+        "offered_window_normalized_packets_per_second": 3100.0,
+        "packets": 18600,
+        "packets_per_second": 3100.0,
+        "profile_wall_interval_bits_per_second": 23862211.76470588,
+        "profile_wall_interval_packets_per_second": 2188.235294117647
+      }
+    },
+    "policy_admission": {
+      "application_bytes": 9624600,
+      "available": true,
+      "bits_per_second": 12832800.0,
+      "bytes": 9624600,
+      "full_matched_lifecycle": {
+        "application_bytes": 9624600,
+        "bits_per_second": 12832800.0,
+        "bytes": 9624600,
+        "offered_window_normalized_bits_per_second": 12832800.0,
+        "offered_window_normalized_packets_per_second": 1227.5,
+        "packets": 7365,
+        "packets_per_second": 1227.5,
+        "profile_wall_interval_bits_per_second": 9058447.05882353,
+        "profile_wall_interval_packets_per_second": 866.4705882352941
+      },
+      "measurement": "explicit_ns3_admit_event",
+      "offered_window_normalized_bits_per_second": 12832800.0,
+      "offered_window_normalized_packets_per_second": 1227.5,
+      "packets": 7365,
+      "packets_per_second": 1227.5,
+      "profile_wall_interval_bits_per_second": 9058447.05882353,
+      "profile_wall_interval_packets_per_second": 866.4705882352941,
+      "shaping_policy": "enabled"
+    },
+    "profile": "controlled_overload",
+    "provenance": {
+      "engine_config_sha256": "1827eb1ec97a4b877ef63f06572cd406dac11e08971390f42d50b47267a07df5",
+      "engine_contract": "ams.tap_packet_engine/v2",
+      "engine_source_sha256": {
+        "/workspace/multiagent_simulation/network/config/communication_qos.yaml": "34784911e2e918a8fa14f97f5e4688115fa73d59e2445efefc9fd49ef648e7ba",
+        "/workspace/multiagent_simulation/network/config/endpoints.yaml": "fe001523f5f6767722fb5189c9de9dbcf67f2384078786c331c581537ddaf2ba",
+        "/workspace/multiagent_simulation/network/config/radio_24ghz_town01.yaml": "2bff16c393f3a93df9980b064ab3e53c98d69a93a7c14cf1c113a89837e6b880"
+      },
+      "environment": {
+        "git_head": "26fa99c",
+        "ns3_binary": "/workspace/multiagent_simulation/.external/ns-3/build/scratch/ns3.40-ams-tap-packet-engine-default",
+        "radio": "/workspace/multiagent_simulation/network/config/radio_24ghz_town01.yaml",
+        "run_id": "town01-controlled-global-20260827T214404Z",
+        "scenario": "/workspace/multiagent_simulation/network/config/scenario_5uav_town01.yaml",
+        "utc": "2026-08-27T21:44:12Z",
+        "world": "/workspace/multiagent_simulation/.external/cavise_maps/Town01/gazebo/town01.sdf"
+      },
+      "event_config_matches_engine": true,
+      "event_config_sha256_values": [
+        "1827eb1ec97a4b877ef63f06572cd406dac11e08971390f42d50b47267a07df5"
+      ],
+      "event_epoch_values": [
+        1787867061676868892
+      ],
+      "profile_window_declared_gates_overall_status": true,
+      "profile_window_declared_shaping_enabled": true,
+      "profile_window_matches_configured_gating": true,
+      "profile_window_matches_expected_shaping": true,
+      "resolved_product_parameters": {
+        "additional_data_admission_rate_bps": 6500000,
+        "control_reserved_bps": 4000000,
+        "event_log_flush_every": 256,
+        "event_log_flush_max_delay_ms": 25,
+        "fair_lower_classes_per_uav": true,
+        "ingress_protection_enabled": true,
+        "lower_retry_limit": 16,
+        "mac_retry_limit": 64,
+        "payload_admission_rate_bps": 6500000,
+        "radio_rate": "20000000bps",
+        "shaping_enabled": true,
+        "sionna_ipc_enabled": true,
+        "strict_control_priority": true,
+        "token_bucket_burst_bytes_per_uav": 7000
+      },
+      "summary_present": true
+    },
+    "queue_delay_ms_by_class": {
+      "additional_data": {
+        "count": 3384,
+        "max": 20.615823,
+        "mean": 1.9968969397163119,
+        "p50": 1.853526,
+        "p95": 4.8048407,
+        "p99": 9.21799608
+      },
+      "control": {
+        "count": 600,
+        "max": 5.624883,
+        "mean": 0.8868996733333334,
+        "p50": 0.8401730000000001,
+        "p95": 1.2024804499999997,
+        "p99": 5.26437473
+      },
+      "payload": {
+        "count": 3373,
+        "max": 19.58687,
+        "mean": 1.9309440281648382,
+        "p50": 1.410399,
+        "p95": 4.8023153999999995,
+        "p99": 9.980851839999996
+      }
+    },
+    "queue_enqueued": {
+      "application_bytes": 9613400,
+      "bits_per_second": 12817866.666666666,
+      "bytes": 9613400,
+      "full_matched_lifecycle": {
+        "application_bytes": 9613400,
+        "bits_per_second": 12817866.666666666,
+        "bytes": 9613400,
+        "offered_window_normalized_bits_per_second": 12817866.666666666,
+        "offered_window_normalized_packets_per_second": 1226.1666666666667,
+        "packets": 7357,
+        "packets_per_second": 1226.1666666666667,
+        "profile_wall_interval_bits_per_second": 9047905.88235294,
+        "profile_wall_interval_packets_per_second": 865.5294117647059
+      },
+      "measurement": "unique_packets_with_ns3_enqueue_event",
+      "offered_window_normalized_bits_per_second": 12817866.666666666,
+      "offered_window_normalized_packets_per_second": 1226.1666666666667,
+      "packets": 7357,
+      "packets_per_second": 1226.1666666666667,
+      "profile_wall_interval_bits_per_second": 9047905.88235294,
+      "profile_wall_interval_packets_per_second": 865.5294117647059
+    },
+    "queue_enqueued_packets": 7357,
+    "retry_backoff": {
+      "affected_logical_packets": 0,
+      "bounded_window": {
+        "affected_logical_packets": 0,
+        "events": 0,
+        "events_per_affected_packet": {
+          "count": 0,
+          "max": null,
+          "mean": null,
+          "p50": null,
+          "p95": null,
+          "p99": null
+        }
+      },
+      "by_class": {
+        "additional_data": {
+          "affected_logical_packets": 0,
+          "bounded_window_events": 0,
+          "events": 0,
+          "events_per_affected_packet": {
+            "count": 0,
+            "max": null,
+            "mean": null,
+            "p50": null,
+            "p95": null,
+            "p99": null
+          }
+        },
+        "control": {
+          "affected_logical_packets": 0,
+          "bounded_window_events": 0,
+          "events": 0,
+          "events_per_affected_packet": {
+            "count": 0,
+            "max": null,
+            "mean": null,
+            "p50": null,
+            "p95": null,
+            "p99": null
+          }
+        },
+        "payload": {
+          "affected_logical_packets": 0,
+          "bounded_window_events": 0,
+          "events": 0,
+          "events_per_affected_packet": {
+            "count": 0,
+            "max": null,
+            "mean": null,
+            "p50": null,
+            "p95": null,
+            "p99": null
+          }
+        }
+      },
+      "events": 0,
+      "events_per_affected_packet": {
+        "count": 0,
+        "max": null,
+        "mean": null,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      },
+      "scope": "full matched lifecycle"
+    },
+    "run_id": "town01-controlled-global-20260827T214404Z",
+    "scheduler_lag_attribution": {
+      "admit": {
+        "mean_positive_lag_growth_us": 22.521192868925265,
+        "positive_growth_samples": 7881,
+        "same_sim_time_positive_lag_growth_ms": 177.489521,
+        "same_sim_time_positive_samples": 7881,
+        "sampling_opportunities": 7881,
+        "total_positive_lag_growth_ms": 177.489521
+      },
+      "channel": {
+        "mean_positive_lag_growth_us": 11.587169319826339,
+        "positive_growth_samples": 4146,
+        "same_sim_time_positive_lag_growth_ms": 0.0,
+        "same_sim_time_positive_samples": 0,
+        "sampling_opportunities": 7873,
+        "total_positive_lag_growth_ms": 48.040404
+      },
+      "dequeue": {
+        "mean_positive_lag_growth_us": 22.08798882255811,
+        "positive_growth_samples": 7873,
+        "same_sim_time_positive_lag_growth_ms": 173.898736,
+        "same_sim_time_positive_samples": 7873,
+        "sampling_opportunities": 7873,
+        "total_positive_lag_growth_ms": 173.898736
+      },
+      "drop": {
+        "mean_positive_lag_growth_us": 23.195317783682707,
+        "positive_growth_samples": 10161,
+        "same_sim_time_positive_lag_growth_ms": 0.022502,
+        "same_sim_time_positive_samples": 1,
+        "sampling_opportunities": 11247,
+        "total_positive_lag_growth_ms": 235.687624
+      },
+      "egress": {
+        "mean_positive_lag_growth_us": 61.21216939890711,
+        "positive_growth_samples": 183,
+        "same_sim_time_positive_lag_growth_ms": 0.0,
+        "same_sim_time_positive_samples": 0,
+        "sampling_opportunities": 7874,
+        "total_positive_lag_growth_ms": 11.201827
+      },
+      "enqueue": {
+        "mean_positive_lag_growth_us": 23.558071511123952,
+        "positive_growth_samples": 6922,
+        "same_sim_time_positive_lag_growth_ms": 31.772338,
+        "same_sim_time_positive_samples": 1222,
+        "sampling_opportunities": 7873,
+        "total_positive_lag_growth_ms": 163.068971
+      },
+      "ingress": {
+        "mean_positive_lag_growth_us": 11.912,
+        "positive_growth_samples": 2,
+        "same_sim_time_positive_lag_growth_ms": 0.0,
+        "same_sim_time_positive_samples": 0,
+        "sampling_opportunities": 2,
+        "total_positive_lag_growth_ms": 0.023824
+      },
+      "phy_tx_end": {
+        "mean_positive_lag_growth_us": 53.90195833862568,
+        "positive_growth_samples": 7873,
+        "same_sim_time_positive_lag_growth_ms": 0.0,
+        "same_sim_time_positive_samples": 0,
+        "sampling_opportunities": 7873,
+        "total_positive_lag_growth_ms": 424.370118
+      }
+    },
+    "scheduler_lag_ms": {
+      "count": 58497,
+      "max": 15.472722,
+      "mean": 6.322900283484623,
+      "p50": 6.241185,
+      "p95": 6.5797504,
+      "p99": 6.79610312,
+      "sampling": "event_weighted",
+      "scope": "all ns-3 events with host timestamps inside the bounded profile window"
+    },
+    "shaping_enabled": true,
+    "sionna_coupling_enabled": true,
+    "sionna_profile_evidence": {
+      "engine_sionna_ipc_enabled": true,
+      "profile_window_events_with_applied_state": 39373,
+      "profile_window_link_rows": 60,
+      "profile_window_query_count": 2,
+      "provider_mode": "real_sionna",
+      "run_summary_query_count": 26
+    },
+    "sionna_query_count": 2,
+    "status": "passed",
+    "terminal": {
+      "accounting_cutoff_monotonic_ns": 200329813293713,
+      "all_packets_terminal": true,
+      "dropped_at_ingress": 11235,
+      "dropped_in_medium": 8,
+      "expired_at_drain": 0,
+      "pending": 0,
+      "physical_ns3_queue_state_measured": false,
+      "reconciled_from_expired_at_drain": 0,
+      "status_counts": {
+        "delivered": 7357,
+        "dropped_at_ingress": 11235,
+        "dropped_in_medium": 8
+      }
+    },
+    "time_bases": {
+      "offered_window_s": 6.0,
+      "post_offer_drain_wall_s": 2.5,
+      "profile_end_monotonic_ns": 200329813293713,
+      "profile_start_monotonic_ns": 200321313293713,
+      "profile_wall_interval_s": 8.5
+    }
+  },
+  "before": {
+    "admitted": {
+      "application_bytes": null,
+      "available": false,
+      "bits_per_second": null,
+      "bytes": null,
+      "full_matched_lifecycle": {
+        "application_bytes": null,
+        "bits_per_second": null,
+        "bytes": null,
+        "offered_window_normalized_bits_per_second": null,
+        "offered_window_normalized_packets_per_second": null,
+        "packets": null,
+        "packets_per_second": null,
+        "profile_wall_interval_bits_per_second": null,
+        "profile_wall_interval_packets_per_second": null
+      },
+      "measurement": "unavailable_legacy_engine_without_admit_event",
+      "offered_window_normalized_bits_per_second": null,
+      "offered_window_normalized_packets_per_second": null,
+      "packets": null,
+      "packets_per_second": null,
+      "profile_wall_interval_bits_per_second": null,
+      "profile_wall_interval_packets_per_second": null,
+      "shaping_policy": "bypassed_or_disabled"
+    },
+    "application_delivered": {
+      "application_bytes": 12639136,
+      "bits_per_second": 10111308.8,
+      "bytes": 12639136,
+      "measurement": "unique application deliveries; rates expose both time bases",
+      "offered_window_normalized_bits_per_second": 10111308.8,
+      "offered_window_normalized_packets_per_second": 942.1,
+      "packets": 9421,
+      "packets_per_second": 942.1,
+      "profile_wall_interval_bits_per_second": 7770632.914608158,
+      "profile_wall_interval_packets_per_second": 724.012431392892
+    },
+    "channel_wire": {
+      "bounded_window_bytes": 13106364,
+      "full_matched_lifecycle_bytes": 13164030,
+      "measurement": "matched channel events inside the bounded profile wall interval",
+      "offered_window_normalized_bits_per_second": 10485091.2,
+      "profile_wall_interval_bits_per_second": 8057888.093714274
+    },
+    "channel_wire_bits_per_second": 10485091.2,
+    "classes": {
+      "additional_data": {
+        "admitted": {
+          "application_bytes": null,
+          "available": false,
+          "bits_per_second": null,
+          "bytes": null,
+          "offered_window_normalized_bits_per_second": null,
+          "offered_window_normalized_packets_per_second": null,
+          "packets": null,
+          "packets_per_second": null,
+          "profile_wall_interval_bits_per_second": null,
+          "profile_wall_interval_packets_per_second": null
+        },
+        "admitted_packets": null,
+        "delivered": {
+          "application_bytes": 6577200,
+          "bits_per_second": 5261760.0,
+          "bytes": 6577200,
+          "offered_window_normalized_bits_per_second": 5261760.0,
+          "offered_window_normalized_packets_per_second": 469.8,
+          "packets": 4698,
+          "packets_per_second": 469.8,
+          "profile_wall_interval_bits_per_second": 4043710.4882771084,
+          "profile_wall_interval_packets_per_second": 361.0455793104561
+        },
+        "delivered_packets": 4698,
+        "delivered_profile_wall_interval_bps": 4043710.4882771084,
+        "delivered_throughput_bps": 5261760.0,
+        "dropped_at_ingress": 0,
+        "dropped_in_medium": 3033,
+        "expired_at_drain": 0,
+        "jain_fairness_admitted": null,
+        "jain_fairness_delivered": 0.9675866933618932,
+        "latency_ms": {
+          "count": 4698,
+          "max": 8295.69455,
+          "mean": 4077.743349369306,
+          "p50": 4510.4866185,
+          "p95": 7754.529111999999,
+          "p99": 8239.004285519999
+        },
+        "no_uav_starvation": true,
+        "offered": {
+          "application_bytes": 21000000,
+          "bits_per_second": 16800000.0,
+          "bytes": 21000000,
+          "offered_window_normalized_bits_per_second": 16800000.0,
+          "offered_window_normalized_packets_per_second": 1500.0,
+          "packets": 15000,
+          "packets_per_second": 1500.0,
+          "profile_wall_interval_bits_per_second": 12910953.027704688,
+          "profile_wall_interval_packets_per_second": 1152.7636631879186
+        },
+        "offered_packets": 15000,
+        "pdr_from_offered": 0.3132,
+        "pending": 7269,
+        "per_uav_admitted_packets": null,
+        "per_uav_delivered_packets": {
+          "uav1": 999,
+          "uav2": 1152,
+          "uav3": 672,
+          "uav4": 1055,
+          "uav5": 820
+        },
+        "per_uav_observed_ingress_packets": {
+          "uav1": 1595,
+          "uav2": 1595,
+          "uav3": 1596,
+          "uav4": 1595,
+          "uav5": 1595
+        },
+        "queue_delay_ms": {
+          "count": 4712,
+          "max": 1193.440473,
+          "mean": 323.8443798760611,
+          "p50": 275.06798549999996,
+          "p95": 890.8762965,
+          "p99": 1032.5132183000005
+        },
+        "queue_delay_ms_full_matched_lifecycle": {
+          "count": 4731,
+          "max": 1193.440473,
+          "mean": 323.4393522938068,
+          "p50": 274.402136,
+          "p95": 890.3141049999999,
+          "p99": 1032.2536269999998
+        },
+        "terminal_status_counts": {
+          "delivered": 4698,
+          "dropped_in_medium": 3033,
+          "pending": 7269
+        }
+      },
+      "control": {
+        "admitted": {
+          "application_bytes": null,
+          "available": false,
+          "bits_per_second": null,
+          "bytes": null,
+          "offered_window_normalized_bits_per_second": null,
+          "offered_window_normalized_packets_per_second": null,
+          "packets": null,
+          "packets_per_second": null,
+          "profile_wall_interval_bits_per_second": null,
+          "profile_wall_interval_packets_per_second": null
+        },
+        "admitted_packets": null,
+        "delivered": {
+          "application_bytes": 123136,
+          "bits_per_second": 98508.8,
+          "bytes": 123136,
+          "offered_window_normalized_bits_per_second": 98508.8,
+          "offered_window_normalized_packets_per_second": 48.1,
+          "packets": 481,
+          "packets_per_second": 48.1,
+          "profile_wall_interval_bits_per_second": 75704.91009616402,
+          "profile_wall_interval_packets_per_second": 36.96528813289259
+        },
+        "delivered_packets": 481,
+        "delivered_profile_wall_interval_bps": 75704.91009616402,
+        "delivered_throughput_bps": 98508.8,
+        "dropped_at_ingress": 0,
+        "dropped_in_medium": 44,
+        "expired_at_drain": 0,
+        "jain_fairness_admitted": null,
+        "jain_fairness_delivered": 0.9980415417466514,
+        "latency_ms": {
+          "count": 481,
+          "max": 7750.745891,
+          "mean": 3615.5717486673598,
+          "p50": 3597.490874,
+          "p95": 7367.34777,
+          "p99": 7662.1739356
+        },
+        "no_uav_starvation": true,
+        "offered": {
+          "application_bytes": 256000,
+          "bits_per_second": 204800.0,
+          "bytes": 256000,
+          "offered_window_normalized_bits_per_second": 204800.0,
+          "offered_window_normalized_packets_per_second": 100.0,
+          "packets": 1000,
+          "packets_per_second": 100.0,
+          "profile_wall_interval_bits_per_second": 157390.66548059048,
+          "profile_wall_interval_packets_per_second": 76.85091087919457
+        },
+        "offered_packets": 1000,
+        "pdr_from_offered": 0.481,
+        "pending": 475,
+        "per_uav_admitted_packets": null,
+        "per_uav_delivered_packets": {
+          "uav1": 99,
+          "uav2": 103,
+          "uav3": 94,
+          "uav4": 94,
+          "uav5": 91
+        },
+        "per_uav_observed_ingress_packets": {
+          "uav1": 107,
+          "uav2": 107,
+          "uav3": 107,
+          "uav4": 107,
+          "uav5": 107
+        },
+        "queue_delay_ms": {
+          "count": 504,
+          "max": 321.835319,
+          "mean": 46.279893123015874,
+          "p50": 23.4996785,
+          "p95": 180.279767,
+          "p99": 264.0501080899998
+        },
+        "queue_delay_ms_full_matched_lifecycle": {
+          "count": 513,
+          "max": 321.835319,
+          "mean": 46.81612736647174,
+          "p50": 24.57512,
+          "p95": 179.921306,
+          "p99": 263.49125336
+        },
+        "terminal_status_counts": {
+          "delivered": 481,
+          "dropped_in_medium": 44,
+          "pending": 475
+        }
+      },
+      "payload": {
+        "admitted": {
+          "application_bytes": null,
+          "available": false,
+          "bits_per_second": null,
+          "bytes": null,
+          "offered_window_normalized_bits_per_second": null,
+          "offered_window_normalized_packets_per_second": null,
+          "packets": null,
+          "packets_per_second": null,
+          "profile_wall_interval_bits_per_second": null,
+          "profile_wall_interval_packets_per_second": null
+        },
+        "admitted_packets": null,
+        "delivered": {
+          "application_bytes": 5938800,
+          "bits_per_second": 4751040.0,
+          "bytes": 5938800,
+          "offered_window_normalized_bits_per_second": 4751040.0,
+          "offered_window_normalized_packets_per_second": 424.2,
+          "packets": 4242,
+          "packets_per_second": 424.2,
+          "profile_wall_interval_bits_per_second": 3651217.516234886,
+          "profile_wall_interval_packets_per_second": 326.00156394954337
+        },
+        "delivered_packets": 4242,
+        "delivered_profile_wall_interval_bps": 3651217.516234886,
+        "delivered_throughput_bps": 4751040.0,
+        "dropped_at_ingress": 0,
+        "dropped_in_medium": 3489,
+        "expired_at_drain": 0,
+        "jain_fairness_admitted": null,
+        "jain_fairness_delivered": 0.9109727926662762,
+        "latency_ms": {
+          "count": 4242,
+          "max": 7910.694917,
+          "mean": 3849.237092023574,
+          "p50": 4053.7014945,
+          "p95": 7647.011810049999,
+          "p99": 7811.85229033
+        },
+        "no_uav_starvation": true,
+        "offered": {
+          "application_bytes": 21000000,
+          "bits_per_second": 16800000.0,
+          "bytes": 21000000,
+          "offered_window_normalized_bits_per_second": 16800000.0,
+          "offered_window_normalized_packets_per_second": 1500.0,
+          "packets": 15000,
+          "packets_per_second": 1500.0,
+          "profile_wall_interval_bits_per_second": 12910953.027704688,
+          "profile_wall_interval_packets_per_second": 1152.7636631879186
+        },
+        "offered_packets": 15000,
+        "pdr_from_offered": 0.2828,
+        "pending": 7269,
+        "per_uav_admitted_packets": null,
+        "per_uav_delivered_packets": {
+          "uav1": 959,
+          "uav2": 1152,
+          "uav3": 458,
+          "uav4": 1054,
+          "uav5": 619
+        },
+        "per_uav_observed_ingress_packets": {
+          "uav1": 1595,
+          "uav2": 1595,
+          "uav3": 1595,
+          "uav4": 1595,
+          "uav5": 1595
+        },
+        "queue_delay_ms": {
+          "count": 4750,
+          "max": 1193.473137,
+          "mean": 327.8957674783158,
+          "p50": 276.0843225,
+          "p95": 899.5520692500002,
+          "p99": 1033.69581741
+        },
+        "queue_delay_ms_full_matched_lifecycle": {
+          "count": 4769,
+          "max": 1193.473137,
+          "mean": 327.4801423776473,
+          "p50": 274.981775,
+          "p95": 898.6816167999992,
+          "p99": 1033.5533381199998
+        },
+        "terminal_status_counts": {
+          "delivered": 4242,
+          "dropped_in_medium": 3489,
+          "pending": 7269
+        }
+      }
+    },
+    "duration_s": 10.0,
+    "events": {
+      "bounded_window": {
+        "count_by_type": {
+          "backoff": 45708,
+          "channel": 9446,
+          "dequeue": 9450,
+          "drop": 6566,
+          "egress": 9433,
+          "enqueue": 13759,
+          "ingress": 16486,
+          "phy_tx_end": 9445
+        },
+        "per_admitted_logical_packet": null,
+        "per_delivered_logical_packet": 12.768602059229382,
+        "per_offered_logical_packet": 3.88041935483871,
+        "total": 120293
+      },
+      "count_by_type": {
+        "backoff": 45927,
+        "channel": 9493,
+        "dequeue": 9497,
+        "drop": 6566,
+        "egress": 9480,
+        "enqueue": 13829,
+        "ingress": 16555,
+        "phy_tx_end": 9492
+      },
+      "outside_bounded_window": 546,
+      "per_admitted_logical_packet": null,
+      "per_delivered_logical_packet": 12.826557690266426,
+      "per_offered_logical_packet": 3.898032258064516,
+      "scope": "full matched logical-packet lifecycle regardless of bounded profile timestamp",
+      "total": 120839,
+      "without_host_monotonic_timestamp": 0
+    },
+    "gates_overall_status": null,
+    "gazebo_mean_rtf": null,
+    "gazebo_rtf_scope": "unavailable",
+    "lower_class_profile_wall_interval_bps": 7694928.004511994,
+    "lower_class_throughput_bps": 10012800.0,
+    "no_bypass": false,
+    "no_bypass_scope": "unavailable",
+    "ns3_cpu_percent_one_core": {
+      "count": 13,
+      "max": 103.44951460630595,
+      "mean": 93.98945264538678,
+      "p50": 101.49385254198597,
+      "p95": 102.85784410941498,
+      "p99": 103.33118050692777
+    },
+    "observed_ns3_ingress": {
+      "application_bytes": 22468360,
+      "bits_per_second": 17974688.0,
+      "bytes": 22468360,
+      "full_matched_lifecycle": {
+        "application_bytes": 22564960,
+        "bits_per_second": 18051968.0,
+        "bytes": 22564960,
+        "offered_window_normalized_bits_per_second": 18051968.0,
+        "offered_window_normalized_packets_per_second": 1655.5,
+        "packets": 16555,
+        "packets_per_second": 1655.5,
+        "profile_wall_interval_bits_per_second": 13873101.839620724,
+        "profile_wall_interval_packets_per_second": 1272.2668296050663
+      },
+      "measurement": "unique_packets_with_ns3_ingress_event",
+      "offered_window_normalized_bits_per_second": 17974688.0,
+      "offered_window_normalized_packets_per_second": 1648.6,
+      "packets": 16486,
+      "packets_per_second": 1648.6,
+      "profile_wall_interval_bits_per_second": 13813711.455693282,
+      "profile_wall_interval_packets_per_second": 1266.9641167544019,
+      "unobserved_offered_packets": 14514
+    },
+    "offered": {
+      "application_bytes": 42256000,
+      "attempts_after_scheduled_offered_window": 0,
+      "attempts_inside_scheduled_offered_window": 31000,
+      "attempts_with_unknown_timestamp": 0,
+      "bits_per_second": 33804800.0,
+      "bytes": 42256000,
+      "measurement": "all application attempt records normalized by the scheduled offered window",
+      "offered_window_normalized_bits_per_second": 33804800.0,
+      "offered_window_normalized_packets_per_second": 3100.0,
+      "packets": 31000,
+      "packets_per_second": 3100.0,
+      "profile_wall_interval_bits_per_second": 25979296.720889967,
+      "profile_wall_interval_packets_per_second": 2382.3782372550318,
+      "scheduled_window_actual": {
+        "application_bytes": 42256000,
+        "bits_per_second": 33804800.0,
+        "bytes": 42256000,
+        "offered_window_normalized_bits_per_second": 33804800.0,
+        "offered_window_normalized_packets_per_second": 3100.0,
+        "packets": 31000,
+        "packets_per_second": 3100.0,
+        "profile_wall_interval_bits_per_second": 25979296.720889967,
+        "profile_wall_interval_packets_per_second": 2382.3782372550318
+      }
+    },
+    "policy_admission": {
+      "application_bytes": null,
+      "available": false,
+      "bits_per_second": null,
+      "bytes": null,
+      "full_matched_lifecycle": {
+        "application_bytes": null,
+        "bits_per_second": null,
+        "bytes": null,
+        "offered_window_normalized_bits_per_second": null,
+        "offered_window_normalized_packets_per_second": null,
+        "packets": null,
+        "packets_per_second": null,
+        "profile_wall_interval_bits_per_second": null,
+        "profile_wall_interval_packets_per_second": null
+      },
+      "measurement": "unavailable_legacy_engine_without_admit_event",
+      "offered_window_normalized_bits_per_second": null,
+      "offered_window_normalized_packets_per_second": null,
+      "packets": null,
+      "packets_per_second": null,
+      "profile_wall_interval_bits_per_second": null,
+      "profile_wall_interval_packets_per_second": null,
+      "shaping_policy": "bypassed_or_disabled"
+    },
+    "profile": "overload",
+    "provenance": {
+      "engine_config_sha256": "e271a7fd8260609fdcb5718e9b537c823ea1f91d319d7349323dab1826862e26",
+      "engine_contract": "ams.tap_packet_engine/v2",
+      "engine_source_sha256": {
+        "/workspace/multiagent_simulation/network/config/communication_qos.yaml": "8ffbc891dc0d44ba580390b6b1770e3a8b69f2dee23705071cc5c5ba88d2e6c3",
+        "/workspace/multiagent_simulation/network/config/endpoints.yaml": "fe001523f5f6767722fb5189c9de9dbcf67f2384078786c331c581537ddaf2ba",
+        "/workspace/multiagent_simulation/network/config/radio_24ghz_town01.yaml": "2bff16c393f3a93df9980b064ab3e53c98d69a93a7c14cf1c113a89837e6b880"
+      },
+      "environment": {
+        "git_head": "26fa99c",
+        "profile": "overload",
+        "qos": "/workspace/multiagent_simulation/network/config/communication_qos.yaml",
+        "radio": "/workspace/multiagent_simulation/network/config/radio_24ghz_town01.yaml"
+      },
+      "event_config_matches_engine": true,
+      "event_config_sha256_values": [
+        "e271a7fd8260609fdcb5718e9b537c823ea1f91d319d7349323dab1826862e26"
+      ],
+      "event_epoch_values": [
+        1787859133127652181
+      ],
+      "profile_window_declared_gates_overall_status": null,
+      "profile_window_declared_shaping_enabled": null,
+      "profile_window_matches_configured_gating": null,
+      "profile_window_matches_expected_shaping": null,
+      "resolved_product_parameters": {
+        "radio_rate": "20000000bps",
+        "sionna_ipc_enabled": true
+      },
+      "summary_present": false
+    },
+    "queue_delay_ms_by_class": {
+      "additional_data": {
+        "count": 4712,
+        "max": 1193.440473,
+        "mean": 323.8443798760611,
+        "p50": 275.06798549999996,
+        "p95": 890.8762965,
+        "p99": 1032.5132183000005
+      },
+      "control": {
+        "count": 504,
+        "max": 321.835319,
+        "mean": 46.279893123015874,
+        "p50": 23.4996785,
+        "p95": 180.279767,
+        "p99": 264.0501080899998
+      },
+      "payload": {
+        "count": 4750,
+        "max": 1193.473137,
+        "mean": 327.8957674783158,
+        "p50": 276.0843225,
+        "p95": 899.5520692500002,
+        "p99": 1033.69581741
+      }
+    },
+    "queue_enqueued": {
+      "application_bytes": 18651704,
+      "bits_per_second": 14921363.2,
+      "bytes": 18651704,
+      "full_matched_lifecycle": {
+        "application_bytes": 18749704,
+        "bits_per_second": 14999763.2,
+        "bytes": 18749704,
+        "offered_window_normalized_bits_per_second": 14999763.2,
+        "offered_window_normalized_packets_per_second": 1382.9,
+        "packets": 13829,
+        "packets_per_second": 1382.9,
+        "profile_wall_interval_bits_per_second": 11527454.648922224,
+        "profile_wall_interval_packets_per_second": 1062.771246548382
+      },
+      "measurement": "unique_packets_with_ns3_enqueue_event",
+      "offered_window_normalized_bits_per_second": 14921363.2,
+      "offered_window_normalized_packets_per_second": 1375.9,
+      "packets": 13759,
+      "packets_per_second": 1375.9,
+      "profile_wall_interval_bits_per_second": 11467203.534792935,
+      "profile_wall_interval_packets_per_second": 1057.3916827868381
+    },
+    "queue_enqueued_packets": 13759,
+    "retry_backoff": {
+      "affected_logical_packets": 414,
+      "bounded_window": {
+        "affected_logical_packets": 410,
+        "events": 45708,
+        "events_per_affected_packet": {
+          "count": 410,
+          "max": 642.0,
+          "mean": 111.4829268292683,
+          "p50": 74.0,
+          "p95": 345.0999999999999,
+          "p99": 569.6599999999992
+        }
+      },
+      "by_class": {
+        "additional_data": {
+          "affected_logical_packets": 214,
+          "bounded_window_events": 22671,
+          "events": 22804,
+          "events_per_affected_packet": {
+            "count": 214,
+            "max": 642.0,
+            "mean": 106.5607476635514,
+            "p50": 69.0,
+            "p95": 344.04999999999995,
+            "p99": 568.1000000000001
+          }
+        },
+        "control": {
+          "affected_logical_packets": 19,
+          "bounded_window_events": 1668,
+          "events": 1691,
+          "events_per_affected_packet": {
+            "count": 19,
+            "max": 340.0,
+            "mean": 89.0,
+            "p50": 45.0,
+            "p95": 276.09999999999985,
+            "p99": 327.22
+          }
+        },
+        "payload": {
+          "affected_logical_packets": 181,
+          "bounded_window_events": 21369,
+          "events": 21432,
+          "events_per_affected_packet": {
+            "count": 181,
+            "max": 623.0,
+            "mean": 118.40883977900552,
+            "p50": 80.0,
+            "p95": 415.0,
+            "p99": 559.1999999999992
+          }
+        }
+      },
+      "events": 45927,
+      "events_per_affected_packet": {
+        "count": 414,
+        "max": 642.0,
+        "mean": 110.93478260869566,
+        "p50": 74.0,
+        "p95": 344.69999999999993,
+        "p99": 568.6200000000001
+      },
+      "scope": "full matched lifecycle"
+    },
+    "run_id": "overload-profile-before-20260827T193206Z",
+    "scheduler_lag_attribution": {
+      "backoff": {
+        "mean_positive_lag_growth_us": 13.16084246118678,
+        "positive_growth_samples": 10499,
+        "same_sim_time_positive_lag_growth_ms": 0.0,
+        "same_sim_time_positive_samples": 0,
+        "sampling_opportunities": 45708,
+        "total_positive_lag_growth_ms": 138.175685
+      },
+      "channel": {
+        "mean_positive_lag_growth_us": 11.83834213973799,
+        "positive_growth_samples": 9160,
+        "same_sim_time_positive_lag_growth_ms": 0.0,
+        "same_sim_time_positive_samples": 0,
+        "sampling_opportunities": 9446,
+        "total_positive_lag_growth_ms": 108.439214
+      },
+      "dequeue": {
+        "mean_positive_lag_growth_us": 19.215194074074077,
+        "positive_growth_samples": 9450,
+        "same_sim_time_positive_lag_growth_ms": 181.583584,
+        "same_sim_time_positive_samples": 9450,
+        "sampling_opportunities": 9450,
+        "total_positive_lag_growth_ms": 181.583584
+      },
+      "drop": {
+        "mean_positive_lag_growth_us": 156.88994242902208,
+        "positive_growth_samples": 6340,
+        "same_sim_time_positive_lag_growth_ms": 949.022634,
+        "same_sim_time_positive_samples": 3819,
+        "sampling_opportunities": 6566,
+        "total_positive_lag_growth_ms": 994.682235
+      },
+      "egress": {
+        "mean_positive_lag_growth_us": 16.652477619799896,
+        "positive_growth_samples": 1899,
+        "same_sim_time_positive_lag_growth_ms": 0.0,
+        "same_sim_time_positive_samples": 0,
+        "sampling_opportunities": 9438,
+        "total_positive_lag_growth_ms": 31.623055
+      },
+      "enqueue": {
+        "mean_positive_lag_growth_us": 18.48165625,
+        "positive_growth_samples": 12608,
+        "same_sim_time_positive_lag_growth_ms": 1.555532,
+        "same_sim_time_positive_samples": 53,
+        "sampling_opportunities": 13759,
+        "total_positive_lag_growth_ms": 233.016722
+      },
+      "ingress": {
+        "mean_positive_lag_growth_us": 492.2907271073378,
+        "positive_growth_samples": 16490,
+        "same_sim_time_positive_lag_growth_ms": 8117.697492,
+        "same_sim_time_positive_samples": 16485,
+        "sampling_opportunities": 16490,
+        "total_positive_lag_growth_ms": 8117.87409
+      },
+      "phy_tx_end": {
+        "mean_positive_lag_growth_us": 212.39183811540497,
+        "positive_growth_samples": 9445,
+        "same_sim_time_positive_lag_growth_ms": 0.0,
+        "same_sim_time_positive_samples": 0,
+        "sampling_opportunities": 9445,
+        "total_positive_lag_growth_ms": 2006.040911
+      }
+    },
+    "scheduler_lag_ms": {
+      "count": 120303,
+      "max": 7701.613819,
+      "mean": 3713.278781005985,
+      "p50": 3815.936059,
+      "p95": 7594.2227474,
+      "p99": 7658.9890549599995,
+      "sampling": "event_weighted",
+      "scope": "all ns-3 events with host timestamps inside the bounded profile window"
+    },
+    "shaping_enabled": false,
+    "sionna_coupling_enabled": true,
+    "sionna_profile_evidence": {
+      "engine_sionna_ipc_enabled": true,
+      "profile_window_events_with_applied_state": 103807,
+      "profile_window_link_rows": 90,
+      "profile_window_query_count": 3,
+      "provider_mode": "real_sionna",
+      "run_summary_query_count": 0
+    },
+    "sionna_query_count": 3,
+    "terminal": {
+      "accounting_cutoff_monotonic_ns": 192303929760357,
+      "all_packets_terminal": false,
+      "dropped_at_ingress": 0,
+      "dropped_in_medium": 6566,
+      "expired_at_drain": 0,
+      "pending": 15013,
+      "physical_ns3_queue_state_measured": false,
+      "reconciled_from_expired_at_drain": 0,
+      "status_counts": {
+        "delivered": 9421,
+        "dropped_in_medium": 6566,
+        "pending": 15013
+      }
+    },
+    "time_bases": {
+      "offered_window_s": 10.0,
+      "post_offer_drain_wall_s": 3.012207514,
+      "profile_end_monotonic_ns": 192303929760357,
+      "profile_start_monotonic_ns": 192290917552843,
+      "profile_wall_interval_s": 13.012207514
+    }
+  },
+  "changes": {
+    "events_per_delivered_after": 7.529291830909338,
+    "events_per_delivered_before": 12.826557690266426,
+    "pending_after": 0,
+    "pending_before": 15013,
+    "scheduler_lag_p95_ms_after": 6.5797504,
+    "scheduler_lag_p95_ms_before": 7594.2227474
+  },
+  "definitions": {
+    "event_count_scope": "full ns-3 lifecycle matched to offered BQO1 hashes; bounded_window is reported separately",
+    "events_per_delivered": "full matched lifecycle events divided by unique application deliveries",
+    "lag_attribution": "positive increase at the next pre-serialization lag sample attributed to the previous event; negative catch-up is not netted",
+    "observed_ingress": "unique packets with an ns-3 ingress event, independent of policy admission",
+    "policy_admission": "unique packets with an explicit ns-3 admit event; never inferred from offered attempts",
+    "rate_time_bases": "offered_window_normalized uses configured source duration; profile_wall_interval includes bounded drain",
+    "scheduler_lag": "host monotonic elapsed minus ns-3 simulation elapsed, sampled at every ns-3 event in the bounded window"
+  },
+  "root_cause": {
+    "baseline_backoff_events": 45927,
+    "baseline_backoff_max_per_affected_packet": 642.0,
+    "dominant_previous_event_by_positive_lag_growth": "ingress",
+    "dominant_previous_event_evidence": {
+      "mean_positive_lag_growth_us": 492.2907271073378,
+      "positive_growth_samples": 16490,
+      "same_sim_time_positive_lag_growth_ms": 8117.697492,
+      "same_sim_time_positive_samples": 16485,
+      "sampling_opportunities": 16490,
+      "total_positive_lag_growth_ms": 8117.87409
+    },
+    "largest_amplifier": "legacy baseline used the vendored ns-3 SetBackoffParams fourth/fifth argument mismatch, leaving the old fifth argument as maxRetries=1000000; 45927 rich backoff lifecycle rows amplified the backlog",
+    "legacy_per_event_cost": "each lifecycle callback reparsed and SHA-256-hashed the frame, serialized roughly 2 KiB of JSON, and synchronously flushed the stream",
+    "mechanism": "unbounded offered traffic entered ingress/Sionna/queue work before capacity admission",
+    "primary": "baseline positive scheduler-lag growth is dominated by work following the 'ingress' callback; see the attributed positive growth and same-simulation-time evidence",
+    "serial_not_primary": "baseline BSF1 evidence is one fragment per serial record"
+  },
+  "serial": {
+    "after": {
+      "bsf1_fragments": 7191,
+      "evidence_available": true,
+      "fragments_per_serial_record": 1.0,
+      "mean_serial_record_bytes": 37.27214573772771,
+      "serial_records": 7191,
+      "source_file": "/home/bas/bas_v2/runs/town01-controlled-global-20260827T214404Z/metrics/communication_summary.json",
+      "source_file_present": true
+    },
+    "aggregation_enabled": false,
+    "before": {
+      "bsf1_fragments": 8813,
+      "evidence_available": true,
+      "fragments_per_serial_record": 1.0,
+      "mean_serial_record_bytes": 37.32327243844321,
+      "serial_records": 8813,
+      "source_file": "/home/bas/bas_v2/runs/town01-audit-20260827T144001Z/metrics/communication_summary.json",
+      "source_file_present": true
+    },
+    "decision": "aggregation remains disabled: BSF1 has no fragmentation fan-out (1 -> 1 fragments/record), and the hash-matched overload lag attribution contains no BSF1 lifecycle; this does not claim that individual serial records are large",
+    "overload_event_scope": "BQO1 logical-packet hashes only; BSF1 serial records are excluded from the scheduler-lag attribution"
+  }
+}

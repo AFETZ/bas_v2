@@ -7,14 +7,20 @@ import argparse
 import hashlib
 import json
 import re
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
 import yaml
 
-
 ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from network.scripts.communication_qos import load_qos  # noqa: E402
+
+
 CONTRACT = "ams.tap_packet_engine/v2"
 MAX_UAVS = 5
 MAX_QUEUE_PACKETS = 1_000_000
@@ -47,7 +53,18 @@ class EngineConfig:
     queue_control_max_age_ms: int
     queue_payload_max_age_ms: int
     queue_additional_data_max_age_ms: int
-    control_burst_limit: int
+    strict_control_priority: bool
+    fair_lower_classes_per_uav: bool
+    ingress_protection_enabled: bool
+    shaping_enabled: bool
+    control_reserved_bps: int
+    payload_admission_rate_bps: int
+    additional_data_admission_rate_bps: int
+    token_bucket_burst_bytes_per_uav: int
+    lower_retry_limit: int
+    mac_retry_limit: int
+    event_log_flush_every: int
+    event_log_flush_max_delay_ms: int
     control_priority: int
     payload_priority: int
     additional_data_priority: int
@@ -109,8 +126,33 @@ class EngineConfig:
             raise ConfigError("queue deadlines and maximum ages must be in 1..60000 ms")
         if any(max_age > deadline for max_age, deadline in zip(max_ages, deadlines)):
             raise ConfigError("queue maximum age must not exceed its class deadline")
-        if not 1 <= self.control_burst_limit <= 1024:
-            raise ConfigError("control_burst_limit must be in 1..1024")
+        if not self.strict_control_priority:
+            raise ConfigError("strict_control_priority must remain enabled")
+        if not self.fair_lower_classes_per_uav:
+            raise ConfigError("fair_lower_classes_per_uav must remain enabled")
+        if not self.ingress_protection_enabled:
+            raise ConfigError("ingress_protection_enabled must remain enabled")
+        if not isinstance(self.shaping_enabled, bool):
+            raise ConfigError("shaping_enabled must be a boolean")
+        protection_rates = (
+            self.control_reserved_bps,
+            self.payload_admission_rate_bps,
+            self.additional_data_admission_rate_bps,
+        )
+        if any(value < 1 for value in protection_rates):
+            raise ConfigError("control reserve and lower admission rates must be positive")
+        if sum(protection_rates) > data_rate_bps(self.radio_rate):
+            raise ConfigError(
+                "control reserve plus lower admission rates exceeds channel capacity"
+            )
+        if not 1 <= self.token_bucket_burst_bytes_per_uav <= 1_000_000:
+            raise ConfigError("token_bucket_burst_bytes_per_uav must be in 1..1000000")
+        if not 1 <= self.lower_retry_limit <= self.mac_retry_limit <= 1_000_000:
+            raise ConfigError("retry limits must satisfy 1 <= lower <= mac <= 1000000")
+        if not 1 <= self.event_log_flush_every <= 65536:
+            raise ConfigError("event_log_flush_every must be in 1..65536")
+        if not 1 <= self.event_log_flush_max_delay_ms <= 1000:
+            raise ConfigError("event_log_flush_max_delay_ms must be in 1..1000")
         priorities = (
             self.control_priority,
             self.payload_priority,
@@ -183,7 +225,33 @@ class EngineConfig:
                 "queue_additional_data_max_age_ms",
                 str(self.queue_additional_data_max_age_ms),
             ),
-            ("control_burst_limit", str(self.control_burst_limit)),
+            ("strict_control_priority", "1" if self.strict_control_priority else "0"),
+            (
+                "fair_lower_classes_per_uav",
+                "1" if self.fair_lower_classes_per_uav else "0",
+            ),
+            (
+                "ingress_protection_enabled",
+                "1" if self.ingress_protection_enabled else "0",
+            ),
+            ("shaping_enabled", "1" if self.shaping_enabled else "0"),
+            ("control_reserved_bps", str(self.control_reserved_bps)),
+            ("payload_admission_rate_bps", str(self.payload_admission_rate_bps)),
+            (
+                "additional_data_admission_rate_bps",
+                str(self.additional_data_admission_rate_bps),
+            ),
+            (
+                "token_bucket_burst_bytes_per_uav",
+                str(self.token_bucket_burst_bytes_per_uav),
+            ),
+            ("lower_retry_limit", str(self.lower_retry_limit)),
+            ("mac_retry_limit", str(self.mac_retry_limit)),
+            ("event_log_flush_every", str(self.event_log_flush_every)),
+            (
+                "event_log_flush_max_delay_ms",
+                str(self.event_log_flush_max_delay_ms),
+            ),
             ("control_priority", str(self.control_priority)),
             ("payload_priority", str(self.payload_priority)),
             ("additional_data_priority", str(self.additional_data_priority)),
@@ -236,7 +304,18 @@ class EngineConfig:
             "queueControlMaxAgeMs": self.queue_control_max_age_ms,
             "queuePayloadMaxAgeMs": self.queue_payload_max_age_ms,
             "queueAdditionalDataMaxAgeMs": self.queue_additional_data_max_age_ms,
-            "controlBurstLimit": self.control_burst_limit,
+            "strictControlPriority": int(self.strict_control_priority),
+            "fairLowerClassesPerUav": int(self.fair_lower_classes_per_uav),
+            "ingressProtectionEnabled": int(self.ingress_protection_enabled),
+            "shapingEnabled": int(self.shaping_enabled),
+            "controlReservedBps": self.control_reserved_bps,
+            "payloadAdmissionRateBps": self.payload_admission_rate_bps,
+            "additionalDataAdmissionRateBps": self.additional_data_admission_rate_bps,
+            "tokenBucketBurstBytesPerUav": self.token_bucket_burst_bytes_per_uav,
+            "lowerRetryLimit": self.lower_retry_limit,
+            "macRetryLimit": self.mac_retry_limit,
+            "eventLogFlushEvery": self.event_log_flush_every,
+            "eventLogFlushMaxDelayMs": self.event_log_flush_max_delay_ms,
             "controlPriority": self.control_priority,
             "payloadPriority": self.payload_priority,
             "additionalDataPriority": self.additional_data_priority,
@@ -296,6 +375,18 @@ def _strict_mapping(path: Path) -> dict[str, Any]:
     return data
 
 
+def data_rate_bps(value: str) -> int:
+    """Resolve the exact integral ns-3 rate syntax used by this product."""
+
+    match = re.fullmatch(r"([1-9][0-9]*)(bps|Kbps|Mbps|Gbps)", value)
+    if not match:
+        raise ConfigError("radio_rate must be a positive integral ns-3 data rate")
+    multiplier = {"bps": 1, "Kbps": 1_000, "Mbps": 1_000_000, "Gbps": 1_000_000_000}[
+        match.group(2)
+    ]
+    return int(match.group(1)) * multiplier
+
+
 def from_repository(
     *,
     uav_count: int,
@@ -315,17 +406,20 @@ def from_repository(
     sionna_max_state_ttl_ms: int | None = None,
     sionna_intervention: str = "natural",
     clock_datagram_socket: str = "",
+    engine_profile: str = "gated",
     endpoints_path: Path = ROOT / "network/config/endpoints.yaml",
     radio_path: Path = ROOT / "network/config/radio_24ghz.yaml",
     qos_path: Path = ROOT / "network/config/communication_qos.yaml",
 ) -> EngineConfig:
     endpoints = _strict_mapping(endpoints_path)
     radio = _strict_mapping(radio_path)
-    qos = _strict_mapping(qos_path)
+    qos = load_qos(qos_path)
     uavs = endpoints.get("uavs")
     ns3 = radio.get("ns3", {})
     classes = qos.get("classes", {})
     scheduler = qos.get("scheduler", {})
+    protection = qos.get("protection", {})
+    profiles = qos.get("profiles", {})
     channel_state = qos.get("channel_state", {})
     if not isinstance(uavs, list) or len(uavs) != MAX_UAVS:
         raise ConfigError("endpoints.yaml must define exactly five UAVs")
@@ -338,6 +432,52 @@ def from_repository(
             if uav_count == 1
             else tuple(f"tap-uav{index}" for index in range(1, uav_count + 1))
         )
+    if engine_profile not in {"gated", "meltdown"}:
+        raise ConfigError("engine_profile must be gated or meltdown")
+    try:
+        radio_capacity_bps = int(ns3["channel_rate_bps"])
+        overload_offered_bps = sum(
+            int(profiles["controlled_overload"][traffic_class][
+                "packets_per_second_per_uav"
+            ])
+            * int(profiles["controlled_overload"][traffic_class]["packet_bytes"])
+            * 8
+            * MAX_UAVS
+            for traffic_class in ("control", "payload", "additional_data")
+        )
+        meltdown_offered_bps = sum(
+            int(profiles["meltdown"][traffic_class][
+                "packets_per_second_per_uav"
+            ])
+            * int(profiles["meltdown"][traffic_class]["packet_bytes"])
+            * 8
+            * MAX_UAVS
+            for traffic_class in ("control", "payload", "additional_data")
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ConfigError("invalid overload profile or radio capacity") from exc
+    if not overload_offered_bps > radio_capacity_bps:
+        raise ConfigError(
+            "controlled_overload offered load must exceed the configured radio capacity"
+        )
+    if meltdown_offered_bps != overload_offered_bps:
+        raise ConfigError(
+            "meltdown and controlled_overload must offer the same load"
+        )
+    if engine_profile == "gated":
+        gated_shaping_values = {
+            bool(profile.get("shaping_enabled"))
+            for name, profile in profiles.items()
+            if name != "meltdown" and isinstance(profile, dict)
+        }
+        if gated_shaping_values != {True}:
+            raise ConfigError("every gated profile must enable shaping")
+        shaping_enabled = True
+    else:
+        meltdown = profiles.get("meltdown")
+        if not isinstance(meltdown, dict) or meltdown.get("shaping_enabled") is not False:
+            raise ConfigError("the meltdown profile must disable shaping")
+        shaping_enabled = False
     try:
         config = EngineConfig(
             uav_count=uav_count,
@@ -361,7 +501,30 @@ def from_repository(
             queue_additional_data_max_age_ms=int(
                 classes["additional_data"]["max_queue_age_ms"]
             ),
-            control_burst_limit=int(scheduler["control_burst_limit"]),
+            strict_control_priority=bool(scheduler["strict_control_priority"]),
+            fair_lower_classes_per_uav=bool(
+                scheduler["fair_lower_classes_per_uav"]
+            ),
+            ingress_protection_enabled=bool(
+                protection["ingress_token_bucket_enabled"]
+            ),
+            shaping_enabled=shaping_enabled,
+            control_reserved_bps=int(protection["control_reserved_bps"]),
+            payload_admission_rate_bps=int(
+                protection["payload_admission_rate_bps"]
+            ),
+            additional_data_admission_rate_bps=int(
+                protection["additional_data_admission_rate_bps"]
+            ),
+            token_bucket_burst_bytes_per_uav=int(
+                protection["token_bucket_burst_bytes_per_uav"]
+            ),
+            lower_retry_limit=int(protection["lower_retry_limit"]),
+            mac_retry_limit=int(protection["mac_retry_limit"]),
+            event_log_flush_every=int(protection["event_log_flush_every"]),
+            event_log_flush_max_delay_ms=int(
+                protection["event_log_flush_max_delay_ms"]
+            ),
             control_priority=int(classes["control"]["priority"]),
             payload_priority=int(classes["payload"]["priority"]),
             additional_data_priority=int(classes["additional_data"]["priority"]),
@@ -423,6 +586,12 @@ def main() -> int:
         default="natural",
     )
     parser.add_argument("--clock-datagram-socket", default="")
+    parser.add_argument(
+        "--engine-profile",
+        choices=("gated", "meltdown"),
+        default="gated",
+        help="startup-authorized shaping mode; meltdown requires a separate engine",
+    )
     parser.add_argument("--events-file", default="ams-tap-packet-events.jsonl")
     parser.add_argument("--pcap-prefix", default="")
     parser.add_argument(
@@ -456,6 +625,7 @@ def main() -> int:
             sionna_max_state_ttl_ms=args.sionna_max_state_ttl_ms,
             sionna_intervention=args.sionna_intervention,
             clock_datagram_socket=args.clock_datagram_socket,
+            engine_profile=args.engine_profile,
             tap_gcs=args.tap_gcs,
             tap_uavs=_parse_taps(args.tap_uavs),
             endpoints_path=args.endpoints,

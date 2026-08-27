@@ -7,12 +7,14 @@ import argparse
 import csv
 import hashlib
 import json
+import math
 import os
 import signal
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Collection, Mapping
 
 import yaml
 
@@ -25,7 +27,15 @@ from network.radio_provider.provider import ProviderError, query_tcp  # noqa: E4
 
 
 TRAFFIC_CLASSES = ("control", "payload", "additional_data")
-SERVICE_RATES = {0, 1000, 10000, 100000, 500000, 2000000, 20000000}
+
+
+@dataclass(frozen=True)
+class Town01RadioPolicy:
+    """Validated provider radio values and shared-medium service tiers."""
+
+    provider_radio: Mapping[str, float]
+    channel_capacity_bps: int
+    service_rates_bps: tuple[int, ...]
 
 
 def compact(value: object) -> str:
@@ -39,14 +49,85 @@ def load_json(path: Path) -> dict[str, Any]:
     return value
 
 
-def load_radio(path: Path) -> dict[str, float]:
-    value = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    radio = value.get("radio", {})
-    return {
-        "carrier_hz": float(radio.get("carrier_hz", 2.4e9)),
-        "bandwidth_hz": float(radio.get("bandwidth_hz", 20e6)),
-        "tx_power_dbm": float(radio.get("tx_power_dbm", 33.0)),
+def _mapping(value: object, path: str) -> Mapping[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} must be an object")
+    return value
+
+
+def _finite(value: object, path: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{path} must be a number")
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError(f"{path} must be finite")
+    return result
+
+
+def _integer(value: object, path: str, minimum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ValueError(f"{path} must be an integer >= {minimum}")
+    return value
+
+
+def load_radio_policy(path: Path) -> Town01RadioPolicy:
+    """Load capacity and provider-returned service rates from one product config."""
+
+    try:
+        value = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise ValueError(f"cannot load radio config {path}: {exc}") from exc
+    root = _mapping(value, "radio config")
+    radio = _mapping(root.get("radio"), "radio")
+    provider_radio = {
+        "carrier_hz": _finite(radio.get("carrier_hz"), "radio.carrier_hz"),
+        "bandwidth_hz": _finite(
+            radio.get("bandwidth_hz"), "radio.bandwidth_hz"
+        ),
+        "tx_power_dbm": _finite(radio.get("tx_power_dbm"), "radio.tx_power_dbm"),
     }
+    if provider_radio["carrier_hz"] <= 0 or provider_radio["bandwidth_hz"] <= 0:
+        raise ValueError("radio carrier and bandwidth must be positive")
+
+    ns3 = _mapping(root.get("ns3"), "ns3")
+    capacity = _integer(ns3.get("channel_rate_bps"), "ns3.channel_rate_bps", 1)
+    raw_tiers = root.get("service_tier_selection")
+    if not isinstance(raw_tiers, list) or not raw_tiers:
+        raise ValueError("service_tier_selection must be a non-empty list")
+    rates: list[int] = []
+    thresholds: list[float] = []
+    for index, raw_tier in enumerate(raw_tiers):
+        tier = _mapping(raw_tier, f"service_tier_selection[{index}]")
+        thresholds.append(
+            _finite(
+                tier.get("min_sinr_db"),
+                f"service_tier_selection[{index}].min_sinr_db",
+            )
+        )
+        rates.append(
+            _integer(
+                tier.get("service_tier_bps"),
+                f"service_tier_selection[{index}].service_tier_bps",
+                0,
+            )
+        )
+    if any(left <= right for left, right in zip(thresholds, thresholds[1:])):
+        raise ValueError("service tier SINR thresholds must decrease strictly")
+    if any(left <= right for left, right in zip(rates, rates[1:])):
+        raise ValueError("service tier rates must decrease strictly")
+    if rates[0] != capacity:
+        raise ValueError("highest service tier must equal ns3.channel_rate_bps")
+    if rates[-1] != 0:
+        raise ValueError("lowest service tier must be zero")
+    if any(rate > capacity for rate in rates):
+        raise ValueError("service tier exceeds ns3.channel_rate_bps")
+    return Town01RadioPolicy(provider_radio, capacity, tuple(rates))
+
+
+def load_radio(path: Path) -> dict[str, float]:
+    """Compatibility wrapper returning the provider request's radio object."""
+
+    return dict(load_radio_policy(path).provider_radio)
 
 
 def current_nodes(path: Path) -> list[dict[str, Any]]:
@@ -85,9 +166,10 @@ def state_record(
     applied_ns: int,
     ttl_ns: int,
     mapping_seed: int,
+    service_rates_bps: Collection[int],
 ) -> dict[str, Any]:
     service_rate = int(link["service_tier_bps"])
-    if service_rate not in SERVICE_RATES:
+    if service_rate not in service_rates_bps:
         raise ValueError(f"provider returned unsupported service tier: {service_rate}")
     directed_link = f"{link['tx']}>{link['rx']}"
     traffic_class = str(link["traffic_class"])
@@ -195,7 +277,8 @@ def main() -> int:
 
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
-    radio = load_radio(args.radio_config)
+    radio_policy = load_radio_policy(args.radio_config)
+    radio = dict(radio_policy.provider_radio)
     sequence = 0
     query_index = 0
     ttl_ns = int(args.ttl_s * 1e9)
@@ -238,6 +321,7 @@ def main() -> int:
                         applied_ns=applied_ns,
                         ttl_ns=ttl_ns,
                         mapping_seed=args.mapping_seed,
+                        service_rates_bps=radio_policy.service_rates_bps,
                     )
                 )
             append_states(args.state_output, records)

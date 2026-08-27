@@ -22,7 +22,11 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from network.scripts.communication_qos import load_qos  # noqa: E402
+from network.scripts.communication_qos import (  # noqa: E402
+    PROFILE_NAMES,
+    load_qos,
+)
+from network.ns3.tap_packet_engine_config import ConfigError, data_rate_bps  # noqa: E402
 from network.scripts.packet_accounting import account_packets, group_accounting  # noqa: E402
 
 
@@ -74,12 +78,16 @@ def numeric_summary(values: list[float]) -> dict[str, float | None]:
 def configured_control_qos_checks(
     qos_config: dict[str, Any], qos_profiles: dict[str, Any]
 ) -> dict[str, bool]:
-    """Apply the declared control PDR and p95 limits to every load profile."""
+    """Apply declared control limits to profiles configured to gate the run."""
 
     required_pdr = float(qos_config["classes"]["control"]["required_pdr"])
     maximum_p95_ms = float(qos_config["classes"]["control"]["max_p95_latency_ms"])
     checks: dict[str, bool] = {}
-    for profile_name in ("nominal", "contention", "overload"):
+    for profile_name in PROFILE_NAMES:
+        if not bool(
+            qos_config["profiles"][profile_name]["gates_overall_status"]
+        ):
+            continue
         control = (
             qos_profiles.get(profile_name, {}).get("classes", {}).get("control", {})
         )
@@ -108,6 +116,7 @@ def packet_metrics(events: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], 
         for event in filtered
     )
     ingress_by_uid: dict[tuple[int, str], int] = {}
+    accepted_ingress_by_class: dict[str, set[tuple[int, str]]] = defaultdict(set)
     enqueue_by_uid: dict[tuple[int, str], deque[int]] = defaultdict(deque)
     latency_by_class: dict[str, list[float]] = defaultdict(list)
     queue_by_class: dict[str, list[float]] = defaultdict(list)
@@ -143,7 +152,8 @@ def packet_metrics(events: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], 
         key = (uid, link)
         timestamp = int(event.get("host_monotonic_ns", 0) or 0)
         kind = event.get("event")
-        if kind == "ingress" and not event.get("p2mp"):
+        if kind in {"ingress", "admit"} and not event.get("p2mp"):
+            accepted_ingress_by_class[traffic_class].add(key)
             ingress_by_uid[key] = timestamp
         elif kind == "egress" and not event.get("p2mp"):
             started = ingress_by_uid.pop(key, None)
@@ -158,6 +168,15 @@ def packet_metrics(events: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], 
             started = enqueue_by_uid[key].popleft()
             if timestamp >= started:
                 queue_by_class[traffic_class].append((timestamp - started) / 1e6)
+        elif kind == "drop":
+            reason = str(event.get("drop_reason") or "")
+            age_ns = event.get("queue_age_ns")
+            if (
+                reason.startswith("deadline_drop")
+                and isinstance(age_ns, int)
+                and age_ns > 0
+            ):
+                queue_by_class[traffic_class].append(age_ns / 1e6)
         queue_id = str(event.get("queue_id") or "")
         if queue_id and kind in {"enqueue", "dequeue", "drop"}:
             state = queue_state[queue_id]
@@ -179,7 +198,17 @@ def packet_metrics(events: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], 
                 if reason.startswith(("queue_limit_", "aggregate_queue_limit")):
                     state["tail_drops"] += 1
             age_ns = event.get("queue_age_ns")
-            if kind in {"dequeue", "drop"} and isinstance(age_ns, int) and age_ns >= 0:
+            reason = str(event.get("drop_reason") or "")
+            if (
+                kind == "dequeue"
+                and isinstance(age_ns, int)
+                and age_ns >= 0
+            ) or (
+                kind == "drop"
+                and reason.startswith("deadline_drop")
+                and isinstance(age_ns, int)
+                and age_ns > 0
+            ):
                 state["queue_delay_ms"].append(age_ns / 1e6)
         age = event.get("radio_state_age_ns")
         if isinstance(age, int) and age >= 0:
@@ -194,7 +223,11 @@ def packet_metrics(events: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], 
     rows: list[dict[str, Any]] = []
     summary: dict[str, Any] = {}
     for traffic_class in CLASSES:
-        unicast_ingress = event_counts[(traffic_class, "ingress", False)]
+        # Profile packets intentionally do not emit the expensive rich ingress
+        # row before policy admission.  Their explicit admit row is therefore
+        # the accepted-ingress observation; non-profile traffic keeps the
+        # legacy ingress row.
+        unicast_ingress = len(accepted_ingress_by_class[traffic_class])
         unicast_egress = event_counts[(traffic_class, "egress", False)]
         unicast_drops = event_counts[(traffic_class, "drop", False)]
         p2mp_ingress = event_counts[(traffic_class, "ingress", True)]
@@ -212,6 +245,7 @@ def packet_metrics(events: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], 
         queue = queue_by_class[traffic_class]
         row = {
             "traffic_class": traffic_class,
+            "unicast_ingress_basis": "legacy_ingress_plus_profile_admit",
             "unicast_ingress_packets": unicast_ingress,
             "unicast_egress_packets": unicast_egress,
             "unicast_drop_events": unicast_drops,
@@ -226,6 +260,7 @@ def packet_metrics(events: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], 
             "latency_mean_ms": statistics.fmean(latency) if latency else None,
             "latency_p95_ms": percentile(latency, 0.95),
             "jitter_ms": statistics.pstdev(latency) if len(latency) > 1 else 0.0 if latency else None,
+            "queue_delay_sample_count": len(queue),
             "queue_delay_mean_ms": statistics.fmean(queue) if queue else None,
             "queue_delay_p95_ms": percentile(queue, 0.95),
             "queue_delay_p99_ms": percentile(queue, 0.99),
@@ -419,12 +454,21 @@ def profile_windows(path: Path) -> dict[str, tuple[int, int]]:
 
 
 def profile_medium_metrics(
-    events: list[dict[str, Any]], start_ns: int, end_ns: int
+    events: list[dict[str, Any]],
+    start_ns: int,
+    end_ns: int,
+    profile_id: int,
+    resource_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     selected = [
         event
         for event in events
         if start_ns <= int(event.get("host_monotonic_ns", 0) or 0) <= end_ns
+    ]
+    profile_events = [
+        event
+        for event in selected
+        if int(event.get("application_profile_id", -1) or -1) == profile_id
     ]
     starts: dict[tuple[int, str], int] = {}
     busy_ns = 0
@@ -436,12 +480,46 @@ def profile_medium_metrics(
         elif event.get("event") == "phy_tx_end" and key in starts:
             busy_ns += max(0, observed - starts.pop(key))
     _rows, packet = packet_metrics(selected)
+    class_queue_distributions = {
+        name: {
+            "count": int(packet.get(name, {}).get("queue_delay_sample_count", 0)),
+            "mean": packet.get(name, {}).get("queue_delay_mean_ms"),
+            "p95": packet.get(name, {}).get("queue_delay_p95_ms"),
+            "p99": packet.get(name, {}).get("queue_delay_p99_ms"),
+        }
+        for name in CLASSES
+    }
+    cpu = [
+        float(row["cpu_percent_one_core"])
+        for row in resource_rows or []
+        if row.get("component") == "ns3_packet_engine"
+        and start_ns <= int(row.get("monotonic_ns", 0) or 0) <= end_ns
+        and isinstance(row.get("cpu_percent_one_core"), (int, float))
+    ]
     return {
         "channel_utilization": min(1.0, busy_ns / max(1, end_ns - start_ns)),
         "channel_busy_ms": busy_ns / 1e6,
-        "backoff_events": sum(1 for event in selected if event.get("event") == "backoff"),
-        "retry_events": sum(1 for event in selected if event.get("event") == "backoff"),
+        "profile_packet_events": len(profile_events),
+        "backoff_events": sum(
+            1 for event in profile_events if event.get("event") == "backoff"
+        ),
+        "retry_events": sum(
+            1 for event in profile_events if event.get("event") == "backoff"
+        ),
+        "sionna_fresh_events": sum(
+            1
+            for event in profile_events
+            if event.get("radio_state_status") == "fresh"
+            and isinstance(event.get("radio_query_id"), str)
+        ),
+        "sionna_stale_events": sum(
+            1
+            for event in profile_events
+            if str(event.get("radio_state_status") or "").startswith("stale")
+        ),
         "queues": packet.get("queues", {}),
+        "queue_delay_ms_by_class": class_queue_distributions,
+        "ns3_cpu_percent_one_core": numeric_summary(cpu),
         "scheduler_lag_ms": packet.get("scheduler_lag_ms", {}),
     }
 
@@ -507,11 +585,19 @@ def main() -> int:
     metrics_dir = run_dir / "metrics"
     metrics_dir.mkdir(parents=True, exist_ok=True)
     qos_config = load_qos()
+    gated_profile_names = tuple(
+        name
+        for name in PROFILE_NAMES
+        if bool(qos_config["profiles"][name]["gates_overall_status"])
+    )
+    controlled_config = qos_config["profiles"]["controlled_overload"]
     scenario = read_json(metrics_dir / "scenario_summary.json")
     health = read_json(metrics_dir / "health.json")
     down = read_json(metrics_dir / "ns3_stopped_probe.json")
     topology = read_json(metrics_dir / "runtime_topology.json")
+    gazebo = gazebo_metrics(run_dir / "logs/gazebo_stats.log")
     events = read_jsonl(run_dir / "logs/ns3_packet_events.jsonl")
+    runtime_resource_rows = read_jsonl(run_dir / "logs/runtime_resources.jsonl")
     aggregate_runtime_logs(run_dir, events)
     packet_rows, packets = packet_metrics(events)
     with (metrics_dir / "packet_metrics.csv").open("w", encoding="utf-8", newline="") as stream:
@@ -529,6 +615,12 @@ def main() -> int:
     radio = radio_metrics(metrics_dir / "radio_links.csv")
     ns3_records = read_jsonl(run_dir / "logs/ns3_packet_engine.log")
     ns3_runtime = ns3_records[-1] if ns3_records else {}
+    engine_config = read_json(run_dir / "logs/ns3_packet_engine_config.json")
+    engine_resolved = engine_config.get("resolved", {})
+    try:
+        radio_capacity_bps = data_rate_bps(str(engine_resolved["radio_rate"]))
+    except (KeyError, TypeError, ConfigError):
+        radio_capacity_bps = None
     attempts = read_jsonl(run_dir / "logs/communication_attempts.jsonl")
     deliveries = read_jsonl(run_dir / "logs/communication_deliveries.jsonl")
     foreign_serial_datagrams = sum(
@@ -549,28 +641,47 @@ def main() -> int:
             )
         )
     ]
-    accounting = account_packets(attempts, accounting_deliveries, events)
+    accounting = account_packets(
+        attempts, accounting_deliveries, events, finalize_pending=True
+    )
     grouped = group_accounting(
         attempts,
         accounting_deliveries,
         events,
         ("profile", "traffic_class", "uav", "direction"),
+        finalize_pending=True,
     )
     traffic_profiles = read_json(metrics_dir / "traffic_profiles.json")
     windows = profile_windows(run_dir / "logs/profile_windows.jsonl")
     qos_profiles: dict[str, Any] = {}
     fairness: dict[str, Any] = {}
-    for profile_name in ("nominal", "contention", "overload"):
+    for profile_name in gated_profile_names:
         snapshot = traffic_profiles.get(profile_name, {})
         classes = snapshot.get("classes", {})
         medium = (
-            profile_medium_metrics(events, *windows[profile_name])
+            profile_medium_metrics(
+                events,
+                *windows[profile_name],
+                PROFILE_NAMES.index(profile_name) + 1,
+                runtime_resource_rows,
+            )
             if profile_name in windows
             else {}
         )
         qos_profiles[profile_name] = {
             "classes": classes,
             "medium": medium,
+            "shaping_enabled": snapshot.get("shaping_enabled"),
+            "gates_overall_status": snapshot.get("gates_overall_status"),
+            "offered": snapshot.get("offered", {}),
+            "admitted_policy_observed": snapshot.get(
+                "admitted_policy_observed", {}
+            ),
+            "queue_enqueued_observed": snapshot.get(
+                "queue_enqueued_observed", {}
+            ),
+            "terminal_accounting": snapshot.get("terminal_accounting", {}),
+            "packets_pending": int(snapshot.get("packets_pending", -1)),
             "offered_load_bps": sum(
                 int(qos_config["profiles"][profile_name][name]["packets_per_second_per_uav"])
                 * int(qos_config["profiles"][profile_name][name]["packet_bytes"])
@@ -579,7 +690,7 @@ def main() -> int:
                 for name in CLASSES
             ),
         }
-        if profile_name in {"nominal", "contention"}:
+        if profile_name in {"nominal", "contention", "controlled_overload"}:
             fairness[profile_name] = {
                 name: jain_fairness(
                     [
@@ -590,38 +701,152 @@ def main() -> int:
                 for name in CLASSES
             }
 
-    overload_classes = qos_profiles.get("overload", {}).get("classes", {})
-    overload_control = overload_classes.get("control", {})
-    overload_payload = overload_classes.get("payload", {})
-    control_p95 = overload_control.get("latency_ms", {}).get("p95")
-    payload_p95 = overload_payload.get("latency_ms", {}).get("p95")
-    overload_control_per_uav = overload_control.get("per_uav_delivered_unique", {})
+    controlled = qos_profiles.get("controlled_overload", {})
+    controlled_classes = controlled.get("classes", {})
+    controlled_control = controlled_classes.get("control", {})
+    controlled_control_per_uav = controlled_control.get(
+        "per_uav_delivered_unique", {}
+    )
+    controlled_lag_p95 = controlled.get("medium", {}).get(
+        "scheduler_lag_ms", {}
+    ).get("p95")
+    controlled_cpu_samples = controlled.get("medium", {}).get(
+        "ns3_cpu_percent_one_core", {}
+    ).get("count")
+    controlled_queue_distributions = controlled.get("medium", {}).get(
+        "queue_delay_ms_by_class", {}
+    )
+    controlled_offered = int(controlled.get("offered", {}).get("packets", 0) or 0)
+    controlled_admitted = int(
+        controlled.get("admitted_policy_observed", {}).get("packets", 0) or 0
+    )
+    controlled_offered_bps = controlled.get("offered", {}).get("bits_per_second")
+    nominal_offered = int(
+        qos_profiles.get("nominal", {}).get("offered", {}).get("packets", 0) or 0
+    )
+    contention_offered = int(
+        qos_profiles.get("contention", {}).get("offered", {}).get("packets", 0)
+        or 0
+    )
+    controlled_terminal = controlled.get("terminal_accounting", {})
+    gazebo_rtf_mean = gazebo.get("real_time_factor", {}).get("mean")
     qos_checks = {
         **configured_control_qos_checks(qos_config, qos_profiles),
-        "overload_control_pdr_above_payload": float(overload_control.get("pdr", 0.0))
-        > float(overload_payload.get("pdr", 0.0)),
-        "overload_control_p95_below_payload": control_p95 is not None
-        and payload_p95 is not None
-        and float(control_p95) < float(payload_p95),
-        "overload_no_control_starvation": all(
-            int(overload_control_per_uav.get(f"uav{uav_id}", 0)) > 0
+        "controlled_overload_no_control_starvation": all(
+            int(controlled_control_per_uav.get(f"uav{uav_id}", 0)) > 0
             for uav_id in range(1, 6)
+        ),
+        "controlled_overload_lower_classes_served": all(
+            int(
+                controlled_classes.get(name, {})
+                .get("per_uav_delivered_unique", {})
+                .get(f"uav{uav_id}", 0)
+            )
+            > 0
+            for name in ("payload", "additional_data")
+            for uav_id in range(1, 6)
+        ),
+        "controlled_overload_scheduler_lag_p95": isinstance(
+            controlled_lag_p95, (int, float)
+        )
+        and float(controlled_lag_p95)
+        <= float(controlled_config["max_scheduler_lag_p95_ms"]),
+        "controlled_overload_cpu_samples_present": isinstance(
+            controlled_cpu_samples, int
+        )
+        and controlled_cpu_samples > 0,
+        "controlled_overload_queue_delay_samples_present": all(
+            isinstance(
+                controlled_queue_distributions.get(name, {}).get("count"), int
+            )
+            and int(controlled_queue_distributions[name]["count"]) > 0
+            for name in CLASSES
+        ),
+        "controlled_overload_pending_zero": int(
+            qos_profiles.get("controlled_overload", {}).get("packets_pending", -1)
+        )
+        == 0,
+        "controlled_overload_shaping_observed": (
+            controlled.get("shaping_enabled") is True
+            and controlled_offered > controlled_admitted > 0
+            and int(controlled_terminal.get("dropped_at_ingress", 0) or 0) > 0
+        ),
+        "controlled_overload_measured_offer_above_capacity": (
+            isinstance(controlled_offered_bps, (int, float))
+            and isinstance(radio_capacity_bps, int)
+            and float(controlled_offered_bps) > radio_capacity_bps
+        ),
+        "all_gated_profiles_terminal": all(
+            int(profile.get("packets_pending", -1)) == 0
+            and bool(profile.get("terminal_accounting", {}).get("invariant_holds"))
+            for profile in qos_profiles.values()
+        ),
+        "controlled_overload_sionna_coupled": (
+            int(controlled.get("medium", {}).get("sionna_fresh_events", 0) or 0)
+            > 0
+            and int(controlled.get("medium", {}).get("sionna_stale_events", 0) or 0)
+            == 0
+        ),
+        "controlled_overload_gazebo_rtf": isinstance(
+            gazebo_rtf_mean, (int, float)
+        )
+        and float(gazebo_rtf_mean)
+        >= float(controlled_config["min_gazebo_mean_rtf"]),
+        "profile_gating_matches_config": all(
+            isinstance(
+                qos_profiles.get(name, {}).get("gates_overall_status"), bool
+            )
+            and qos_profiles[name]["gates_overall_status"]
+            == bool(qos_config["profiles"][name]["gates_overall_status"])
+            for name in gated_profile_names
         ),
         "lower_classes_served_when_capacity_exists": all(
             int(qos_profiles.get("nominal", {}).get("classes", {}).get(name, {}).get("packets_delivered_unique", 0))
             > 0
             for name in ("payload", "additional_data")
         ),
-        "contention_observed": int(
-            qos_profiles.get("contention", {}).get("medium", {}).get("backoff_events", 0)
-        )
-        > 0,
+        # The product MAC arbiter is expected to remove avoidable native CSMA
+        # collisions.  Exercise the higher-load profile without requiring a
+        # backoff event that would contradict that scheduler behavior.
+        "contention_profile_exercised": (
+            contention_offered > nominal_offered > 0
+            and int(
+                qos_profiles.get("contention", {})
+                .get("medium", {})
+                .get("profile_packet_events", 0)
+                or 0
+            )
+            > 0
+        ),
     }
     qos_summary = {
         "config": {
             "path": "network/config/communication_qos.yaml",
             "classes": qos_config["classes"],
             "scheduler": qos_config["scheduler"],
+            "protection": qos_config["protection"],
+            "profile_gating": {
+                name: bool(qos_config["profiles"][name]["gates_overall_status"])
+                for name in PROFILE_NAMES
+            },
+            "controlled_overload_acceptance": {
+                "control_required_pdr": float(
+                    qos_config["classes"]["control"]["required_pdr"]
+                ),
+                "control_max_p95_latency_ms": float(
+                    qos_config["classes"]["control"]["max_p95_latency_ms"]
+                ),
+                "scheduler_lag_max_p95_ms": float(
+                    controlled_config["max_scheduler_lag_p95_ms"]
+                ),
+                "gazebo_min_mean_rtf": float(
+                    controlled_config["min_gazebo_mean_rtf"]
+                ),
+                "cpu_sample_distribution_required": True,
+                "queue_delay_sample_distribution_required_for_classes": list(
+                    CLASSES
+                ),
+            },
         },
         "profiles": qos_profiles,
         "fairness_jain_throughput": fairness,
@@ -662,9 +887,7 @@ def main() -> int:
     ]
     realtime = {
         "gazebo": {
-            "real_time_factor": gazebo_metrics(run_dir / "logs/gazebo_stats.log").get(
-                "real_time_factor", {}
-            )
+            "real_time_factor": gazebo.get("real_time_factor", {})
         },
         "sionna_query_latency_ms": radio.get("provider_latency_ms", {}),
         "channel_state_age_ms": packets.get("radio_state_age_ms", {}),
@@ -730,7 +953,7 @@ def main() -> int:
         and int(radio.get("stale_link_rows", 1)) == 0
     )
     pcap_passed = all(item["packets"] > 0 and item["bytes"] > 24 for item in class_pcaps)
-    profiles_passed = set(traffic_profiles) == {"nominal", "contention", "overload"}
+    profiles_passed = set(traffic_profiles) == set(gated_profile_names)
     components = {
         "gazebo_town01": health_passed,
         "ardupilot_sitl_count": len(health.get("sitl", [])),
@@ -741,8 +964,15 @@ def main() -> int:
         "additional_data": additional_data,
         "communication_profiles": profiles_passed,
         "qos": qos_summary["status"] == "passed",
-        "packet_accounting": accounting["packet_invariant_holds"],
+        "packet_accounting": (
+            accounting["packet_invariant_holds"]
+            and accounting["all_packets_terminal"]
+            and accounting["packets_pending"] == 0
+        ),
         "class_pcaps": pcap_passed,
+        "gazebo_mean_rtf": isinstance(gazebo_rtf_mean, (int, float))
+        and float(gazebo_rtf_mean)
+        >= float(controlled_config["min_gazebo_mean_rtf"]),
     }
     overall_passed = (
         scenario_passed
@@ -752,6 +982,8 @@ def main() -> int:
         and pcap_passed
         and qos_summary["status"] == "passed"
         and bool(accounting["packet_invariant_holds"])
+        and bool(accounting["all_packets_terminal"])
+        and accounting["packets_pending"] == 0
         and all(
             bool(value)
             for key, value in components.items()
@@ -812,7 +1044,7 @@ def main() -> int:
         "realtime": realtime,
         "radio": radio,
         "ns3_runtime": ns3_runtime,
-        "gazebo": gazebo_metrics(run_dir / "logs/gazebo_stats.log"),
+        "gazebo": gazebo,
         "no_bypass": {
             "ns3_stop_breaks_control_exchange": no_bypass,
             "probe": down,
@@ -843,7 +1075,7 @@ def main() -> int:
             )
         )
     profile_lines = []
-    for profile_name in ("nominal", "contention", "overload"):
+    for profile_name in traffic_profiles:
         classes = qos_profiles.get(profile_name, {}).get("classes", {})
         profile_lines.append(
             "| {profile} | {cpdr:.6f} | {ppdr:.6f} | {apdr:.6f} | {c95} | {p95} | {backoff} | {util:.6f} |".format(
@@ -869,7 +1101,7 @@ def main() -> int:
 - Gazebo RTF mean: `{summary['gazebo'].get('real_time_factor', {}).get('mean')}`
 - Packet invariant: `{accounting.get('packets_attempted')} = {accounting.get('packets_delivered_unique')} + {accounting.get('packets_dropped_unique')} + {accounting.get('packets_pending')}`
 
-| Traffic class | Unicast ingress/egress | PDR | Delivered goodput (bit/s) | Mean latency (ms) | P95 latency (ms) | P95 queue (ms) |
+| Traffic class | Accepted unicast ingress/egress | PDR | Delivered goodput (bit/s) | Mean latency (ms) | P95 latency (ms) | P95 queue (ms) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 {chr(10).join(packet_lines)}
 

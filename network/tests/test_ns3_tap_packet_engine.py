@@ -21,6 +21,9 @@ from network.ns3.tap_packet_engine_config import (
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "network/ns3/scratch/ams-tap-packet-engine.cc"
 BUILD_SCRIPT = ROOT / "network/ns3/build_ns3_tap_packet_engine.sh"
+CORE_PATCH = (
+    ROOT / "network/ns3/patches/ns-3.40-csma-global-queue-scheduler.patch"
+)
 OLD_DIAGNOSTIC = ROOT / "network/ns3/scratch/ams-tap-vertical-slice.cc"
 BINARY = Path(
     os.environ.get(
@@ -99,14 +102,21 @@ class TapPacketEngineConfigTests(unittest.TestCase):
         mutations = (
             dataclasses.replace(baseline, uav_count=4, tap_uavs=baseline.tap_uavs[:4]),
             dataclasses.replace(baseline, duration_ms=501),
-            dataclasses.replace(baseline, radio_rate="10000000bps"),
+            dataclasses.replace(baseline, radio_rate="25000000bps"),
             dataclasses.replace(baseline, radio_delay="3ms"),
             dataclasses.replace(baseline, queue_control_max_packets=255),
             dataclasses.replace(baseline, queue_payload_max_packets=127),
             dataclasses.replace(baseline, queue_additional_data_max_packets=127),
             dataclasses.replace(baseline, queue_control_deadline_ms=251),
             dataclasses.replace(baseline, queue_payload_max_age_ms=751),
-            dataclasses.replace(baseline, control_burst_limit=7),
+            dataclasses.replace(baseline, shaping_enabled=False),
+            dataclasses.replace(baseline, control_reserved_bps=3_999_999),
+            dataclasses.replace(baseline, payload_admission_rate_bps=6_499_999),
+            dataclasses.replace(baseline, token_bucket_burst_bytes_per_uav=6_999),
+            dataclasses.replace(baseline, lower_retry_limit=15),
+            dataclasses.replace(baseline, mac_retry_limit=17),
+            dataclasses.replace(baseline, event_log_flush_every=255),
+            dataclasses.replace(baseline, event_log_flush_max_delay_ms=24),
             dataclasses.replace(baseline, control_priority=3, payload_priority=4, additional_data_priority=5),
             dataclasses.replace(baseline, control_tos=185),
             dataclasses.replace(baseline, seed=43),
@@ -135,7 +145,16 @@ class TapPacketEngineConfigTests(unittest.TestCase):
             dataclasses.replace(baseline, queue_payload_max_packets=1_000_001),
             dataclasses.replace(baseline, queue_control_deadline_ms=0),
             dataclasses.replace(baseline, queue_control_max_age_ms=251),
-            dataclasses.replace(baseline, control_burst_limit=0),
+            dataclasses.replace(baseline, strict_control_priority=False),
+            dataclasses.replace(baseline, fair_lower_classes_per_uav=False),
+            dataclasses.replace(baseline, ingress_protection_enabled=False),
+            dataclasses.replace(baseline, shaping_enabled=1),
+            dataclasses.replace(baseline, control_reserved_bps=0),
+            dataclasses.replace(baseline, payload_admission_rate_bps=16_000_001),
+            dataclasses.replace(baseline, token_bucket_burst_bytes_per_uav=0),
+            dataclasses.replace(baseline, lower_retry_limit=65),
+            dataclasses.replace(baseline, event_log_flush_every=0),
+            dataclasses.replace(baseline, event_log_flush_max_delay_ms=0),
             dataclasses.replace(baseline, payload_priority=0),
             dataclasses.replace(baseline, payload_tos=184),
             dataclasses.replace(baseline, seed=0),
@@ -164,22 +183,70 @@ class TapPacketEngineConfigTests(unittest.TestCase):
             "--queueAdditionalDataMaxPackets=128",
             "--queueControlDeadlineMs=250",
             "--queuePayloadMaxAgeMs=750",
-            "--controlBurstLimit=8",
+            "--strictControlPriority=1",
+            "--fairLowerClassesPerUav=1",
+            "--ingressProtectionEnabled=1",
+            "--shapingEnabled=1",
+            "--controlReservedBps=4000000",
+            "--payloadAdmissionRateBps=6500000",
+            "--additionalDataAdmissionRateBps=6500000",
+            "--tokenBucketBurstBytesPerUav=7000",
+            "--lowerRetryLimit=16",
+            "--macRetryLimit=64",
+            "--eventLogFlushEvery=256",
+            "--eventLogFlushMaxDelayMs=25",
             "--controlTos=184",
         ):
             self.assertIn(expected, joined)
 
+    def test_meltdown_shaping_requires_a_separate_startup_mode(self) -> None:
+        protected = config_for()
+        meltdown = config_for(engine_profile="meltdown")
+        self.assertTrue(protected.shaping_enabled)
+        self.assertFalse(meltdown.shaping_enabled)
+        self.assertNotEqual(protected.sha256(), meltdown.sha256())
+        self.assertIn(
+            "--shapingEnabled=0",
+            meltdown.engine_argv(events_file="events.jsonl"),
+        )
+
+        source = SOURCE.read_text(encoding="utf-8")
+        controller = source[
+            source.index("class IngressProtectionController") : source.index(
+                "class PerUavRoundRobin"
+            )
+        ]
+        self.assertNotIn("metadata.applicationProfileId ==", controller)
+        self.assertNotIn("m_shapingBypass", controller)
+
+    def test_overload_profile_must_exceed_the_configured_radio_capacity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            radio_path = Path(temporary) / "radio.yaml"
+            source = (ROOT / "network/config/radio_24ghz.yaml").read_text(
+                encoding="utf-8"
+            )
+            radio_path.write_text(
+                source.replace(
+                    "channel_rate_bps: 20000000",
+                    "channel_rate_bps: 40000000",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                ConfigError, "offered load must exceed.*radio capacity"
+            ):
+                config_for(radio_path=radio_path)
+
 
 class TapPacketEngineStaticTests(unittest.TestCase):
-    def test_source_uses_bounded_nonstarving_three_class_scheduler(self) -> None:
+    def test_source_uses_strict_control_and_fair_lower_scheduler(self) -> None:
         source = SOURCE.read_text(encoding="utf-8")
-        queue_start = source.index("class BoundedPriorityScheduler")
+        queue_start = source.index("class StrictPriorityScheduler")
         queue_end = source.index("struct EngineConfig", queue_start)
         queue_source = source[queue_start:queue_end]
 
-        self.assertRegex(queue_source, r"m_controlBurstLimit\s*=\s*8")
-        self.assertIn("SetControlBurstLimit", queue_source)
-        self.assertIn("m_controlBurst < m_controlBurstLimit", queue_source)
+        self.assertIn("counts[CONTROL_CLASS] > 0", queue_source)
         self.assertIn("counts[m_nextLowerClass] > 0", queue_source)
         self.assertIn(
             "m_nextLowerClass = selectedClass == PAYLOAD_CLASS",
@@ -191,15 +258,85 @@ class TapPacketEngineStaticTests(unittest.TestCase):
             r"Do(?:Dequeue|Remove|Peek)\(GetContainer\(\)\.begin\(\)\)",
         )
         self.assertGreaterEqual(
-            queue_source.count("m_scheduler.Record(classIndex, m_counts)"),
+            queue_source.count("m_scheduler.Record(classIndex"),
             2,
         )
         self.assertIn(
-            "BoundedPriorityScheduler::DeterministicSelfTest()",
+            "StrictPriorityScheduler::DeterministicSelfTest()",
             source,
         )
-        self.assertIn("configured.SetControlBurstLimit(2)", queue_source)
+        self.assertIn("IngressProtection", queue_source)
+        self.assertIn("ingress_token_bucket_", source)
         self.assertIn("deadline_drop_", queue_source)
+
+    def test_global_scheduler_is_owner_exact_and_core_patch_is_reproducible(self) -> None:
+        source = SOURCE.read_text(encoding="utf-8")
+        patch = CORE_PATCH.read_text(encoding="utf-8")
+        build = BUILD_SCRIPT.read_text(encoding="utf-8")
+
+        scheduler = source[
+            source.index("class GlobalRadioScheduler") : source.index(
+                "struct EngineConfig"
+            )
+        ]
+        self.assertIn("Snapshot()", scheduler)
+        self.assertIn("counts[CONTROL_CLASS]", source)
+        self.assertIn("selected->ownerIndex", scheduler)
+        self.assertIn("GrantExactPacket(selected->entryId", scheduler)
+        self.assertIn("owner.device->StartOneQueuedPacket()", scheduler)
+        self.assertIn("m_perUavSchedulers", scheduler)
+        self.assertIn("expectedUav <= MAX_UAVS", scheduler)
+        self.assertIn("ownerIndex != expectedUav", scheduler)
+        self.assertIn("selected->packetUid != 20", scheduler)
+        self.assertIn("selected->ownerIndex != 5", scheduler)
+        self.assertIn("A stale grant is fail-closed", source)
+
+        for hook in (
+            "SetQueueReadyCallback",
+            "IsTransmitReady",
+            "StartOneQueuedPacket",
+            "RequestCurrentPacketAbortOnNextBusy",
+            "SetIdleCallback",
+        ):
+            self.assertIn(hook, patch)
+        self.assertIn("m_idleCallback()", patch)
+        self.assertIn("m_queueReadyCallback.IsNull()", patch)
+        self.assertIn("patch --batch --forward --dry-run", build)
+        self.assertIn("patch --batch --reverse --dry-run", build)
+        self.assertIn("--expected-core-tree-sha256", build)
+
+    def test_pre_admission_suppression_and_retry_abort_are_fail_closed(self) -> None:
+        source = SOURCE.read_text(encoding="utf-8")
+        trace_ingress = source[
+            source.index("TraceIngress(") : source.index("TraceIpv4Drop(")
+        ]
+        self.assertIn("metadata.sourceMonotonicValid", trace_ingress)
+        self.assertNotIn("applicationProfileId > 0", trace_ingress)
+
+        trace_backoff = source[
+            source.index("TraceBackoff(") : source.index("TracePhyTxEnd(")
+        ]
+        self.assertIn("RequestCurrentPacketAbortOnNextBusy", trace_backoff)
+        self.assertNotIn("SetBackoffParams", trace_backoff)
+
+    def test_event_logger_has_config_driven_bounded_timed_flush(self) -> None:
+        source = SOURCE.read_text(encoding="utf-8")
+        logger = source[
+            source.index("class PacketEventLogger") : source.index("TraceIngress(")
+        ]
+        self.assertIn("ScheduleTimedFlush", logger)
+        self.assertIn("TimedFlush", logger)
+        self.assertIn("MilliSeconds(m_flushMaxDelayMs)", logger)
+        self.assertIn("m_eventsSinceFlush > 0", logger)
+        self.assertNotIn("MilliSeconds(25)", logger)
+        self.assertIn(
+            'command.AddValue("eventLogFlushMaxDelayMs"',
+            source,
+        )
+        self.assertIn(
+            '"event_log_flush_max_delay_ms=" << config.eventLogFlushMaxDelayMs',
+            source,
+        )
 
     def test_source_uses_external_tap_netdevices_and_no_ns3_applications(self) -> None:
         source = SOURCE.read_text(encoding="utf-8")
@@ -357,6 +494,18 @@ class TapPacketEngineCompiledTests(unittest.TestCase):
             summary = json.loads(result.stdout)
             self.assertEqual(summary["p2mp_root_transmissions"], 1)
             self.assertEqual(summary["p2mp_egress_devices"], 5)
+            for self_test in (
+                "token_bucket_self_test",
+                "deadline_drop_self_test",
+                "reserved_control_self_test",
+                "profile_id_no_bypass_self_test",
+                "per_uav_fairness_self_test",
+                "retry_bound_self_test",
+                "strict_control_priority_self_test",
+                "global_radio_scheduler_self_test",
+                "stale_grant_self_test",
+            ):
+                self.assertTrue(summary[self_test], self_test)
             records = [json.loads(line) for line in events.read_text().splitlines()]
 
         required = {

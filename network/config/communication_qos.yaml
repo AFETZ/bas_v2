@@ -8,7 +8,28 @@ serial_transport:
   metrics_period_ms: 1000
 
 scheduler:
-  control_burst_limit: 8
+  strict_control_priority: true
+  fair_lower_classes_per_uav: true
+
+protection:
+  ingress_token_bucket_enabled: true
+  control_reserved_bps: 4000000
+  payload_admission_rate_bps: 6500000
+  additional_data_admission_rate_bps: 6500000
+  token_bucket_burst_bytes_per_uav: 7000
+  lower_retry_limit: 16
+  mac_retry_limit: 64
+  event_log_flush_every: 256
+  event_log_flush_max_delay_ms: 25
+  event_log_snapshot_wait_intervals: 2
+  drain_interval_ms: 2500
+  deadline_drop_before_radio_decision: true
+  terminal_expiry_after_drain: true
+
+serial_aggregation:
+  enabled: false
+  mtu_bytes: 1400
+  max_delay_ms: 5
 
 channel_state:
   maximum_age_ms: 20000
@@ -41,16 +62,31 @@ classes:
 profiles:
   nominal:
     duration_s: 6
+    shaping_enabled: true
+    gates_overall_status: true
     control: {packets_per_second_per_uav: 10, packet_bytes: 256}
     payload: {packets_per_second_per_uav: 50, packet_bytes: 1024}
     additional_data: {packets_per_second_per_uav: 25, packet_bytes: 1024}
   contention:
     duration_s: 8
+    shaping_enabled: true
+    gates_overall_status: true
     control: {packets_per_second_per_uav: 20, packet_bytes: 256}
     payload: {packets_per_second_per_uav: 150, packet_bytes: 1024}
     additional_data: {packets_per_second_per_uav: 150, packet_bytes: 1024}
-  overload:
-    duration_s: 10
+  controlled_overload:
+    duration_s: 6
+    shaping_enabled: true
+    gates_overall_status: true
+    max_scheduler_lag_p95_ms: 50
+    min_gazebo_mean_rtf: 0.95
+    control: {packets_per_second_per_uav: 20, packet_bytes: 256}
+    payload: {packets_per_second_per_uav: 300, packet_bytes: 1400}
+    additional_data: {packets_per_second_per_uav: 300, packet_bytes: 1400}
+  meltdown:
+    duration_s: 4
+    shaping_enabled: false
+    gates_overall_status: false
     control: {packets_per_second_per_uav: 20, packet_bytes: 256}
     payload: {packets_per_second_per_uav: 300, packet_bytes: 1400}
     additional_data: {packets_per_second_per_uav: 300, packet_bytes: 1400}
