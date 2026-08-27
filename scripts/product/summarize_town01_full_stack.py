@@ -71,6 +71,28 @@ def numeric_summary(values: list[float]) -> dict[str, float | None]:
     }
 
 
+def configured_control_qos_checks(
+    qos_config: dict[str, Any], qos_profiles: dict[str, Any]
+) -> dict[str, bool]:
+    """Apply the declared control PDR and p95 limits to every load profile."""
+
+    required_pdr = float(qos_config["classes"]["control"]["required_pdr"])
+    maximum_p95_ms = float(qos_config["classes"]["control"]["max_p95_latency_ms"])
+    checks: dict[str, bool] = {}
+    for profile_name in ("nominal", "contention", "overload"):
+        control = (
+            qos_profiles.get(profile_name, {}).get("classes", {}).get("control", {})
+        )
+        p95 = control.get("latency_ms", {}).get("p95")
+        checks[f"{profile_name}_control_required_pdr"] = (
+            float(control.get("pdr", 0.0)) >= required_pdr
+        )
+        checks[f"{profile_name}_control_p95_latency"] = (
+            isinstance(p95, (int, float)) and float(p95) <= maximum_p95_ms
+        )
+    return checks
+
+
 def packet_metrics(events: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     filtered = [
         event
@@ -512,15 +534,19 @@ def main() -> int:
     foreign_serial_datagrams = sum(
         1
         for item in deliveries
-        if item.get("malformed") and item.get("error") == "profile magic/version mismatch"
+        if item.get("background_serial_datagram")
+        or (item.get("malformed") and item.get("error") == "profile magic/version mismatch")
     )
     accounting_deliveries = [
         item
         for item in deliveries
         if not (
-            item.get("malformed")
-            and item.get("error") == "profile magic/version mismatch"
-            and not item.get("packet_id")
+            item.get("background_serial_datagram")
+            or (
+                item.get("malformed")
+                and item.get("error") == "profile magic/version mismatch"
+                and not item.get("packet_id")
+            )
         )
     ]
     accounting = account_packets(attempts, accounting_deliveries, events)
@@ -564,7 +590,6 @@ def main() -> int:
                 for name in CLASSES
             }
 
-    nominal_control = qos_profiles.get("nominal", {}).get("classes", {}).get("control", {})
     overload_classes = qos_profiles.get("overload", {}).get("classes", {})
     overload_control = overload_classes.get("control", {})
     overload_payload = overload_classes.get("payload", {})
@@ -572,12 +597,7 @@ def main() -> int:
     payload_p95 = overload_payload.get("latency_ms", {}).get("p95")
     overload_control_per_uav = overload_control.get("per_uav_delivered_unique", {})
     qos_checks = {
-        "nominal_control_required_pdr": float(nominal_control.get("pdr", 0.0))
-        >= float(qos_config["classes"]["control"]["required_pdr"]),
-        "nominal_control_p95_latency": nominal_control.get("latency_ms", {}).get("p95")
-        is not None
-        and float(nominal_control["latency_ms"]["p95"])
-        <= float(qos_config["classes"]["control"]["max_p95_latency_ms"]),
+        **configured_control_qos_checks(qos_config, qos_profiles),
         "overload_control_pdr_above_payload": float(overload_control.get("pdr", 0.0))
         > float(overload_payload.get("pdr", 0.0)),
         "overload_control_p95_below_payload": control_p95 is not None

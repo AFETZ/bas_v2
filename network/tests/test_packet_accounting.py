@@ -70,6 +70,24 @@ class PacketAccountingTests(unittest.TestCase):
         self.assertEqual(result["phy_drop_events"], 1)
         self.assertTrue(result["packet_invariant_holds"])
 
+    def test_background_medium_events_are_not_logical_packet_events(self) -> None:
+        result = account_packets(
+            [attempt("p1", "logical")],
+            [{"packet_id": "p1"}],
+            [
+                {"event": "backoff", "transport_payload_sha256": "background"},
+                {
+                    "event": "drop",
+                    "drop_reason": "queue_limit_payload",
+                    "transport_payload_sha256": "background",
+                },
+            ],
+        )
+        self.assertEqual(result["backoff_events"], 0)
+        self.assertEqual(result["retry_events"], 0)
+        self.assertEqual(result["queue_drop_events"], 0)
+        self.assertEqual(result["packets_delivered_unique"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

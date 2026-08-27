@@ -196,6 +196,23 @@ def run_receiver(args: argparse.Namespace) -> int:
                 # load profiles.  It is valid background traffic, not a
                 # malformed BQO1 logical packet.
                 if not data.startswith(MAGIC):
+                    stream.write(
+                        json.dumps(
+                            {
+                                "event": "background_delivery",
+                                "profile": args.profile,
+                                "traffic_class": str(key.data),
+                                "background_serial_datagram": True,
+                                "bytes": len(data),
+                                "transport_payload_sha256": hashlib.sha256(data).hexdigest(),
+                                "source": f"{source[0]}:{source[1]}",
+                                "received_monotonic_ns": received_ns,
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                        + "\n"
+                    )
                     continue
                 try:
                     record = decode_packet(data)

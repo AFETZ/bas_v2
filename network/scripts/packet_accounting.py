@@ -74,6 +74,14 @@ def account_packets(
     backoff_events = 0
     retry_events = 0
     for event in events:
+        digest = event.get("transport_payload_sha256")
+        matching_packets = (
+            hashes_to_packets.get(digest, ()) if isinstance(digest, str) else ()
+        )
+        # Medium events for telemetry and other background datagrams remain
+        # part of channel/load metrics, but are not logical test-packet events.
+        if not matching_packets:
+            continue
         event_name = event.get("event")
         if event_name == "backoff":
             backoff_events += 1
@@ -87,9 +95,7 @@ def account_packets(
         elif kind == "phy":
             phy_drop_events += 1
         if kind:
-            digest = event.get("transport_payload_sha256")
-            if isinstance(digest, str):
-                dropped_candidates.update(hashes_to_packets.get(digest, ()))
+            dropped_candidates.update(matching_packets)
 
     delivered = set(delivery_counts)
     dropped = dropped_candidates - delivered

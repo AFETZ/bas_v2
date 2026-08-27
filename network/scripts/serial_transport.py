@@ -22,6 +22,22 @@ DIRECTION_IDS = {"uart_to_gcs": 1, "gcs_to_uart": 2}
 HEADER = struct.Struct("!4sBBBBIHHHIQII")
 MAX_RECORD_BYTES = 1 << 20
 MAX_FRAGMENTS = 8192
+SEQUENCE_MODULUS = 1 << 32
+SEQUENCE_MASK = SEQUENCE_MODULUS - 1
+SEQUENCE_HALF_RANGE = SEQUENCE_MODULUS >> 1
+
+
+def sequence_forward_distance(reference: int, candidate: int) -> int:
+    """Return the unsigned 32-bit distance from reference to candidate."""
+
+    return (candidate - reference) & SEQUENCE_MASK
+
+
+def sequence_is_ahead(candidate: int, reference: int) -> bool:
+    """Order sequence numbers within the unambiguous half of their ring."""
+
+    distance = sequence_forward_distance(reference, candidate)
+    return 0 < distance < SEQUENCE_HALF_RANGE
 
 
 class FramingError(ValueError):
@@ -243,10 +259,13 @@ class Reassembler:
             self.counters.malformed_chunks += 1
             return self.expire(observed_ns)
         self.counters.chunks_received += 1
-        if chunk.sequence in self._recent_set or chunk.sequence < self.expected_sequence:
+        if chunk.sequence in self._recent_set or (
+            chunk.sequence != self.expected_sequence
+            and not sequence_is_ahead(chunk.sequence, self.expected_sequence)
+        ):
             self.counters.duplicate_chunks += 1
             return self.expire(observed_ns)
-        if chunk.sequence > self.expected_sequence:
+        if sequence_is_ahead(chunk.sequence, self.expected_sequence):
             self.counters.reordered_chunks += 1
         record = self._records.get(chunk.sequence)
         if record is None:
@@ -312,29 +331,39 @@ class Reassembler:
             higher_times = [
                 seen
                 for sequence, (_payload, _sent, seen) in self._complete.items()
-                if sequence > self.expected_sequence
+                if sequence_is_ahead(sequence, self.expected_sequence)
             ] + [
                 record.first_seen_ns
                 for sequence, record in self._records.items()
-                if sequence > self.expected_sequence
+                if sequence_is_ahead(sequence, self.expected_sequence)
             ]
             if not higher_times or (not force and observed_ns - min(higher_times) < self.timeout_ns):
                 break
             next_sequence = min(
-                sequence
-                for sequence in (*self._complete.keys(), *self._records.keys())
-                if sequence > self.expected_sequence
+                (
+                    sequence
+                    for sequence in (*self._complete.keys(), *self._records.keys())
+                    if sequence_is_ahead(sequence, self.expected_sequence)
+                ),
+                key=lambda sequence: sequence_forward_distance(
+                    self.expected_sequence, sequence
+                ),
             )
-            gap = next_sequence - self.expected_sequence
+            gap = sequence_forward_distance(self.expected_sequence, next_sequence)
             self.counters.sequence_gaps += gap
             self.counters.reassembly_failures += gap
             self.counters.discarded_frames += gap
             self.expected_sequence = next_sequence
         if force:
             while self._records:
-                next_sequence = min(self._records)
-                if next_sequence > self.expected_sequence:
-                    gap = next_sequence - self.expected_sequence
+                next_sequence = min(
+                    self._records,
+                    key=lambda sequence: sequence_forward_distance(
+                        self.expected_sequence, sequence
+                    ),
+                )
+                if next_sequence != self.expected_sequence:
+                    gap = sequence_forward_distance(self.expected_sequence, next_sequence)
                     self.counters.sequence_gaps += gap
                     self.counters.reassembly_failures += gap
                     self.counters.discarded_frames += gap

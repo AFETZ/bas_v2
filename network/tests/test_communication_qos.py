@@ -10,6 +10,7 @@ import yaml
 
 from network.ns3.tap_packet_engine_config import from_repository
 from network.scripts.communication_qos import DEFAULT_PATH, QosConfigError, load_qos
+from scripts.product.summarize_town01_full_stack import configured_control_qos_checks
 
 
 class CommunicationQosTests(unittest.TestCase):
@@ -51,6 +52,28 @@ class CommunicationQosTests(unittest.TestCase):
             path.write_text(yaml.safe_dump(document), encoding="utf-8")
             with self.assertRaises(QosConfigError):
                 load_qos(path)
+
+    def test_configured_control_thresholds_apply_to_every_profile(self) -> None:
+        qos = load_qos()
+        profiles = {
+            profile: {
+                "classes": {
+                    "control": {"pdr": 1.0, "latency_ms": {"p95": 5.0}}
+                }
+            }
+            for profile in ("nominal", "contention", "overload")
+        }
+        profiles["overload"]["classes"]["control"] = {
+            "pdr": 0.47,
+            "latency_ms": {"p95": 7681.5},
+        }
+
+        checks = configured_control_qos_checks(qos, profiles)
+
+        self.assertTrue(checks["nominal_control_required_pdr"])
+        self.assertTrue(checks["contention_control_p95_latency"])
+        self.assertFalse(checks["overload_control_required_pdr"])
+        self.assertFalse(checks["overload_control_p95_latency"])
 
 
 if __name__ == "__main__":

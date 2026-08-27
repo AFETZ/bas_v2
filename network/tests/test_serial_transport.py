@@ -105,6 +105,61 @@ class SerialTransportTests(unittest.TestCase):
         self.assertEqual(output, [b"record-two"])
         self.assertEqual(counters.sequence_gaps, 1)
 
+    def test_sequence_wrap_preserves_order_and_rejects_late_pre_wrap_data(self) -> None:
+        counters = TransportCounters()
+        encoder = Encoder(
+            channel="control",
+            uav_id=3,
+            direction="uart_to_gcs",
+            max_payload=128,
+            initial_sequence=0xFFFFFFFF,
+        )
+        receiver = Reassembler(
+            channel="control",
+            uav_id=3,
+            direction="uart_to_gcs",
+            timeout_ms=10,
+            initial_sequence=0xFFFFFFFF,
+            counters=counters,
+        )
+        pre_wrap = encoder.encode(b"pre-wrap", sent_monotonic_ns=1)[0]
+        post_wrap = encoder.encode(b"post-wrap", sent_monotonic_ns=2)[0]
+
+        self.assertEqual(receiver.ingest(post_wrap, now_ns=3), [])
+        self.assertEqual(
+            receiver.ingest(pre_wrap, now_ns=4),
+            [b"pre-wrap", b"post-wrap"],
+        )
+        self.assertEqual(receiver.expected_sequence, 1)
+        self.assertEqual(receiver.ingest(pre_wrap, now_ns=5), [])
+        self.assertEqual(counters.duplicate_chunks, 1)
+        self.assertGreater(counters.reordered_chunks, 0)
+
+    def test_missing_pre_wrap_sequence_releases_sequence_zero_after_timeout(self) -> None:
+        counters = TransportCounters()
+        encoder = Encoder(
+            channel="control",
+            uav_id=3,
+            direction="uart_to_gcs",
+            max_payload=128,
+            initial_sequence=0xFFFFFFFF,
+        )
+        encoder.encode(b"lost-pre-wrap", sent_monotonic_ns=1)
+        post_wrap = encoder.encode(b"post-wrap", sent_monotonic_ns=2)[0]
+        receiver = Reassembler(
+            channel="control",
+            uav_id=3,
+            direction="uart_to_gcs",
+            timeout_ms=1,
+            initial_sequence=0xFFFFFFFF,
+            counters=counters,
+        )
+
+        self.assertEqual(receiver.ingest(post_wrap, now_ns=10), [])
+        self.assertEqual(receiver.expire(now_ns=2_000_010), [b"post-wrap"])
+        self.assertEqual(counters.sequence_gaps, 1)
+        self.assertEqual(receiver.expected_sequence, 1)
+
     def test_mavlink_counter_recovers_after_corrupt_prefix(self) -> None:
         parser = MavlinkStreamCounter()
         parser.feed(b"\x00\x01corrupt")
