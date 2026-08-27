@@ -57,6 +57,17 @@ its external dependencies are unavailable:
 make run-network
 ```
 
+Run the complete five-UAV Town01 development scenario, including Gazebo,
+ArduPilot SITL, ROS odometry, real Sionna RT, ns-3, dual UARTs, additional data,
+flight lifecycle, PCAP capture, and heatmaps:
+
+```bash
+make run-town01
+```
+
+The command writes its self-contained result under `runs/town01-full-*` and
+cleans up its container, namespaces, TAP devices, and child processes.
+
 During development:
 
 ```bash
@@ -66,11 +77,13 @@ make status
 
 ## Current state
 
-The five-UAV configuration and launch mechanics exist, but this process-reset
-change does not claim a live five-aircraft flight. The checked-in baseline
-terrain is about 200 m by 150 m, not the required 10 km by 10 km shared scene.
-The ns-3, Sionna, bridge, and HitL directories contain partial runtime paths;
-the fully integrated real-byte and live-hardware path remains unfinished.
+The five-UAV Town01 development scenario has passed one integrated runtime:
+all five vehicles completed arm, takeoff, hold, movement, landing, and disarm
+while their control, payload, and additional-data traffic traversed ns-3 using
+live Sionna RT link state. This is not completion of the product target:
+Town01 measures about 3.191 km by 3.191 km rather than 10 km by 10 km, the ns-3
+medium remains the documented CSMA engineering surrogate, and live-hardware
+HitL plus scalability characterization remain unfinished.
 
 Continue from the first incomplete stage in the
 [development plan](doc/DEVELOPMENT_PLAN.md) and verify the live state in

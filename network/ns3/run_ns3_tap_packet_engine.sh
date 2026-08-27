@@ -16,6 +16,7 @@ STOP_FILE="${STOP_FILE:-$RUN_DIR/logs/ns3_packet_engine.stop}"
 SELF_TEST="${SELF_TEST:-0}"
 CONFIG_REPORT="${CONFIG_REPORT:-$RUN_DIR/logs/ns3_packet_engine_config.json}"
 ARGV_FILE="${ARGV_FILE:-$RUN_DIR/logs/ns3_packet_engine.argv}"
+RADIO_FILE="${RADIO_FILE:-$ROOT_DIR/network/config/radio_24ghz.yaml}"
 
 test -x "$BINARY"
 test -f "$CONFIG_TOOL"
@@ -31,6 +32,7 @@ CONFIG_ARGS=(
   --tap-gcs "${TAP_GCS:-tap-gcs}"
   --events-file "$EVENTS_FILE"
   --pcap-prefix "$PCAP_PREFIX"
+  --radio "$RADIO_FILE"
 )
 if [[ -n "${TAP_UAVS:-}" ]]; then
   CONFIG_ARGS+=(--tap-uavs "$TAP_UAVS")

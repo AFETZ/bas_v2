@@ -83,8 +83,10 @@ One script starts the complete scenario and writes:
 - run log;
 - short Markdown report.
 
-## Commands not yet exposed
+## Command exposure
 
 Do not add Make targets for capabilities that do not have a runnable path.
-The integrated P7 demo and benchmark commands remain planned until their
-implementations exist.
+`make run-town01` exposes the integrated Town01 development path, but it does
+not close the compliant-map, physical-HitL, scalability, or final customer-demo
+work. Benchmark and final-demo commands remain planned until those runnable
+paths exist.

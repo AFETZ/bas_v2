@@ -4,6 +4,7 @@ set -euo pipefail
 RUNTIME_DIR="${BAS_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp}/bas-v2-${UID}}"
 CONTAINER_NAME="${BAS_BASE_CONTAINER_NAME:-bas-v2-baseline}"
 NETWORK_CONTAINER_NAME="${BAS_NETWORK_CONTAINER_NAME:-bas-v2-network}"
+TOWN01_CONTAINER_NAME="${BAS_TOWN01_CONTAINER_NAME:-bas-v2-town01-full-stack}"
 stopped=0
 
 if command -v docker >/dev/null 2>&1 \
@@ -16,6 +17,19 @@ if command -v docker >/dev/null 2>&1 \
   fi
   printf 'Stopping base container %s.\n' "$CONTAINER_NAME"
   docker stop --timeout 15 "$CONTAINER_NAME" >/dev/null
+  stopped=$((stopped + 1))
+fi
+
+if command -v docker >/dev/null 2>&1 \
+  && [[ "$(docker inspect --format '{{.State.Running}}' "$TOWN01_CONTAINER_NAME" 2>/dev/null || true)" == "true" ]]; then
+  product_label="$(docker inspect --format '{{index .Config.Labels "bas.product"}}' "$TOWN01_CONTAINER_NAME")"
+  if [[ "$product_label" != "town01-full-stack" ]]; then
+    printf 'Refusing to stop container %s: missing bas.product=town01-full-stack label.\n' \
+      "$TOWN01_CONTAINER_NAME" >&2
+    exit 1
+  fi
+  printf 'Stopping Town01 full-stack container %s.\n' "$TOWN01_CONTAINER_NAME"
+  docker stop --timeout 15 "$TOWN01_CONTAINER_NAME" >/dev/null
   stopped=$((stopped + 1))
 fi
 

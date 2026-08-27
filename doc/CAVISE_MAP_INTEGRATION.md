@@ -87,11 +87,21 @@ on them. They are not the customer map, are not an implementation of the 10 by
 10 km requirement, and must not be generated, extended, or used by the active
 product path.
 
-## Next task: P3B
+## Town01 development derivative
 
-P3B will derive a tiled or selectively loaded Town01 Gazebo visual mesh and
-simplified collision mesh from the selected Blender/CAVISE geometry. It will
-then add a numeric alignment test that samples common landmarks in the
-original Sionna scene and the Gazebo derivative. This exercises the real asset
-path but cannot close the separate 10 by 10 km product requirement. Heavy
-Sionna path tracing remains outside P3A.
+`scripts/product/prepare_town01_gazebo.py` converts the selected canonical PLY
+categories to external OBJ visuals without moving their vertices. The current
+derivative contains 140 visual meshes, 867,887 vertices, and 1,489,181
+triangles. Its generated alignment data records an identity transform and zero
+source-to-Gazebo vertex delta.
+
+Runtime-cost reductions are explicit: vegetation visuals and collisions are
+omitted, while 57 surface and 401 building collision volumes are axis-aligned
+approximations computed from the canonical geometry. They are not replacement
+terrain or synthetic buildings. The output remains under the ignored
+`.external/cavise_maps/Town01/gazebo/` directory.
+
+`make run-town01` now loads this derivative in Gazebo and the canonical
+`scene.xml`/PLY geometry in real Sionna RT during the same five-UAV run. The
+next P3 work is an explicit motion-driven LOS/NLOS transition and selection of
+a measured 10 by 10 km source scene; Town01 cannot close that requirement.

@@ -102,5 +102,11 @@ components.
   the active development map with its measured 3.191 km by 3.191 km footprint.
 - Town01 exercises the canonical asset path but does not satisfy the separate
   10 km by 10 km or up-to-200 m product requirements.
-- No Gazebo derivative or Gazebo/Sionna alignment test exists yet.
+- The Town01 Gazebo development derivative preserves 867,887 source PLY
+  vertices in the Sionna frame with an identity transform. Its surface and
+  building collisions are axis-aligned approximations and vegetation is
+  omitted for runtime cost.
+- `make run-town01` exercises five SITLs, Gazebo, ROS odometry, real Sionna RT,
+  ns-3, dual UARTs, additional data, the flight lifecycle, and run artifacts.
+  It is a development integration command, not the final customer demo.
 - Live physical HitL serial/Ethernet gateways are not yet complete.

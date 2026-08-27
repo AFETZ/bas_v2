@@ -50,6 +50,13 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
     peer_address = endpoint(args.peer)
     uart = os.open(args.tty, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
     udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    tos_by_channel = {"control": 184, "payload": 40}
+    tos = int(args.tos if args.tos is not None else tos_by_channel.get(args.channel, 0))
+    if not 0 <= tos <= 255:
+        raise ValueError("UART adapter TOS must be in 0..255")
+    udp.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, tos)
+    if udp.getsockopt(socket.IPPROTO_IP, socket.IP_TOS) != tos:
+        raise RuntimeError(f"UART adapter did not retain requested TOS {tos}")
     udp.bind(bind_address)
     udp.setblocking(False)
     selector = selectors.DefaultSelector()
@@ -674,6 +681,7 @@ def parser() -> argparse.ArgumentParser:
     adapter.add_argument("--peer", required=True)
     adapter.add_argument("--event-log", required=True)
     adapter.add_argument("--ready-file", required=True)
+    adapter.add_argument("--tos", type=int)
     adapter.set_defaults(function=run_uart_adapter)
 
     mavlink = commands.add_parser("mavlink-probe")

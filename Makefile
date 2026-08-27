@@ -1,6 +1,6 @@
 SHELL := /usr/bin/env bash
 
-.PHONY: check-env build run-base run-network stop test-changed status
+.PHONY: check-env build run-base run-network run-town01 stop test-changed status
 
 check-env:
 	./scripts/product/check_env.sh
@@ -13,6 +13,9 @@ run-base:
 
 run-network:
 	./scripts/product/run_network.sh
+
+run-town01:
+	./scripts/product/run_town01_full_stack.sh
 
 stop:
 	./scripts/product/stop_all.sh

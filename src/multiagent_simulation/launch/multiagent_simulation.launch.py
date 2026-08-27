@@ -202,6 +202,9 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
         raise RuntimeError("control_uart and payload_uart must be configured together")
     if enable_serial2 and payload_uart_template:
         raise RuntimeError("enable_serial2 cannot be combined with payload_uart")
+    sitl_extra_defaults = LaunchConfiguration("sitl_extra_defaults").perform(context).strip()
+    if sitl_extra_defaults and not Path(sitl_extra_defaults).is_file():
+        raise RuntimeError(f"sitl_extra_defaults is not a file: {sitl_extra_defaults}")
     mavproxy_streamrate = LaunchConfiguration("mavproxy_streamrate").perform(
         context
     ).strip()
@@ -302,6 +305,8 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
             os.path.join(pkg_ardupilot_sitl, "config", "default_params", "dds_udp.parm"),
             dds_udp_params,
         ]
+        if sitl_extra_defaults:
+            defaults_files.append(sitl_extra_defaults)
         if control_uart_template:
             defaults_files.append(create_mavlink_uart_params_file())
         defaults_file = ",".join(defaults_files)
@@ -609,6 +614,11 @@ def generate_launch_description():
                     "PTY path for the separate MAVLink2 payload UART (SERIAL2). "
                     "Supports {name} and {instance} placeholders."
                 ),
+            ),
+            DeclareLaunchArgument(
+                "sitl_extra_defaults",
+                default_value="",
+                description="Optional scenario-specific ArduPilot defaults file.",
             ),
             DeclareLaunchArgument(
                 "mavproxy_streamrate",

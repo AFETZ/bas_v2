@@ -1,0 +1,267 @@
+#!/usr/bin/env python3
+"""Continuously map real Town01 Sionna link results into ns-3 packet states."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import json
+import os
+import signal
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from network.radio_provider.provider import ProviderError, query_tcp  # noqa: E402
+
+
+TRAFFIC_CLASSES = ("control", "payload", "additional_data")
+SERVICE_RATES = {0, 1000, 10000, 100000, 500000, 2000000, 20000000}
+
+
+def compact(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def load_json(path: Path) -> dict[str, Any]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError(f"JSON root is not an object: {path}")
+    return value
+
+
+def load_radio(path: Path) -> dict[str, float]:
+    value = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    radio = value.get("radio", {})
+    return {
+        "carrier_hz": float(radio.get("carrier_hz", 2.4e9)),
+        "bandwidth_hz": float(radio.get("bandwidth_hz", 20e6)),
+        "tx_power_dbm": float(radio.get("tx_power_dbm", 33.0)),
+    }
+
+
+def current_nodes(path: Path) -> list[dict[str, Any]]:
+    state = load_json(path)
+    nodes = state.get("nodes")
+    if state.get("type") != "node_state" or not isinstance(nodes, list):
+        raise ValueError("tracker state has the wrong type")
+    by_id = {str(item.get("id")): item for item in nodes if isinstance(item, dict)}
+    required = {"cp", *(f"uav{index}" for index in range(1, 6))}
+    if set(by_id) != required:
+        raise ValueError(f"tracker node set differs: {sorted(by_id)}")
+    for node_id in required:
+        node = by_id[node_id]
+        position = node.get("position_m")
+        if node.get("stale") or not isinstance(position, list) or len(position) != 3:
+            raise ValueError(f"tracker node is stale or malformed: {node_id}")
+    return [by_id["cp"], *(by_id[f"uav{index}"] for index in range(1, 6))]
+
+
+def all_links() -> list[dict[str, str]]:
+    links: list[dict[str, str]] = []
+    for index in range(1, 6):
+        uav = f"uav{index}"
+        for traffic_class in TRAFFIC_CLASSES:
+            links.append({"tx": "cp", "rx": uav, "traffic_class": traffic_class})
+            links.append({"tx": uav, "rx": "cp", "traffic_class": traffic_class})
+    return links
+
+
+def state_record(
+    *,
+    sequence: int,
+    query_id: str,
+    response_hash: str,
+    link: dict[str, Any],
+    applied_ns: int,
+    ttl_ns: int,
+    mapping_seed: int,
+) -> dict[str, Any]:
+    service_rate = int(link["service_tier_bps"])
+    if service_rate not in SERVICE_RATES:
+        raise ValueError(f"provider returned unsupported service tier: {service_rate}")
+    directed_link = f"{link['tx']}>{link['rx']}"
+    traffic_class = str(link["traffic_class"])
+    state_id = hashlib.sha256(
+        f"{query_id}|{directed_link}|{traffic_class}|{response_hash}".encode("utf-8")
+    ).hexdigest()
+    record: dict[str, Any] = {
+        "schema": "ams.sionna.packet_state/v1",
+        "state_sequence": sequence,
+        "availability": "fresh",
+        "directed_link": directed_link,
+        "traffic_class": traffic_class,
+        "query_id": query_id,
+        "applied_state_id": state_id,
+        "result_wire_sha256": response_hash,
+        "validity_start_monotonic_ns": applied_ns,
+        "expires_monotonic_ns": applied_ns + ttl_ns,
+        "adapter_applied_monotonic_ns": applied_ns,
+        "propagation_delay_ns": max(0, int(round(float(link["propagation_delay_ns"])))),
+        "service_rate_bps": service_rate,
+        "loss_probability": min(1.0, max(0.0, float(link["per_input"]))),
+        "mapping_seed": mapping_seed,
+        "mapping_version": "town01-provider-per-v1",
+    }
+    record["state_sha256"] = hashlib.sha256(compact(record).encode("utf-8")).hexdigest()
+    return record
+
+
+def append_states(path: Path, records: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as stream:
+        for record in records:
+            stream.write(compact(record) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def append_metrics(
+    path: Path,
+    *,
+    query_index: int,
+    query_started_ns: int,
+    response: dict[str, Any],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    new_file = not path.exists()
+    fields = [
+        "query_index",
+        "query_started_monotonic_ns",
+        "provider_latency_ms",
+        "tx",
+        "rx",
+        "traffic_class",
+        "pathloss_db",
+        "rssi_dbm",
+        "sinr_db",
+        "js_db",
+        "service_tier_bps",
+        "per_input",
+        "link_state",
+        "stale",
+        "geometry_state",
+        "path_count",
+        "propagation_delay_ns",
+    ]
+    with path.open("a", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        if new_file:
+            writer.writeheader()
+        for link in response["links"]:
+            writer.writerow(
+                {
+                    "query_index": query_index,
+                    "query_started_monotonic_ns": query_started_ns,
+                    "provider_latency_ms": response.get("provider_latency_ms"),
+                    **{field: link.get(field) for field in fields if field in link},
+                }
+            )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--node-state", type=Path, required=True)
+    parser.add_argument("--radio-config", type=Path, required=True)
+    parser.add_argument("--state-output", type=Path, required=True)
+    parser.add_argument("--metrics-output", type=Path, required=True)
+    parser.add_argument("--ready-file", type=Path, required=True)
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=5090)
+    parser.add_argument("--period-s", type=float, default=5.0)
+    parser.add_argument("--ttl-s", type=float, default=20.0)
+    parser.add_argument("--timeout-s", type=float, default=45.0)
+    parser.add_argument("--mapping-seed", type=int, default=42)
+    args = parser.parse_args()
+    if not 0.5 <= args.period_s <= 30.0:
+        raise SystemExit("--period-s must be in 0.5..30")
+    if not args.period_s * 2 < args.ttl_s <= 60.0:
+        raise SystemExit("--ttl-s must be greater than two periods and at most 60")
+
+    stop = False
+
+    def request_stop(_signum: int, _frame: object) -> None:
+        nonlocal stop
+        stop = True
+
+    signal.signal(signal.SIGTERM, request_stop)
+    signal.signal(signal.SIGINT, request_stop)
+    radio = load_radio(args.radio_config)
+    sequence = 0
+    query_index = 0
+    ttl_ns = int(args.ttl_s * 1e9)
+    args.state_output.parent.mkdir(parents=True, exist_ok=True)
+    args.state_output.write_text("", encoding="utf-8")
+    args.ready_file.unlink(missing_ok=True)
+
+    while not stop:
+        cycle_started = time.monotonic()
+        try:
+            nodes = current_nodes(args.node_state)
+            query_index += 1
+            query_started_ns = time.monotonic_ns()
+            query_id = f"town01-{query_index}-{query_started_ns}"
+            request = {
+                "type": "link_query",
+                "time_s": time.time(),
+                "deadline_ms": int(args.timeout_s * 1000),
+                "radio": radio,
+                "nodes": nodes,
+                "emitters": [],
+                "links": all_links(),
+            }
+            response = query_tcp(args.host, args.port, request, timeout_s=args.timeout_s)
+            if response.get("type") != "link_state" or len(response.get("links", [])) != 30:
+                raise ProviderError(f"provider returned incomplete state: {response!r}")
+            if response.get("scene_id") != "cavise_town01_editor_lod0_full_20260712":
+                raise ProviderError(f"provider scene differs: {response.get('scene_id')!r}")
+            response_hash = hashlib.sha256(compact(response).encode("utf-8")).hexdigest()
+            applied_ns = time.monotonic_ns()
+            records = []
+            for link in response["links"]:
+                sequence += 1
+                records.append(
+                    state_record(
+                        sequence=sequence,
+                        query_id=query_id,
+                        response_hash=response_hash,
+                        link=link,
+                        applied_ns=applied_ns,
+                        ttl_ns=ttl_ns,
+                        mapping_seed=args.mapping_seed,
+                    )
+                )
+            append_states(args.state_output, records)
+            append_metrics(
+                args.metrics_output,
+                query_index=query_index,
+                query_started_ns=query_started_ns,
+                response=response,
+            )
+            if not args.ready_file.exists():
+                args.ready_file.write_text(f"{query_id}\n", encoding="utf-8")
+            print(
+                f"RADIO_STATE query={query_index} links=30 "
+                f"provider_latency_ms={response.get('provider_latency_ms')}",
+                flush=True,
+            )
+        except (OSError, ValueError, json.JSONDecodeError, ProviderError) as exc:
+            print(f"RADIO_STATE retry error={exc}", file=sys.stderr, flush=True)
+        remaining = args.period_s - (time.monotonic() - cycle_started)
+        deadline = time.monotonic() + max(remaining, 0.0)
+        while not stop and time.monotonic() < deadline:
+            time.sleep(min(0.1, deadline - time.monotonic()))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
