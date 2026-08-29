@@ -1332,13 +1332,13 @@ class IngressProtectionController
   public:
     IngressProtectionController(bool enabled,
                                 uint32_t uavCount,
-                                uint64_t controlReservedBps,
+                                uint64_t minimumControlHeadroomBps,
                                 uint64_t payloadRateBps,
                                 uint64_t additionalDataRateBps,
                                 uint32_t burstBytesPerUav)
         : m_enabled(enabled),
           m_uavCount(uavCount),
-          m_controlReservedBps(controlReservedBps)
+          m_minimumControlHeadroomBps(minimumControlHeadroomBps)
     {
         const std::array<uint64_t, 2> rates = {payloadRateBps, additionalDataRateBps};
         const uint64_t aggregateBurst =
@@ -1400,8 +1400,8 @@ class IngressProtectionController
         return decision;
     }
 
-    static bool CapacityReservesControl(uint64_t radioRateBps,
-                                        uint64_t controlReservedBps,
+    static bool CapacityKeepsMinimumControlHeadroom(uint64_t radioRateBps,
+                                                     uint64_t minimumControlHeadroomBps,
                                         uint64_t payloadRateBps,
                                         uint64_t additionalDataRateBps)
     {
@@ -1411,12 +1411,47 @@ class IngressProtectionController
             return false;
         }
         const uint64_t lowerRateBps = payloadRateBps + additionalDataRateBps;
-        return controlReservedBps <= radioRateBps - lowerRateBps;
+        return minimumControlHeadroomBps <= radioRateBps - lowerRateBps;
     }
 
     static bool TokenBucketSelfTest()
     {
         return TokenBucket::DeterministicSelfTest();
+    }
+
+    static uint64_t PerUavSustainedAdmissionRateBps(uint64_t aggregateRateBps,
+                                                     uint32_t uavCount)
+    {
+        return uavCount == 0 ? 0 : aggregateRateBps / uavCount;
+    }
+
+    static bool AsymmetricPayloadDemandSelfTest()
+    {
+        // Only uav1 demands payload. The per-UAV bucket remains the limiting
+        // rate even though the aggregate bucket retains capacity for uav2..5.
+        constexpr uint64_t payloadRateBps = 6500000;
+        constexpr uint32_t uavCount = 5;
+        const uint64_t perUavBytesPerSecond =
+            PerUavSustainedAdmissionRateBps(payloadRateBps, uavCount) / 8;
+        IngressProtectionController controller(true,
+                                               uavCount,
+                                               4000000,
+                                               payloadRateBps,
+                                               1,
+                                               1000000);
+        FrameMetadata payload;
+        payload.classMapped = true;
+        payload.trafficClass = "payload";
+        if (!controller.Admit("uav1", payload, 1000000, 0, 1).admitted)
+        {
+            return false;
+        }
+        const IngressAdmissionDecision abovePerUavRate = controller.Admit(
+            "uav1", payload, perUavBytesPerSecond + 1, 0, 1000000001ULL);
+        const IngressAdmissionDecision atPerUavRate = controller.Admit(
+            "uav1", payload, perUavBytesPerSecond, 0, 1000000001ULL);
+        return !abovePerUavRate.admitted && atPerUavRate.admitted &&
+               perUavBytesPerSecond * 8 < payloadRateBps;
     }
 
     static bool DeadlineDropSelfTest()
@@ -1432,10 +1467,10 @@ class IngressProtectionController
         return !atDeadline.admitted && atDeadline.reason == "ingress_deadline_payload";
     }
 
-    static bool ReservedControlSelfTest()
+    static bool MinimumControlHeadroomSelfTest()
     {
-        if (!CapacityReservesControl(100, 20, 30, 30) ||
-            CapacityReservesControl(100, 50, 30, 30))
+        if (!CapacityKeepsMinimumControlHeadroom(100, 20, 30, 30) ||
+            CapacityKeepsMinimumControlHeadroom(100, 50, 30, 30))
         {
             return false;
         }
@@ -1461,9 +1496,9 @@ class IngressProtectionController
                second.reason == "ingress_token_bucket_payload";
     }
 
-    uint64_t ControlReservedBps() const
+    uint64_t MinimumControlHeadroomBps() const
     {
-        return m_controlReservedBps;
+        return m_minimumControlHeadroomBps;
     }
 
   private:
@@ -1476,7 +1511,7 @@ class IngressProtectionController
 
     bool m_enabled;
     uint32_t m_uavCount;
-    uint64_t m_controlReservedBps;
+    uint64_t m_minimumControlHeadroomBps;
     std::array<TokenBucket, 2> m_aggregate;
     std::array<std::vector<TokenBucket>, 2> m_perUav;
 };
@@ -2695,7 +2730,7 @@ struct EngineConfig
     bool fairLowerClassesPerUav = false;
     bool ingressProtectionEnabled = false;
     bool shapingEnabled = false;
-    uint64_t controlReservedBps = 0;
+    uint64_t minimumControlHeadroomBps = 0;
     uint64_t payloadAdmissionRateBps = 0;
     uint64_t additionalDataAdmissionRateBps = 0;
     uint32_t tokenBucketBurstBytesPerUav = 0;
@@ -2801,7 +2836,7 @@ CanonicalConfig(const EngineConfig& config, const std::vector<std::string>& tapU
         << "fair_lower_classes_per_uav=" << (config.fairLowerClassesPerUav ? 1 : 0) << '\n'
         << "ingress_protection_enabled=" << (config.ingressProtectionEnabled ? 1 : 0) << '\n'
         << "shaping_enabled=" << (config.shapingEnabled ? 1 : 0) << '\n'
-        << "control_reserved_bps=" << config.controlReservedBps << '\n'
+        << "minimum_control_headroom_bps=" << config.minimumControlHeadroomBps << '\n'
         << "payload_admission_rate_bps=" << config.payloadAdmissionRateBps << '\n'
         << "additional_data_admission_rate_bps=" << config.additionalDataAdmissionRateBps << '\n'
         << "token_bucket_burst_bytes_per_uav=" << config.tokenBucketBurstBytesPerUav << '\n'
@@ -2965,18 +3000,18 @@ ValidateConfig(const EngineConfig& config, const std::vector<std::string>& tapUa
     {
         return "ingressProtectionEnabled must be true for the protected product path";
     }
-    if (config.controlReservedBps == 0 || config.payloadAdmissionRateBps == 0 ||
+    if (config.minimumControlHeadroomBps == 0 || config.payloadAdmissionRateBps == 0 ||
         config.additionalDataAdmissionRateBps == 0)
     {
-        return "control reserve and lower admission rates must be positive";
+        return "minimum control headroom and lower admission rates must be positive";
     }
-    if (!IngressProtectionController::CapacityReservesControl(
+    if (!IngressProtectionController::CapacityKeepsMinimumControlHeadroom(
             *radioRateBps,
-            config.controlReservedBps,
+            config.minimumControlHeadroomBps,
             config.payloadAdmissionRateBps,
             config.additionalDataAdmissionRateBps))
     {
-        return "payload/additional admission rates plus control reserve exceed radioRate";
+        return "payload/additional admission rates plus minimum control headroom exceed radioRate";
     }
     if (config.tokenBucketBurstBytesPerUav < 1 ||
         config.tokenBucketBurstBytesPerUav > 1000000)
@@ -3722,7 +3757,7 @@ TracePhyTxEnd(LowerPacketGuard* packetGuard,
 {
     if (sourceDevice)
     {
-        sourceDevice->SetBackoffParams(MicroSeconds(1), 1, 1000, 10, macRetryLimit);
+        sourceDevice->SetBackoffParams(MicroSeconds(1), 1, 1000, macRetryLimit, 10);
     }
     if (packetGuard)
     {
@@ -3741,7 +3776,7 @@ TracePhyTxDrop(LowerPacketGuard* packetGuard,
 {
     if (sourceDevice)
     {
-        sourceDevice->SetBackoffParams(MicroSeconds(1), 1, 1000, 10, macRetryLimit);
+        sourceDevice->SetBackoffParams(MicroSeconds(1), 1, 1000, macRetryLimit, 10);
     }
     if (sourceDevice && !sourceDevice->IsSendEnabled())
     {
@@ -4210,9 +4245,9 @@ main(int argc, char* argv[])
     command.AddValue("shapingEnabled",
                      "Startup-authorized lower-class shaping mode",
                      config.shapingEnabled);
-    command.AddValue("controlReservedBps",
-                     "Radio capacity unavailable to lower-class admission",
-                     config.controlReservedBps);
+    command.AddValue("minimumControlHeadroomBps",
+                     "Minimum static control headroom required by lower-class admission validation",
+                     config.minimumControlHeadroomBps);
     command.AddValue("payloadAdmissionRateBps",
                      "Aggregate payload token-bucket rate",
                      config.payloadAdmissionRateBps);
@@ -4330,8 +4365,10 @@ main(int argc, char* argv[])
     {
         const bool tokenBucketSelfTest = IngressProtectionController::TokenBucketSelfTest();
         const bool deadlineDropSelfTest = IngressProtectionController::DeadlineDropSelfTest();
-        const bool reservedControlSelfTest =
-            IngressProtectionController::ReservedControlSelfTest();
+        const bool minimumControlHeadroomSelfTest =
+            IngressProtectionController::MinimumControlHeadroomSelfTest();
+        const bool asymmetricPayloadDemandSelfTest =
+            IngressProtectionController::AsymmetricPayloadDemandSelfTest();
         const bool profileIdNoBypassSelfTest =
             IngressProtectionController::ProfileIdCannotBypassSelfTest();
         const bool perUavFairnessSelfTest = PerUavRoundRobin::DeterministicSelfTest();
@@ -4340,7 +4377,8 @@ main(int argc, char* argv[])
         const bool globalRadioSchedulerSelfTest = GlobalRadioScheduler::DeterministicSelfTest();
         const bool staleGrantSelfTest = ExactPacketGrant::DeterministicSelfTest();
         if (config.selfTest &&
-            !(tokenBucketSelfTest && deadlineDropSelfTest && reservedControlSelfTest &&
+            !(tokenBucketSelfTest && deadlineDropSelfTest && minimumControlHeadroomSelfTest &&
+              asymmetricPayloadDemandSelfTest &&
               profileIdNoBypassSelfTest &&
               perUavFairnessSelfTest && retryBoundSelfTest && strictPrioritySelfTest &&
               globalRadioSchedulerSelfTest && staleGrantSelfTest))
@@ -4373,7 +4411,7 @@ main(int argc, char* argv[])
         IngressProtectionController ingressProtection(config.ingressProtectionEnabled &&
                                                            config.shapingEnabled,
                                                        config.uavCount,
-                                                       config.controlReservedBps,
+                                                       config.minimumControlHeadroomBps,
                                                        config.payloadAdmissionRateBps,
                                                        config.additionalDataAdmissionRateBps,
                                                        config.tokenBucketBurstBytesPerUav);
@@ -4464,9 +4502,9 @@ main(int argc, char* argv[])
                                    logger.Log(
                                        event, observedDevice, packet, depth, limit, reason, queueAgeNs);
                                });
-            // The tracked ns-3 patch makes the runtime order explicit:
-            // ceiling is fourth and maxRetries is fifth.
-            device->SetBackoffParams(MicroSeconds(1), 1, 1000, 10, config.macRetryLimit);
+            // Keep the stock ns-3.40 public API order: maxRetries, then ceiling.
+            device->SetBackoffParams(
+                MicroSeconds(1), 1, 1000, config.macRetryLimit, 10);
             if (config.sionnaIpcEnabled)
             {
                 Ptr<AmsRadioReceiveErrorModel> receiveError =
@@ -4626,7 +4664,8 @@ main(int argc, char* argv[])
         if (config.selfTest)
         {
             selfTestPassed = tokenBucketSelfTest && deadlineDropSelfTest &&
-                             reservedControlSelfTest && profileIdNoBypassSelfTest &&
+                             minimumControlHeadroomSelfTest && asymmetricPayloadDemandSelfTest &&
+                             profileIdNoBypassSelfTest &&
                              perUavFairnessSelfTest &&
                              retryBoundSelfTest && strictPrioritySelfTest &&
                              globalRadioSchedulerSelfTest && staleGrantSelfTest &&
@@ -4645,8 +4684,15 @@ main(int argc, char* argv[])
                   << (tokenBucketSelfTest ? "true" : "false")
                   << ",\"deadline_drop_self_test\":"
                   << (deadlineDropSelfTest ? "true" : "false")
-                  << ",\"reserved_control_self_test\":"
-                  << (reservedControlSelfTest ? "true" : "false")
+                  << ",\"minimum_control_headroom_self_test\":"
+                  << (minimumControlHeadroomSelfTest ? "true" : "false")
+                  << ",\"asymmetric_payload_demand_self_test\":"
+                  << (asymmetricPayloadDemandSelfTest ? "true" : "false")
+                  << ",\"asymmetric_payload_uav1_max_sustained_admitted_bps\":"
+                  << IngressProtectionController::PerUavSustainedAdmissionRateBps(
+                         config.payloadAdmissionRateBps,
+                         config.uavCount)
+                  << ",\"work_conserving_across_idle_uavs\":false"
                   << ",\"profile_id_no_bypass_self_test\":"
                   << (profileIdNoBypassSelfTest ? "true" : "false")
                   << ",\"per_uav_fairness_self_test\":"

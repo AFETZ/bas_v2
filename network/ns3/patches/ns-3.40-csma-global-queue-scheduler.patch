@@ -60,25 +60,6 @@
  uint32_t
 --- a/src/csma/model/csma-net-device.h
 +++ b/src/csma/model/csma-net-device.h
-@@ -108,14 +108,14 @@
-      * \param slotTime Length of a packet slot (or average packet time)
-      * \param minSlots Minimum number of slots to wait
-      * \param maxSlots Maximum number of slots to wait
--     * \param maxRetries Maximum number of retries before packet is discard
--     * \param ceiling Cap on the exponential function when calculating max slots
-+     * \param ceiling Cap on the exponential function when calculating max slots
-+     * \param maxRetries Maximum number of retries before packet is discarded
-      */
-     void SetBackoffParams(Time slotTime,
-                           uint32_t minSlots,
-                           uint32_t maxSlots,
--                          uint32_t maxRetries,
--                          uint32_t ceiling);
-+                          uint32_t ceiling,
-+                          uint32_t maxRetries);
- 
-     /**
-      * Attach the device to a channel.
 @@ -150,6 +150,39 @@
      Ptr<Queue<Packet>> GetQueue() const;
  
@@ -158,6 +139,21 @@
      NetDevice::DoDispose();
  }
  
+@@ -299,11 +299,11 @@
+ CsmaNetDevice::SetBackoffParams(Time slotTime,
+                                 uint32_t minSlots,
+                                 uint32_t maxSlots,
+-                                uint32_t ceiling,
+-                                uint32_t maxRetries)
++                                uint32_t maxRetries,
++                                uint32_t ceiling)
+ {
+-    NS_LOG_FUNCTION(slotTime << minSlots << maxSlots << ceiling << maxRetries);
++    NS_LOG_FUNCTION(slotTime << minSlots << maxSlots << maxRetries << ceiling);
+     m_backoff.m_slotTime = slotTime;
+     m_backoff.m_minSlots = minSlots;
+     m_backoff.m_maxSlots = maxSlots;
+     m_backoff.m_ceiling = ceiling;
 @@ -462,6 +463,7 @@
      if (!IsSendEnabled())
      {

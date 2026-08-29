@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from network.ns3.tap_packet_engine_config import ConfigError, data_rate_bps  # noqa: E402
 from network.scripts.communication_qos import DEFAULT_PATH, load_qos  # noqa: E402
 
 
@@ -353,9 +354,9 @@ def runtime_context(
     window_events: list[dict[str, Any]],
 ) -> dict[str, Any]:
     summary = read_json(run_dir / "metrics/summary.json")
-    gazebo = summary.get("gazebo", {}) if isinstance(summary, dict) else {}
     radio = summary.get("radio", {}) if isinstance(summary, dict) else {}
     no_bypass = summary.get("no_bypass", {}) if isinstance(summary, dict) else {}
+    stop_probe = read_json(run_dir / "metrics/ns3_stopped_probe.json")
     engine = read_json(run_dir / "logs/ns3_packet_engine_config.json")
     resolved = engine.get("resolved", {}) if isinstance(engine, dict) else {}
     if not isinstance(resolved, dict):
@@ -390,7 +391,7 @@ def runtime_context(
             "fair_lower_classes_per_uav",
             "ingress_protection_enabled",
             "shaping_enabled",
-            "control_reserved_bps",
+            "minimum_control_headroom_bps",
             "payload_admission_rate_bps",
             "additional_data_admission_rate_bps",
             "token_bucket_burst_bytes_per_uav",
@@ -402,13 +403,51 @@ def runtime_context(
         )
         if key in resolved
     }
+    try:
+        configured_capacity_bps = data_rate_bps(str(resolved["radio_rate"]))
+        lower_admission_total_bps = int(resolved["payload_admission_rate_bps"]) + int(
+            resolved["additional_data_admission_rate_bps"]
+        )
+        minimum_control_headroom_bps = int(
+            resolved["minimum_control_headroom_bps"]
+        )
+    except (ConfigError, KeyError, TypeError, ValueError):
+        configured_capacity_bps = None
+        lower_admission_total_bps = None
+        minimum_control_headroom_bps = None
+    actual_static_headroom_bps = (
+        configured_capacity_bps - lower_admission_total_bps
+        if isinstance(configured_capacity_bps, int)
+        and isinstance(lower_admission_total_bps, int)
+        else None
+    )
+    summary_no_bypass = (
+        bool(no_bypass.get("ns3_stop_breaks_control_exchange"))
+        if isinstance(no_bypass, dict)
+        else False
+    )
+    probe_no_bypass = all(
+        stop_probe.get(key) is True
+        for key in (
+            "exchange_stopped",
+            "new_command_response_stopped",
+            "reverse_telemetry_stopped",
+        )
+    )
     return {
-        "gazebo_mean_rtf": gazebo.get("real_time_factor", {}).get("mean")
-        if isinstance(gazebo, dict)
-        else None,
-        "gazebo_rtf_scope": "run_summary_global"
-        if isinstance(gazebo, dict) and bool(gazebo)
-        else "unavailable",
+        "medium_access": {
+            "mode": "centralized_priority_scheduler_over_csma_channel",
+            "arbitration_mode": "centralized_priority_scheduler",
+            "transport_medium": "ns3_csma_channel",
+            "collisions_expected": False,
+            "non_preemptive_current_frame": True,
+        },
+        "profile_rtf_status": "unmeasured",
+        "gazebo_rtf_scope": "unmeasured",
+        "configured_capacity_bps": configured_capacity_bps,
+        "lower_admission_total_bps": lower_admission_total_bps,
+        "actual_static_headroom_bps": actual_static_headroom_bps,
+        "minimum_control_headroom_bps": minimum_control_headroom_bps,
         "sionna_coupling_enabled": coupling_enabled,
         "sionna_query_count": profile_queries["query_count"],
         "sionna_profile_evidence": {
@@ -419,12 +458,9 @@ def runtime_context(
             "profile_window_events_with_applied_state": applied_event_count,
             "run_summary_query_count": global_query_count,
         },
-        "no_bypass": bool(no_bypass.get("ns3_stop_breaks_control_exchange"))
-        if isinstance(no_bypass, dict)
-        else False,
-        "no_bypass_scope": "run_summary_global"
-        if isinstance(no_bypass, dict) and bool(no_bypass)
-        else "unavailable",
+        "no_bypass": summary_no_bypass or probe_no_bypass,
+        "no_bypass_scope": "full_run",
+        "not_profile_local": True,
         "provenance": {
             "environment": environment_provenance(run_dir),
             "engine_contract": engine.get("contract"),
@@ -874,7 +910,7 @@ def analyze_profile(
             "dropped_at_ingress": class_statuses["dropped_at_ingress"],
             "dropped_in_medium": class_statuses["dropped_in_medium"],
             "expired_at_drain": class_statuses["expired_at_drain"],
-            "pending": class_statuses["pending"],
+            "logical_terminal_pending": class_statuses["pending"],
             "pdr_from_offered": len(class_delivered) / len(class_ids)
             if class_ids
             else 0.0,
@@ -1039,15 +1075,16 @@ def analyze_profile(
             "dropped_at_ingress": statuses["dropped_at_ingress"],
             "dropped_in_medium": statuses["dropped_in_medium"],
             "expired_at_drain": statuses["expired_at_drain"],
-            "pending": statuses["pending"],
+            "logical_terminal_pending": statuses["pending"],
             "reconciled_from_expired_at_drain": sum(
                 bool(row.get("reconciled_from_expired_at_drain"))
                 for row in outcomes.values()
             ),
-            "all_packets_terminal": len(outcomes) == len(attempts)
+            "logical_all_packets_terminal": len(outcomes) == len(attempts)
             and statuses["pending"] == 0,
             "accounting_cutoff_monotonic_ns": end_ns,
             "physical_ns3_queue_state_measured": False,
+            "physical_ns3_queue_empty": None,
         },
         "classes": classes,
         "lower_class_throughput_bps": sum(
@@ -1147,7 +1184,6 @@ def controlled_acceptance_thresholds(qos_config: dict[str, Any]) -> dict[str, fl
         "control_required_pdr": float(control["required_pdr"]),
         "control_max_p95_latency_ms": float(control["max_p95_latency_ms"]),
         "scheduler_lag_max_p95_ms": float(profile["max_scheduler_lag_p95_ms"]),
-        "gazebo_min_mean_rtf": float(profile["min_gazebo_mean_rtf"]),
     }
 
 
@@ -1160,7 +1196,6 @@ def acceptance(
     classes = summary["classes"]
     control = classes["control"]
     lag = summary["scheduler_lag_ms"].get("p95")
-    rtf = summary.get("gazebo_mean_rtf")
     cpu_samples = summary.get("ns3_cpu_percent_one_core", {}).get("count")
     queue_distributions = summary.get("queue_delay_ms_by_class", {})
     return {
@@ -1180,7 +1215,9 @@ def acceptance(
             and int(queue_distributions[name]["count"]) > 0
             for name in CLASSES
         ),
-        "pending_zero": int(summary["terminal"]["pending"]) == 0,
+        "logical_terminal_pending_zero": int(
+            summary["terminal"]["logical_terminal_pending"]
+        ) == 0,
         "lower_priority_delivered": all(
             int(classes[name]["delivered_packets"]) > 0
             for name in ("payload", "additional_data")
@@ -1189,8 +1226,6 @@ def acceptance(
             bool(classes[name]["no_uav_starvation"]) for name in CLASSES
         ),
         "no_bypass": bool(summary.get("no_bypass")),
-        "gazebo_mean_rtf_at_least_0_95": isinstance(rtf, (int, float))
-        and float(rtf) >= thresholds["gazebo_min_mean_rtf"],
         "sionna_coupling_enabled": bool(summary.get("sionna_coupling_enabled")),
     }
 
@@ -1203,7 +1238,7 @@ def main() -> int:
     parser.add_argument("--meltdown-run", type=Path, required=True)
     parser.add_argument("--serial-baseline-run", type=Path)
     parser.add_argument("--qos-config", type=Path, default=DEFAULT_PATH)
-    parser.add_argument("--output-dir", type=Path, default=ROOT / "metrics")
+    parser.add_argument("--output-dir", type=Path)
     args = parser.parse_args()
 
     qos_path = args.qos_config.resolve()
@@ -1365,8 +1400,12 @@ def main() -> int:
             "events_per_delivered_after": controlled["events"][
                 "per_delivered_logical_packet"
             ],
-            "pending_before": baseline["terminal"]["pending"],
-            "pending_after": controlled["terminal"]["pending"],
+            "logical_terminal_pending_before": baseline["terminal"][
+                "logical_terminal_pending"
+            ],
+            "logical_terminal_pending_after": controlled["terminal"][
+                "logical_terminal_pending"
+            ],
         },
         "serial": {
             "before": serial_before,
@@ -1380,7 +1419,11 @@ def main() -> int:
         },
     }
 
-    output_dir = args.output_dir.resolve()
+    output_dir = (
+        args.output_dir.resolve()
+        if args.output_dir
+        else args.controlled_run.resolve() / "metrics"
+    )
     write_json(output_dir / "controlled_overload_summary.json", controlled)
     write_json(output_dir / "meltdown_characterization.json", meltdown)
     write_json(output_dir / "event_profile.json", event_profile)

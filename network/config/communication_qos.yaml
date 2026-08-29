@@ -11,9 +11,16 @@ scheduler:
   strict_control_priority: true
   fair_lower_classes_per_uav: true
 
+medium_access:
+  mode: centralized_priority_scheduler_over_csma_channel
+  arbitration_mode: centralized_priority_scheduler
+  transport_medium: ns3_csma_channel
+  collisions_expected: false
+  non_preemptive_current_frame: true
+
 protection:
   ingress_token_bucket_enabled: true
-  control_reserved_bps: 4000000
+  minimum_control_headroom_bps: 4000000
   payload_admission_rate_bps: 6500000
   additional_data_admission_rate_bps: 6500000
   token_bucket_burst_bytes_per_uav: 7000

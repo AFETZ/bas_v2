@@ -80,6 +80,19 @@ def load_qos(path: Path = DEFAULT_PATH) -> dict[str, Any]:
     if not _required_bool(scheduler, "fair_lower_classes_per_uav", "scheduler"):
         raise QosConfigError("scheduler.fair_lower_classes_per_uav must remain enabled")
 
+    medium_access = _mapping(root.get("medium_access"), "medium_access")
+    required_medium_access = {
+        "mode": "centralized_priority_scheduler_over_csma_channel",
+        "arbitration_mode": "centralized_priority_scheduler",
+        "transport_medium": "ns3_csma_channel",
+        "collisions_expected": False,
+        "non_preemptive_current_frame": True,
+    }
+    if medium_access != required_medium_access:
+        raise QosConfigError(
+            "medium_access must declare the centralized scheduler over the ns-3 CSMA channel"
+        )
+
     protection = _mapping(root.get("protection"), "protection")
     if not _required_bool(
         protection, "ingress_token_bucket_enabled", "protection"
@@ -95,7 +108,9 @@ def load_qos(path: Path = DEFAULT_PATH) -> dict[str, Any]:
         protection, "terminal_expiry_after_drain", "protection"
     ):
         raise QosConfigError("protection.terminal_expiry_after_drain must remain enabled")
-    control_reserve = _positive_int(protection, "control_reserved_bps", "protection")
+    minimum_control_headroom = _positive_int(
+        protection, "minimum_control_headroom_bps", "protection"
+    )
     payload_rate = _positive_int(
         protection, "payload_admission_rate_bps", "protection"
     )
@@ -127,7 +142,9 @@ def load_qos(path: Path = DEFAULT_PATH) -> dict[str, Any]:
     drain_interval = _positive_int(protection, "drain_interval_ms", "protection")
     if drain_interval > 60000:
         raise QosConfigError("protection.drain_interval_ms must be <= 60000")
-    if control_reserve + payload_rate + additional_rate <= control_reserve:
+    if minimum_control_headroom + payload_rate + additional_rate <= (
+        minimum_control_headroom
+    ):
         raise QosConfigError("lower-class admission rates must be non-zero")
 
     aggregation = _mapping(root.get("serial_aggregation"), "serial_aggregation")

@@ -57,7 +57,7 @@ class EngineConfig:
     fair_lower_classes_per_uav: bool
     ingress_protection_enabled: bool
     shaping_enabled: bool
-    control_reserved_bps: int
+    minimum_control_headroom_bps: int
     payload_admission_rate_bps: int
     additional_data_admission_rate_bps: int
     token_bucket_burst_bytes_per_uav: int
@@ -135,15 +135,15 @@ class EngineConfig:
         if not isinstance(self.shaping_enabled, bool):
             raise ConfigError("shaping_enabled must be a boolean")
         protection_rates = (
-            self.control_reserved_bps,
+            self.minimum_control_headroom_bps,
             self.payload_admission_rate_bps,
             self.additional_data_admission_rate_bps,
         )
         if any(value < 1 for value in protection_rates):
-            raise ConfigError("control reserve and lower admission rates must be positive")
+            raise ConfigError("minimum control headroom and lower admission rates must be positive")
         if sum(protection_rates) > data_rate_bps(self.radio_rate):
             raise ConfigError(
-                "control reserve plus lower admission rates exceeds channel capacity"
+                "minimum control headroom plus lower admission rates exceeds channel capacity"
             )
         if not 1 <= self.token_bucket_burst_bytes_per_uav <= 1_000_000:
             raise ConfigError("token_bucket_burst_bytes_per_uav must be in 1..1000000")
@@ -235,7 +235,10 @@ class EngineConfig:
                 "1" if self.ingress_protection_enabled else "0",
             ),
             ("shaping_enabled", "1" if self.shaping_enabled else "0"),
-            ("control_reserved_bps", str(self.control_reserved_bps)),
+            (
+                "minimum_control_headroom_bps",
+                str(self.minimum_control_headroom_bps),
+            ),
             ("payload_admission_rate_bps", str(self.payload_admission_rate_bps)),
             (
                 "additional_data_admission_rate_bps",
@@ -308,7 +311,7 @@ class EngineConfig:
             "fairLowerClassesPerUav": int(self.fair_lower_classes_per_uav),
             "ingressProtectionEnabled": int(self.ingress_protection_enabled),
             "shapingEnabled": int(self.shaping_enabled),
-            "controlReservedBps": self.control_reserved_bps,
+            "minimumControlHeadroomBps": self.minimum_control_headroom_bps,
             "payloadAdmissionRateBps": self.payload_admission_rate_bps,
             "additionalDataAdmissionRateBps": self.additional_data_admission_rate_bps,
             "tokenBucketBurstBytesPerUav": self.token_bucket_burst_bytes_per_uav,
@@ -509,7 +512,9 @@ def from_repository(
                 protection["ingress_token_bucket_enabled"]
             ),
             shaping_enabled=shaping_enabled,
-            control_reserved_bps=int(protection["control_reserved_bps"]),
+            minimum_control_headroom_bps=int(
+                protection["minimum_control_headroom_bps"]
+            ),
             payload_admission_rate_bps=int(
                 protection["payload_admission_rate_bps"]
             ),

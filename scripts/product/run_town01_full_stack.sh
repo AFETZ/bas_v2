@@ -39,6 +39,9 @@ run_in_container() {
     "${gpu_args[@]}" \
     -e BAS_TOWN01_IN_CONTAINER=1 \
     -e BAS_TOWN01_RUN_ID="${BAS_TOWN01_RUN_ID:-}" \
+    -e BAS_TOWN01_PROFILES="${BAS_TOWN01_PROFILES:-}" \
+    -e BAS_TOWN01_SKIP_HEATMAPS="${BAS_TOWN01_SKIP_HEATMAPS:-0}" \
+    -e BAS_TOWN01_SKIP_FLIGHT_SCENARIO="${BAS_TOWN01_SKIP_FLIGHT_SCENARIO:-0}" \
     -e BAS_TOWN01_HOST_UID="$(id -u)" \
     -e BAS_TOWN01_HOST_GID="$(id -g)" \
     -e HOME=/tmp/bas-town01-home \
@@ -113,6 +116,16 @@ SIONNA_STATES="$RUN_DIR/logs/sionna_packet_states.jsonl"
 SIONNA_READY="$RUN_DIR/logs/sionna_packet_states.ready"
 NS3_READY="$RUN_DIR/logs/ns3_packet_engine.ready"
 NS3_STOP="$RUN_DIR/logs/ns3_packet_engine.stop"
+TOWN01_PROFILES="${BAS_TOWN01_PROFILES:-}"
+TOWN01_SKIP_HEATMAPS="${BAS_TOWN01_SKIP_HEATMAPS:-0}"
+TOWN01_SKIP_FLIGHT_SCENARIO="${BAS_TOWN01_SKIP_FLIGHT_SCENARIO:-0}"
+
+for flag in "$TOWN01_SKIP_HEATMAPS" "$TOWN01_SKIP_FLIGHT_SCENARIO"; do
+  [[ "$flag" == "0" || "$flag" == "1" ]] || {
+    printf 'Focused-run flags must be 0 or 1.\n' >&2
+    exit 2
+  }
+done
 
 mapfile -t QOS_VALUES < <(
   python3 - "$QOS" <<'PY'
@@ -463,32 +476,49 @@ setsid python3 -u "$ROOT_DIR/scripts/product/town01_runtime_monitor.py" \
   > "$RUN_DIR/logs/runtime_monitor.log" 2>&1 &
 managed_pids+=("$!")
 
-set +e
-ip netns exec ams-gcs python3 -u "$ROOT_DIR/scripts/product/town01_full_stack_scenario.py" run \
-  --run-dir "$RUN_DIR" \
-  --node-state "$NODE_STATE" \
-  > "$RUN_DIR/logs/scenario.log" 2>&1
-SCENARIO_STATUS=$?
-set -e
+SCENARIO_STATUS=0
+if [[ "$TOWN01_SKIP_FLIGHT_SCENARIO" == "0" ]]; then
+  set +e
+  ip netns exec ams-gcs python3 -u "$ROOT_DIR/scripts/product/town01_full_stack_scenario.py" run \
+    --run-dir "$RUN_DIR" \
+    --node-state "$NODE_STATE" \
+    > "$RUN_DIR/logs/scenario.log" 2>&1
+  SCENARIO_STATUS=$?
+  set -e
+else
+  printf 'Flight lifecycle scenario skipped by BAS_TOWN01_SKIP_FLIGHT_SCENARIO=1.\n' \
+    > "$RUN_DIR/logs/scenario.log"
+fi
 
 PROFILE_STATUS=1
 if ((SCENARIO_STATUS == 0)); then
+  PROFILE_ARGS=()
+  if [[ -n "$TOWN01_PROFILES" ]]; then
+    PROFILE_ARGS=(--profiles "$TOWN01_PROFILES")
+  fi
   set +e
   python3 -u "$ROOT_DIR/scripts/product/town01_communication_profiles.py" run \
     --run-dir "$RUN_DIR" \
     --qos "$QOS" \
+    "${PROFILE_ARGS[@]}" \
     > "$RUN_DIR/logs/communication_profiles.log" 2>&1
   PROFILE_STATUS=$?
   set -e
 fi
 
-set +e
-python3 "$ROOT_DIR/scripts/product/town01_heatmaps.py" \
-  --run-dir "$RUN_DIR" \
-  --points 7 \
-  > "$RUN_DIR/logs/heatmaps.log" 2>&1
-HEATMAP_STATUS=$?
-set -e
+HEATMAP_STATUS=0
+if [[ "$TOWN01_SKIP_HEATMAPS" == "0" ]]; then
+  set +e
+  python3 "$ROOT_DIR/scripts/product/town01_heatmaps.py" \
+    --run-dir "$RUN_DIR" \
+    --points 7 \
+    > "$RUN_DIR/logs/heatmaps.log" 2>&1
+  HEATMAP_STATUS=$?
+  set -e
+else
+  printf 'Heatmaps skipped by BAS_TOWN01_SKIP_HEATMAPS=1.\n' \
+    > "$RUN_DIR/logs/heatmaps.log"
+fi
 
 set +e
 python3 "$ROOT_DIR/scripts/product/collect_town01_runtime_topology.py" \
@@ -519,11 +549,17 @@ ip netns exec ams-gcs python3 "$ROOT_DIR/network/scripts/communication_vertical.
   --output "$RUN_DIR/metrics/ns3_stopped_probe.json" \
   > "$RUN_DIR/logs/ns3_stopped_probe.log" 2>&1
 
-set +e
-python3 "$ROOT_DIR/scripts/product/summarize_town01_full_stack.py" --run-dir "$RUN_DIR" \
-  > "$RUN_DIR/logs/summary.log" 2>&1
-SUMMARY_STATUS=$?
-set -e
+SUMMARY_STATUS=0
+if [[ "$TOWN01_SKIP_FLIGHT_SCENARIO" == "0" ]]; then
+  set +e
+  python3 "$ROOT_DIR/scripts/product/summarize_town01_full_stack.py" --run-dir "$RUN_DIR" \
+    > "$RUN_DIR/logs/summary.log" 2>&1
+  SUMMARY_STATUS=$?
+  set -e
+else
+  printf 'Full-stack summary skipped because the focused run omitted the flight lifecycle.\n' \
+    > "$RUN_DIR/logs/summary.log"
+fi
 
 printf 'Town01 full-stack run complete: %s\n' "$RUN_DIR"
 printf 'Scenario status=%s profiles status=%s topology status=%s heatmap status=%s summary status=%s\n' \

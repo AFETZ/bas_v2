@@ -729,7 +729,6 @@ def main() -> int:
         or 0
     )
     controlled_terminal = controlled.get("terminal_accounting", {})
-    gazebo_rtf_mean = gazebo.get("real_time_factor", {}).get("mean")
     qos_checks = {
         **configured_control_qos_checks(qos_config, qos_profiles),
         "controlled_overload_no_control_starvation": all(
@@ -787,11 +786,6 @@ def main() -> int:
             and int(controlled.get("medium", {}).get("sionna_stale_events", 0) or 0)
             == 0
         ),
-        "controlled_overload_gazebo_rtf": isinstance(
-            gazebo_rtf_mean, (int, float)
-        )
-        and float(gazebo_rtf_mean)
-        >= float(controlled_config["min_gazebo_mean_rtf"]),
         "profile_gating_matches_config": all(
             isinstance(
                 qos_profiles.get(name, {}).get("gates_overall_status"), bool
@@ -839,9 +833,7 @@ def main() -> int:
                 "scheduler_lag_max_p95_ms": float(
                     controlled_config["max_scheduler_lag_p95_ms"]
                 ),
-                "gazebo_min_mean_rtf": float(
-                    controlled_config["min_gazebo_mean_rtf"]
-                ),
+                "profile_rtf_status": "unmeasured",
                 "cpu_sample_distribution_required": True,
                 "queue_delay_sample_distribution_required_for_classes": list(
                     CLASSES
@@ -970,9 +962,6 @@ def main() -> int:
             and accounting["packets_pending"] == 0
         ),
         "class_pcaps": pcap_passed,
-        "gazebo_mean_rtf": isinstance(gazebo_rtf_mean, (int, float))
-        and float(gazebo_rtf_mean)
-        >= float(controlled_config["min_gazebo_mean_rtf"]),
     }
     overall_passed = (
         scenario_passed

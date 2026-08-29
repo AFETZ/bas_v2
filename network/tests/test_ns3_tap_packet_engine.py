@@ -110,7 +110,7 @@ class TapPacketEngineConfigTests(unittest.TestCase):
             dataclasses.replace(baseline, queue_control_deadline_ms=251),
             dataclasses.replace(baseline, queue_payload_max_age_ms=751),
             dataclasses.replace(baseline, shaping_enabled=False),
-            dataclasses.replace(baseline, control_reserved_bps=3_999_999),
+            dataclasses.replace(baseline, minimum_control_headroom_bps=3_999_999),
             dataclasses.replace(baseline, payload_admission_rate_bps=6_499_999),
             dataclasses.replace(baseline, token_bucket_burst_bytes_per_uav=6_999),
             dataclasses.replace(baseline, lower_retry_limit=15),
@@ -149,7 +149,7 @@ class TapPacketEngineConfigTests(unittest.TestCase):
             dataclasses.replace(baseline, fair_lower_classes_per_uav=False),
             dataclasses.replace(baseline, ingress_protection_enabled=False),
             dataclasses.replace(baseline, shaping_enabled=1),
-            dataclasses.replace(baseline, control_reserved_bps=0),
+            dataclasses.replace(baseline, minimum_control_headroom_bps=0),
             dataclasses.replace(baseline, payload_admission_rate_bps=16_000_001),
             dataclasses.replace(baseline, token_bucket_burst_bytes_per_uav=0),
             dataclasses.replace(baseline, lower_retry_limit=65),
@@ -187,7 +187,7 @@ class TapPacketEngineConfigTests(unittest.TestCase):
             "--fairLowerClassesPerUav=1",
             "--ingressProtectionEnabled=1",
             "--shapingEnabled=1",
-            "--controlReservedBps=4000000",
+            "--minimumControlHeadroomBps=4000000",
             "--payloadAdmissionRateBps=6500000",
             "--additionalDataAdmissionRateBps=6500000",
             "--tokenBucketBurstBytesPerUav=7000",
@@ -304,6 +304,29 @@ class TapPacketEngineStaticTests(unittest.TestCase):
         self.assertIn("patch --batch --forward --dry-run", build)
         self.assertIn("patch --batch --reverse --dry-run", build)
         self.assertIn("--expected-core-tree-sha256", build)
+
+    def test_stock_backoff_api_keeps_retry_limit_fourth(self) -> None:
+        source = SOURCE.read_text(encoding="utf-8")
+        patch = CORE_PATCH.read_text(encoding="utf-8")
+        config = config_for()
+
+        self.assertNotIn("@@ -108,14 +108,14 @@", patch)
+        self.assertIn("@@ -299,11 +299,11 @@", patch)
+        self.assertRegex(patch, r"\+\s+uint32_t maxRetries,")
+        self.assertRegex(patch, r"\+\s+uint32_t ceiling\)")
+        self.assertRegex(
+            source,
+            r"device->SetBackoffParams\(\s*MicroSeconds\(1\),\s*1,\s*1000,\s*"
+            r"config\.macRetryLimit,\s*10\)",
+        )
+        self.assertEqual(config.mac_retry_limit, 64)
+        self.assertIn("--macRetryLimit=64", config.engine_argv(events_file="events.jsonl"))
+
+    def test_asymmetric_payload_demand_is_not_work_conserving(self) -> None:
+        source = SOURCE.read_text(encoding="utf-8")
+        self.assertIn("AsymmetricPayloadDemandSelfTest", source)
+        self.assertIn("PerUavSustainedAdmissionRateBps", source)
+        self.assertIn('"work_conserving_across_idle_uavs\\":false', source)
 
     def test_pre_admission_suppression_and_retry_abort_are_fail_closed(self) -> None:
         source = SOURCE.read_text(encoding="utf-8")
@@ -497,7 +520,8 @@ class TapPacketEngineCompiledTests(unittest.TestCase):
             for self_test in (
                 "token_bucket_self_test",
                 "deadline_drop_self_test",
-                "reserved_control_self_test",
+                "minimum_control_headroom_self_test",
+                "asymmetric_payload_demand_self_test",
                 "profile_id_no_bypass_self_test",
                 "per_uav_fairness_self_test",
                 "retry_bound_self_test",
@@ -506,6 +530,11 @@ class TapPacketEngineCompiledTests(unittest.TestCase):
                 "stale_grant_self_test",
             ):
                 self.assertTrue(summary[self_test], self_test)
+            self.assertEqual(
+                summary["asymmetric_payload_uav1_max_sustained_admitted_bps"],
+                1_300_000,
+            )
+            self.assertFalse(summary["work_conserving_across_idle_uavs"])
             records = [json.loads(line) for line in events.read_text().splitlines()]
 
         required = {

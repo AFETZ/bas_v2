@@ -1,6 +1,6 @@
 # Product Development Plan
 
-Work on the first incomplete stage only. A stage advances when its product
+Work on the first active non-deferred stage only. A stage advances when its product
 behavior is observable through the command and artifact listed in
 `network/STATUS.md`; documentary flags alone do not complete a stage.
 

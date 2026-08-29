@@ -36,7 +36,8 @@ class CommunicationQosTests(unittest.TestCase):
         self.assertTrue(config.fair_lower_classes_per_uav)
         self.assertTrue(config.ingress_protection_enabled)
         self.assertEqual(
-            config.control_reserved_bps, qos["protection"]["control_reserved_bps"]
+            config.minimum_control_headroom_bps,
+            qos["protection"]["minimum_control_headroom_bps"],
         )
         self.assertEqual(
             config.event_log_flush_max_delay_ms,
@@ -74,7 +75,7 @@ class CommunicationQosTests(unittest.TestCase):
             0.95,
         )
 
-    def test_reserved_control_capacity_cannot_be_consumed_by_lower_rates(self) -> None:
+    def test_minimum_control_headroom_cannot_be_consumed_by_lower_rates(self) -> None:
         qos = load_qos()
         config = from_repository(
             uav_count=5,
@@ -91,8 +92,10 @@ class CommunicationQosTests(unittest.TestCase):
             + config.additional_data_admission_rate_bps
         )
         self.assertLessEqual(
-            lower + config.control_reserved_bps, data_rate_bps(config.radio_rate)
+            lower + config.minimum_control_headroom_bps,
+            data_rate_bps(config.radio_rate),
         )
+        self.assertEqual(data_rate_bps(config.radio_rate) - lower, 7_000_000)
         self.assertEqual(
             config.shaping_enabled,
             qos["profiles"]["controlled_overload"]["shaping_enabled"],
