@@ -29,6 +29,9 @@ if str(ROOT) not in sys.path:
 from network.ns3.tap_packet_engine_config import (  # noqa: E402
     CONTRACT as ENGINE_CONTRACT,
 )
+from network.ns3.tap_packet_engine_stock_config import (  # noqa: E402
+    CONTRACT as STOCK_ENGINE_CONTRACT,
+)
 from network.scripts.communication_qos import (  # noqa: E402
     CLASS_NAMES,
     PROFILE_NAMES,
@@ -383,10 +386,18 @@ def validate_engine_shaping_mode(
     qos_path: Path,
     qos: dict[str, Any],
     selected_profiles: tuple[str, ...],
+    *,
+    medium_access_mode: str = "centralized_priority_scheduler_over_csma_channel",
 ) -> bool:
     """Require one config-hashed engine shaping mode for the whole profile set."""
 
-    expected = {
+    stock = medium_access_mode == "stock_ns3_csma"
+    if medium_access_mode not in {
+        "stock_ns3_csma",
+        "centralized_priority_scheduler_over_csma_channel",
+    }:
+        raise ProfileError("unknown medium access mode")
+    expected = {False} if stock else {
         bool(qos["profiles"][profile]["shaping_enabled"])
         for profile in selected_profiles
     }
@@ -399,7 +410,9 @@ def validate_engine_shaping_mode(
     try:
         report = json.loads(report_path.read_text(encoding="utf-8"))
         resolved = report["resolved"]
-        engine_mode = resolved["shaping_enabled"]
+        engine_mode = resolved[
+            "ingress_shaping_enabled" if stock else "shaping_enabled"
+        ]
         config_hash = report["config_sha256"]
         event_epoch = resolved["event_epoch"]
         uav_count = resolved["uav_count"]
@@ -410,7 +423,8 @@ def validate_engine_shaping_mode(
         raise ProfileError(f"invalid ns-3 engine config report: {report_path}") from exc
     if not isinstance(report, dict) or not isinstance(ready, dict):
         raise ProfileError("ns-3 engine report/readiness must be JSON objects")
-    if report.get("contract") != ENGINE_CONTRACT:
+    expected_contract = STOCK_ENGINE_CONTRACT if stock else ENGINE_CONTRACT
+    if report.get("contract") != expected_contract:
         raise ProfileError("ns-3 engine config report contract mismatch")
     if not isinstance(engine_mode, bool):
         raise ProfileError("ns-3 engine shaping mode is not a boolean")
@@ -454,7 +468,7 @@ def validate_engine_shaping_mode(
         raise ProfileError("ns-3 engine argv report is invalid")
     if (
         ready.get("status") != "ready"
-        or ready.get("contract") != ENGINE_CONTRACT
+        or ready.get("contract") != expected_contract
         or ready.get("config_sha256") != config_hash
         or ready.get("event_epoch") != event_epoch
         or ready.get("uav_count") != uav_count
@@ -464,7 +478,8 @@ def validate_engine_shaping_mode(
     if not isinstance(ready_pid, int) or isinstance(ready_pid, bool) or ready_pid <= 0:
         raise ProfileError("live ns-3 readiness PID is invalid")
     command_line = live_engine_command_line(ready_pid)
-    if "ams-tap-packet-engine" not in Path(command_line[0]).name:
+    expected_binary = "ams-tap-packet-engine-stock" if stock else "ams-tap-packet-engine"
+    if expected_binary not in Path(command_line[0]).name:
         raise ProfileError("live readiness PID is not the ns-3 TAP packet engine")
     observed_argv = command_line[1 : len(engine_argv) + 1]
     if observed_argv != engine_argv:
@@ -506,6 +521,7 @@ def selected_profile_names(
 def profile_packet_events(
     path: Path,
     fragment_hashes: set[str],
+    packet_ids: set[str],
     *,
     start_offset: int = 0,
     end_offset: int | None = None,
@@ -557,12 +573,17 @@ def profile_packet_events(
                 ):
                     continue
                 digest = event.get("transport_payload_sha256")
-                if not isinstance(digest, str) or digest not in fragment_hashes:
+                explicit_packet_id = event.get("packet_id")
+                matches_hash = isinstance(digest, str) and digest in fragment_hashes
+                matches_packet_id = (
+                    isinstance(explicit_packet_id, str) and explicit_packet_id in packet_ids
+                )
+                if not matches_hash and not matches_packet_id:
                     continue
                 event_name = str(event.get("event") or "")
                 compact = {
                     "event": event_name,
-                    "packet_id": event.get("packet_id"),
+                    "packet_id": explicit_packet_id,
                     "transport_payload_sha256": digest,
                     "drop_reason": event.get("drop_reason"),
                     "reason": event.get("reason"),
@@ -570,10 +591,11 @@ def profile_packet_events(
                     "terminal_status": event.get("terminal_status"),
                 }
                 events.append(compact)
-                if event_name == "admit":
-                    admit_hashes.add(digest)
-                elif event_name == "enqueue":
-                    enqueue_hashes.add(digest)
+                if isinstance(digest, str):
+                    if event_name == "admit":
+                        admit_hashes.add(digest)
+                    elif event_name == "enqueue":
+                        enqueue_hashes.add(digest)
     except OSError as exc:
         raise ProfileError(f"cannot read ns-3 packet events: {path}: {exc}") from exc
     return events, admit_hashes, enqueue_hashes
@@ -805,7 +827,14 @@ def run_profiles(args: argparse.Namespace) -> int:
         configured_profiles,
         default_names=gated_profiles,
     )
-    validate_engine_shaping_mode(run_dir, qos_path, qos, selected_profiles)
+    stock = args.medium_access_mode == "stock_ns3_csma"
+    validate_engine_shaping_mode(
+        run_dir,
+        qos_path,
+        qos,
+        selected_profiles,
+        medium_access_mode=args.medium_access_mode,
+    )
     protection = qos["protection"]
     drain_interval_ms = int(protection["drain_interval_ms"])
     event_log_flush_max_delay_ms = int(protection["event_log_flush_max_delay_ms"])
@@ -832,8 +861,8 @@ def run_profiles(args: argparse.Namespace) -> int:
     for profile_name in selected_profiles:
         profile = qos["profiles"][profile_name]
         duration_s = int(profile["duration_s"])
-        shaping_enabled = bool(profile["shaping_enabled"])
-        gates_overall_status = bool(profile["gates_overall_status"])
+        shaping_enabled = False if stock else bool(profile["shaping_enabled"])
+        gates_overall_status = False if stock else bool(profile["gates_overall_status"])
         profile_dir = run_dir / "logs" / "profiles" / profile_name
         profile_dir.mkdir(parents=True, exist_ok=True)
         ready = profile_dir / "receiver.ready"
@@ -971,6 +1000,7 @@ def run_profiles(args: argparse.Namespace) -> int:
         ns3_events, admit_hashes, enqueue_hashes = profile_packet_events(
             ns3_events_path,
             fragment_hashes,
+            attempt_ids,
             start_offset=ns3_event_start_offset,
             end_offset=ns3_event_end_offset,
             end_ns=end_ns,
@@ -984,11 +1014,21 @@ def run_profiles(args: argparse.Namespace) -> int:
             for digest in admit_hashes
             for logical_id in hash_to_packet_ids.get(digest, ())
         }
+        admitted_ids.update(
+            str(event["packet_id"])
+            for event in ns3_events
+            if event.get("event") == "admit" and isinstance(event.get("packet_id"), str)
+        )
         enqueued_ids = {
             logical_id
             for digest in enqueue_hashes
             for logical_id in hash_to_packet_ids.get(digest, ())
         }
+        enqueued_ids.update(
+            str(event["packet_id"])
+            for event in ns3_events
+            if event.get("event") == "enqueue" and isinstance(event.get("packet_id"), str)
+        )
         accounting_deliveries = [
             item
             for item in deliveries
@@ -1122,6 +1162,11 @@ def parser() -> argparse.ArgumentParser:
             "comma-separated profile subset; defaults to gated profiles and "
             "always follows product-config order"
         ),
+    )
+    run.add_argument(
+        "--medium-access-mode",
+        choices=("stock_ns3_csma", "centralized_priority_scheduler_over_csma_channel"),
+        default="centralized_priority_scheduler_over_csma_channel",
     )
     run.set_defaults(function=run_profiles)
     return root

@@ -81,17 +81,28 @@ def load_qos(path: Path = DEFAULT_PATH) -> dict[str, Any]:
         raise QosConfigError("scheduler.fair_lower_classes_per_uav must remain enabled")
 
     medium_access = _mapping(root.get("medium_access"), "medium_access")
-    required_medium_access = {
-        "mode": "centralized_priority_scheduler_over_csma_channel",
-        "arbitration_mode": "centralized_priority_scheduler",
-        "transport_medium": "ns3_csma_channel",
-        "collisions_expected": False,
-        "non_preemptive_current_frame": True,
+    supported_modes = {
+        "stock_ns3_csma",
+        "centralized_priority_scheduler_over_csma_channel",
     }
-    if medium_access != required_medium_access:
-        raise QosConfigError(
-            "medium_access must declare the centralized scheduler over the ns-3 CSMA channel"
-        )
+    if set(medium_access.get("supported_modes", [])) != supported_modes:
+        raise QosConfigError("medium_access must declare both selectable product modes")
+    if medium_access.get("mode") not in supported_modes:
+        raise QosConfigError("medium_access.mode is not supported")
+    if medium_access.get("transport_medium") != "ns3_csma_channel":
+        raise QosConfigError("medium_access.transport_medium must remain ns3_csma_channel")
+    if medium_access.get("propagation_backend") != "sionna_rt":
+        raise QosConfigError("medium_access.propagation_backend must remain sionna_rt")
+    if medium_access.get("radio_mapping_mode") != "abstract_service_tier_v1":
+        raise QosConfigError("medium_access.radio_mapping_mode must be explicit")
+    stock = medium_access["mode"] == "stock_ns3_csma"
+    expected_arbitration = "stock_ns3_csma" if stock else "centralized_priority_scheduler"
+    if medium_access.get("arbitration_mode") != expected_arbitration:
+        raise QosConfigError("medium_access.arbitration_mode does not match mode")
+    if medium_access.get("collisions_expected") is not stock:
+        raise QosConfigError("medium_access.collisions_expected does not match mode")
+    if medium_access.get("non_preemptive_current_frame") is not (not stock):
+        raise QosConfigError("medium_access.non_preemptive_current_frame does not match mode")
 
     protection = _mapping(root.get("protection"), "protection")
     if not _required_bool(

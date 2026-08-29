@@ -19,6 +19,7 @@ ARGV_FILE="${ARGV_FILE:-$RUN_DIR/logs/ns3_packet_engine.argv}"
 RADIO_FILE="${RADIO_FILE:-$ROOT_DIR/network/config/radio_24ghz.yaml}"
 QOS_FILE="${QOS_FILE:-$ROOT_DIR/network/config/communication_qos.yaml}"
 ENGINE_PROFILE="${ENGINE_PROFILE:-gated}"
+MEDIUM_ACCESS_MODE="${MEDIUM_ACCESS_MODE:-centralized_priority_scheduler_over_csma_channel}"
 
 test -x "$BINARY"
 test -f "$CONFIG_TOOL"
@@ -67,6 +68,27 @@ fi
 python3 "$CONFIG_TOOL" "${CONFIG_ARGS[@]}" \
   --json-output "$CONFIG_REPORT" \
   --print-argv > "$ARGV_FILE"
+[[ "$MEDIUM_ACCESS_MODE" == "centralized_priority_scheduler_over_csma_channel" ]] || {
+  printf 'FAIL centralized runner received medium access mode: %s\n' "$MEDIUM_ACCESS_MODE" >&2
+  exit 2
+}
+python3 - "$CONFIG_REPORT" "$RUN_DIR/metrics/medium_access_run.json" <<'PY'
+import json, sys
+from pathlib import Path
+source, output = map(Path, sys.argv[1:])
+resolved = json.loads(source.read_text(encoding="utf-8"))["resolved"]
+output.parent.mkdir(parents=True, exist_ok=True)
+output.write_text(json.dumps({
+    "medium_access_mode": "centralized_priority_scheduler_over_csma_channel",
+    "ns3_source_version": "3.40",
+    "ns3_tree_kind": "project_patched_worktree",
+    "upstream_patch_applied": True,
+    "global_scheduler_enabled": True,
+    "ingress_shaping_enabled": bool(resolved["ingress_protection_enabled"] and resolved["shaping_enabled"]),
+    "radio_mapping_mode": "abstract_service_tier_v1",
+    "propagation_backend": "sionna_rt",
+}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
 mapfile -t ENGINE_ARGS < "$ARGV_FILE"
 if [[ "${#ENGINE_ARGS[@]}" -lt 10 ]]; then
   printf 'FAIL resolved packet-engine argv is unexpectedly short\n' >&2

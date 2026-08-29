@@ -40,6 +40,8 @@ run_in_container() {
     -e BAS_TOWN01_IN_CONTAINER=1 \
     -e BAS_TOWN01_RUN_ID="${BAS_TOWN01_RUN_ID:-}" \
     -e BAS_TOWN01_PROFILES="${BAS_TOWN01_PROFILES:-}" \
+    -e BAS_TOWN01_MEDIUM_ACCESS_MODE="${BAS_TOWN01_MEDIUM_ACCESS_MODE:-}" \
+    -e BAS_TOWN01_COMPARISON_RUN="${BAS_TOWN01_COMPARISON_RUN:-}" \
     -e BAS_TOWN01_SKIP_HEATMAPS="${BAS_TOWN01_SKIP_HEATMAPS:-0}" \
     -e BAS_TOWN01_SKIP_FLIGHT_SCENARIO="${BAS_TOWN01_SKIP_FLIGHT_SCENARIO:-0}" \
     -e BAS_TOWN01_HOST_UID="$(id -u)" \
@@ -48,6 +50,7 @@ run_in_container() {
     -e XDG_RUNTIME_DIR=/tmp/bas-town01-xdg \
     -e PYTHONPATH=/home/ubuntu/.local/lib/python3.10/site-packages \
     -v "$ROOT_DIR":/workspace/multiagent_simulation \
+    -v "$ROOT_DIR":/home/bas/bas_v2 \
     -w /workspace/multiagent_simulation \
     "$image_id" \
     bash -lc '
@@ -89,12 +92,35 @@ for command in ip ros2 gz socat setsid python3; do
   }
 done
 
-NS3_DIR="${NS3_DIR:-$ROOT_DIR/.external/ns-3}"
-NS3_BINARY="$NS3_DIR/build/scratch/ns3.40-ams-tap-packet-engine-default"
+MEDIUM_ACCESS_MODE="${BAS_TOWN01_MEDIUM_ACCESS_MODE:-}"
+if [[ -z "$MEDIUM_ACCESS_MODE" ]]; then
+  MEDIUM_ACCESS_MODE="$(python3 - "$ROOT_DIR/network/config/communication_qos.yaml" <<'PY'
+import sys, yaml
+print(yaml.safe_load(open(sys.argv[1], encoding="utf-8"))["medium_access"]["mode"])
+PY
+)"
+fi
+case "$MEDIUM_ACCESS_MODE" in
+  stock_ns3_csma)
+    NS3_DIR="${NS3_STOCK_DIR:-$ROOT_DIR/.external/ns-3-stock}"
+    NS3_BINARY="$NS3_DIR/build/scratch/ns3.40-ams-tap-packet-engine-stock-default"
+    NS3_RUNNER="$ROOT_DIR/network/ns3/run_ns3_tap_packet_engine_stock.sh"
+    NS3_SOURCE="$ROOT_DIR/network/ns3/scratch/ams-tap-packet-engine-stock.cc"
+    ;;
+  centralized_priority_scheduler_over_csma_channel)
+    NS3_DIR="${NS3_DIR:-$ROOT_DIR/.external/ns-3}"
+    NS3_BINARY="$NS3_DIR/build/scratch/ns3.40-ams-tap-packet-engine-default"
+    NS3_RUNNER="$ROOT_DIR/network/ns3/run_ns3_tap_packet_engine.sh"
+    NS3_SOURCE="$ROOT_DIR/network/ns3/scratch/ams-tap-packet-engine.cc"
+    ;;
+  *)
+    printf 'Unsupported medium access mode: %s\n' "$MEDIUM_ACCESS_MODE" >&2
+    exit 2
+    ;;
+esac
 test -x "$NS3_BINARY"
-cmp -s "$ROOT_DIR/network/ns3/scratch/ams-tap-packet-engine.cc" \
-  "$NS3_DIR/scratch/ams-tap-packet-engine.cc" || {
-  printf 'ns-3 packet-engine source differs from its built external copy; run the focused build first.\n' >&2
+cmp -s "$NS3_SOURCE" "$NS3_DIR/scratch/$(basename "$NS3_SOURCE")" || {
+  printf 'selected ns-3 packet-engine source differs from its built external copy; run its focused build first.\n' >&2
   exit 2
 }
 
@@ -119,6 +145,7 @@ NS3_STOP="$RUN_DIR/logs/ns3_packet_engine.stop"
 TOWN01_PROFILES="${BAS_TOWN01_PROFILES:-}"
 TOWN01_SKIP_HEATMAPS="${BAS_TOWN01_SKIP_HEATMAPS:-0}"
 TOWN01_SKIP_FLIGHT_SCENARIO="${BAS_TOWN01_SKIP_FLIGHT_SCENARIO:-0}"
+TOWN01_COMPARISON_RUN="${BAS_TOWN01_COMPARISON_RUN:-}"
 
 for flag in "$TOWN01_SKIP_HEATMAPS" "$TOWN01_SKIP_FLIGHT_SCENARIO"; do
   [[ "$flag" == "0" || "$flag" == "1" ]] || {
@@ -159,6 +186,7 @@ printf '\n' >> "$RUN_DIR/command.txt"
   printf 'radio=%s\n' "$RADIO"
   printf 'world=%s\n' "$WORLD"
   printf 'ns3_binary=%s\n' "$NS3_BINARY"
+  printf 'medium_access_mode=%s\n' "$MEDIUM_ACCESS_MODE"
 } > "$RUN_DIR/environment.txt"
 
 managed_pids=()
@@ -449,22 +477,27 @@ wait_for_file "$SIONNA_READY" 120 "first 30-cell Sionna state"
 
 rm -f "$NS3_READY" "$NS3_STOP"
 EVENT_EPOCH="$(date +%s%N)"
-setsid env \
+NS3_ENV=(
   RUN_DIR="$RUN_DIR" \
   UAV_COUNT=5 \
   EVENT_EPOCH="$EVENT_EPOCH" \
   NS3_NS=ams-ns3 \
   NS3_DIR="$NS3_DIR" \
+  NS3_STOCK_DIR="$NS3_DIR" \
   TAP_GCS=tap-gcs \
   TAP_UAVS=tap-uav1,tap-uav2,tap-uav3,tap-uav4,tap-uav5 \
   DURATION_MS=600000 \
   RADIO_FILE="$RADIO" \
   QOS_FILE="$QOS" \
-  ENGINE_PROFILE=gated \
+  MEDIUM_ACCESS_MODE="$MEDIUM_ACCESS_MODE" \
   SIONNA_IPC_ENABLED=1 \
   SIONNA_STATE_FILE="$SIONNA_STATES" \
-  SIONNA_MAX_UPDATES_PER_POLL=128 \
-  "$ROOT_DIR/network/ns3/run_ns3_tap_packet_engine.sh" \
+  SIONNA_MAX_UPDATES_PER_POLL=128
+)
+if [[ "$MEDIUM_ACCESS_MODE" == "centralized_priority_scheduler_over_csma_channel" ]]; then
+  NS3_ENV+=(ENGINE_PROFILE=gated)
+fi
+setsid env "${NS3_ENV[@]}" "$NS3_RUNNER" \
   > "$RUN_DIR/logs/ns3_packet_engine.log" 2>&1 &
 NS3_PID=$!
 managed_pids+=("$NS3_PID")
@@ -500,6 +533,7 @@ if ((SCENARIO_STATUS == 0)); then
   python3 -u "$ROOT_DIR/scripts/product/town01_communication_profiles.py" run \
     --run-dir "$RUN_DIR" \
     --qos "$QOS" \
+    --medium-access-mode "$MEDIUM_ACCESS_MODE" \
     "${PROFILE_ARGS[@]}" \
     > "$RUN_DIR/logs/communication_profiles.log" 2>&1
   PROFILE_STATUS=$?
@@ -550,7 +584,13 @@ ip netns exec ams-gcs python3 "$ROOT_DIR/network/scripts/communication_vertical.
   > "$RUN_DIR/logs/ns3_stopped_probe.log" 2>&1
 
 SUMMARY_STATUS=0
-if [[ "$TOWN01_SKIP_FLIGHT_SCENARIO" == "0" ]]; then
+if [[ "$TOWN01_SKIP_FLIGHT_SCENARIO" == "0" && ( "$MEDIUM_ACCESS_MODE" == "stock_ns3_csma" || -n "$TOWN01_PROFILES" ) ]]; then
+  set +e
+  python3 "$ROOT_DIR/scripts/product/summarize_medium_access_baseline.py" --run-dir "$RUN_DIR" \
+    > "$RUN_DIR/logs/summary.log" 2>&1
+  SUMMARY_STATUS=$?
+  set -e
+elif [[ "$TOWN01_SKIP_FLIGHT_SCENARIO" == "0" ]]; then
   set +e
   python3 "$ROOT_DIR/scripts/product/summarize_town01_full_stack.py" --run-dir "$RUN_DIR" \
     > "$RUN_DIR/logs/summary.log" 2>&1
@@ -559,6 +599,14 @@ if [[ "$TOWN01_SKIP_FLIGHT_SCENARIO" == "0" ]]; then
 else
   printf 'Full-stack summary skipped because the focused run omitted the flight lifecycle.\n' \
     > "$RUN_DIR/logs/summary.log"
+fi
+
+if [[ "$MEDIUM_ACCESS_MODE" == "stock_ns3_csma" && -n "$TOWN01_COMPARISON_RUN" && "$SUMMARY_STATUS" == "0" ]]; then
+  python3 "$ROOT_DIR/scripts/product/compare_medium_access_runs.py" \
+    --stock-run "$RUN_DIR" \
+    --centralized-run "$TOWN01_COMPARISON_RUN" \
+    --output-run "$RUN_DIR" \
+    > "$RUN_DIR/logs/medium_access_comparison.log" 2>&1
 fi
 
 printf 'Town01 full-stack run complete: %s\n' "$RUN_DIR"

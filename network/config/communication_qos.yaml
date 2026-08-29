@@ -12,11 +12,16 @@ scheduler:
   fair_lower_classes_per_uav: true
 
 medium_access:
-  mode: centralized_priority_scheduler_over_csma_channel
-  arbitration_mode: centralized_priority_scheduler
+  mode: stock_ns3_csma
+  supported_modes:
+    - stock_ns3_csma
+    - centralized_priority_scheduler_over_csma_channel
+  arbitration_mode: stock_ns3_csma
   transport_medium: ns3_csma_channel
-  collisions_expected: false
-  non_preemptive_current_frame: true
+  propagation_backend: sionna_rt
+  radio_mapping_mode: abstract_service_tier_v1
+  collisions_expected: true
+  non_preemptive_current_frame: false
 
 protection:
   ingress_token_bucket_enabled: true

@@ -17,6 +17,15 @@ Use these sources in priority order:
 5. `network/STATUS.md`.
 6. Task-specific source files.
 
+## Integration authenticity
+
+- Upstream tools are authoritative in their own domains.
+- Adapters may transform framing, coordinates, and timestamps, never outcomes.
+- Integrated product runs forbid mocks and fallback formulas.
+- Native baselines and custom policies must remain independently runnable.
+- Test traffic may be synthetic; ACK, telemetry, Sionna values, and packet outcomes may not.
+- Every non-native model must be explicit in configuration and reported results.
+
 ## Legacy exclusion
 
 Without a direct user instruction, do not read, modify, or run:
