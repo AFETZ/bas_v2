@@ -22,6 +22,7 @@ MATCHES = {
     "uart_adapter": ("communication_vertical.py uart-adapter",),
     "scenario": ("town01_full_stack_scenario.py run",),
     "native_product_scenario": ("native_radio_product_scenario.py run",),
+    "native_five_uav_scenario": ("native_radio_five_uav_scenario.py run",),
     "traffic_profile": ("town01_communication_profiles.py",),
 }
 

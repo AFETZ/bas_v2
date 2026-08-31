@@ -246,7 +246,7 @@ trap cleanup EXIT INT TERM
 # ARP control replies out of the ideal PHY's receive callback; this does not
 # bypass the IP packet path and all UDP/MAVLink frames still traverse TapBridge.
 ip -n ams-gcs neigh replace 10.71.0.1 lladdr 02:71:00:00:00:01 nud permanent dev eth0
-ip -n ams-uav1 neigh replace 10.71.1.1 lladdr 02:71:01:00:00:01 nud permanent dev eth0
+ip -n ams-uav1 neigh replace 10.71.1.1 lladdr 02:71:ff:00:00:01 nud permanent dev eth0
 {
   ip -n ams-gcs neigh show dev eth0
   ip -n ams-uav1 neigh show dev eth0
@@ -327,6 +327,7 @@ setsid ip netns exec ams-ns3 env \
   MPLCONFIGDIR="$RUNTIME_DIR/matplotlib" \
   NS_LOG='SionnaRtChannelModel=level_debug|prefix_time:HalfDuplexIdealPhy=level_logic|prefix_time' \
   stdbuf -oL -eL "$BINARY" \
+  --uavCount=1 --tapGcs=tap-gcs --tapUavs=tap-uav \
   --scene="$SCENE" --positionFile="$NODE_STATE" --phaseFile="$PHASE_FILE" \
   --radioPcap="$RUN_DIR/pcap/native_radio.pcap" \
   --eventCsv="$RUN_DIR/logs/native_radio_events.csv" \

@@ -80,3 +80,63 @@ and 3,539.014 ms max during cold startup. Gazebo RTF mean was 0.99873 and p5 was
 control, payload, reverse telemetry or additional-data datagrams and no direct GCS SITL
 socket. This closes the real one-UAV vertical slice only. Five-UAV native migration,
 capacity validation, jammer behavior and hardware HitL remain pending.
+
+## Native five-UAV migration
+
+Run `runs/native-radio-five-uav/native-five-final-20260901T030000Z` passed the
+functional five-UAV gate. One ns-3 process contained one
+`MultiModelSpectrumChannel`, one in-process `SionnaRtSpectrumPropagationLossModel`,
+and six native `HalfDuplexIdealPhy`/`AlohaNoackNetDevice`/antenna/MobilityModel
+sets for the command post and UAV1...UAV5. Six standard TAP boundaries connected
+GCS `10.71.0.10` and UAV endpoints `10.71.1.10`...`10.71.5.10`; ten existing
+BSF1 UART adapters carried real SERIAL1/SERIAL2 MAVLink. The local CP ingress CSMA
+segment is explicitly not a radio medium. Preconfigured neighbors work around the
+upstream ideal-PHY ARP reentrancy limit and do not change packet outcomes.
+
+All five `/uavN/odometry` publishers were observed at 10 Hz and supplied 19,187
+fresh tracker samples per UAV. ns-3 atomically applied 8,380 complete six-node
+snapshots with zero fail-closed stale samples; maximum applied position age was
+147.784 ms and the maximum per-UAV p95 was 69.603 ms. Each sysid 1...5 returned an
+independent control AUTOPILOT_VERSION ACK and post-command telemetry, and an
+independent payload ATTITUDE ACK/response with no matching control ACK. The common
+parallel safe request also returned five distinct ACKs.
+
+P2P offered exactly 10 packets per UAV in both directions. All 50 downlink packets
+arrived; uplink application deliveries were UAV1 5/10, UAV2 10/10, UAV3 10/10,
+UAV4 10/10 and UAV5 6/10. No retry or ns-3 echo was used. P2MP used 20 multicast
+application roots and exactly 20 command-post native `MacTx`; in this observation
+each UAV had 20 `RxEndOk`, 0 `RxEndError`, 20 unique application deliveries and no
+duplicates. This is an observed physical result, not a required PDR.
+
+The simultaneous-uplink profile offered 20 independently originated 256-byte
+packets per UAV at the same predeclared instant. Native traces recorded 20 `MacTx`
+per UAV and 200 overlapping interval pairs. Application/native `RxEndOk` deliveries
+for UAV1...UAV5 were 3, 2, 2, 10 and 3, giving PDR 0.15, 0.10, 0.10, 0.50 and 0.15
+and Jain fairness 0.634921. No scheduler, shaping or retransmission logic was added.
+
+UAV1 completed the frozen LOS, corridor, obstructed-candidate and return route while
+UAV2...UAV5 held their declared positions; all five completed staggered arm/takeoff,
+LAND and automatic disarm through the native radio. Stopping the single common
+ns-3/Sionna process produced zero control/payload messages and zero additional data
+for 10.5 seconds. The exact final implementation also passed
+`runs/native-radio-product/native-one-final-regression-20260901T040000Z` with real
+Gazebo odometry, dual UART, additional data, flight and no-bypass.
+
+The five-UAV functional run intentionally used Gazebo RTF 0.1 to separate functional
+correctness from target realtime readiness. Cold scene load/path solve/channel compute
+were 385.754/465.202/851.254 ms. Steady path solve p50/p95/max was
+30.568/31.450/52.286 ms, while full per-pair channel compute was
+331.627/336.498/372.619 ms. Across the 15 antenna pairs, native logs recorded 15
+cache misses, 13,275 hits, 3,304 stale updates and 3,319 path computations. The
+final run deliberately made no periodic report-only `GetParams` calls; upstream logs
+record actual path counts and `CalculateTauFromPaths` execution but do not export
+individual delay values, so none were reconstructed.
+
+Measured ns-3 lag was 607.594 ms p50, 3,880.427 ms p95 and 12,550.080 ms max.
+Gazebo RTF was 0.099990 mean and 0.099984 p5. The native process used at most
+1.169 GB RSS and 2.743 GB GPU memory; its one-core-normalized CPU was 91.535% p50,
+103.305% p95 and 257.783% max. Therefore
+`functional_five_uav_native_path=passed`, while `realtime_readiness=limited`; target
+RTF 1 is not claimed. The generic profile remains non-technology-specific. The older
+custom five-UAV provider/PER/scheduler contour is comparative only and is not in the
+primary process. Jammer behavior and hardware HitL remain pending.

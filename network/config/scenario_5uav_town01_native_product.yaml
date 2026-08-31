@@ -1,0 +1,136 @@
+# Five live ArduPilot/Gazebo UAVs on the native ns-3.48/Sionna reference radio.
+schema_version: 1
+
+scenario:
+  name: scenario_5uav_town01_native_product
+  description: Five real Town01 UAVs sharing one native Spectrum/Aloha radio channel.
+  map:
+    town: Town01
+    world_file: .external/cavise_maps/Town01/gazebo/town01.sdf
+    scene_xml: .external/cavise_maps/Town01/map/scene.xml
+
+base_simulation:
+  launch_package: multiagent_simulation
+  launch_file: multiagent_simulation.launch.py
+  sitl_home: "46.607213,14.278461,446,10"
+  target_realtime_factor: 1.0
+  functional_evidence_realtime_factor: 0.1
+
+command_post:
+  id: cp
+  role: command_post
+  gazebo_model_name: command_post
+  position_m: [5.0, 0.0, 2.0]
+  orientation_quat_xyzw: [0.0, 0.0, 0.0, 1.0]
+  antenna: omni
+
+robots:
+  - name: uav1
+    role: uav
+    instance: 0
+    system_id: 1
+    dds_udp_port: 2019
+    master_tcp_port: 5760
+    sitl_udp_port: 5501
+    fdm_udp_port: 9002
+    mavproxy_out: 127.0.0.1:14601
+    position: [20.0, 0.0, 2.0, 0.0, 0.0, 0.0]
+    nominal_radio_position_m: [20.0, 0.0, 2.0]
+    antenna: omni
+  - name: uav2
+    role: uav
+    instance: 1
+    system_id: 2
+    dds_udp_port: 2020
+    master_tcp_port: 5770
+    sitl_udp_port: 5511
+    fdm_udp_port: 9012
+    mavproxy_out: 127.0.0.1:14602
+    position: [35.0, 0.0, 2.0, 0.0, 0.0, 0.0]
+    nominal_radio_position_m: [35.0, 0.0, 2.0]
+    antenna: omni
+  - name: uav3
+    role: uav
+    instance: 2
+    system_id: 3
+    dds_udp_port: 2021
+    master_tcp_port: 5780
+    sitl_udp_port: 5521
+    fdm_udp_port: 9022
+    mavproxy_out: 127.0.0.1:14603
+    position: [50.0, 0.0, 2.0, 0.0, 0.0, 0.0]
+    nominal_radio_position_m: [50.0, 0.0, 2.0]
+    antenna: omni
+  - name: uav4
+    role: uav
+    instance: 3
+    system_id: 4
+    dds_udp_port: 2022
+    master_tcp_port: 5790
+    sitl_udp_port: 5531
+    fdm_udp_port: 9032
+    mavproxy_out: 127.0.0.1:14604
+    position: [65.0, 0.0, 2.0, 0.0, 0.0, 0.0]
+    nominal_radio_position_m: [65.0, 0.0, 2.0]
+    antenna: omni
+  - name: uav5
+    role: uav
+    instance: 4
+    system_id: 5
+    dds_udp_port: 2023
+    master_tcp_port: 5800
+    sitl_udp_port: 5541
+    fdm_udp_port: 9042
+    mavproxy_out: 127.0.0.1:14605
+    position: [80.0, 0.0, 2.0, 0.0, 0.0, 0.0]
+    nominal_radio_position_m: [80.0, 0.0, 2.0]
+    antenna: omni
+
+radio:
+  profile: generic_native_spectrum_aloha_reference
+  technology_specific_modem: false
+  carrier_hz: 2400000000
+  bandwidth_hz: 5000000
+  phy_rate_bps: 1000000
+  tx_power_w: 0.01
+  shared_spectrum_channels: 1
+  native_radio_nodes: 6
+  neighbor_discovery_mode: preconfigured_static_neighbors
+  reason: upstream_ideal_phy_arp_reentrancy_limit
+  packet_outcome_affected: false
+  solver:
+    profile: realtime_minimal_solver_profile
+    max_depth: 1
+    los: true
+    specular_reflection: true
+    diffuse_reflection: false
+    diffraction: false
+    refraction: false
+
+flight:
+  moving_uav: uav1
+  takeoff_relative_altitude_m:
+    uav1: 15.0
+    uav2: 23.0
+    uav3: 25.0
+    uav4: 27.0
+    uav5: 29.0
+  hold_time_s: 4.0
+  route_m:
+    los: [80.0, 0.0, 17.0]
+    transit_south: [118.0, 0.0, 17.0]
+    transit_north: [118.0, 110.0, 17.0]
+    obstructed_candidate: [80.0, 110.0, 17.0]
+    return: [20.0, 0.0, 17.0]
+
+traffic:
+  diagnostic_retry_interval_s: 20.0
+  forced_mavlink_stream_intervals: false
+  p2p_packets_per_direction_per_uav: 10
+  p2mp_root_transmissions: 20
+  simultaneous_uplink:
+    packets_per_uav: 20
+    packet_payload_bytes: 256
+    interval_ms: 50
+    duration_s: 1.0
+    retransmissions: false
