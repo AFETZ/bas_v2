@@ -52,6 +52,8 @@ struct NodeCounters
 std::vector<NodeCounters> g_nodeCounters;
 std::vector<std::string> g_nodeNames;
 std::vector<Vector> g_positions;
+double g_channelStateMaxAgeS{2.0};
+double g_updateDistanceThresholdM{1.0};
 uint64_t g_poseSnapshots{0};
 uint64_t g_stalePoseSamples{0};
 uint64_t g_pathObservations{0};
@@ -61,6 +63,11 @@ std::ofstream g_events;
 volatile std::sig_atomic_t g_stopRequested = 0;
 std::string g_stopReason = "duration";
 std::string g_phaseFile;
+
+class NativeRuntimeSampler;
+NativeRuntimeSampler* g_runtimeSampler{nullptr};
+
+void ObserveReceivedPath(uint32_t nodeIndex, Ptr<const Packet> packet);
 
 std::string
 ReadPhase()
@@ -150,6 +157,7 @@ PacketTraceDetails(Ptr<const Packet> packet)
     {
         return details.str();
     }
+    details << ";src_mac=" << aloha.GetSource() << ";dst_mac=" << aloha.GetDestination();
 
     Ipv4Header ipv4;
     if (copy->RemoveHeader(ipv4) == 0)
@@ -215,6 +223,7 @@ PhyRxStart(uint32_t nodeIndex, Ptr<const Packet> packet)
              packet->GetSize(),
              std::numeric_limits<double>::quiet_NaN(),
              PacketTraceDetails(packet));
+    ObserveReceivedPath(nodeIndex, packet);
 }
 
 void
@@ -334,17 +343,17 @@ class LivePositionSource
     void Poll()
     {
         const auto now = std::chrono::steady_clock::now();
-        std::error_code error;
-        const auto modified = std::filesystem::last_write_time(m_path, error);
-        bool invalidSnapshot = error.value() != 0;
-        if (!error && (!m_haveTimestamp || modified != m_lastModified))
+        std::ifstream input(m_path);
+        std::ostringstream buffer;
+        buffer << input.rdbuf();
+        const std::string json = buffer.str();
+        const auto sourceTime = ParseScalar(json, "time_s");
+        const bool live = json.find("\"source\": \"ros_odometry\"") != std::string::npos;
+        const bool sourceAdvanced = sourceTime &&
+                                    (!m_lastSourceTime || *sourceTime > *m_lastSourceTime);
+        bool invalidSnapshot = !input.is_open();
+        if (sourceAdvanced)
         {
-            std::ifstream input(m_path);
-            std::ostringstream buffer;
-            buffer << input.rdbuf();
-            const std::string json = buffer.str();
-            const auto sourceTime = ParseScalar(json, "time_s");
-            const bool live = json.find("\"source\": \"ros_odometry\"") != std::string::npos;
             std::vector<Vector> snapshot;
             std::vector<std::string> missing;
             for (const std::string& name : g_nodeNames)
@@ -367,8 +376,7 @@ class LivePositionSource
                     g_positions[index] = snapshot[index];
                     m_mobility[index]->SetPosition(snapshot[index]);
                 }
-                m_lastModified = modified;
-                m_haveTimestamp = true;
+                m_lastSourceTime = sourceTime;
                 m_lastFresh = now;
                 m_invalidSince.reset();
                 ++g_poseSnapshots;
@@ -394,6 +402,12 @@ class LivePositionSource
                          std::numeric_limits<double>::quiet_NaN(), "invalid_atomic_snapshot");
             }
         }
+        else if (sourceTime && m_lastSourceTime && *sourceTime < *m_lastSourceTime)
+        {
+            invalidSnapshot = true;
+            LogEvent("position_snapshot_rejected", "tracker", "", 0,
+                     std::numeric_limits<double>::quiet_NaN(), "non_monotonic_source_time");
+        }
 
         if (invalidSnapshot && !m_invalidSince)
         {
@@ -401,8 +415,7 @@ class LivePositionSource
         }
         const auto timeout = std::chrono::nanoseconds(m_timeout.GetNanoSeconds());
         const bool invalidTimedOut = m_invalidSince && now - *m_invalidSince > timeout;
-        const bool trackerStopped = !error && m_haveTimestamp && modified == m_lastModified &&
-                                    now - m_lastFresh > timeout;
+        const bool trackerStopped = m_lastSourceTime && now - m_lastFresh > timeout;
         if (invalidTimedOut || trackerStopped)
         {
             ++g_stalePoseSamples;
@@ -418,8 +431,7 @@ class LivePositionSource
     std::string m_path;
     std::vector<Ptr<MobilityModel>> m_mobility;
     Time m_timeout;
-    std::filesystem::file_time_type m_lastModified;
-    bool m_haveTimestamp{false};
+    std::optional<double> m_lastSourceTime;
     std::chrono::steady_clock::time_point m_lastFresh;
     std::optional<std::chrono::steady_clock::time_point> m_invalidSince;
 };
@@ -430,10 +442,10 @@ class NativeRuntimeSampler
     NativeRuntimeSampler(Ptr<MatrixBasedChannelModel> channelModel,
                          Ptr<MobilityModel> cpMobility,
                          std::vector<Ptr<MobilityModel>> uavMobility)
-        : m_channelModel(std::move(channelModel)),
-          m_cpMobility(std::move(cpMobility)),
-          m_uavMobility(std::move(uavMobility))
+        : m_channelModel(std::move(channelModel))
     {
+        m_mobility.push_back(std::move(cpMobility));
+        m_mobility.insert(m_mobility.end(), uavMobility.begin(), uavMobility.end());
     }
 
     void PollLag()
@@ -449,36 +461,86 @@ class NativeRuntimeSampler
         Simulator::Schedule(MilliSeconds(500), &NativeRuntimeSampler::PollLag, this);
     }
 
-    void PollPaths()
+    void ObserveReceivedPath(uint32_t receiverIndex, Ptr<const Packet> packet)
     {
-        for (std::size_t index = 0; index < m_uavMobility.size(); ++index)
+        Ptr<Packet> copy = packet->Copy();
+        AlohaNoackMacHeader aloha;
+        if (copy->RemoveHeader(aloha) == 0)
         {
-            Ptr<const MatrixBasedChannelModel::ChannelParams> params =
-                m_channelModel->GetParams(m_cpMobility, m_uavMobility[index]);
-            if (params)
+            return;
+        }
+        std::ostringstream sourceValue;
+        sourceValue << aloha.GetSource();
+        const std::string source = sourceValue.str();
+        uint32_t transmitterIndex = g_nodeNames.size();
+        if (source == "02:71:ff:00:00:01")
+        {
+            transmitterIndex = 0;
+        }
+        else
+        {
+            for (uint32_t index = 1; index < g_nodeNames.size(); ++index)
             {
-                std::ostringstream delays;
-                delays << std::setprecision(12);
-                for (std::size_t path = 0; path < params->m_delay.size(); ++path)
+                std::ostringstream expected;
+                expected << "02:71:" << std::hex << std::setfill('0') << std::setw(2) << index
+                         << ":00:10:10";
+                if (source == expected.str())
                 {
-                    if (path)
-                    {
-                        delays << ';';
-                    }
-                    delays << params->m_delay[path];
+                    transmitterIndex = index;
+                    break;
                 }
-                ++g_pathObservations;
-                LogEvent("sionna_paths", "cp", g_nodeNames.at(index + 1), 0,
-                         static_cast<double>(params->m_delay.size()), delays.str());
             }
         }
+        if (transmitterIndex >= m_mobility.size() || receiverIndex >= m_mobility.size())
+        {
+            return;
+        }
+        Ptr<const MatrixBasedChannelModel::ChannelParams> params =
+            m_channelModel->GetParams(m_mobility.at(transmitterIndex), m_mobility.at(receiverIndex));
+        if (!params)
+        {
+            return;
+        }
+        std::vector<double> delays;
+        for (double delay : params->m_delay)
+        {
+            if (delay >= 0.0 && std::isfinite(delay))
+            {
+                delays.push_back(delay);
+            }
+        }
+        std::ostringstream details;
+        details << "packet_uid=" << packet->GetUid() << ";delays_s=" << std::setprecision(12);
+        for (std::size_t index = 0; index < delays.size(); ++index)
+        {
+            if (index)
+            {
+                details << ';';
+            }
+            details << delays[index];
+        }
+        ++g_pathObservations;
+        LogEvent("sionna_paths",
+                 g_nodeNames.at(transmitterIndex),
+                 g_nodeNames.at(receiverIndex),
+                 0,
+                 static_cast<double>(delays.size()),
+                 details.str());
     }
 
   private:
     Ptr<MatrixBasedChannelModel> m_channelModel;
-    Ptr<MobilityModel> m_cpMobility;
-    std::vector<Ptr<MobilityModel>> m_uavMobility;
+    std::vector<Ptr<MobilityModel>> m_mobility;
 };
+
+void
+ObserveReceivedPath(uint32_t nodeIndex, Ptr<const Packet> packet)
+{
+    if (g_runtimeSampler)
+    {
+        g_runtimeSampler->ObserveReceivedPath(nodeIndex, packet);
+    }
+}
 
 void
 PollSignal()
@@ -570,6 +632,9 @@ WriteStats(const std::string& path)
            << "  \"radio_node_count\": " << g_nodeNames.size() << ",\n"
            << "  \"shared_spectrum_channel_count\": 1,\n"
            << "  \"tap_ingress_segment\": {\"type\": \"local_fast_csma\", \"radio_medium\": false},\n"
+           << "  \"cache_policy\": \"displacement_or_time\",\n"
+           << "  \"channel_state_max_age_s\": " << g_channelStateMaxAgeS << ",\n"
+           << "  \"endpoint_displacement_threshold_m\": " << g_updateDistanceThresholdM << ",\n"
            << "  \"pose_snapshots\": " << g_poseSnapshots << ",\n"
            << "  \"pose_updates\": " << g_poseSnapshots << ",\n"
            << "  \"stale_pose_samples\": " << g_stalePoseSamples << ",\n"
@@ -630,6 +695,8 @@ main(int argc, char* argv[])
     std::string phaseFile;
     double duration = 120.0;
     double txPowerW = 0.00001;
+    double channelStateMaxAgeS = 2.0;
+    double updateDistanceThresholdM = 1.0;
 
     CommandLine command(__FILE__);
     command.AddValue("uavCount", "Number of UAV radio nodes (supported: 1 or 5)", uavCount);
@@ -645,6 +712,10 @@ main(int argc, char* argv[])
     command.AddValue("phaseFile", "Current product flight phase file", phaseFile);
     command.AddValue("duration", "Maximum wall-clock run duration", duration);
     command.AddValue("txPowerW", "Spectrum transmitter power in watts", txPowerW);
+    command.AddValue("channelStateMaxAgeS", "Maximum age of a live Sionna channel realization", channelStateMaxAgeS);
+    command.AddValue("updateDistanceThresholdM",
+                     "Endpoint displacement that invalidates a live Sionna channel realization",
+                     updateDistanceThresholdM);
     command.Parse(argc, argv);
 
     NS_ABORT_MSG_IF(uavCount != 1 && uavCount != 5, "uavCount must be 1 or 5");
@@ -664,7 +735,14 @@ main(int argc, char* argv[])
     std::signal(SIGINT, HandleSignal);
     GlobalValue::Bind("SimulatorImplementationType", StringValue("ns3::RealtimeSimulatorImpl"));
     GlobalValue::Bind("ChecksumEnabled", BooleanValue(true));
-    Config::SetDefault("ns3::SionnaRtChannelModel::UpdatePeriod", TimeValue(Seconds(2.0)));
+    NS_ABORT_MSG_IF(channelStateMaxAgeS <= 0.0 || updateDistanceThresholdM <= 0.0,
+                    "channel-state age and displacement threshold must be positive");
+    g_channelStateMaxAgeS = channelStateMaxAgeS;
+    g_updateDistanceThresholdM = updateDistanceThresholdM;
+    Config::SetDefault("ns3::SionnaRtChannelModel::UpdatePeriod",
+                       TimeValue(Seconds(channelStateMaxAgeS)));
+    Config::SetDefault("ns3::SionnaRtChannelModel::UpdateDistanceThreshold",
+                       DoubleValue(updateDistanceThresholdM));
 
     g_nodeNames.push_back("cp");
     for (uint32_t index = 1; index <= uavCount; ++index)
@@ -801,12 +879,9 @@ main(int argc, char* argv[])
 
     LivePositionSource positions(positionFile, mobility, Seconds(1.5));
     NativeRuntimeSampler metrics(sionna->GetChannelModel(), cpMobility, uavMobility);
+    g_runtimeSampler = &metrics;
     Simulator::ScheduleNow(&LivePositionSource::Poll, &positions);
     Simulator::ScheduleNow(&NativeRuntimeSampler::PollLag, &metrics);
-    // Allow one startup cache sample; it can be empty before the first packet.
-    // Periodic report-only GetParams calls are intentionally avoided: packet
-    // transmissions are the causal source of subsequent channel solves.
-    Simulator::ScheduleNow(&NativeRuntimeSampler::PollPaths, &metrics);
     Simulator::ScheduleNow(&PollSignal);
     Simulator::Schedule(MilliSeconds(250), &WriteReady, readyFile);
     Simulator::Stop(Seconds(duration));

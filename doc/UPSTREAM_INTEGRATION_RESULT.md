@@ -140,3 +140,48 @@ Gazebo RTF was 0.099990 mean and 0.099984 p5. The native process used at most
 RTF 1 is not claimed. The generic profile remains non-technology-specific. The older
 custom five-UAV provider/PER/scheduler contour is comparative only and is not in the
 primary process. Jammer behavior and hardware HitL remain pending.
+
+## Native five-UAV realtime operating envelope
+
+The realtime branch retains official ns-3.48 commit
+`d2add90b452d600cfb4859baed8e9ea633519447`, Sionna/Sionna RT 1.2.0, Town01, the
+minimal MR !2608 compatibility patch, and the same generic native channel/PHY/MAC
+chain. A narrow cache extension to upstream `SionnaRtChannelModel` reuses one loaded
+Town01 scene and updates the current transmitter/receiver poses before each genuine
+per-pair Sionna solve. It invalidates a pair on the declared maximum age (2 s) or
+position displacement threshold (1 m); it changes no propagation equation, packet
+error decision, PHY/MAC decision, traffic schedule, or radio topology. The external
+model remains a single shared six-node spectrum medium with the 15 physically required
+unordered endpoint pairs.
+
+The partial RTF-1 evidence run is
+`runs/native-radio-realtime/native-realtime-five-20260831T233000Z`. Its cold scene
+initialisation/path solve/full channel operation were 394.362/494.250/888.944 ms.
+After warm-up, genuine per-pair Sionna path solve/full-channel p95 were
+30.640/30.845 ms (3,883 samples); there was one scene initialisation, 15 initial
+pair misses, 31,595 cache hits and 3,869 age invalidations. Gazebo RTF mean/p5 were
+0.99783/0.99931. Native process RSS peaked at 888 MB, GPU memory at 2.743 GB and
+native one-core-normalized CPU p95 at about 36%; fresh live tracker position p95
+reached at most 55.088 ms across the five UAVs. Steady ns-3 scheduler lag p50/p95
+was 0.072/0.082 ms, excluding cold start.
+
+This is an operating-envelope observation, not a pass. The real five-UAV Aloha
+control path accumulated severe MAVLink response latency; the run was manually stopped
+before its flight and application scenario completed. Consequently
+`functional_five_uav_native_path=failed` and `realtime_readiness=limited` in its
+generated report. The capture process records only unmodified frames from real Gazebo
+camera sensors, with sidecar metadata for run, phase, camera pose, all five fresh UAV
+positions and the command post. The incomplete run captured only the shared-medium
+frame, and its six required lifecycle images are correctly marked failed rather than
+being substituted or inferred. Camera placement is now explicitly aimed at the command
+post/five-UAV formation and UAV1's obstacle crossing; a complete RTF-1 run is still
+needed to validate those live frames.
+
+The generic metrics follow the native availability contract. Received PSD would support
+Rx power/RSSI where a public upstream API provides it; the selected PHY does not, so
+RSSI/Rx power is `unavailable`. SNR/SINR is likewise `unavailable` unless the native
+interference model exports it. PHY `RxEndOk`/`RxEndError` give empirical PER (for
+example, the partial run observed CP-to-UAV1 93 successful end events and zero error
+end events among 94 start events). BLER is deliberately `unavailable`: the current
+HalfDuplexIdealPhy/ShannonSpectrumErrorModel reference has no user-facing
+transport-block abstraction. No unavailable quantity is synthesized.

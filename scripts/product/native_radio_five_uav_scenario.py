@@ -611,14 +611,21 @@ class NativeFiveUavHarness(FlightHarness):
             20,
             "moving_uav_global_position",
         )
-        self.wait(
-            lambda: self.latest_at_ns.get(("control", system_id, "GLOBAL_POSITION_INT"), 0)
-            >= sent_ns,
-            15,
-            "moving UAV GLOBAL_POSITION_INT",
-        )
-        message = self.latest[("control", system_id, "GLOBAL_POSITION_INT")]
-        return float(message.lat) / 1e7, float(message.lon) / 1e7
+        deadline = time.monotonic() + 15 * self.timeout_scale
+        while time.monotonic() < deadline:
+            received_ns = self.latest_at_ns.get(("control", system_id, "GLOBAL_POSITION_INT"), 0)
+            message = self.latest.get(("control", system_id, "GLOBAL_POSITION_INT"))
+            if received_ns >= sent_ns and message is not None:
+                lat = float(message.lat) / 1e7
+                lon = float(message.lon) / 1e7
+                # ArduPilot can acknowledge REQUEST_MESSAGE before its GPS origin
+                # yields a usable coordinate.  Never upload an origin-zero mission:
+                # MAV_MISSION_INVALID_PARAM5_X is a valid flight-controller rejection.
+                if 1.0 <= abs(lat) <= 90.0 and 1.0 <= abs(lon) <= 180.0:
+                    self.summary["moving_uav_global_position"] = {"latitude_deg": lat, "longitude_deg": lon}
+                    return lat, lon
+            self.pump(0.2)
+        raise ScenarioError("moving UAV GLOBAL_POSITION_INT did not contain a valid GPS coordinate")
 
     def upload_moving_uav_mission(self) -> None:
         system_id = 1
@@ -630,6 +637,7 @@ class NativeFiveUavHarness(FlightHarness):
             name: self.offset_global(lat, lon, point[0] - initial[0], point[1] - initial[1])
             for name, point in ROUTE.items()
         }
+        self.summary["moving_uav_mission_coordinates_int"] = coordinates
         mav = self.mavutil.mavlink
         definitions = [
             (mav.MAV_CMD_NAV_WAYPOINT, 0.0, coordinates["los"]),
@@ -664,12 +672,26 @@ class NativeFiveUavHarness(FlightHarness):
             for sequence, (command, hold, coordinate) in enumerate(definitions)
         ]
         started_ns = time.monotonic_ns()
-        next_count = 0.0
         handled_at_ns = 0
+        last_requested_sequence = -1
+        count_packets_sent = 0
+        ignored_stale_requests: list[int] = []
+        request_history: list[dict[str, Any]] = []
+        deferred_repeat_sequence: int | None = None
+        deferred_repeat_deadline = 0.0
+        self.summary["mission_upload"] = {
+            "item_count": len(items),
+            "request_history": request_history,
+            "mission_count_packets_sent": count_packets_sent,
+        }
         deadline = time.monotonic() + 60 * self.timeout_scale
         requested: set[int] = set()
         while time.monotonic() < deadline:
-            if time.monotonic() >= next_count:
+            # The ALOHA medium can delay an earlier MISSION_COUNT until the item
+            # exchange is in progress.  A second count restarts that exchange in
+            # ArduPilot, so send this protocol opener exactly once.  Item repeats
+            # remain driven only by the flight controller's MISSION_REQUEST.
+            if count_packets_sent == 0:
                 self.send(
                     "control",
                     system_id,
@@ -677,7 +699,21 @@ class NativeFiveUavHarness(FlightHarness):
                         system_id, 1, len(items), int(mav.MAV_MISSION_TYPE_MISSION)
                     ),
                 )
-                next_count = time.monotonic() + DIAGNOSTIC_RETRY_INTERVAL_S
+                count_packets_sent += 1
+                self.summary["mission_upload"]["mission_count_packets_sent"] = count_packets_sent
+            if (
+                deferred_repeat_sequence is not None
+                and time.monotonic() >= deferred_repeat_deadline
+            ):
+                self.send("control", system_id, items[deferred_repeat_sequence])
+                request_history.append(
+                    {
+                        "message_type": "MISSION_REQUEST",
+                        "sequence": deferred_repeat_sequence,
+                        "action": "delayed_resent",
+                    }
+                )
+                deferred_repeat_sequence = None
             self.pump(0.2)
             for message_type in ("MISSION_REQUEST_INT", "MISSION_REQUEST"):
                 at_ns = self.latest_at_ns.get(("control", system_id, message_type), 0)
@@ -685,19 +721,66 @@ class NativeFiveUavHarness(FlightHarness):
                     sequence = int(self.latest[("control", system_id, message_type)].seq)
                     if not 0 <= sequence < len(items):
                         raise ScenarioError(f"invalid mission request {sequence}")
+                    if sequence < last_requested_sequence:
+                        ignored_stale_requests.append(sequence)
+                        request_history.append(
+                            {"message_type": message_type, "sequence": sequence, "action": "ignored_stale"}
+                        )
+                        handled_at_ns = at_ns
+                        continue
+                    if sequence > last_requested_sequence + 1:
+                        request_history.append(
+                            {"message_type": message_type, "sequence": sequence, "action": "rejected_gap"}
+                        )
+                        raise ScenarioError(
+                            f"out-of-order mission request {sequence}; expected {last_requested_sequence + 1}"
+                        )
+                    if sequence == last_requested_sequence:
+                        # A request can be delayed behind the item it asked for.
+                        # Wait briefly for the controller's next sequence before
+                        # retransmitting; otherwise that late request would inject
+                        # an already-accepted item and make ArduPilot reject the plan.
+                        if deferred_repeat_sequence is None:
+                            deferred_repeat_sequence = sequence
+                            deferred_repeat_deadline = time.monotonic() + 1.0
+                            action = "deferred_repeat"
+                        else:
+                            action = "duplicate_repeat_pending"
+                        request_history.append(
+                            {"message_type": message_type, "sequence": sequence, "action": action}
+                        )
+                        handled_at_ns = at_ns
+                        continue
                     self.send("control", system_id, items[sequence])
                     requested.add(sequence)
+                    request_history.append(
+                        {
+                            "message_type": message_type,
+                            "sequence": sequence,
+                            "action": "sent",
+                        }
+                    )
+                    last_requested_sequence = sequence
+                    deferred_repeat_sequence = None
                     handled_at_ns = at_ns
-                    next_count = time.monotonic() + 30.0
             ack_at_ns = self.latest_at_ns.get(("control", system_id, "MISSION_ACK"), 0)
             if ack_at_ns >= started_ns:
                 result = int(self.latest[("control", system_id, "MISSION_ACK")].type)
+                self.summary["mission_upload"].update(
+                    {
+                        "ack_result": result,
+                        "last_requested_sequence": last_requested_sequence,
+                        "ignored_stale_requests": ignored_stale_requests,
+                    }
+                )
                 if result != int(mav.MAV_MISSION_ACCEPTED):
                     raise ScenarioError(f"moving UAV mission rejected: {result}")
                 self.summary["mission"] = {
                     "moving_uav": "uav1",
                     "item_count": len(items),
                     "requested_items": sorted(requested),
+                    "mission_count_packets_sent": count_packets_sent,
+                    "ignored_stale_requests": ignored_stale_requests,
                     "route_m": ROUTE,
                     "upload_ack": result,
                 }
@@ -752,13 +835,44 @@ class NativeFiveUavHarness(FlightHarness):
             # arm-all loop leaves the first vehicles idle for several seconds
             # of simulated time while commands traverse the shared medium.
             self.phase(f"takeoff_uav{system_id}")
-            self.command_until_accepted(
-                system_id,
-                takeoff_command,
-                [0, 0, 0, 0, 0, 0, TAKEOFF_ALTITUDES[system_id]],
-                "staggered_takeoff",
-                60,
-            )
+            try:
+                self.command_until_accepted(
+                    system_id,
+                    takeoff_command,
+                    [0, 0, 0, 0, 0, 0, TAKEOFF_ALTITUDES[system_id]],
+                    "staggered_takeoff",
+                    12,
+                )
+            except ScenarioError:
+                # The physical ALOHA medium may lose the first TAKEOFF command.
+                # ArduPilot then auto-disarms rather than silently taking off.
+                # Re-arm and issue one bounded, observable recovery attempt; this
+                # is ordinary MAVLink command handling, not a PHY/MAC retry.
+                recovery = self.summary["uavs"][f"uav{system_id}"].setdefault(
+                    "takeoff_recovery", {"attempted": True}
+                )
+                recovery["reason"] = "initial_takeoff_ack_missing"
+                self.phase(f"arm_retry_uav{system_id}")
+                self.command_until_accepted(
+                    system_id, arm_command, [1.0, 0, 0, 0, 0, 0, 0], "takeoff_rearm", 20
+                )
+                self.wait(
+                    lambda system_id=system_id: bool(
+                        int(self.latest[("control", system_id, "HEARTBEAT")].base_mode)
+                        & int(self.mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+                    ),
+                    20,
+                    f"uav{system_id} recovery armed heartbeat",
+                )
+                self.phase(f"takeoff_retry_uav{system_id}")
+                self.command_until_accepted(
+                    system_id,
+                    takeoff_command,
+                    [0, 0, 0, 0, 0, 0, TAKEOFF_ALTITUDES[system_id]],
+                    "staggered_takeoff_recovery",
+                    20,
+                )
+                recovery["succeeded"] = True
             self.observe_for(1.0)
         self.wait(
             lambda: all(

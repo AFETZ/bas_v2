@@ -30,7 +30,9 @@ run_in_container() {
     -e BAS_NATIVE_FIVE_RUN_ID="${BAS_NATIVE_FIVE_RUN_ID:-}" \
     -e BAS_NATIVE_FIVE_SKIP_BUILD="${BAS_NATIVE_FIVE_SKIP_BUILD:-0}" \
     -e BAS_NATIVE_FIVE_ONE_UAV_RUN="${BAS_NATIVE_FIVE_ONE_UAV_RUN:-}" \
-    -e BAS_NATIVE_FIVE_GAZEBO_RTF="${BAS_NATIVE_FIVE_GAZEBO_RTF:-0.1}" \
+    -e BAS_NATIVE_FIVE_GAZEBO_RTF="${BAS_NATIVE_FIVE_GAZEBO_RTF:-1.0}" \
+    -e BAS_NATIVE_CHANNEL_STATE_MAX_AGE_S="${BAS_NATIVE_CHANNEL_STATE_MAX_AGE_S:-2.0}" \
+    -e BAS_NATIVE_UPDATE_DISTANCE_THRESHOLD_M="${BAS_NATIVE_UPDATE_DISTANCE_THRESHOLD_M:-1.0}" \
     -e BAS_NATIVE_FIVE_TIMEOUT_SCALE="${BAS_NATIVE_FIVE_TIMEOUT_SCALE:-5.0}" \
     -e BAS_NATIVE_FIVE_HOST_UID="$(id -u)" \
     -e BAS_NATIVE_FIVE_HOST_GID="$(id -g)" \
@@ -70,7 +72,7 @@ done
 
 RUN_ID="${BAS_NATIVE_FIVE_RUN_ID:-native-five-$(date -u +%Y%m%dT%H%M%SZ)}"
 [[ "$RUN_ID" =~ ^[a-zA-Z0-9_.-]+$ ]] || { printf 'Unsafe run ID: %s\n' "$RUN_ID" >&2; exit 2; }
-RUN_DIR="$ROOT_DIR/runs/native-radio-five-uav/$RUN_ID"
+RUN_DIR="$ROOT_DIR/runs/native-radio-realtime/$RUN_ID"
 [[ ! -e "$RUN_DIR" ]] || { printf 'Run directory exists: %s\n' "$RUN_DIR" >&2; exit 2; }
 RUNTIME_DIR="/tmp/bas-native-five-$RUN_ID"
 ONE_UAV_RUN="${BAS_NATIVE_FIVE_ONE_UAV_RUN:-}"
@@ -83,11 +85,15 @@ PROJECT_SOURCE="$ROOT_DIR/network/ns3/scratch/upstream-sionna-tap-spike.cc"
 UPSTREAM_SOURCE="$NS3_DIR/scratch/upstream-sionna-tap-spike.cc"
 BINARY="$NS3_DIR/build/scratch/ns3.48-upstream-sionna-tap-spike-default"
 PATCH_FILE="$ROOT_DIR/network/ns3/patches/mr2608-spike-compatibility.patch"
+REALTIME_CACHE_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-realtime-scene-cache.patch"
 SCENARIO="$ROOT_DIR/network/config/scenario_5uav_town01_native_product.yaml"
 WORLD="$ROOT_DIR/.external/cavise_maps/Town01/gazebo/town01.sdf"
-GAZEBO_RTF="${BAS_NATIVE_FIVE_GAZEBO_RTF:-0.1}"
+CAMERA_FRAGMENT="$ROOT_DIR/network/ns3/runtime_live_cameras.sdf.inc"
+GAZEBO_RTF="${BAS_NATIVE_FIVE_GAZEBO_RTF:-1.0}"
 SCENARIO_TIMEOUT_SCALE="${BAS_NATIVE_FIVE_TIMEOUT_SCALE:-5.0}"
-LAUNCH_WORLD="$WORLD"
+CHANNEL_STATE_MAX_AGE_S="${BAS_NATIVE_CHANNEL_STATE_MAX_AGE_S:-2.0}"
+UPDATE_DISTANCE_THRESHOLD_M="${BAS_NATIVE_UPDATE_DISTANCE_THRESHOLD_M:-1.0}"
+LAUNCH_WORLD="$WORK_DIR/town01-native-live-cameras.sdf"
 SCENE="$ROOT_DIR/.external/cavise_maps/Town01/map/scene.xml"
 NODE_STATE="$RUN_DIR/logs/node_state.json"
 NODE_EVENTS="$RUN_DIR/logs/node_state.jsonl"
@@ -109,7 +115,7 @@ else
   RADIO_CPUSET="$STACK_CPUSET"
 fi
 
-for required_file in "$PROJECT_SOURCE" "$PATCH_FILE" "$SCENARIO" "$WORLD" "$SCENE"; do
+for required_file in "$PROJECT_SOURCE" "$PATCH_FILE" "$REALTIME_CACHE_PATCH" "$SCENARIO" "$WORLD" "$SCENE" "$CAMERA_FRAGMENT"; do
   [[ -f "$required_file" ]] || { printf 'Missing input: %s\n' "$required_file" >&2; exit 2; }
 done
 [[ "$(git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" rev-parse HEAD)" == d2add90b452d600cfb4859baed8e9ea633519447 ]] || {
@@ -120,6 +126,12 @@ git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply --reverse --check "$PATCH_F
   printf 'Compatibility patch does not match exactly.\n' >&2
   exit 2
 }
+if ! git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply --reverse --check "$REALTIME_CACHE_PATCH"; then
+  git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply "$REALTIME_CACHE_PATCH" || {
+    printf 'Realtime scene-cache patch does not apply to the compatible upstream checkout.\n' >&2
+    exit 2
+  }
+fi
 PYTHONPATH="$PYTHON_DEPS" python3 - <<'PY'
 from importlib.metadata import version
 assert version("sionna") == "1.2.0"
@@ -129,18 +141,16 @@ assert version("cppyy") == "3.5.0"
 PY
 [[ -x "$PYTHON_TOOLING/bin/cmake" ]] || { printf 'Pinned CMake tooling is absent.\n' >&2; exit 2; }
 
-mkdir -p "$RUN_DIR"/{logs,metrics,pcap} "$UART_DIR" "$WORK_DIR"
+mkdir -p "$RUN_DIR"/{logs,metrics,pcap,screenshots,plots} "$UART_DIR" "$WORK_DIR"
+python3 "$ROOT_DIR/scripts/product/inject_native_radio_runtime_cameras.py" \
+  --world "$WORLD" --fragment "$CAMERA_FRAGMENT" --output "$LAUNCH_WORLD"
 printf '%q ' "$0" "$@" > "$RUN_DIR/command.txt"
 printf '\n' >> "$RUN_DIR/command.txt"
 printf 'preflight\n' > "$PHASE_FILE"
 printf '{}\n' > "$SCHEDULE_FILE"
 if [[ "$GAZEBO_RTF" != 1.0 ]]; then
-  LAUNCH_WORLD="$WORK_DIR/town01-functional-evidence.sdf"
-  cp "$WORLD" "$LAUNCH_WORLD"
-  sed -i \
-    -e "s#<real_time_factor>1.0</real_time_factor>#<real_time_factor>$GAZEBO_RTF</real_time_factor>#" \
-    -e "s#<real_time_update_rate>1000</real_time_update_rate>#<real_time_update_rate>100</real_time_update_rate>#" \
-    "$LAUNCH_WORLD"
+  printf 'Gazebo RTF must be 1.0 for a realtime run; got %s\n' "$GAZEBO_RTF" >&2
+  exit 2
 fi
 
 export PATH="$PYTHON_TOOLING/bin:$PATH"
@@ -191,6 +201,8 @@ PY
   printf 'uav_count=5\nradio_node_count=6\nshared_spectrum_channels=1\n'
   printf 'carrier_hz=2400000000\nbandwidth_hz=5000000\nphy_rate_bps=1000000\ntx_power_w=0.01\n'
   printf 'solver_profile=realtime_minimal_solver_profile\n'
+  printf 'cache_policy=displacement_or_time\nchannel_state_max_age_s=%s\nendpoint_displacement_threshold_m=%s\n' \
+    "$CHANNEL_STATE_MAX_AGE_S" "$UPDATE_DISTANCE_THRESHOLD_M"
   printf 'neighbor_discovery_mode=preconfigured_static_neighbors\n'
   printf 'reason=upstream_ideal_phy_arp_reentrancy_limit\npacket_outcome_affected=false\n'
 } > "$RUN_DIR/environment.txt"
@@ -363,7 +375,7 @@ export ROS_DOMAIN_ID GZ_PARTITION
 cd "$WORK_DIR"
 setsid taskset -c "$STACK_CPUSET" ros2 launch multiagent_simulation multiagent_simulation.launch.py \
   robots_config_file:="$SCENARIO" world_file:="$LAUNCH_WORLD" robot_model:=iris_radio_headless \
-  gui:=false rviz:=false headless_rendering:=false generate_sensor_models:=false \
+  gui:=false rviz:=false headless_rendering:=true generate_sensor_models:=false \
   use_mapping_camera:=false use_navigation_camera:=false use_zed_camera:=false \
   start_mavproxy:=false sitl_extra_defaults:="$ROOT_DIR/network/config/town01_sitl.parm" \
   control_uart:="$UART_DIR/control-sitl-{instance}" \
@@ -402,6 +414,17 @@ for index in 1 2 3 4 5; do
     > "$RUN_DIR/logs/odometry_uav$index.txt" 2>&1 || true
 done
 
+for camera in overview obstacle uav_focus; do
+  setsid ros2 run ros_gz_image image_bridge "/native_radio/$camera/image" \
+    > "$RUN_DIR/logs/gazebo_${camera}_image_bridge.log" 2>&1 &
+  managed_pids+=("$!")
+done
+setsid python3 -u "$ROOT_DIR/scripts/product/capture_live_gazebo_screenshots.py" \
+  --run-id "$RUN_ID" --output "$RUN_DIR/screenshots" --node-state "$NODE_STATE" \
+  --phase-file "$PHASE_FILE" --stop-file "$MONITOR_STOP" \
+  > "$RUN_DIR/logs/live_screenshot_capture.log" 2>&1 &
+managed_pids+=("$!")
+
 for endpoint in gcs uav1 uav2 uav3 uav4 uav5; do
   setsid ip netns exec ams-ns3 tcpdump -U -i "tap-$endpoint" -nn \
     -w "$RUN_DIR/pcap/tap_${endpoint}.pcap" \
@@ -430,6 +453,8 @@ setsid ip netns exec ams-ns3 env \
   --eventCsv="$RUN_DIR/logs/native_radio_events.csv" \
   --statsFile="$RUN_DIR/metrics/native_radio_stats.json" \
   --readyFile="$NS3_READY" --duration=2400 --txPowerW=0.01 \
+  --channelStateMaxAgeS="$CHANNEL_STATE_MAX_AGE_S" \
+  --updateDistanceThresholdM="$UPDATE_DISTANCE_THRESHOLD_M" \
   > "$NS3_FIFO" 2>&1 &
 NS3_PID=$!
 for _ in $(seq 1 1800); do

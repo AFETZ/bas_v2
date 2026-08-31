@@ -1,0 +1,262 @@
+diff --git a/src/spectrum/model/sionna-rt-channel-model.cc b/src/spectrum/model/sionna-rt-channel-model.cc
+index 4ae6c0556..65ae5b5e0 100644
+--- a/src/spectrum/model/sionna-rt-channel-model.cc
++++ b/src/spectrum/model/sionna-rt-channel-model.cc
+@@ -23,6 +23,7 @@
+ #include "ns3/uniform-planar-array.h"
+ 
+ #include <filesystem>
++#include <sstream>
+ namespace py = pybind11;
+ 
+ namespace ns3
+@@ -51,6 +52,9 @@ SionnaRtChannelModel::DoDispose()
+     NS_LOG_FUNCTION(this);
+     m_channelMatrixMap.clear();
+     m_channelParamsMap.clear();
++    m_pairPositionSnapshots.clear();
++    m_cachedScene = py::none();
++    m_cachedSceneFingerprint.clear();
+ }
+ 
+ TypeId
+@@ -72,6 +76,13 @@ SionnaRtChannelModel::GetTypeId()
+                           TimeValue(MilliSeconds(0)),
+                           MakeTimeAccessor(&SionnaRtChannelModel::m_updatePeriod),
+                           MakeTimeChecker())
++            .AddAttribute("UpdateDistanceThreshold",
++                          "Endpoint displacement in metres that invalidates a live cache entry; "
++                          "zero retains the upstream time-only policy",
++                          DoubleValue(0.0),
++                          MakeDoubleAccessor(&SionnaRtChannelModel::SetUpdateDistanceThreshold,
++                                             &SionnaRtChannelModel::GetUpdateDistanceThreshold),
++                          MakeDoubleChecker<double>(0.0))
+             .AddAttribute("OutputImageDirectory",
+                           "Output directory for rendered Sionna RT images",
+                           StringValue("images"),
+@@ -211,7 +222,9 @@ SionnaRtChannelModel::AntennaSetupChanged(Ptr<const PhasedArrayModel> aAntenna,
+ }
+ 
+ bool
+-SionnaRtChannelModel::ChannelMatrixNeedsUpdate(Ptr<const ChannelMatrix> channelMatrix) const
++SionnaRtChannelModel::ChannelMatrixNeedsUpdate(Ptr<const ChannelMatrix> channelMatrix,
++                                               Ptr<const MobilityModel> aMob,
++                                               Ptr<const MobilityModel> bMob) const
+ {
+     NS_LOG_FUNCTION(this);
+ 
+@@ -226,9 +239,46 @@ SionnaRtChannelModel::ChannelMatrixNeedsUpdate(Ptr<const ChannelMatrix> channelM
+         update = true;
+     }
+ 
++    if (m_updateDistanceThreshold > 0.0)
++    {
++        const uint32_t aNodeId = aMob->GetObject<Node>()->GetId();
++        const uint32_t bNodeId = bMob->GetObject<Node>()->GetId();
++        const uint64_t pairKey = GetKey(aNodeId, bNodeId);
++        const auto snapshot = m_pairPositionSnapshots.find(pairKey);
++        if (snapshot != m_pairPositionSnapshots.end())
++        {
++            const PairPositionSnapshot& solved = snapshot->second;
++            const Vector aAtSolve = solved.firstNodeId == aNodeId ? solved.firstPosition
++                                                                    : solved.secondPosition;
++            const Vector bAtSolve = solved.firstNodeId == bNodeId ? solved.firstPosition
++                                                                    : solved.secondPosition;
++            const double aDistance = CalculateDistance(aMob->GetPosition(), aAtSolve);
++            const double bDistance = CalculateDistance(bMob->GetPosition(), bAtSolve);
++            if (aDistance >= m_updateDistanceThreshold || bDistance >= m_updateDistanceThreshold)
++            {
++                NS_LOG_INFO("Cached channel matrix marked for update (endpoint displacement: "
++                            << aDistance << ", " << bDistance << " m; threshold="
++                            << m_updateDistanceThreshold << " m)");
++                update = true;
++            }
++        }
++    }
++
+     return update;
+ }
+ 
++void
++SionnaRtChannelModel::SetUpdateDistanceThreshold(double distance)
++{
++    m_updateDistanceThreshold = distance;
++}
++
++double
++SionnaRtChannelModel::GetUpdateDistanceThreshold() const
++{
++    return m_updateDistanceThreshold;
++}
++
+ Ptr<const MatrixBasedChannelModel::ChannelMatrix>
+ SionnaRtChannelModel::GetChannel(Ptr<const MobilityModel> aMob,
+                                  Ptr<const MobilityModel> bMob,
+@@ -249,7 +299,7 @@ SionnaRtChannelModel::GetChannel(Ptr<const MobilityModel> aMob,
+         // channel matrix present in the map
+         NS_LOG_DEBUG("channel matrix present in the map");
+         channelMatrix = m_channelMatrixMap[channelMatrixKey];
+-        update = ChannelMatrixNeedsUpdate(channelMatrix);
++        update = ChannelMatrixNeedsUpdate(channelMatrix, aMob, bMob);
+         update |= AntennaSetupChanged(aAntenna, bAntenna, channelMatrix);
+         if (update)
+         {
+@@ -284,6 +334,12 @@ SionnaRtChannelModel::GetChannel(Ptr<const MobilityModel> aMob,
+ 
+         // store or replace the channel matrix in the channel map
+         m_channelMatrixMap[channelMatrixKey] = channelMatrix;
++        const uint64_t mobilityPairKey =
++            GetKey(aMob->GetObject<Node>()->GetId(), bMob->GetObject<Node>()->GetId());
++        m_pairPositionSnapshots[mobilityPairKey] = {aMob->GetObject<Node>()->GetId(),
++                                                     aMob->GetPosition(),
++                                                     bMob->GetObject<Node>()->GetId(),
++                                                     bMob->GetPosition()};
+ 
+         // each time a new channel is created, also compute the channel params
+         auto channelParams = CalculateChannelParamsFromPaths(paths, aMob, bMob);
+@@ -539,41 +595,64 @@ SionnaRtChannelModel::CreateScene(const py::module_ rt,
+                                   Ptr<const PhasedArrayModel> uAntenna) const
+ {
+     NS_LOG_FUNCTION(this);
+-    py::object scene = LoadScene(rt);
+-    NS_LOG_DEBUG("Installing antenna arrays on scene (tx/rx)");
+-    scene.attr("tx_array") = MakePlannarArray(rt, sAntenna);
+-    scene.attr("rx_array") = MakePlannarArray(rt, uAntenna);
+-    // --- Create and add a TX/RX
+-
+-    py::object Transmitter = rt.attr("Transmitter");
+-    py::object Receiver = rt.attr("Receiver");
++    const std::string sceneFingerprint = AntennaSceneFingerprint(sAntenna) + "|" +
++                                         AntennaSceneFingerprint(uAntenna);
++    const bool sceneMissing = !m_cachedScene || m_cachedScene.is_none();
++    if (sceneMissing || sceneFingerprint != m_cachedSceneFingerprint)
++    {
++        m_cachedScene = LoadScene(rt);
++        m_cachedSceneFingerprint = sceneFingerprint;
++        NS_LOG_INFO("Sionna scene cache miss; loading geometry and installing tx/rx arrays");
++        m_cachedScene.attr("tx_array") = MakePlannarArray(rt, sAntenna);
++        m_cachedScene.attr("rx_array") = MakePlannarArray(rt, uAntenna);
++        py::object Transmitter = rt.attr("Transmitter");
++        py::object Receiver = rt.attr("Receiver");
++        m_cachedScene.attr("add")(Transmitter(py::arg("name") = "tx",
++                                                py::arg("position") = py::make_tuple(0.0, 0.0, 0.0)));
++        m_cachedScene.attr("add")(Receiver(py::arg("name") = "rx",
++                                             py::arg("position") = py::make_tuple(0.0, 0.0, 0.0)));
++    }
++    else
++    {
++        NS_LOG_DEBUG("Sionna scene cache hit; updating live tx/rx endpoints");
++    }
++
+     Vector pos = sMob->GetPosition();
+     Vector v = sMob->GetVelocity();
+     auto upa = DynamicCast<const UniformPlanarArray>(sAntenna);
+     Vector posRx = uMob->GetPosition();
+-    py::object tx =
+-        Transmitter(py::arg("name") = "tx",
+-                    py::arg("position") = py::make_tuple(pos.x, pos.y, pos.z),
+-                    py::arg("orientation") = py::make_tuple(upa->GetAlpha(), upa->GetBeta(), 0.0),
+-                    py::arg("velocity") = py::make_tuple(v.x, v.y, v.z));
+-
+     Vector vRx = uMob->GetVelocity();
+     auto upau = DynamicCast<const UniformPlanarArray>(uAntenna);
+-    py::object rx =
+-        Receiver(py::arg("name") = "rx",
+-                 py::arg("position") = py::make_tuple(posRx.x, posRx.y, posRx.z),
+-                 py::arg("orientation") = py::make_tuple(upau->GetAlpha(), upau->GetBeta(), 0.0),
+-                 py::arg("velocity") = py::make_tuple(vRx.x, vRx.y, vRx.z));
+-
+-    scene.attr("add")(tx);
+-    scene.attr("add")(rx);
+-
+-    //  tx.attr("look_at")(rx);
+-    scene.attr("frequency") = m_sceneConfigs.frequency;
++    NS_ASSERT_MSG(upa && upau, "Sionna RT scene reuse requires UniformPlanarArray antennas");
++    py::object tx = m_cachedScene.attr("get")("tx");
++    py::object rx = m_cachedScene.attr("get")("rx");
++    tx.attr("position") = py::make_tuple(pos.x, pos.y, pos.z);
++    tx.attr("orientation") = py::make_tuple(upa->GetAlpha(), upa->GetBeta(), 0.0);
++    tx.attr("velocity") = py::make_tuple(v.x, v.y, v.z);
++    rx.attr("position") = py::make_tuple(posRx.x, posRx.y, posRx.z);
++    rx.attr("orientation") = py::make_tuple(upau->GetAlpha(), upau->GetBeta(), 0.0);
++    rx.attr("velocity") = py::make_tuple(vRx.x, vRx.y, vRx.z);
++    m_cachedScene.attr("frequency") = m_sceneConfigs.frequency;
+     NS_LOG_INFO("Scene created: frequency=" << m_sceneConfigs.frequency << " tx@" << pos << " rx@"
+                                             << posRx);
+ 
+-    return scene;
++    return m_cachedScene;
++}
++
++std::string
++SionnaRtChannelModel::AntennaSceneFingerprint(Ptr<const PhasedArrayModel> antenna) const
++{
++    auto upa = DynamicCast<const UniformPlanarArray>(antenna);
++    if (!upa)
++    {
++        return "non_uniform_" + std::to_string(antenna->GetId());
++    }
++    std::ostringstream value;
++    value << upa->GetNumRows() << 'x' << upa->GetNumColumns() << ':'
++          << upa->GetAntennaVerticalSpacing() << ':' << upa->GetAntennaHorizontalSpacing() << ':'
++          << static_cast<uint32_t>(upa->GetNumPols()) << ':' << upa->GetPolSlant() << ':'
++          << GetAntennaElementPattern(upa->GetAntennaElement());
++    return value.str();
+ }
+ 
+ void
+diff --git a/src/spectrum/model/sionna-rt-channel-model.h b/src/spectrum/model/sionna-rt-channel-model.h
+index e790239d4..2ae8d67a4 100644
+--- a/src/spectrum/model/sionna-rt-channel-model.h
++++ b/src/spectrum/model/sionna-rt-channel-model.h
+@@ -390,7 +390,18 @@ class SionnaRtChannelModel : public MatrixBasedChannelModel
+      * @param channelMatrix The existing channel matrix to check
+      * @return true if the matrix must be updated; false otherwise
+      */
+-    bool ChannelMatrixNeedsUpdate(Ptr<const ChannelMatrix> channelMatrix) const;
++    bool ChannelMatrixNeedsUpdate(Ptr<const ChannelMatrix> channelMatrix,
++                                  Ptr<const MobilityModel> aMob,
++                                  Ptr<const MobilityModel> bMob) const;
++
++    /**
++     * Set the endpoint displacement that invalidates a cached live realization.
++     * A zero value retains the upstream time-only policy; a positive value is
++     * combined with UpdatePeriod, which remains the maximum live-state age.
++     */
++    void SetUpdateDistanceThreshold(double distance);
++
++    double GetUpdateDistanceThreshold() const;
+ 
+     /**
+      * @brief Check whether antenna configuration changes require regenerating the channel matrix.
+@@ -644,6 +655,16 @@ class SionnaRtChannelModel : public MatrixBasedChannelModel
+      */
+     bool DoesNumberOfPathsExceedMaximum(size_t numPaths) const;
+ 
++    std::string AntennaSceneFingerprint(Ptr<const PhasedArrayModel> antenna) const;
++
++    struct PairPositionSnapshot
++    {
++        uint32_t firstNodeId;
++        Vector firstPosition;
++        uint32_t secondNodeId;
++        Vector secondPosition;
++    };
++
+     // Attributes
+     std::unordered_map<uint64_t, Ptr<ChannelMatrix>>
+         m_channelMatrixMap; //!< map containing the channel realizations per pair of
+@@ -655,6 +676,13 @@ class SionnaRtChannelModel : public MatrixBasedChannelModel
+                             //!< nodes
+     /** Channel update period used to decide whether to re-run path computations */
+     Time m_updatePeriod;
++    /** Positive endpoint displacement also invalidates a cached pair. */
++    double m_updateDistanceThreshold{0.0};
++    /** Exact endpoint positions at the last solve, indexed by reciprocal pair key. */
++    std::unordered_map<uint64_t, PairPositionSnapshot> m_pairPositionSnapshots;
++    /** Reusable Sionna scene geometry and its live tx/rx objects. */
++    mutable py::object m_cachedScene;
++    mutable std::string m_cachedSceneFingerprint;
+ 
+     /** Path solver configuration used when computing paths */
+     RtPathSolverConfig m_RtPathSolverConfig;

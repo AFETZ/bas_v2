@@ -446,7 +446,8 @@ def parse_sionna_log(path: Path) -> dict[str, Any]:
     scene_ms: list[float] = []
     solve_ms: list[float] = []
     channel_ms: list[float] = []
-    misses = hits = updates = 0
+    misses = hits = updates = scene_cache_hits = scene_cache_misses = 0
+    displacement_invalidations = time_invalidations = 0
     pair_computations: Counter[str] = Counter()
     for line in lines:
         match = re.match(r"(\d+)\s+(.*)", line)
@@ -460,6 +461,14 @@ def parse_sionna_log(path: Path) -> dict[str, Any]:
             hits += 1
         if "Cached channel matrix marked for update" in text:
             updates += 1
+            if "endpoint displacement" in text:
+                displacement_invalidations += 1
+            else:
+                time_invalidations += 1
+        if "Sionna scene cache hit" in text:
+            scene_cache_hits += 1
+        if "Sionna scene cache miss" in text:
+            scene_cache_misses += 1
         pair = re.search(r"Building scene for antenna pair .* nodes \((\d+), (\d+)\)", text)
         if pair:
             channel_started = at_ns
@@ -494,7 +503,15 @@ def parse_sionna_log(path: Path) -> dict[str, Any]:
             "path_solve_duration_ms": distribution(solve_ms[1:]),
             "channel_compute_duration_ms": distribution(channel_ms[1:]),
         },
-        "cache": {"hits": hits, "misses": misses, "stale_updates": updates},
+        "cache": {
+            "hits": hits,
+            "misses": misses,
+            "stale_updates": updates,
+            "time_invalidations": time_invalidations,
+            "displacement_invalidations": displacement_invalidations,
+            "scene_initialization_count": scene_cache_misses,
+            "scene_cache_hits": scene_cache_hits,
+        },
         "path_computations_by_pair": dict(pair_computations),
     }
 
@@ -578,6 +595,364 @@ def build_realtime(run_dir: Path, events: list[dict[str, Any]], mobility: dict[s
     }
 
 
+UNAVAILABLE_RADIO_METRICS = {
+    "rx_power_dbm": "unavailable: HalfDuplexIdealPhy does not expose received PSD through a public trace",
+    "rssi_dbm": "unavailable: no public received-PSD/RSSI trace in the selected native PHY",
+    "snr_db": "unavailable: no public SNR trace in HalfDuplexIdealPhy/ShannonSpectrumErrorModel",
+    "sinr_db": "unavailable: SpectrumInterference evaluates SINR internally but exposes no public trace",
+    "interference_power_dbm": "unavailable: no public interference-power trace in the selected native PHY",
+    "noise_power_dbm": "unavailable: no public noise-power trace in the selected native PHY",
+    "bler": "unavailable: current HalfDuplexIdealPhy/Shannon reference does not expose a transport-block abstraction",
+}
+
+REQUIRED_SCREENSHOTS = (
+    "01_five_uav_takeoff",
+    "02_five_uav_hold",
+    "03_uav1_los",
+    "04_uav1_obstructed",
+    "05_p2mp_or_shared_medium",
+    "06_landing",
+)
+
+
+def screenshot_native_observation(
+    metadata: dict[str, Any], events: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Summarize native events close to a real camera-frame simulation time."""
+
+    timestamp = metadata.get("simulation_timestamp")
+    if not isinstance(timestamp, (int, float)):
+        return {"status": "unavailable: camera frame has no simulation timestamp"}
+    phase = str(metadata.get("scenario_phase", ""))
+    nearby = [
+        event
+        for event in events
+        if abs(float(event.get("time_s", -math.inf)) - float(timestamp)) <= 2.0
+        and str(event.get("phase", "")) == phase
+    ]
+    paths = [
+        int(event["value"])
+        for event in nearby
+        if event.get("event") == "sionna_paths" and event.get("value") is not None
+    ]
+    return {
+        "window_simulation_seconds": [float(timestamp) - 2.0, float(timestamp) + 2.0],
+        "scenario_phase": phase,
+        "sionna_path_observations": len(paths),
+        "sionna_path_count_min": min(paths) if paths else "unavailable",
+        "sionna_path_count_max": max(paths) if paths else "unavailable",
+        "phy_rx_ok": sum(event.get("event") == "phy_rx_ok" for event in nearby),
+        "phy_rx_error": sum(event.get("event") == "phy_rx_error" for event in nearby),
+        "basis": "native events within +/- 2 simulation seconds of the unmodified Gazebo frame",
+    }
+
+
+def screenshot_status(run_dir: Path, events: list[dict[str, Any]]) -> dict[str, Any]:
+    screenshot_dir = run_dir / "screenshots"
+    records: dict[str, Any] = {}
+    for stem in REQUIRED_SCREENSHOTS:
+        metadata = read_json(screenshot_dir / f"{stem}.json", {})
+        metadata = metadata if isinstance(metadata, dict) else {}
+        image_exists = (screenshot_dir / f"{stem}.png").is_file()
+        visible = metadata.get("visible_uavs", [])
+        valid = bool(
+            image_exists
+            and metadata.get("run_id") == run_dir.name
+            and metadata.get("source") == "live_gazebo_runtime"
+            and sorted(visible) == list(UAVS)
+        )
+        records[stem] = {
+            "image_exists": image_exists,
+            "metadata": metadata,
+            "valid_live_capture": valid,
+            "native_observation": screenshot_native_observation(metadata, events) if valid else {},
+        }
+    return {
+        "screenshots_status": "passed" if all(item["valid_live_capture"] for item in records.values()) else "failed",
+        "records": records,
+    }
+
+
+def canonical_phase(phase: str) -> str:
+    if phase.startswith("takeoff_") or phase.startswith("arm_"):
+        return "takeoff"
+    if phase == "hold_all":
+        return "five_uav_hold"
+    if phase == "los":
+        return "los_observation"
+    if phase == "obstructed_candidate":
+        return "obstructed_observation"
+    if phase == "return":
+        return "return_observation"
+    if phase == "land_all":
+        return "landing"
+    if phase == "pre_no_bypass" or phase == "no_bypass_stop":
+        return "no_bypass_test"
+    if phase == "stationary_communication_smoke":
+        return "startup"
+    return phase or "startup"
+
+
+def delay_values(details: str) -> list[float]:
+    value = re.search(r"(?:^|;)delays_s=([^;]+(?:;[^;]+)*)", details)
+    if not value:
+        return []
+    result: list[float] = []
+    for item in value.group(1).split(";"):
+        try:
+            result.append(float(item))
+        except ValueError:
+            continue
+    return result
+
+
+def packet_uid(row: dict[str, Any]) -> int | None:
+    value = row.get("packet_uid")
+    return int(value) if isinstance(value, int) else None
+
+
+def real_value(value: float | None) -> float | str:
+    return value if value is not None and math.isfinite(value) else "unavailable"
+
+
+def build_radio_observability(
+    run_dir: Path, events: list[dict[str, Any]], scenario: dict[str, Any]
+) -> dict[str, Any]:
+    metrics_dir = run_dir / "metrics"
+    positions: dict[str, tuple[float, float, float]] = {}
+    mobility_age: dict[str, float | None] = {}
+    lag_at_event: float | None = None
+    mac_by_uid: defaultdict[int, list[dict[str, Any]]] = defaultdict(list)
+    starts_by_uid: defaultdict[int, list[dict[str, Any]]] = defaultdict(list)
+    ends_by_uid: defaultdict[int, list[dict[str, Any]]] = defaultdict(list)
+    rows: list[dict[str, Any]] = []
+    outcomes: defaultdict[tuple[str, str], dict[str, set[int]]] = defaultdict(
+        lambda: {"attempted": set(), "ok": set(), "error": set(), "start": set()}
+    )
+
+    for event in events:
+        event_name = str(event.get("event"))
+        node = str(event.get("node"))
+        uid = packet_uid(event)
+        if event_name == "live_pose":
+            positions[node] = (float(event["x"]), float(event["y"]), float(event["z"]))
+            mobility_age[node] = event.get("value")
+        elif event_name == "realtime_lag":
+            lag_at_event = event.get("value")
+        elif uid is not None and event_name == "mac_tx":
+            mac_by_uid[uid].append(event)
+        elif uid is not None and event_name == "phy_rx_start":
+            starts_by_uid[uid].append(event)
+        elif uid is not None and event_name in {"phy_rx_ok", "phy_rx_error"}:
+            ends_by_uid[uid].append(event)
+        elif event_name == "sionna_paths" and event.get("peer"):
+            tx = node
+            rx = str(event["peer"])
+            uid = packet_uid(event)
+            delays = delay_values(str(event.get("details", "")))
+            tx_pos = positions.get(tx, (float(event["x"]), float(event["y"]), float(event["z"])))
+            rx_pos = positions.get(rx, (float("nan"), float("nan"), float("nan")))
+            matching_mac = [item for item in mac_by_uid.get(uid or -1, []) if item["node"] == tx]
+            matching_start = [item for item in starts_by_uid.get(uid or -1, []) if item["node"] == rx]
+            matching_end = [item for item in ends_by_uid.get(uid or -1, []) if item["node"] == rx]
+            outcome = outcomes[(tx, rx)]
+            if uid is not None:
+                outcome["attempted"].add(uid)
+                if matching_mac:
+                    outcome["attempted"].add(uid)
+                if matching_start:
+                    outcome["start"].add(uid)
+                for end in matching_end:
+                    if end["event"] == "phy_rx_ok":
+                        outcome["ok"].add(uid)
+                    else:
+                        outcome["error"].add(uid)
+            distance = math.dist(tx_pos, rx_pos) if all(math.isfinite(value) for value in rx_pos) else None
+            rows.append(
+                {
+                    "timestamp_wall": float(event["wall_monotonic_ns"]) / 1e9,
+                    "timestamp_sim": event["time_s"],
+                    "scenario_phase": canonical_phase(str(event["phase"])),
+                    "_packet_uid": uid,
+                    "tx": tx,
+                    "rx": rx,
+                    "tx_x": tx_pos[0],
+                    "tx_y": tx_pos[1],
+                    "tx_z": tx_pos[2],
+                    "rx_x": real_value(rx_pos[0]),
+                    "rx_y": real_value(rx_pos[1]),
+                    "rx_z": real_value(rx_pos[2]),
+                    "distance_m": real_value(distance),
+                    "sionna_path_count": len(delays),
+                    "sionna_los_available": "unavailable: current SionnaRtChannelParams exposes delays but not LOS identity",
+                    "sionna_path_delay_min_ns": min(delays) * 1e9 if delays else "unavailable",
+                    "sionna_path_delay_max_ns": max(delays) * 1e9 if delays else "unavailable",
+                    "sionna_delay_spread_ns": (max(delays) - min(delays)) * 1e9 if delays else "unavailable",
+                    "rx_power_dbm": "unavailable",
+                    "rssi_dbm": "unavailable",
+                    "snr_db": "unavailable",
+                    "sinr_db": "unavailable",
+                    "interference_power_dbm": "unavailable",
+                    "noise_power_dbm": "unavailable",
+                    "native_mac_tx": len(matching_mac),
+                    "native_phy_rx_start": len(matching_start),
+                    "native_phy_rx_ok": sum(item["event"] == "phy_rx_ok" for item in matching_end),
+                    "native_phy_rx_error": sum(item["event"] == "phy_rx_error" for item in matching_end),
+                    "packets_attempted": 1 if uid is not None else 0,
+                    "packets_delivered": sum(item["event"] == "phy_rx_ok" for item in matching_end),
+                    "packet_error_count": sum(item["event"] == "phy_rx_error" for item in matching_end),
+                    "empirical_per": "unavailable",
+                    "application_pdr": "unavailable",
+                    "goodput_bps": "unavailable",
+                    "end_to_end_latency_ms": "unavailable",
+                    "jitter_ms": "unavailable",
+                    "mobility_age_ms": real_value(mobility_age.get(rx)),
+                    "ns3_realtime_lag_ms": real_value(lag_at_event),
+                    "gazebo_rtf": "unavailable",
+                }
+            )
+
+    # RxEnd events follow the per-receiver Sionna-path trace.  Match only after
+    # the full native trace has been indexed, otherwise a one-pass parser would
+    # falsely report zero RxEndOk/RxEndError and invent an optimistic PER.
+    outcomes.clear()
+    for row in rows:
+        uid = row.pop("_packet_uid")
+        tx = str(row["tx"])
+        rx = str(row["rx"])
+        matching_mac = [item for item in mac_by_uid.get(uid or -1, []) if item["node"] == tx]
+        matching_start = [item for item in starts_by_uid.get(uid or -1, []) if item["node"] == rx]
+        matching_end = [item for item in ends_by_uid.get(uid or -1, []) if item["node"] == rx]
+        row.update(
+            {
+                "native_mac_tx": len(matching_mac),
+                "native_phy_rx_start": len(matching_start),
+                "native_phy_rx_ok": sum(item["event"] == "phy_rx_ok" for item in matching_end),
+                "native_phy_rx_error": sum(item["event"] == "phy_rx_error" for item in matching_end),
+                "packets_attempted": 1 if uid is not None else 0,
+                "packets_delivered": sum(item["event"] == "phy_rx_ok" for item in matching_end),
+                "packet_error_count": sum(item["event"] == "phy_rx_error" for item in matching_end),
+            }
+        )
+        if uid is not None:
+            outcome = outcomes[(tx, rx)]
+            outcome["attempted"].add(uid)
+            if matching_start:
+                outcome["start"].add(uid)
+            for end in matching_end:
+                outcome["ok" if end["event"] == "phy_rx_ok" else "error"].add(uid)
+
+    for row in rows:
+        key = (str(row["tx"]), str(row["rx"]))
+        values = outcomes[key]
+        attempts = len(values["attempted"])
+        row["empirical_per"] = len(values["error"]) / attempts if attempts else "unavailable"
+
+    columns = [
+        "timestamp_wall", "timestamp_sim", "scenario_phase", "tx", "rx", "tx_x", "tx_y", "tx_z",
+        "rx_x", "rx_y", "rx_z", "distance_m", "sionna_path_count", "sionna_los_available",
+        "sionna_path_delay_min_ns", "sionna_path_delay_max_ns", "sionna_delay_spread_ns", "rx_power_dbm",
+        "rssi_dbm", "snr_db", "sinr_db", "interference_power_dbm", "noise_power_dbm", "native_mac_tx",
+        "native_phy_rx_start", "native_phy_rx_ok", "native_phy_rx_error", "packets_attempted",
+        "packets_delivered", "packet_error_count", "empirical_per", "application_pdr", "goodput_bps",
+        "end_to_end_latency_ms", "jitter_ms", "mobility_age_ms", "ns3_realtime_lag_ms", "gazebo_rtf",
+    ]
+    with (metrics_dir / "radio_link_metrics.csv").open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=columns)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    required_pairs = [("cp", uav) for uav in UAVS] + [(uav, "cp") for uav in UAVS]
+    summary_pairs = sorted(set(outcomes) | set(required_pairs))
+    links: dict[str, Any] = {}
+    matrix_rows: list[dict[str, Any]] = []
+    for tx, rx in summary_pairs:
+        samples = [row for row in rows if row["tx"] == tx and row["rx"] == rx]
+        result = outcomes[(tx, rx)]
+        attempted = len(result["attempted"])
+        ok = len(result["ok"])
+        error = len(result["error"])
+        per = error / attempted if attempted else None
+        path_samples = [int(row["sionna_path_count"]) for row in samples]
+        state = "connected" if ok else ("no_path" if samples and not any(path_samples) else "degraded" if attempted else "no_samples")
+        item = {
+            "tx": tx,
+            "rx": rx,
+            "samples": len(samples),
+            "path_count": distribution(path_samples),
+            "native_mac_tx": attempted,
+            "native_phy_rx_start": len(result["start"]),
+            "native_phy_rx_ok": ok,
+            "native_phy_rx_error": error,
+            "empirical_per": per,
+            "state": state,
+        }
+        links[f"{tx}->{rx}"] = item
+        matrix_rows.append({
+            "tx": tx, "rx": rx,
+            "path_count": item["path_count"]["p50"],
+            "rssi_dbm": "unavailable", "snr_db": "unavailable", "sinr_db": "unavailable",
+            "per": per if per is not None else "unavailable", "pdr": "unavailable",
+            "latency_p95_ms": "unavailable", "state": state,
+        })
+    write_json(metrics_dir / "radio_link_summary.json", {
+        "source": "live native Sionna/PHY events only",
+        "metric_availability": UNAVAILABLE_RADIO_METRICS,
+        "bler": UNAVAILABLE_RADIO_METRICS["bler"],
+        "links": links,
+    })
+    with (metrics_dir / "link_matrix.csv").open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(matrix_rows[0]) if matrix_rows else ["tx", "rx"])
+        writer.writeheader()
+        writer.writerows(matrix_rows)
+
+    uav_rows: list[dict[str, Any]] = []
+    for uav in UAVS:
+        control = read_json(metrics_dir / f"control_uart_{uav}.json", {})
+        payload = read_json(metrics_dir / f"payload_uart_{uav}.json", {})
+        diagnostic = scenario.get("dual_uart_diagnostics", {}).get("sequential", {}).get(uav, {})
+        incident = [row for row in rows if row["tx"] == uav or row["rx"] == uav]
+        paths = [int(row["sionna_path_count"]) for row in incident]
+        distances = [float(row["distance_m"]) for row in incident if isinstance(row["distance_m"], float)]
+        ack_control = diagnostic.get("control", {}).get("ack_latency_ms")
+        ack_payload = diagnostic.get("payload", {}).get("ack_latency_ms")
+        uav_rows.append({
+            "uav": uav,
+            "control_packets_tx": control.get("records_encoded", "unavailable"),
+            "control_packets_rx": control.get("records_reassembled", "unavailable"),
+            "control_pdr": control.get("records_reassembled", 0) / control["records_encoded"] if control.get("records_encoded") else "unavailable",
+            "control_per": "unavailable",
+            "control_rtt_p50_ms": ack_control if ack_control is not None else "unavailable",
+            "control_rtt_p95_ms": ack_control if ack_control is not None else "unavailable",
+            "control_rtt_max_ms": ack_control if ack_control is not None else "unavailable",
+            "payload_packets_tx": payload.get("records_encoded", "unavailable"),
+            "payload_packets_rx": payload.get("records_reassembled", "unavailable"),
+            "payload_pdr": payload.get("records_reassembled", 0) / payload["records_encoded"] if payload.get("records_encoded") else "unavailable",
+            "payload_per": "unavailable",
+            "payload_rtt_p50_ms": ack_payload if ack_payload is not None else "unavailable",
+            "payload_rtt_p95_ms": ack_payload if ack_payload is not None else "unavailable",
+            "additional_tx": len(outcomes[(uav, "cp")]["attempted"]),
+            "additional_rx": len(outcomes[("cp", uav)]["ok"]),
+            "additional_pdr": len(outcomes[("cp", uav)]["ok"]) / len(outcomes[("cp", uav)]["attempted"]) if outcomes[("cp", uav)]["attempted"] else "unavailable",
+            "additional_goodput_bps": "unavailable",
+            "mean_rssi_dbm": "unavailable", "min_rssi_dbm": "unavailable",
+            "mean_snr_db": "unavailable", "min_snr_db": "unavailable",
+            "mean_sinr_db": "unavailable", "min_sinr_db": "unavailable",
+            "min_path_count": min(paths) if paths else "unavailable",
+            "median_path_count": percentile(paths, 50) if paths else "unavailable",
+            "max_path_count": max(paths) if paths else "unavailable",
+            "phy_rx_ok": sum(len(outcomes[(tx, uav)]["ok"]) for tx in {"cp", *UAVS} if tx != uav),
+            "phy_rx_error": sum(len(outcomes[(tx, uav)]["error"]) for tx in {"cp", *UAVS} if tx != uav),
+            "distance_min_m": min(distances) if distances else "unavailable",
+            "distance_max_m": max(distances) if distances else "unavailable",
+        })
+    with (metrics_dir / "per_uav_network_summary.csv").open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(uav_rows[0]))
+        writer.writeheader()
+        writer.writerows(uav_rows)
+    return {"radio_links": links, "radio_rows": len(rows), "metric_availability": UNAVAILABLE_RADIO_METRICS}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
@@ -598,6 +973,8 @@ def main() -> int:
     p2mp = build_p2mp(scenario, agents, events)
     shared = build_shared_medium(scenario, agents, events)
     realtime = build_realtime(run_dir, events, mobility)
+    observability = build_radio_observability(run_dir, events, scenario)
+    screenshots = screenshot_status(run_dir, events)
     one_uav = None
     if args.one_uav_run:
         one_uav = read_json(args.one_uav_run.resolve() / "metrics/native_product_summary.json", None)
@@ -638,6 +1015,11 @@ def main() -> int:
         "exact_seven_pcaps": topology["exact_pcap_count"] == 7,
     }
     functional_status = "passed" if all(functional_checks.values()) else "failed"
+    if functional_status != "passed" and realtime["realtime_readiness"] == "ready":
+        # Timing alone is not product readiness when the same RTF=1 run did
+        # not complete the native control/flight proof.
+        realtime["realtime_readiness"] = "limited"
+        realtime["functional_prerequisite"] = "failed"
     process_text = (run_dir / "logs/process_snapshot.txt").read_text(
         encoding="utf-8", errors="replace"
     ) if (run_dir / "logs/process_snapshot.txt").exists() else ""
@@ -648,6 +1030,33 @@ def main() -> int:
         "centralized_priority_scheduler": "centralized_priority_scheduler" in process_text,
         "custom_five_uav_packet_engine": "ams-tap-packet-engine" in process_text,
     }
+    status = "functional_native_path" if functional_status == "passed" else "realtime_failed"
+    if functional_status == "passed":
+        status = "realtime_ready" if realtime["realtime_readiness"] == "ready" else "realtime_limited"
+    operating_envelope = {
+        "uav_count": 5,
+        "motion_pattern": "five-UAV flight with UAV1 moving and UAV2..UAV5 holding",
+        "cache_policy": stats.get("cache_policy", "displacement_or_time"),
+        "update_period_s": stats.get("channel_state_max_age_s"),
+        "displacement_threshold_m": stats.get("endpoint_displacement_threshold_m"),
+        "solver_calls_per_s": None,
+        "channel_state_age_ms": {
+            "p50": None,
+            "p95": (stats.get("channel_state_max_age_s") or 0) * 1000.0,
+            "max": (stats.get("channel_state_max_age_s") or 0) * 1000.0,
+            "basis": "bounded maximum configured for live cache; per-solve generated timestamps are in native log",
+        },
+        "ns3_lag_ms": realtime.get("steady_ns3_realtime_lag_ms"),
+        "gazebo_rtf": realtime.get("gazebo_rtf"),
+        "resources": realtime.get("resources"),
+        "functional_result": functional_status,
+        "realtime_classification": status,
+    }
+    path_computations = realtime.get("sionna", {}).get("path_computations_by_pair", {})
+    total_solves = sum(int(value) for value in path_computations.values())
+    runtime_duration = float(scenario.get("duration_s", 0.0) or 0.0)
+    operating_envelope["solver_calls_per_s"] = total_solves / runtime_duration if runtime_duration else None
+    write_json(metrics_dir / "operating_envelope.json", operating_envelope)
     summary = {
         "run_id": run_dir.name,
         "functional_five_uav_native_path": functional_status,
@@ -669,6 +1078,9 @@ def main() -> int:
             "uavs": scenario.get("uavs"),
         },
         "realtime": realtime,
+        "observability": observability,
+        "screenshots": screenshots,
+        "operating_envelope": operating_envelope,
         "no_bypass": no_bypass,
         "one_uav_regression": one_uav,
         "forbidden_custom_components_present": forbidden,
@@ -692,9 +1104,32 @@ def main() -> int:
         f"- Simultaneous uplink Jain fairness: {shared['jain_fairness']}",
         f"- No-bypass after common native process stop: {no_bypass.get('passed')}",
         f"- One-UAV regression attached: {one_uav is not None}",
+        f"- Radio-link observations: {observability['radio_rows']}; RSSI/SNR/SINR are explicitly unavailable when the selected native API does not expose them.",
+        f"- BLER: {UNAVAILABLE_RADIO_METRICS['bler']}",
+        f"- Live Gazebo screenshots: {screenshots['screenshots_status']}.",
         "",
         "All packet and timing results above are derived from endpoint logs, native ns-3 traces, ROS tracker snapshots, Gazebo stats, and process-resource samples in this run directory.",
     ]
+    report.extend(["", "## Live Gazebo frames"])
+    for stem in REQUIRED_SCREENSHOTS:
+        record = screenshots["records"][stem]
+        if not record["valid_live_capture"]:
+            report.append(f"- `{stem}`: unavailable in this run.")
+            continue
+        observation = record["native_observation"]
+        report.extend(
+            [
+                "",
+                f"### {stem}",
+                "",
+                f"![{stem}](screenshots/{stem}.png)",
+                "",
+                "Native evidence in the +/- 2 simulation-second frame window: "
+                f"Sionna path observations={observation['sionna_path_observations']}, "
+                f"path count={observation['sionna_path_count_min']}..{observation['sionna_path_count_max']}, "
+                f"PHY RxEndOk/RxEndError={observation['phy_rx_ok']}/{observation['phy_rx_error']}.",
+            ]
+        )
     (run_dir / "report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
     print(json.dumps({"run_dir": str(run_dir), "functional": functional_status, "realtime": realtime["realtime_readiness"]}, sort_keys=True))
     return 0 if functional_status == "passed" else 1
