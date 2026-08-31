@@ -14,19 +14,24 @@
 #include "ns3/multi-model-spectrum-channel.h"
 #include "ns3/pcap-file-wrapper.h"
 #include "ns3/propagation-delay-model.h"
+#include "ns3/realtime-simulator-impl.h"
 #include "ns3/sionna-rt-spectrum-propagation-loss-model.h"
 #include "ns3/spectrum-helper.h"
 #include "ns3/tap-bridge-module.h"
 #include "ns3/uniform-planar-array.h"
 
 #include <chrono>
+#include <cmath>
 #include <csignal>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <utility>
+#include <vector>
 
 using namespace ns3;
 namespace py = pybind11;
@@ -42,9 +47,14 @@ struct Counters
     uint64_t uavMacTx{0};
     uint64_t cpPhyRxOk{0};
     uint64_t uavPhyRxOk{0};
+    uint64_t cpPhyRxStart{0};
+    uint64_t uavPhyRxStart{0};
     uint64_t cpPhyRxError{0};
     uint64_t uavPhyRxError{0};
     uint64_t poseUpdates{0};
+    uint64_t stalePoseSamples{0};
+    uint64_t pathObservations{0};
+    uint64_t realtimeLagSamples{0};
 };
 
 Counters g_counters;
@@ -54,6 +64,26 @@ Vector g_cpPosition;
 Vector g_uavPosition;
 volatile std::sig_atomic_t g_stopRequested = 0;
 std::string g_stopReason = "duration";
+std::string g_phaseFile;
+
+std::string
+ReadPhase()
+{
+    std::ifstream input(g_phaseFile);
+    std::string phase = "unclassified";
+    if (input.is_open())
+    {
+        std::getline(input, phase);
+    }
+    for (char& value : phase)
+    {
+        if (value == ',')
+        {
+            value = '_';
+        }
+    }
+    return phase.empty() ? "unclassified" : phase;
+}
 
 void
 HandleSignal(int)
@@ -62,12 +92,24 @@ HandleSignal(int)
 }
 
 void
-LogEvent(const std::string& event, const std::string& node, uint32_t bytes)
+LogEvent(const std::string& event,
+         const std::string& node,
+         uint32_t bytes,
+         double value = std::numeric_limits<double>::quiet_NaN(),
+         const std::string& details = "")
 {
-    g_events << std::fixed << std::setprecision(6) << Simulator::Now().GetSeconds() << ',' << event
-             << ',' << node << ',' << bytes << ',' << g_cpPosition.x << ',' << g_cpPosition.y << ','
-             << g_cpPosition.z << ',' << g_uavPosition.x << ',' << g_uavPosition.y << ','
-             << g_uavPosition.z << '\n';
+    const auto wallNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+    g_events << std::fixed << std::setprecision(6) << Simulator::Now().GetSeconds() << ',' << wallNs
+             << ',' << ReadPhase() << ',' << event << ',' << node << ',' << bytes << ','
+             << g_cpPosition.x << ',' << g_cpPosition.y << ',' << g_cpPosition.z << ','
+             << g_uavPosition.x << ',' << g_uavPosition.y << ',' << g_uavPosition.z << ',';
+    if (std::isfinite(value))
+    {
+        g_events << value;
+    }
+    g_events << ',' << details << '\n';
     g_events.flush();
 }
 
@@ -111,6 +153,20 @@ CpPhyRxOk(Ptr<const Packet> packet)
     ++g_counters.cpPhyRxOk;
     LogEvent("phy_rx_ok", "cp", packet->GetSize());
     WriteRadioPcap(packet);
+}
+
+void
+CpPhyRxStart(Ptr<const Packet> packet)
+{
+    ++g_counters.cpPhyRxStart;
+    LogEvent("phy_rx_start", "cp", packet->GetSize());
+}
+
+void
+UavPhyRxStart(Ptr<const Packet> packet)
+{
+    ++g_counters.uavPhyRxStart;
+    LogEvent("phy_rx_start", "uav1", packet->GetSize());
 }
 
 void
@@ -177,6 +233,24 @@ ParsePosition(const std::string& json, const std::string& nodeId)
     return position;
 }
 
+std::optional<double>
+ParseScalar(const std::string& json, const std::string& key)
+{
+    const std::string marker = "\"" + key + "\":";
+    const std::size_t position = json.find(marker);
+    if (position == std::string::npos)
+    {
+        return std::nullopt;
+    }
+    std::istringstream input(json.substr(position + marker.size()));
+    double value;
+    if (!(input >> value))
+    {
+        return std::nullopt;
+    }
+    return value;
+}
+
 class LivePositionSource
 {
   public:
@@ -204,8 +278,9 @@ class LivePositionSource
             const std::string json = buffer.str();
             const auto cp = ParsePosition(json, "cp");
             const auto uav = ParsePosition(json, "uav1");
+            const auto sourceTime = ParseScalar(json, "time_s");
             const bool live = json.find("\"source\": \"ros_odometry\"") != std::string::npos;
-            if (input.is_open() && live && cp && uav)
+            if (input.is_open() && live && cp && uav && sourceTime)
             {
                 g_cpPosition = *cp;
                 g_uavPosition = *uav;
@@ -215,12 +290,17 @@ class LivePositionSource
                 m_haveTimestamp = true;
                 m_lastFresh = std::chrono::steady_clock::now();
                 ++g_counters.poseUpdates;
-                LogEvent("live_pose", "tracker", 0);
+                const double wallSeconds = std::chrono::duration<double>(
+                                               std::chrono::system_clock::now().time_since_epoch())
+                                               .count();
+                LogEvent("live_pose", "tracker", 0, (wallSeconds - *sourceTime) * 1000.0,
+                         "applied_position_age_ms");
             }
         }
         const auto staleFor = std::chrono::steady_clock::now() - m_lastFresh;
         if (staleFor > std::chrono::nanoseconds(m_timeout.GetNanoSeconds()))
         {
+            ++g_counters.stalePoseSamples;
             g_stopReason = "position_tracker_stale";
             LogEvent("fail_closed", "tracker", 0);
             Simulator::Stop();
@@ -237,6 +317,55 @@ class LivePositionSource
     std::filesystem::file_time_type m_lastModified;
     bool m_haveTimestamp{false};
     std::chrono::steady_clock::time_point m_lastFresh;
+};
+
+class NativeRuntimeSampler
+{
+  public:
+    NativeRuntimeSampler(Ptr<MatrixBasedChannelModel> channelModel,
+                         Ptr<MobilityModel> cpMobility,
+                         Ptr<MobilityModel> uavMobility)
+        : m_channelModel(std::move(channelModel)),
+          m_cpMobility(std::move(cpMobility)),
+          m_uavMobility(std::move(uavMobility))
+    {
+    }
+
+    void Poll()
+    {
+        Ptr<RealtimeSimulatorImpl> realtime =
+            DynamicCast<RealtimeSimulatorImpl>(Simulator::GetImplementation());
+        if (realtime)
+        {
+            const double lagMs = (realtime->RealtimeNow() - Simulator::Now()).GetSeconds() * 1000.0;
+            ++g_counters.realtimeLagSamples;
+            LogEvent("realtime_lag", "ns3", 0, lagMs, "lag_ms");
+        }
+        Ptr<const MatrixBasedChannelModel::ChannelParams> params =
+            m_channelModel->GetParams(m_cpMobility, m_uavMobility);
+        if (params)
+        {
+            std::ostringstream delays;
+            delays << std::setprecision(12);
+            for (std::size_t index = 0; index < params->m_delay.size(); ++index)
+            {
+                if (index)
+                {
+                    delays << ';';
+                }
+                delays << params->m_delay[index];
+            }
+            ++g_counters.pathObservations;
+            LogEvent("sionna_paths", "cp-uav1", 0,
+                     static_cast<double>(params->m_delay.size()), delays.str());
+        }
+        Simulator::Schedule(MilliSeconds(500), &NativeRuntimeSampler::Poll, this);
+    }
+
+  private:
+    Ptr<MatrixBasedChannelModel> m_channelModel;
+    Ptr<MobilityModel> m_cpMobility;
+    Ptr<MobilityModel> m_uavMobility;
 };
 
 void
@@ -314,12 +443,24 @@ WriteStats(const std::string& path)
     output << "{\n"
            << "  \"stop_reason\": \"" << g_stopReason << "\",\n"
            << "  \"pose_updates\": " << g_counters.poseUpdates << ",\n"
+           << "  \"stale_pose_samples\": " << g_counters.stalePoseSamples << ",\n"
+           << "  \"path_observations\": " << g_counters.pathObservations << ",\n"
+           << "  \"realtime_lag_samples\": " << g_counters.realtimeLagSamples << ",\n"
            << "  \"cp_mac_tx\": " << g_counters.cpMacTx << ",\n"
            << "  \"uav_mac_tx\": " << g_counters.uavMacTx << ",\n"
+           << "  \"cp_phy_rx_start\": " << g_counters.cpPhyRxStart << ",\n"
+           << "  \"uav_phy_rx_start\": " << g_counters.uavPhyRxStart << ",\n"
            << "  \"cp_phy_rx_ok\": " << g_counters.cpPhyRxOk << ",\n"
            << "  \"uav_phy_rx_ok\": " << g_counters.uavPhyRxOk << ",\n"
            << "  \"cp_phy_rx_error\": " << g_counters.cpPhyRxError << ",\n"
-           << "  \"uav_phy_rx_error\": " << g_counters.uavPhyRxError << "\n"
+           << "  \"uav_phy_rx_error\": " << g_counters.uavPhyRxError << ",\n"
+           << "  \"profile\": \"generic_native_spectrum_aloha_reference\",\n"
+           << "  \"technology_specific_modem\": false,\n"
+           << "  \"native_ns3_phy\": true,\n"
+           << "  \"native_ns3_mac\": true,\n"
+           << "  \"custom_packet_error_model\": false,\n"
+           << "  \"custom_scheduler\": false,\n"
+           << "  \"sionna_in_process\": true\n"
            << "}\n";
 }
 
@@ -338,6 +479,7 @@ main(int argc, char* argv[])
     std::string eventCsv = "upstream-radio-events.csv";
     std::string statsFile = "upstream-radio-stats.json";
     std::string readyFile;
+    std::string phaseFile;
     double duration = 120.0;
     double txPowerW = 0.00001;
 
@@ -350,12 +492,13 @@ main(int argc, char* argv[])
     command.AddValue("eventCsv", "Native radio and position event CSV", eventCsv);
     command.AddValue("statsFile", "Final native radio counters", statsFile);
     command.AddValue("readyFile", "Readiness file", readyFile);
+    command.AddValue("phaseFile", "Current product flight phase file", phaseFile);
     command.AddValue("duration", "Maximum wall-clock run duration", duration);
     command.AddValue("txPowerW", "Spectrum transmitter power in watts", txPowerW);
     command.Parse(argc, argv);
 
-    NS_ABORT_MSG_IF(scene.empty() || positionFile.empty() || readyFile.empty(),
-                    "scene, positionFile, and readyFile are required");
+    NS_ABORT_MSG_IF(scene.empty() || positionFile.empty() || readyFile.empty() || phaseFile.empty(),
+                    "scene, positionFile, readyFile, and phaseFile are required");
     NS_ABORT_MSG_IF(!std::filesystem::exists(scene), "Town01 scene.xml is missing: " << scene);
 
     std::signal(SIGTERM, HandleSignal);
@@ -365,7 +508,9 @@ main(int argc, char* argv[])
     Config::SetDefault("ns3::SionnaRtChannelModel::UpdatePeriod", TimeValue(Seconds(2.0)));
 
     g_events.open(eventCsv, std::ios::out | std::ios::trunc);
-    g_events << "time_s,event,node,bytes,cp_x,cp_y,cp_z,uav_x,uav_y,uav_z\n";
+    g_phaseFile = phaseFile;
+    g_events << "time_s,wall_monotonic_ns,phase,event,node,bytes,cp_x,cp_y,cp_z,"
+                "uav_x,uav_y,uav_z,value,details\n";
     PcapHelper pcapHelper;
     g_radioPcap = pcapHelper.CreateFile(radioPcap, std::ios::out, PcapHelper::DLT_EN10MB);
 
@@ -424,6 +569,8 @@ main(int argc, char* argv[])
     uavRadio->TraceConnectWithoutContext("MacTx", MakeCallback(&UavMacTx));
     cpPhy->TraceConnectWithoutContext("RxEndOk", MakeCallback(&CpPhyRxOk));
     uavPhy->TraceConnectWithoutContext("RxEndOk", MakeCallback(&UavPhyRxOk));
+    cpPhy->TraceConnectWithoutContext("RxStart", MakeCallback(&CpPhyRxStart));
+    uavPhy->TraceConnectWithoutContext("RxStart", MakeCallback(&UavPhyRxStart));
     cpPhy->TraceConnectWithoutContext("RxEndError", MakeCallback(&CpPhyRxError));
     uavPhy->TraceConnectWithoutContext("RxEndError", MakeCallback(&UavPhyRxError));
 
@@ -449,7 +596,9 @@ main(int argc, char* argv[])
     tap.Install(uav, radioDevices.Get(1));
 
     LivePositionSource positions(positionFile, cpMobility, uavMobility, Seconds(1.5));
+    NativeRuntimeSampler metrics(sionna->GetChannelModel(), cpMobility, uavMobility);
     Simulator::ScheduleNow(&LivePositionSource::Poll, &positions);
+    Simulator::ScheduleNow(&NativeRuntimeSampler::Poll, &metrics);
     Simulator::ScheduleNow(&PollSignal);
     Simulator::Schedule(MilliSeconds(250), &WriteReady, readyFile);
     Simulator::Stop(Seconds(duration));

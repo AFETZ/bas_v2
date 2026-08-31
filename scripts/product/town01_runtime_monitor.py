@@ -18,8 +18,10 @@ MATCHES = {
     "sionna_provider": ("network/radio_provider/provider.py",),
     "sionna_state_adapter": ("town01_radio_state.py",),
     "ns3_packet_engine": ("ams-tap-packet-engine",),
+    "native_ns3_sionna": ("ns3.48-upstream-sionna-tap-spike",),
     "uart_adapter": ("communication_vertical.py uart-adapter",),
     "scenario": ("town01_full_stack_scenario.py run",),
+    "native_product_scenario": ("native_radio_product_scenario.py run",),
     "traffic_profile": ("town01_communication_profiles.py",),
 }
 

@@ -1,0 +1,82 @@
+# One real UAV using the shared Town01 frame for Gazebo, ROS odometry, and Sionna RT.
+schema_version: 1
+
+scenario:
+  name: scenario_1uav_town01_native_product
+  description: One real ArduPilot/Gazebo UAV through native ns-3 Sionna Spectrum.
+  map:
+    town: Town01
+    world_file: .external/cavise_maps/Town01/gazebo/town01.sdf
+    scene_xml: .external/cavise_maps/Town01/map/scene.xml
+
+base_simulation:
+  launch_package: multiagent_simulation
+  launch_file: multiagent_simulation.launch.py
+  sitl_home: "46.607213,14.278461,446,10"
+
+command_post:
+  id: cp
+  role: command_post
+  gazebo_model_name: command_post
+  position_m: [5.0, 0.0, 2.0]
+  orientation_quat_xyzw: [0.0, 0.0, 0.0, 1.0]
+  antenna: omni
+
+robots:
+  - name: uav1
+    role: uav
+    instance: 0
+    system_id: 1
+    dds_udp_port: 2019
+    master_tcp_port: 5760
+    sitl_udp_port: 5501
+    fdm_udp_port: 9002
+    mavproxy_out: 127.0.0.1:14601
+    position: [20.0, 0.0, 2.0, 0.0, 0.0, 0.0]
+    nominal_radio_position_m: [20.0, 0.0, 2.0]
+    antenna: omni
+
+native_radio_product:
+  profile: generic_native_spectrum_aloha_reference
+  solver_profile: realtime_minimal_solver_profile
+  frequency_hz: 2400000000
+  bandwidth_hz: 5000000
+  max_depth: 1
+  los: true
+  specular_reflection: true
+  diffuse_reflection: false
+  diffraction: false
+  refraction: false
+  synthetic_array: true
+  # Frozen before the run from Town01 geometry.  y=0 is the open street.
+  # The ray from CP [5,0] to [80,110] crosses the retained building tile
+  # spanning approximately x=6.1..99.9 and y=5.6..104.8 metres.
+  initial_point_m: [20.0, 0.0, 2.0]
+  los_point_m: [80.0, 0.0, 17.0]
+  obstructed_candidate_m: [80.0, 110.0, 17.0]
+  # Safe physical route around the building tile; these do not replace the
+  # LOS or obstructed observation targets.
+  transit_south_m: [118.0, 0.0, 17.0]
+  transit_north_m: [118.0, 110.0, 17.0]
+  return_point_m: [20.0, 0.0, 17.0]
+  target_tolerance_m: 8.0
+  hold_time_s: 5
+  parameters_frozen_before_run: true
+
+communication:
+  control:
+    ardupilot_serial: SERIAL1
+    protocol: mavlink2
+    baud: 115200
+    gcs_udp: 10.71.0.10:14600
+    uav_udp: 10.71.1.10:14601
+  payload:
+    ardupilot_serial: SERIAL2
+    protocol: mavlink2
+    baud: 115200
+    gcs_udp: 10.71.0.10:14700
+    uav_udp: 10.71.1.10:14701
+  additional_data:
+    protocol: checksummed_logical_message_v1
+    gcs_udp: 10.71.0.10:14800
+    uav_udp: 10.71.1.10:14801
