@@ -257,3 +257,19 @@ intentionally not run, because no project-side bug or retry/stream-configuration
 was established; consequently no new full-flight screenshots are claimed. RSSI, SNR,
 SINR and BLER retain the availability contract above: RSSI/SNR/SINR are unavailable in
 the selected public native API and BLER is unavailable for this PHY abstraction.
+
+## Native Wi-Fi GATE 1 blocker
+
+Run: `runs/native-radio-wifi/gate1-20260901T000000Z` on exact ns-3.48 revision
+`d2add90b452d600cfb4859baed8e9ea633519447`, in the pinned product container. The
+unchanged official `wifi-spectrum-per-example` built and completed with
+`SpectrumWifiPhy`, 741 received packets, signal `-79.75 dBm`, noise `-93.97 dBm`,
+and signal-minus-noise `14.22 dB`.
+
+The required unchanged official `sionna-rt-channel-example` built and ran its two
+scheduled computations (`34.49 dB/-87.96 dBm` and `27.68 dB/-94.77 dBm` SNR/Rx
+power), printed its success message, then died with `SIGABRT`: `PyThreadState_Get:
+the function must be called with the GIL held` while Python was finalizing. Therefore
+GATE 1 is failed, `sionna_spectrumwifi_compatibility` is `blocked`, and no minimal
+Wi-Fi spike or product topology was created. No Wi-Fi MAC, PHY, error, propagation,
+antenna, TAP, UART, or scenario code was changed.
