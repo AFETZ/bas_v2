@@ -14,6 +14,7 @@
 #include "ns3/multi-model-spectrum-channel.h"
 #include "ns3/pcap-file-wrapper.h"
 #include "ns3/propagation-delay-model.h"
+#include "ns3/queue.h"
 #include "ns3/realtime-simulator-impl.h"
 #include "ns3/sionna-rt-spectrum-propagation-loss-model.h"
 #include "ns3/spectrum-helper.h"
@@ -30,6 +31,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -47,6 +49,14 @@ struct NodeCounters
     uint64_t phyRxOk{0};
     uint64_t phyRxStart{0};
     uint64_t phyRxError{0};
+    uint64_t phyTxStart{0};
+    uint64_t phyTxEnd{0};
+    uint64_t phyRxAbort{0};
+    uint64_t macTxDrop{0};
+    uint64_t queueEnqueue{0};
+    uint64_t queueDequeue{0};
+    uint64_t queueDrop{0};
+    uint32_t queueMaxDepth{0};
 };
 
 std::vector<NodeCounters> g_nodeCounters;
@@ -63,6 +73,13 @@ std::ofstream g_events;
 volatile std::sig_atomic_t g_stopRequested = 0;
 std::string g_stopReason = "duration";
 std::string g_phaseFile;
+std::string g_eventLogging{"batched_trace"};
+uint32_t g_flushEveryEvents{256};
+uint32_t g_flushMaxDelayMs{25};
+uint64_t g_pendingEventWrites{0};
+std::chrono::steady_clock::time_point g_lastEventFlush{std::chrono::steady_clock::now()};
+std::unordered_map<uint64_t, Time> g_queueEnqueueAt;
+std::vector<Ptr<Queue<Packet>>> g_queues;
 
 class NativeRuntimeSampler;
 NativeRuntimeSampler* g_runtimeSampler{nullptr};
@@ -102,6 +119,16 @@ LogEvent(const std::string& event,
          double value = std::numeric_limits<double>::quiet_NaN(),
          const std::string& details = "")
 {
+    const bool packetEvent = event == "mac_tx" || event == "mac_tx_drop" ||
+                             event == "phy_tx_start" || event == "phy_tx_end" ||
+                             event == "phy_rx_start" || event == "phy_rx_abort" ||
+                             event == "phy_rx_ok" || event == "phy_rx_error" ||
+                             event == "radio_queue_enqueue" || event == "radio_queue_dequeue" ||
+                             event == "radio_queue_drop";
+    if (g_eventLogging == "metrics_only" && packetEvent)
+    {
+        return;
+    }
     Vector position;
     for (std::size_t index = 0; index < g_nodeNames.size(); ++index)
     {
@@ -122,7 +149,26 @@ LogEvent(const std::string& event,
         g_events << value;
     }
     g_events << ',' << details << '\n';
-    g_events.flush();
+    ++g_pendingEventWrites;
+    const auto now = std::chrono::steady_clock::now();
+    if (g_pendingEventWrites >= g_flushEveryEvents ||
+        now - g_lastEventFlush >= std::chrono::milliseconds(g_flushMaxDelayMs))
+    {
+        g_events.flush();
+        g_pendingEventWrites = 0;
+        g_lastEventFlush = now;
+    }
+}
+
+void
+FlushEvents()
+{
+    if (g_events.is_open())
+    {
+        g_events.flush();
+        g_pendingEventWrites = 0;
+        g_lastEventFlush = std::chrono::steady_clock::now();
+    }
 }
 
 void
@@ -198,6 +244,86 @@ MacTx(uint32_t nodeIndex, Ptr<const Packet> packet)
              std::numeric_limits<double>::quiet_NaN(),
              PacketTraceDetails(packet));
     WriteRadioPcap(packet);
+}
+
+void
+MacTxDrop(uint32_t nodeIndex, Ptr<const Packet> packet)
+{
+    ++g_nodeCounters.at(nodeIndex).macTxDrop;
+    LogEvent("mac_tx_drop", g_nodeNames.at(nodeIndex), "", packet->GetSize(),
+             std::numeric_limits<double>::quiet_NaN(), PacketTraceDetails(packet));
+}
+
+void
+PhyTxStart(uint32_t nodeIndex, Ptr<const Packet> packet)
+{
+    ++g_nodeCounters.at(nodeIndex).phyTxStart;
+    LogEvent("phy_tx_start", g_nodeNames.at(nodeIndex), "", packet->GetSize(),
+             std::numeric_limits<double>::quiet_NaN(), PacketTraceDetails(packet));
+}
+
+void
+PhyTxEnd(uint32_t nodeIndex, Ptr<const Packet> packet)
+{
+    ++g_nodeCounters.at(nodeIndex).phyTxEnd;
+    LogEvent("phy_tx_end", g_nodeNames.at(nodeIndex), "", packet->GetSize(),
+             std::numeric_limits<double>::quiet_NaN(), PacketTraceDetails(packet));
+}
+
+void
+PhyRxAbort(uint32_t nodeIndex, Ptr<const Packet> packet)
+{
+    ++g_nodeCounters.at(nodeIndex).phyRxAbort;
+    LogEvent("phy_rx_abort", g_nodeNames.at(nodeIndex), "", packet->GetSize(),
+             std::numeric_limits<double>::quiet_NaN(), PacketTraceDetails(packet));
+}
+
+void
+QueueEnqueue(uint32_t nodeIndex, Ptr<const Packet> packet)
+{
+    NodeCounters& counters = g_nodeCounters.at(nodeIndex);
+    ++counters.queueEnqueue;
+    const uint32_t depth = g_queues.at(nodeIndex)->GetNPackets();
+    counters.queueMaxDepth = std::max(counters.queueMaxDepth, depth);
+    g_queueEnqueueAt[packet->GetUid()] = Simulator::Now();
+    LogEvent("radio_queue_enqueue", g_nodeNames.at(nodeIndex), "", packet->GetSize(), depth,
+             PacketTraceDetails(packet));
+}
+
+void
+QueueDequeue(uint32_t nodeIndex, Ptr<const Packet> packet)
+{
+    NodeCounters& counters = g_nodeCounters.at(nodeIndex);
+    ++counters.queueDequeue;
+    double residenceMs = std::numeric_limits<double>::quiet_NaN();
+    const auto found = g_queueEnqueueAt.find(packet->GetUid());
+    if (found != g_queueEnqueueAt.end())
+    {
+        residenceMs = (Simulator::Now() - found->second).GetSeconds() * 1000.0;
+        g_queueEnqueueAt.erase(found);
+    }
+    LogEvent("radio_queue_dequeue", g_nodeNames.at(nodeIndex), "", packet->GetSize(), residenceMs,
+             PacketTraceDetails(packet));
+}
+
+void
+QueueDrop(uint32_t nodeIndex, Ptr<const Packet> packet)
+{
+    ++g_nodeCounters.at(nodeIndex).queueDrop;
+    LogEvent("radio_queue_drop", g_nodeNames.at(nodeIndex), "", packet->GetSize(),
+             g_queues.at(nodeIndex)->GetNPackets(), PacketTraceDetails(packet));
+}
+
+void
+SampleQueues()
+{
+    for (uint32_t index = 0; index < g_queues.size(); ++index)
+    {
+        const uint32_t depth = g_queues[index]->GetNPackets();
+        g_nodeCounters[index].queueMaxDepth = std::max(g_nodeCounters[index].queueMaxDepth, depth);
+        LogEvent("radio_queue_depth", g_nodeNames[index], "", 0, depth, "public_queue_api");
+    }
+    Simulator::Schedule(Seconds(1), &SampleQueues);
 }
 
 void
@@ -618,12 +744,26 @@ WriteStats(const std::string& path)
     uint64_t phyRxStart = 0;
     uint64_t phyRxOk = 0;
     uint64_t phyRxError = 0;
+    uint64_t phyTxStart = 0;
+    uint64_t phyTxEnd = 0;
+    uint64_t phyRxAbort = 0;
+    uint64_t macTxDrop = 0;
+    uint64_t queueEnqueue = 0;
+    uint64_t queueDequeue = 0;
+    uint64_t queueDrop = 0;
     for (const NodeCounters& counters : g_nodeCounters)
     {
         macTx += counters.macTx;
         phyRxStart += counters.phyRxStart;
         phyRxOk += counters.phyRxOk;
         phyRxError += counters.phyRxError;
+        phyTxStart += counters.phyTxStart;
+        phyTxEnd += counters.phyTxEnd;
+        phyRxAbort += counters.phyRxAbort;
+        macTxDrop += counters.macTxDrop;
+        queueEnqueue += counters.queueEnqueue;
+        queueDequeue += counters.queueDequeue;
+        queueDrop += counters.queueDrop;
     }
     std::ofstream output(path, std::ios::out | std::ios::trunc);
     output << "{\n"
@@ -644,6 +784,14 @@ WriteStats(const std::string& path)
            << "  \"phy_rx_start_total\": " << phyRxStart << ",\n"
            << "  \"phy_rx_ok_total\": " << phyRxOk << ",\n"
            << "  \"phy_rx_error_total\": " << phyRxError << ",\n"
+           << "  \"phy_tx_start_total\": " << phyTxStart << ",\n"
+           << "  \"phy_tx_end_total\": " << phyTxEnd << ",\n"
+           << "  \"phy_rx_abort_total\": " << phyRxAbort << ",\n"
+           << "  \"mac_tx_drop_total\": " << macTxDrop << ",\n"
+           << "  \"queue_enqueue_total\": " << queueEnqueue << ",\n"
+           << "  \"queue_dequeue_total\": " << queueDequeue << ",\n"
+           << "  \"queue_drop_total\": " << queueDrop << ",\n"
+           << "  \"event_logging\": \"" << g_eventLogging << "\",\n"
            << "  \"cp_mac_tx\": " << g_nodeCounters.front().macTx << ",\n"
            << "  \"uav_mac_tx\": " << (macTx - g_nodeCounters.front().macTx) << ",\n"
            << "  \"cp_phy_rx_start\": " << g_nodeCounters.front().phyRxStart << ",\n"
@@ -658,7 +806,15 @@ WriteStats(const std::string& path)
         const NodeCounters& counters = g_nodeCounters[index];
         output << "    \"" << g_nodeNames[index] << "\": {\"mac_tx\": " << counters.macTx
                << ", \"phy_rx_start\": " << counters.phyRxStart << ", \"phy_rx_ok\": "
-               << counters.phyRxOk << ", \"phy_rx_error\": " << counters.phyRxError << "}";
+               << counters.phyRxOk << ", \"phy_rx_error\": " << counters.phyRxError
+               << ", \"phy_tx_start\": " << counters.phyTxStart
+               << ", \"phy_tx_end\": " << counters.phyTxEnd
+               << ", \"phy_rx_abort\": " << counters.phyRxAbort
+               << ", \"mac_tx_drop\": " << counters.macTxDrop
+               << ", \"queue_enqueue\": " << counters.queueEnqueue
+               << ", \"queue_dequeue\": " << counters.queueDequeue
+               << ", \"queue_drop\": " << counters.queueDrop
+               << ", \"queue_max_depth\": " << counters.queueMaxDepth << "}";
         output << (index + 1 == g_nodeNames.size() ? "\n" : ",\n");
     }
     output << "  },\n"
@@ -695,8 +851,12 @@ main(int argc, char* argv[])
     std::string phaseFile;
     double duration = 120.0;
     double txPowerW = 0.00001;
+    uint64_t phyRateBps = 1000000;
     double channelStateMaxAgeS = 2.0;
     double updateDistanceThresholdM = 1.0;
+    std::string eventLogging = "batched_trace";
+    uint32_t flushEveryEvents = 256;
+    uint32_t flushMaxDelayMs = 25;
 
     CommandLine command(__FILE__);
     command.AddValue("uavCount", "Number of UAV radio nodes (supported: 1 or 5)", uavCount);
@@ -712,10 +872,14 @@ main(int argc, char* argv[])
     command.AddValue("phaseFile", "Current product flight phase file", phaseFile);
     command.AddValue("duration", "Maximum wall-clock run duration", duration);
     command.AddValue("txPowerW", "Spectrum transmitter power in watts", txPowerW);
+    command.AddValue("phyRateBps", "Configured native PHY bit rate", phyRateBps);
     command.AddValue("channelStateMaxAgeS", "Maximum age of a live Sionna channel realization", channelStateMaxAgeS);
     command.AddValue("updateDistanceThresholdM",
                      "Endpoint displacement that invalidates a live Sionna channel realization",
                      updateDistanceThresholdM);
+    command.AddValue("eventLogging", "metrics_only or batched_trace", eventLogging);
+    command.AddValue("flushEveryEvents", "Batched trace flush event limit", flushEveryEvents);
+    command.AddValue("flushMaxDelayMs", "Batched trace maximum flush delay", flushMaxDelayMs);
     command.Parse(argc, argv);
 
     NS_ABORT_MSG_IF(uavCount != 1 && uavCount != 5, "uavCount must be 1 or 5");
@@ -737,8 +901,14 @@ main(int argc, char* argv[])
     GlobalValue::Bind("ChecksumEnabled", BooleanValue(true));
     NS_ABORT_MSG_IF(channelStateMaxAgeS <= 0.0 || updateDistanceThresholdM <= 0.0,
                     "channel-state age and displacement threshold must be positive");
+    NS_ABORT_MSG_IF(phyRateBps == 0 || (eventLogging != "metrics_only" && eventLogging != "batched_trace") ||
+                        flushEveryEvents == 0 || flushMaxDelayMs == 0,
+                    "invalid PHY rate or event logging configuration");
     g_channelStateMaxAgeS = channelStateMaxAgeS;
     g_updateDistanceThresholdM = updateDistanceThresholdM;
+    g_eventLogging = eventLogging;
+    g_flushEveryEvents = flushEveryEvents;
+    g_flushMaxDelayMs = flushMaxDelayMs;
     Config::SetDefault("ns3::SionnaRtChannelModel::UpdatePeriod",
                        TimeValue(Seconds(channelStateMaxAgeS)));
     Config::SetDefault("ns3::SionnaRtChannelModel::UpdateDistanceThreshold",
@@ -812,17 +982,29 @@ main(int argc, char* argv[])
     radio.SetChannel(channel);
     radio.SetTxPowerSpectralDensity(txPsd);
     radio.SetNoisePowerSpectralDensity(noisePsd);
-    radio.SetPhyAttribute("Rate", DataRateValue(DataRate("1Mbps")));
+    radio.SetPhyAttribute("Rate", DataRateValue(DataRate(phyRateBps)));
     NetDeviceContainer radioDevices = radio.Install(radioNodes);
 
     for (uint32_t index = 0; index < radioDevices.GetN(); ++index)
     {
         Ptr<AlohaNoackNetDevice> device = DynamicCast<AlohaNoackNetDevice>(radioDevices.Get(index));
         Ptr<HalfDuplexIdealPhy> phy = device->GetPhy()->GetObject<HalfDuplexIdealPhy>();
+        PointerValue queueValue;
+        device->GetAttribute("Queue", queueValue);
+        Ptr<Queue<Packet>> queue = queueValue.Get<Queue<Packet>>();
+        NS_ABORT_MSG_IF(!queue, "Aloha device queue is unavailable through its public Queue attribute");
+        g_queues.push_back(queue);
         phy->SetAntenna(CreateAntenna());
         device->TraceConnectWithoutContext("MacTx", MakeBoundCallback(&MacTx, index));
+        device->TraceConnectWithoutContext("MacTxDrop", MakeBoundCallback(&MacTxDrop, index));
+        queue->TraceConnectWithoutContext("Enqueue", MakeBoundCallback(&QueueEnqueue, index));
+        queue->TraceConnectWithoutContext("Dequeue", MakeBoundCallback(&QueueDequeue, index));
+        queue->TraceConnectWithoutContext("Drop", MakeBoundCallback(&QueueDrop, index));
+        phy->TraceConnectWithoutContext("TxStart", MakeBoundCallback(&PhyTxStart, index));
+        phy->TraceConnectWithoutContext("TxEnd", MakeBoundCallback(&PhyTxEnd, index));
         phy->TraceConnectWithoutContext("RxEndOk", MakeBoundCallback(&PhyRxOk, index));
         phy->TraceConnectWithoutContext("RxStart", MakeBoundCallback(&PhyRxStart, index));
+        phy->TraceConnectWithoutContext("RxAbort", MakeBoundCallback(&PhyRxAbort, index));
         phy->TraceConnectWithoutContext("RxEndError", MakeBoundCallback(&PhyRxError, index));
     }
 
@@ -882,6 +1064,7 @@ main(int argc, char* argv[])
     g_runtimeSampler = &metrics;
     Simulator::ScheduleNow(&LivePositionSource::Poll, &positions);
     Simulator::ScheduleNow(&NativeRuntimeSampler::PollLag, &metrics);
+    Simulator::ScheduleNow(&SampleQueues);
     Simulator::ScheduleNow(&PollSignal);
     Simulator::Schedule(MilliSeconds(250), &WriteReady, readyFile);
     Simulator::Stop(Seconds(duration));
@@ -905,6 +1088,7 @@ main(int argc, char* argv[])
     }
     Simulator::Destroy();
     WriteStats(statsFile);
+    FlushEvents();
     g_events.close();
     g_radioPcap = nullptr;
     if (g_stopReason == "position_tracker_stale")

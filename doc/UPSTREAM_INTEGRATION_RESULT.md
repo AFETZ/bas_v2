@@ -185,3 +185,75 @@ example, the partial run observed CP-to-UAV1 93 successful end events and zero e
 end events among 94 start events). BLER is deliberately `unavailable`: the current
 HalfDuplexIdealPhy/ShannonSpectrumErrorModel reference has no user-facing
 transport-block abstraction. No unavailable quantity is synthesized.
+
+## Five-UAV control-latency decision gate
+
+The RTF-1 stationary decision gate was run on 2026-09-01 with the same Town01 scene,
+solver profile (depth 1, LOS plus specular only, seed 42), one shared generic native
+medium and five real SITL UART endpoints. It uses only safe one-shot
+`MAV_CMD_REQUEST_MESSAGE(AUTOPILOT_VERSION)` requests. Every operation has a separate
+attempt record; no more than one request of that command ID is outstanding for a given
+UAV. Each run has `report.md`, `metrics/mavlink_latency_chain.csv`, UART load/stream
+composition, public queue/PHY summaries and the observer record in its own run
+directory.
+
+`control-latency-A-20260901T002000Z` is the one-UAV control point with both UARTs:
+23/23 ACKs, all 23 post-write UART deliveries, first-attempt RTT p95 4.997 ms, no
+RxAbort and no queue drop. Real SITL did not return a matching MAVLink PING, so PING
+is explicitly `supported: false` after one non-synthetic probe per UAV; no made-up
+20-sample PING statistic appears.
+
+The five-UAV results are below. `parallel` is the ten rounds of five back-to-back
+one-shot requests, not a sequential loop. RTT statistics include only ACKs received
+within the one-second one-shot window.
+
+| Run | Active UARTs | PHY rate | ACKs / attempts | Parallel ACKs / 50 | RTT p95 (ms) | RxAbort | Queue drops | RxEndError |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `control-latency-B2-20260901T003000Z` | control | 1 Mbit/s | 78 / 115 | 13 | 726.256 | 353 | 0 | 0 |
+| `control-latency-C-20260901T004000Z` | control,payload | 1 Mbit/s | 78 / 115 | 13 | 821.383 | 348 | 0 | 0 |
+| `control-latency-D2-20260901T005000Z` | control,payload | 2 Mbit/s | 79 / 115 | 14 | 663.748 | 344 | 0 | 0 |
+| `control-latency-D5-20260901T006000Z` | control,payload | 5 Mbit/s | 78 / 115 | 13 | 713.044 | 352 | 0 | 1 |
+| `control-latency-D10-20260901T007000Z` | control,payload | 10 Mbit/s | 78 / 115 | 13 | 757.514 | 396 | 0 | 28 |
+
+For the 1-Mbit/s control-only gate, public `Queue` traces show the CP FIFO did accept
+and dequeue the four immediately queued requests: depth reached 4, queue-residence p95
+was 4.106 ms and drop count was zero. Adapter frame accounting shows all 115
+`COMMAND_LONG` records were handed to real UAV UARTs and all 115 corresponding
+`COMMAND_ACK` records were observed leaving those UARTs, while only 78 ACKs reached
+the GCS scenario boundary. Thus neither GCS dispatch, the Aloha FIFO, UART delivery,
+nor the UAV command application is the primary loss boundary.
+
+The native return trace identifies the selected upstream model's boundary. During the
+diagnostic there were 509 UAV-to-GCS `MacTx` packets but only 156 CP `RxStart`
+candidates; 353 signals arrived while the CP was already RX/TX and therefore had no
+second public `RxEndOk`/`RxEndError` outcome. This is the documented behavior of
+`HalfDuplexIdealPhy::StartRx`: in `RX` or `TX` it adds interference but does not begin
+another receive candidate. Concurrent command replies therefore compete in an
+unacknowledged ALOHA medium; missing return candidates and UAV `RxAbort` dominate the
+failure. The zero queue drops and low queue residence exclude a FIFO backlog as the
+multi-second cause. At 10 Mbit/s the same collision boundary remains and genuine PHY
+errors increase to 28, so rate alone is not a remedy.
+
+The observed multi-second effect is at the real framed GCS transport boundary, not an
+invented command timestamp. In Case B2 the affected control paths had 70--72 sequence
+gaps/reassembly failures each; maximum ingress-record ages were 4,771.084 ms (UAV2),
+4,019.394 ms (UAV4) and 3,145.550 ms (UAV5). `serial_transport.Reassembler` correctly
+holds later complete records until a missing sequence expires, then records the gap; it
+does not retransmit or create an ACK. The physical no-candidate losses above therefore
+propagate into these measured multi-second application-facing waits.
+
+`control-latency-E-20260901T008000Z` repeated Case C in `metrics_only` mode. It again
+received 78 ACKs from 115 attempts and 13/50 parallel ACKs, while native event rows
+dropped from 11,998 to 5,163. Its RTT p95 changed from 821.383 to 631.950 ms, so
+latency percentiles are treated as workload-sensitive; the invariant ACK-loss outcome
+rules out per-packet tracing as the root cause. Batched mode flushes at 256 events or
+25 ms and never flushes per packet.
+
+Decision: `generic_native_spectrum_aloha_reference` is unsuitable as a reliable
+five-UAV MAVLink control plane under this offered parallel load. This is a valid
+negative result, not a reason to add a custom provider, synthetic ACK, custom PER,
+scheduler, retry daemon, database, dashboard or telemetry framework. A full flight was
+intentionally not run, because no project-side bug or retry/stream-configuration fix
+was established; consequently no new full-flight screenshots are claimed. RSSI, SNR,
+SINR and BLER retain the availability contract above: RSSI/SNR/SINR are unavailable in
+the selected public native API and BLER is unavailable for this PHY abstraction.

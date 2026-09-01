@@ -45,6 +45,8 @@ SIMULTANEOUS_PACKETS = 20
 SIMULTANEOUS_INTERVAL_NS = 50_000_000
 SIMULTANEOUS_PAYLOAD_BYTES = 256
 DIAGNOSTIC_RETRY_INTERVAL_S = 20.0
+RETRY_CHARACTERIZATION_CANDIDATES_S = (0.5, 1.0, 3.0)
+DIAGNOSTIC_OPERATIONS_PER_UAV = 10
 TAKEOFF_ALTITUDES = {1: 15.0, 2: 23.0, 3: 25.0, 4: 27.0, 5: 29.0}
 ROUTE = {
     "los": [80.0, 0.0, 17.0],
@@ -246,6 +248,331 @@ class NativeFiveUavHarness(FlightHarness):
         deadline = time.monotonic() + duration_s
         while time.monotonic() < deadline:
             self.pump(min(0.2, deadline - time.monotonic()))
+
+    def command_operation(
+        self,
+        *,
+        channel: str,
+        system_id: int,
+        command: int,
+        params: list[float],
+        label: str,
+        retry_policy: str,
+        retry_interval_s: float | None,
+        maximum_attempts: int,
+        timeout_s: float,
+    ) -> dict[str, Any]:
+        """Record attempts separately from successful-attempt and recovery time."""
+
+        if retry_policy not in {"one_shot", "characterization"}:
+            raise ValueError(f"unsupported command retry policy: {retry_policy}")
+        if retry_policy == "one_shot" and maximum_attempts != 1:
+            raise ValueError("one_shot command policy permits exactly one attempt")
+        operation_id = f"op-{len(self.summary.setdefault('command_operations', [])) + 1:05d}"
+        operation: dict[str, Any] = {
+            "operation_id": operation_id,
+            "uav": f"uav{system_id}",
+            "channel": channel,
+            "command": command,
+            "label": label,
+            "retry_policy": retry_policy,
+            "retry_interval_s": retry_interval_s,
+            "maximum_attempts": maximum_attempts,
+            "attempt_count": 0,
+            "attempts": [],
+            "first_attempt_success": False,
+            "first_attempt_rtt_ms": None,
+            "successful_attempt": None,
+            "successful_attempt_rtt_ms": None,
+            "time_to_success_ms": None,
+            "retry_count": 0,
+            "timeout_count": 0,
+            "deprecated_ambiguous_metric": True,
+        }
+        self.summary["command_operations"].append(operation)
+        accepted = {
+            int(self.mavutil.mavlink.MAV_RESULT_ACCEPTED),
+            int(self.mavutil.mavlink.MAV_RESULT_IN_PROGRESS),
+        }
+        started_ns = time.monotonic_ns()
+        for attempt_number in range(1, maximum_attempts + 1):
+            attempt_id = f"{operation_id}-a{attempt_number}"
+            sent_ns = time.monotonic_ns()
+            message = self.transmitters[(channel, system_id)].command_long_encode(
+                system_id, 1, command, attempt_number - 1, *params
+            )
+            self.send(channel, system_id, message)
+            attempt: dict[str, Any] = {
+                "attempt_id": attempt_id,
+                "confirmation": attempt_number - 1,
+                "send_monotonic_ns": sent_ns,
+                "uav_uart_delivery_monotonic_ns": None,
+                "uav_uart_delivery_unavailable_reason": (
+                    "resolved only by post-run adapter-frame correlation; no synthetic timestamp"
+                ),
+                "ack_uav_uart_observed_monotonic_ns": None,
+                "ack_uav_uart_unavailable_reason": (
+                    "COMMAND_ACK carries no request confirmation; a delayed ACK cannot be assigned "
+                    "to a retry without a transport correlation"
+                ),
+                "ack_gcs_received_monotonic_ns": None,
+                "ack_gcs_uart_delivery_monotonic_ns": None,
+                "ack_gcs_uart_unavailable_reason": (
+                    "the GCS endpoint is UDP-only in this topology; the scenario receive boundary is recorded instead"
+                ),
+                "attempt_rtt_ms": None,
+                "outcome": "timeout",
+            }
+            operation["attempts"].append(attempt)
+            operation["attempt_count"] = attempt_number
+            deadline = time.monotonic() + timeout_s * self.timeout_scale
+            while time.monotonic() < deadline:
+                self.pump(0.1)
+                ack = self.acks.get((channel, system_id, command))
+                if ack is None or ack[1] < sent_ns:
+                    continue
+                if int(ack[0].result) not in accepted:
+                    attempt["outcome"] = "command_rejected"
+                    return operation
+                received_ns = int(ack[1])
+                rtt_ms = (received_ns - sent_ns) / 1e6
+                attempt.update(
+                    {
+                        "ack_gcs_received_monotonic_ns": received_ns,
+                        "attempt_rtt_ms": rtt_ms,
+                        "outcome": "ack_received",
+                    }
+                )
+                operation.update(
+                    {
+                        "first_attempt_success": attempt_number == 1,
+                        "first_attempt_rtt_ms": rtt_ms if attempt_number == 1 else None,
+                        "successful_attempt": attempt_number,
+                        "successful_attempt_rtt_ms": rtt_ms,
+                        "time_to_success_ms": (received_ns - started_ns) / 1e6,
+                        "retry_count": attempt_number - 1,
+                    }
+                )
+                return operation
+            operation["timeout_count"] += 1
+            if attempt_number < maximum_attempts and retry_interval_s is not None:
+                self.observe_for(retry_interval_s)
+        return operation
+
+    def parallel_one_shot_operations(
+        self,
+        *,
+        systems: tuple[int, ...],
+        command: int,
+        params: list[float],
+        round_number: int,
+        timeout_s: float,
+    ) -> list[dict[str, Any]]:
+        """Send one safe request per UAV before waiting for any response.
+
+        Each UAV has exactly one outstanding MAV_CMD_REQUEST_MESSAGE.  Different
+        UAVs are deliberately sent back-to-back so this is a genuine parallel
+        offered-load round rather than a loop of sequential measurements.
+        """
+
+        accepted = {
+            int(self.mavutil.mavlink.MAV_RESULT_ACCEPTED),
+            int(self.mavutil.mavlink.MAV_RESULT_IN_PROGRESS),
+        }
+        operations: list[dict[str, Any]] = []
+        for system_id in systems:
+            operation_id = f"op-{len(self.summary.setdefault('command_operations', [])) + 1:05d}"
+            sent_ns = time.monotonic_ns()
+            attempt = {
+                "attempt_id": f"{operation_id}-a1",
+                "confirmation": 0,
+                "send_monotonic_ns": sent_ns,
+                "uav_uart_delivery_monotonic_ns": None,
+                "uav_uart_delivery_unavailable_reason": (
+                    "resolved only by post-run adapter-frame correlation; no synthetic timestamp"
+                ),
+                "ack_uav_uart_observed_monotonic_ns": None,
+                "ack_uav_uart_unavailable_reason": (
+                    "COMMAND_ACK carries no request confirmation; a delayed ACK cannot be assigned "
+                    "without a transport correlation"
+                ),
+                "ack_gcs_received_monotonic_ns": None,
+                "ack_gcs_uart_delivery_monotonic_ns": None,
+                "ack_gcs_uart_unavailable_reason": (
+                    "the GCS endpoint is UDP-only in this topology; the scenario receive boundary is recorded instead"
+                ),
+                "attempt_rtt_ms": None,
+                "outcome": "timeout",
+            }
+            operation: dict[str, Any] = {
+                "operation_id": operation_id,
+                "uav": f"uav{system_id}",
+                "channel": "control",
+                "command": command,
+                "label": f"one_shot_parallel_round_{round_number}",
+                "retry_policy": "one_shot",
+                "retry_interval_s": None,
+                "maximum_attempts": 1,
+                "attempt_count": 1,
+                "attempts": [attempt],
+                "first_attempt_success": False,
+                "first_attempt_rtt_ms": None,
+                "successful_attempt": None,
+                "successful_attempt_rtt_ms": None,
+                "time_to_success_ms": None,
+                "retry_count": 0,
+                "timeout_count": 0,
+                "deprecated_ambiguous_metric": True,
+            }
+            self.summary["command_operations"].append(operation)
+            message = self.transmitters[("control", system_id)].command_long_encode(
+                system_id, 1, command, 0, *params
+            )
+            self.send("control", system_id, message)
+            operations.append(operation)
+
+        deadline = time.monotonic() + timeout_s * self.timeout_scale
+        pending = {int(operation["uav"].removeprefix("uav")): operation for operation in operations}
+        while pending and time.monotonic() < deadline:
+            self.pump(min(0.1, deadline - time.monotonic()))
+            for system_id, operation in tuple(pending.items()):
+                attempt = operation["attempts"][0]
+                ack = self.acks.get(("control", system_id, command))
+                if ack is None or ack[1] < attempt["send_monotonic_ns"]:
+                    continue
+                received_ns = int(ack[1])
+                if int(ack[0].result) in accepted:
+                    rtt_ms = (received_ns - attempt["send_monotonic_ns"]) / 1e6
+                    attempt.update(
+                        {
+                            "ack_gcs_received_monotonic_ns": received_ns,
+                            "attempt_rtt_ms": rtt_ms,
+                            "outcome": "ack_received",
+                        }
+                    )
+                    operation.update(
+                        {
+                            "first_attempt_success": True,
+                            "first_attempt_rtt_ms": rtt_ms,
+                            "successful_attempt": 1,
+                            "successful_attempt_rtt_ms": rtt_ms,
+                            "time_to_success_ms": rtt_ms,
+                        }
+                    )
+                else:
+                    attempt["outcome"] = "command_rejected"
+                del pending[system_id]
+        for operation in pending.values():
+            operation["timeout_count"] = 1
+        return operations
+
+    def ping_diagnostics(self, systems: tuple[int, ...]) -> dict[str, Any]:
+        """Measure MAVLink PING if this SITL responds; never fabricate a reply."""
+
+        operations: list[dict[str, Any]] = []
+        def send_one(system_id: int, sequence: int) -> None:
+            sent_ns = time.monotonic_ns()
+            time_usec = sent_ns // 1_000
+            message = self.transmitters[("control", system_id)].ping_encode(
+                time_usec, system_id * 100 + sequence, system_id, 1
+            )
+            self.send("control", system_id, message)
+            operation: dict[str, Any] = {
+                "uav": f"uav{system_id}",
+                "sequence": sequence,
+                "send_monotonic_ns": sent_ns,
+                "time_usec": time_usec,
+                "reply_gcs_received_monotonic_ns": None,
+                "rtt_ms": None,
+                "outcome": "timeout",
+            }
+            deadline = time.monotonic() + self.timeout_scale
+            while time.monotonic() < deadline:
+                self.pump(min(0.1, deadline - time.monotonic()))
+                reply = self.latest.get(("control", system_id, "PING"))
+                reply_ns = self.latest_at_ns.get(("control", system_id, "PING"), 0)
+                if reply is None or reply_ns < sent_ns:
+                    continue
+                if int(reply.time_usec) != time_usec or int(reply.seq) != system_id * 100 + sequence:
+                    continue
+                operation.update(
+                    {
+                        "reply_gcs_received_monotonic_ns": reply_ns,
+                        "rtt_ms": (reply_ns - sent_ns) / 1e6,
+                        "outcome": "reply_received",
+                    }
+                )
+                break
+            operations.append(operation)
+
+        # A single real probe per UAV establishes whether this SITL exposes a
+        # PING responder.  Only if it does do we run the required 20-per-UAV
+        # sample; an unsupported PING must not add 100 seconds of fabricated
+        # timeout pressure to an unrelated control-latency diagnosis.
+        for system_id in systems:
+            send_one(system_id, 0)
+        if any(operation["outcome"] == "reply_received" for operation in operations):
+            for system_id in systems:
+                for sequence in range(1, 20):
+                    send_one(system_id, sequence)
+        replies = sum(operation["outcome"] == "reply_received" for operation in operations)
+        return {
+            "attempts_per_uav": 20 if len(operations) == 20 * len(systems) else 1,
+            "operations": operations,
+            "reply_count": replies,
+            "supported": replies > 0,
+            "unavailable_reason": (
+                None if replies else "the real SITL returned no matching MAVLink PING reply; no response was synthesized"
+            ),
+        }
+
+    def latency_diagnostics(self, uav_count: int, channels: tuple[str, ...]) -> None:
+        """Stationary, non-flight decision-gate commands; no synthetic response is used."""
+
+        request = int(self.mavutil.mavlink.MAV_CMD_REQUEST_MESSAGE)
+        version_id = int(self.mavutil.mavlink.MAVLINK_MSG_ID_AUTOPILOT_VERSION)
+        systems = tuple(range(1, uav_count + 1))
+        self.phase("latency_stationary_warmup")
+        self.wait(
+            lambda: all((channel, system_id, "HEARTBEAT") in self.latest
+                        for channel in channels for system_id in systems),
+            90,
+            "diagnostic UART heartbeats",
+        )
+        self.observe_for(30.0)
+        self.phase("latency_one_shot_sequential")
+        for system_id in systems:
+            for sequence in range(DIAGNOSTIC_OPERATIONS_PER_UAV):
+                self.command_operation(
+                    channel="control", system_id=system_id, command=request,
+                    params=[float(version_id), 0, 0, 0, 0, 0, 0],
+                    label=f"one_shot_request_message_{sequence}", retry_policy="one_shot",
+                    retry_interval_s=None, maximum_attempts=1, timeout_s=1.0,
+                )
+        self.phase("latency_one_shot_parallel")
+        for round_number in range(DIAGNOSTIC_OPERATIONS_PER_UAV):
+            self.parallel_one_shot_operations(
+                systems=systems, command=request,
+                params=[float(version_id), 0, 0, 0, 0, 0, 0],
+                round_number=round_number, timeout_s=1.0,
+            )
+        self.phase("latency_retry_characterization")
+        for retry_interval_s in RETRY_CHARACTERIZATION_CANDIDATES_S:
+            for system_id in systems:
+                self.command_operation(
+                    channel="control", system_id=system_id, command=request,
+                    params=[float(version_id), 0, 0, 0, 0, 0, 0],
+                    label=f"retry_characterization_{retry_interval_s:g}s",
+                    retry_policy="characterization", retry_interval_s=retry_interval_s,
+                    maximum_attempts=3, timeout_s=1.0,
+                )
+        self.summary["latency_diagnostic"] = {
+            "uav_count": uav_count,
+            "channels": list(channels),
+            "one_shot_operations_per_uav_per_mode": DIAGNOSTIC_OPERATIONS_PER_UAV,
+            "retry_candidates_s": list(RETRY_CHARACTERIZATION_CANDIDATES_S),
+            "mavlink_ping": self.ping_diagnostics(systems),
+        }
 
     def native_command_one(
         self,
@@ -961,7 +1288,14 @@ def run_scenario(args: argparse.Namespace) -> int:
     harness = NativeFiveUavHarness(args)
     output = Path(args.run_dir).resolve() / "metrics/scenario_summary.json"
     try:
-        summary = harness.run_native()
+        if args.mode == "latency_diagnostic":
+            channels = tuple(args.channels.split(","))
+            harness.latency_diagnostics(args.uav_count, channels)
+            harness.summary["status"] = "diagnostic_complete"
+            harness.summary["duration_s"] = round(time.monotonic() - harness.started, 3)
+            summary = harness.summary
+        else:
+            summary = harness.run_native()
     except Exception as error:
         harness.summary.update(
             {
@@ -1049,6 +1383,9 @@ def parser() -> argparse.ArgumentParser:
     scenario.add_argument("--phase-file", required=True)
     scenario.add_argument("--schedule-file", required=True)
     scenario.add_argument("--timeout-scale", type=float, default=1.0)
+    scenario.add_argument("--mode", choices=("product", "latency_diagnostic"), default="product")
+    scenario.add_argument("--uav-count", type=int, choices=(1, 5), default=5)
+    scenario.add_argument("--channels", default="control,payload")
     scenario.set_defaults(function=run_scenario)
     probe = commands.add_parser("no-bypass-probe")
     probe.add_argument("--run-dir", required=True)

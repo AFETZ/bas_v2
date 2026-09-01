@@ -953,12 +953,396 @@ def build_radio_observability(
     return {"radio_links": links, "radio_rows": len(rows), "metric_availability": UNAVAILABLE_RADIO_METRICS}
 
 
+def active_diagnostic_uavs(scenario: dict[str, Any]) -> tuple[str, ...]:
+    diagnostic = scenario.get("latency_diagnostic", {})
+    count = int(diagnostic.get("uav_count", 5) or 5)
+    return tuple(f"uav{index}" for index in range(1, count + 1))
+
+
+def adapter_control_events(run_dir: Path, uav: str) -> list[dict[str, Any]]:
+    return read_jsonl(run_dir / "logs" / f"control_uart_{uav}.jsonl")
+
+
+def first_matching_command_delivery(
+    events: list[dict[str, Any]], attempt: dict[str, Any], command: int, uav_id: int
+) -> int | None:
+    """Find the post-radio, post-write PTY hand-off for an unmodified command."""
+
+    sent_ns = int(attempt["send_monotonic_ns"])
+    confirmation = int(attempt["confirmation"])
+    matches = [
+        int(row["monotonic_ns"])
+        for row in events
+        if row.get("event") == "mavlink_frame"
+        and row.get("direction") == "ns3_to_uart"
+        and row.get("message_name") == "COMMAND_LONG"
+        and row.get("command") == command
+        and row.get("confirmation") == confirmation
+        and row.get("target_system") == uav_id
+        and isinstance(row.get("monotonic_ns"), int)
+        and int(row["monotonic_ns"]) >= sent_ns
+    ]
+    return min(matches) if matches else None
+
+
+def summarize_latency_operations(run_dir: Path, scenario: dict[str, Any]) -> dict[str, Any]:
+    """Write an auditable command chain without inventing unavailable boundaries."""
+
+    metrics = run_dir / "metrics"
+    chain_rows: list[dict[str, Any]] = []
+    operations = scenario.get("command_operations", [])
+    if not isinstance(operations, list):
+        operations = []
+    adapter_events = {uav: adapter_control_events(run_dir, uav) for uav in active_diagnostic_uavs(scenario)}
+    by_label: defaultdict[str, list[float]] = defaultdict(list)
+    by_label_outcomes: defaultdict[str, Counter[str]] = defaultdict(Counter)
+    delivery_matched = 0
+    for operation in operations:
+        if not isinstance(operation, dict):
+            continue
+        uav = str(operation.get("uav", ""))
+        try:
+            uav_id = int(uav.removeprefix("uav"))
+            command = int(operation.get("command"))
+        except (TypeError, ValueError):
+            continue
+        label = str(operation.get("label", "unlabelled"))
+        attempts = operation.get("attempts", [])
+        if not isinstance(attempts, list):
+            continue
+        for attempt in attempts:
+            if not isinstance(attempt, dict):
+                continue
+            delivery_ns = first_matching_command_delivery(
+                adapter_events.get(uav, []), attempt, command, uav_id
+            )
+            if delivery_ns is not None:
+                delivery_matched += 1
+            ack_ns = attempt.get("ack_gcs_received_monotonic_ns")
+            rtt_ms = attempt.get("attempt_rtt_ms")
+            chain_rows.append(
+                {
+                    "operation_id": operation.get("operation_id"),
+                    "label": label,
+                    "uav": uav,
+                    "channel": operation.get("channel"),
+                    "command": command,
+                    "retry_policy": operation.get("retry_policy"),
+                    "retry_interval_s": operation.get("retry_interval_s"),
+                    "maximum_attempts": operation.get("maximum_attempts"),
+                    "attempt_id": attempt.get("attempt_id"),
+                    "confirmation": attempt.get("confirmation"),
+                    "send_monotonic_ns": attempt.get("send_monotonic_ns"),
+                    "uav_uart_delivery_monotonic_ns": delivery_ns,
+                    "uav_uart_delivery_status": "observed" if delivery_ns is not None else "unavailable",
+                    "uav_uart_delivery_reason": (
+                        "adapter did not emit a matching post-write COMMAND_LONG frame"
+                        if delivery_ns is None else "native adapter post-write MAVLink frame"
+                    ),
+                    "ack_uav_uart_observed_monotonic_ns": None,
+                    "ack_uav_uart_status": "unavailable",
+                    "ack_uav_uart_reason": (
+                        "COMMAND_ACK has no request confirmation; retry-safe per-attempt attribution is unavailable"
+                    ),
+                    "ack_gcs_uart_delivery_monotonic_ns": None,
+                    "ack_gcs_uart_status": "unavailable",
+                    "ack_gcs_uart_reason": (
+                        "the GCS endpoint is UDP-only; ack_gcs_received_monotonic_ns is its receive boundary"
+                    ),
+                    "ack_gcs_received_monotonic_ns": ack_ns,
+                    "attempt_rtt_ms": rtt_ms,
+                    "outcome": attempt.get("outcome"),
+                }
+            )
+            by_label_outcomes[label][str(attempt.get("outcome", "unknown"))] += 1
+            if isinstance(rtt_ms, (int, float)):
+                by_label[label].append(float(rtt_ms))
+    columns = [
+        "operation_id", "label", "uav", "channel", "command", "retry_policy", "retry_interval_s", "maximum_attempts",
+        "attempt_id", "confirmation", "send_monotonic_ns", "uav_uart_delivery_monotonic_ns",
+        "uav_uart_delivery_status", "uav_uart_delivery_reason", "ack_uav_uart_observed_monotonic_ns",
+        "ack_uav_uart_status", "ack_uav_uart_reason", "ack_gcs_uart_delivery_monotonic_ns",
+        "ack_gcs_uart_status", "ack_gcs_uart_reason", "ack_gcs_received_monotonic_ns",
+        "attempt_rtt_ms", "outcome",
+    ]
+    with (metrics / "mavlink_latency_chain.csv").open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=columns)
+        writer.writeheader()
+        writer.writerows(chain_rows)
+    labels = {
+        label: {"rtt_ms": distribution(by_label[label]), "outcomes": dict(by_label_outcomes[label])}
+        for label in sorted(set(by_label) | set(by_label_outcomes))
+    }
+    transport = scenario.get("gcs_serial_transport", {})
+    control_transport = {
+        str(path): {
+            "maximum_ingress_queue_age_ms": values.get("maximum_ingress_queue_age_ms"),
+            "average_ingress_queue_age_ms": values.get("average_ingress_queue_age_ms"),
+            "sequence_gaps": values.get("sequence_gaps"),
+            "reassembly_failures": values.get("reassembly_failures"),
+        }
+        for path, values in transport.items()
+        if isinstance(values, dict) and str(path).startswith("control:")
+    } if isinstance(transport, dict) else {}
+    result = {
+        "operation_count": len(operations),
+        "attempt_count": len(chain_rows),
+        "uav_uart_delivery_observed": delivery_matched,
+        "per_label": labels,
+        "first_attempt_rtt_ms": distribution(
+            float(operation["first_attempt_rtt_ms"])
+            for operation in operations
+            if isinstance(operation, dict) and isinstance(operation.get("first_attempt_rtt_ms"), (int, float))
+        ),
+        "successful_attempt_rtt_ms": distribution(
+            float(operation["successful_attempt_rtt_ms"])
+            for operation in operations
+            if isinstance(operation, dict) and isinstance(operation.get("successful_attempt_rtt_ms"), (int, float))
+        ),
+        "time_to_success_ms": distribution(
+            float(operation["time_to_success_ms"])
+            for operation in operations
+            if isinstance(operation, dict) and isinstance(operation.get("time_to_success_ms"), (int, float))
+        ),
+        "deprecated_ambiguous_ack_latency_ms": True,
+        "gcs_transport_reassembly": control_transport,
+        "chain_file": "metrics/mavlink_latency_chain.csv",
+    }
+    write_json(metrics / "mavlink_latency_summary.json", result)
+    return result
+
+
+def summarize_adapter_load(run_dir: Path, scenario: dict[str, Any]) -> dict[str, Any]:
+    metrics = run_dir / "metrics"
+    load: defaultdict[tuple[str, str, int, str], int] = defaultdict(int)
+    streams: Counter[tuple[str, str, str, int, str]] = Counter()
+    stream_bytes: Counter[tuple[str, str, str, int, str]] = Counter()
+    command_long_to_uart = 0
+    command_ack_from_uart = 0
+    event_count = 0
+    for uav in active_diagnostic_uavs(scenario):
+        for channel in tuple(scenario.get("latency_diagnostic", {}).get("channels", ["control"])):
+            for row in read_jsonl(run_dir / "logs" / f"{channel}_uart_{uav}.jsonl"):
+                event_count += 1
+                timestamp = row.get("monotonic_ns")
+                if row.get("event") in {"serial_chunk_tx", "serial_chunk_rx", "serial_tx", "serial_rx"} \
+                        and isinstance(timestamp, int):
+                    direction = str(row.get("direction", "unknown"))
+                    load[(uav, str(channel), int(timestamp) // 1_000_000_000, direction)] += int(row.get("bytes", 0) or 0)
+                if row.get("event") == "mavlink_frame":
+                    key = (
+                        uav,
+                        str(channel),
+                        str(row.get("direction", "unknown")),
+                        int(row.get("msgid", -1)),
+                        str(row.get("message_name", "unknown")),
+                    )
+                    streams[key] += 1
+                    stream_bytes[key] += int(row.get("message_bytes", 0) or 0)
+                    if row.get("direction") == "ns3_to_uart" and row.get("message_name") == "COMMAND_LONG":
+                        command_long_to_uart += 1
+                    if row.get("direction") == "uart_to_ns3" and row.get("message_name") == "COMMAND_ACK":
+                        command_ack_from_uart += 1
+    with (metrics / "uart_load_per_second.csv").open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=["uav", "channel", "monotonic_second", "direction", "bytes"])
+        writer.writeheader()
+        for (uav, channel, second, direction), value in sorted(load.items()):
+            writer.writerow({"uav": uav, "channel": channel, "monotonic_second": second, "direction": direction, "bytes": value})
+    with (metrics / "mavlink_stream_composition.csv").open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=["uav", "channel", "direction", "msgid", "message_name", "frames", "message_bytes"])
+        writer.writeheader()
+        for key, frames in sorted(streams.items()):
+            writer.writerow({
+                "uav": key[0], "channel": key[1], "direction": key[2], "msgid": key[3],
+                "message_name": key[4], "frames": frames, "message_bytes": stream_bytes[key],
+            })
+    result = {
+        "adapter_event_records": event_count,
+        "per_second_rows": len(load),
+        "stream_rows": len(streams),
+        "command_long_post_write_to_uav_uart": command_long_to_uart,
+        "command_ack_observed_from_uav_uart": command_ack_from_uart,
+        "availability": "observed" if event_count else "unavailable: metrics_only adapter mode intentionally suppresses per-frame trace",
+    }
+    write_json(metrics / "uart_load_summary.json", result)
+    return result
+
+
+def summarize_native_contention(run_dir: Path, events: list[dict[str, Any]]) -> dict[str, Any]:
+    metrics = run_dir / "metrics"
+    queue_rows: list[dict[str, Any]] = []
+    by_node: defaultdict[str, Counter[str]] = defaultdict(Counter)
+    queue_depths: defaultdict[str, list[float]] = defaultdict(list)
+    queue_residence_ms: defaultdict[str, list[float]] = defaultdict(list)
+    half_duplex: defaultdict[str, Counter[str]] = defaultdict(Counter)
+    return_mac_uids: set[int] = set()
+    return_rx_start_uids: set[int] = set()
+    return_rx_ok_uids: set[int] = set()
+    return_rx_error_uids: set[int] = set()
+    for row in events:
+        name = str(row.get("event"))
+        node = str(row.get("node"))
+        if name.startswith("radio_queue_"):
+            by_node[node][name] += 1
+            value = row.get("value")
+            if name in {"radio_queue_depth", "radio_queue_enqueue"} and isinstance(value, float):
+                queue_depths[node].append(value)
+            if name == "radio_queue_dequeue" and isinstance(value, float):
+                queue_residence_ms[node].append(value)
+            queue_rows.append({
+                "time_s": row.get("time_s"), "node": node, "event": name,
+                "value": value, "bytes": row.get("bytes"), "details": row.get("details"),
+            })
+        if name in {"phy_tx_start", "phy_tx_end", "phy_rx_start", "phy_rx_abort", "phy_rx_ok", "phy_rx_error"}:
+            half_duplex[node][name] += 1
+        uid = packet_uid(row)
+        if uid is not None and node.startswith("uav") and name == "mac_tx" and row.get("dst_port") == 14600:
+            return_mac_uids.add(uid)
+        if uid is not None and node == "cp" and row.get("dst_port") == 14600:
+            if name == "phy_rx_start":
+                return_rx_start_uids.add(uid)
+            elif name == "phy_rx_ok":
+                return_rx_ok_uids.add(uid)
+            elif name == "phy_rx_error":
+                return_rx_error_uids.add(uid)
+    with (metrics / "native_queue_events.csv").open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=["time_s", "node", "event", "value", "bytes", "details"])
+        writer.writeheader()
+        writer.writerows(queue_rows)
+    queue_summary = {
+        node: {
+            "events": dict(by_node[node]),
+            "depth": distribution(queue_depths[node]),
+            "residence_ms": distribution(queue_residence_ms[node]),
+        }
+        for node in sorted(set(by_node) | set(queue_depths) | set(queue_residence_ms))
+    }
+    write_json(metrics / "native_queue_summary.json", {
+        "source": "public AlohaNoackNetDevice Queue attribute and public Queue traces",
+        "nodes": queue_summary,
+    })
+    return_chain = {
+        "uav_to_gcs_mac_tx": len(return_mac_uids),
+        "cp_phy_rx_start": len(return_rx_start_uids),
+        "cp_phy_rx_ok": len(return_rx_ok_uids),
+        "cp_phy_rx_error": len(return_rx_error_uids),
+        "no_cp_rx_candidate": len(return_mac_uids - return_rx_start_uids),
+        "no_cp_rx_candidate_reason": (
+            "HalfDuplexIdealPhy emits RxStart only while IDLE; a signal arriving during RX/TX has no "
+            "second public RxEnd outcome"
+        ),
+    }
+    half_duplex_result = {node: dict(values) for node, values in half_duplex.items()}
+    write_json(metrics / "half_duplex_summary.json", {
+        "source": "public HalfDuplexIdealPhy TxStart/TxEnd/RxStart/RxAbort/RxEndOk/RxEndError traces",
+        "nodes": half_duplex_result,
+        "uav_to_gcs_control_return": return_chain,
+    })
+    return {"queue_nodes": queue_summary, "half_duplex": half_duplex_result, "control_return": return_chain}
+
+
+def summarize_observer_mode(run_dir: Path, events: list[dict[str, Any]]) -> dict[str, Any]:
+    environment = (run_dir / "environment.txt").read_text(encoding="utf-8", errors="replace") \
+        if (run_dir / "environment.txt").exists() else ""
+    match = re.search(r"^event_logging=(.+)$", environment, re.M)
+    mode = match.group(1).strip() if match else "unrecorded"
+    result = {
+        "event_logging": mode,
+        "native_event_rows": len(events),
+        "native_event_log_bytes": (run_dir / "logs/native_radio_events.csv").stat().st_size
+        if (run_dir / "logs/native_radio_events.csv").exists() else 0,
+        "flush_policy": "256 events or 25 ms maximum" if mode == "batched_trace" else "metrics-only suppression of per-packet native and adapter trace",
+    }
+    write_json(run_dir / "metrics/observer_effect.json", result)
+    return result
+
+
+def write_latency_diagnostic_report(run_dir: Path, observer_reference: Path | None = None) -> int:
+    scenario = read_json(run_dir / "metrics/scenario_summary.json", {})
+    events = native_events(run_dir / "logs/native_radio_events.csv")
+    latency = summarize_latency_operations(run_dir, scenario)
+    load = summarize_adapter_load(run_dir, scenario)
+    contention = summarize_native_contention(run_dir, events)
+    observer = summarize_observer_mode(run_dir, events)
+    ping = scenario.get("latency_diagnostic", {}).get("mavlink_ping", {})
+    stats = read_json(run_dir / "metrics/native_radio_stats.json", {})
+    observer_comparison: dict[str, Any] | None = None
+    if observer_reference is not None:
+        reference = read_json(observer_reference / "metrics/control_latency_summary.json", {})
+        reference_observer = reference.get("observer", {}) if isinstance(reference, dict) else {}
+        reference_latency = reference.get("mavlink_latency", {}) if isinstance(reference, dict) else {}
+        observer_comparison = {
+            "reference_run": observer_reference.name,
+            "reference_event_logging": reference_observer.get("event_logging"),
+            "candidate_event_logging": observer["event_logging"],
+            "reference_ack_samples": reference_latency.get("first_attempt_rtt_ms", {}).get("samples"),
+            "candidate_ack_samples": latency["first_attempt_rtt_ms"]["samples"],
+            "reference_rtt_p95_ms": reference_latency.get("first_attempt_rtt_ms", {}).get("p95"),
+            "candidate_rtt_p95_ms": latency["first_attempt_rtt_ms"]["p95"],
+            "reference_native_event_rows": reference_observer.get("native_event_rows"),
+            "candidate_native_event_rows": observer["native_event_rows"],
+            "interpretation": (
+                "The ACK sample count is the primary observer-invariant outcome; latency percentiles remain "
+                "workload-sensitive and are not treated as a correction factor."
+            ),
+        }
+        write_json(run_dir / "metrics/observer_effect_comparison.json", observer_comparison)
+    result = {
+        "run_id": run_dir.name,
+        "status": scenario.get("status"),
+        "uav_count": scenario.get("latency_diagnostic", {}).get("uav_count"),
+        "profile": scenario.get("profile"),
+        "mavlink_latency": latency,
+        "mavlink_ping": ping,
+        "uart_load": load,
+        "native_contention": contention,
+        "observer": observer,
+        "observer_comparison": observer_comparison,
+        "native_stats": stats,
+        "physical_metric_availability": UNAVAILABLE_RADIO_METRICS,
+        "control_loss_breakdown": {
+            "before_native_enqueue": "unavailable: no public GCS-side Aloha enqueue trace",
+            "native_queue": "observed in metrics/native_queue_summary.json; no queue drops in this run",
+            "phy": contention["control_return"],
+            "uav_uart_delivery": latency["uav_uart_delivery_observed"],
+            "uav_application_ack_generated": load["command_ack_observed_from_uav_uart"],
+            "uav_application_ack_at_gcs": latency["first_attempt_rtt_ms"]["samples"],
+            "gcs_transport_reassembly": latency["gcs_transport_reassembly"],
+        },
+    }
+    write_json(run_dir / "metrics/control_latency_summary.json", result)
+    report = [
+        f"# Native control-latency diagnostic: {run_dir.name}",
+        "",
+        f"- Status: **{scenario.get('status', 'missing')}**; UAVs: {result['uav_count']}",
+        f"- Command attempts: {latency['attempt_count']}; post-write UAV UART deliveries observed: {latency['uav_uart_delivery_observed']}.",
+        f"- First-attempt RTT p95: {latency['first_attempt_rtt_ms']['p95']} ms.",
+        f"- Successful-attempt RTT p95: {latency['successful_attempt_rtt_ms']['p95']} ms.",
+        f"- MAVLink PING supported: {ping.get('supported', False)}; attempts/UAV: {ping.get('attempts_per_uav', 0)}.",
+        f"- Observer mode: {observer['event_logging']} ({observer['native_event_rows']} native event rows).",
+        "",
+        "`mavlink_latency_chain.csv` contains every operation and attempt.  It deliberately marks UAV UART ACK and GCS UART boundaries unavailable where this UDP-only topology or MAVLink COMMAND_ACK lacks an exact, retry-safe correlation key; no timestamps are reconstructed.",
+        "",
+        "RSSI/SNR/SINR and BLER retain their explicit native-API availability status in `control_latency_summary.json`.",
+    ]
+    (run_dir / "report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    print(json.dumps({"run_dir": str(run_dir), "diagnostic": scenario.get("status")}, sort_keys=True))
+    return 0 if scenario.get("status") == "diagnostic_complete" else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--one-uav-run", type=Path)
+    parser.add_argument("--latency-diagnostic", action="store_true")
+    parser.add_argument("--observer-reference-run", type=Path)
     args = parser.parse_args()
     run_dir = args.run_dir.resolve()
+    if args.latency_diagnostic:
+        return write_latency_diagnostic_report(
+            run_dir,
+            args.observer_reference_run.resolve() if args.observer_reference_run else None,
+        )
     metrics_dir = run_dir / "metrics"
     scenario = read_json(metrics_dir / "scenario_summary.json", {})
     stats = read_json(metrics_dir / "native_radio_stats.json", {})

@@ -41,7 +41,6 @@ def write_json(path: str | Path, value: Any) -> None:
 
 def append_jsonl(handle: Any, value: dict[str, Any]) -> None:
     handle.write(json.dumps(value, separators=(",", ":"), sort_keys=True) + "\n")
-    handle.flush()
 
 
 def sha256(data: bytes) -> str:
@@ -67,6 +66,9 @@ def configure_tty_baud(descriptor: int, baud_rate: int) -> int:
 
 
 def run_uart_adapter(args: argparse.Namespace) -> int:
+    os.environ.setdefault("MAVLINK20", "1")
+    from pymavlink import mavutil
+
     bind_address = endpoint(args.bind)
     peer_address = endpoint(args.peer)
     uart = os.open(args.tty, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
@@ -116,6 +118,10 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
     )
     input_frames = MavlinkStreamCounter()
     output_frames = MavlinkStreamCounter()
+    input_parser = mavutil.mavlink.MAVLink(None)
+    output_parser = mavutil.mavlink.MAVLink(None)
+    input_parser.robust_parsing = True
+    output_parser.robust_parsing = True
     ready = {
         "status": "ready",
         "pid": os.getpid(),
@@ -170,6 +176,34 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
             last_metrics_ns = now_ns
 
     with Path(args.event_log).open("a", encoding="utf-8") as events:
+        def emit_event(value: dict[str, Any]) -> None:
+            if args.event_logging == "batched_trace":
+                append_jsonl(events, value)
+
+        def emit_mavlink_frames(direction: str, parser: Any, record: bytes, observed_ns: int) -> None:
+            if args.event_logging != "batched_trace":
+                return
+            for message in parser.parse_buffer(record) or []:
+                if message.get_type() == "BAD_DATA":
+                    continue
+                emit_event(
+                    {
+                        "event": "mavlink_frame",
+                        "channel": args.channel,
+                        "uav_id": args.uav_id,
+                        "direction": direction,
+                        "sysid": int(message.get_srcSystem()),
+                        "compid": int(message.get_srcComponent()),
+                        "msgid": int(message.get_msgId()),
+                        "message_name": str(message.get_type()),
+                        "message_bytes": len(message.get_msgbuf()),
+                        "command": int(message.command) if hasattr(message, "command") else None,
+                        "confirmation": int(message.confirmation) if hasattr(message, "confirmation") else None,
+                        "target_system": int(message.target_system) if hasattr(message, "target_system") else None,
+                        "target_component": int(message.target_component) if hasattr(message, "target_component") else None,
+                        "monotonic_ns": observed_ns,
+                    },
+                )
         try:
             while running:
                 now_ns = time.monotonic_ns()
@@ -199,6 +233,7 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
                         observed_ns = time.monotonic_ns()
                         counters.uart_input_bytes += len(data)
                         input_frames.feed(data)
+                        emit_mavlink_frames("uart_to_ns3", input_parser, data, observed_ns)
                         datagrams = encoder.encode(data, observed_ns) if encoder else [data]
                         if encoder:
                             counters.records_encoded += 1
@@ -206,8 +241,7 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
                         for fragment_index, datagram in enumerate(datagrams):
                             udp.sendto(datagram, peer_address)
                             counters.ns3_input_bytes += len(datagram)
-                            append_jsonl(
-                                events,
+                            emit_event(
                                 {
                                     "event": "serial_chunk_tx" if encoder else "serial_tx",
                                     "channel": args.channel,
@@ -244,8 +278,11 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
                                     select_write.register(uart, selectors.EVENT_WRITE)
                                     select_write.select(0.25)
                                     select_write.close()
-                        append_jsonl(
-                            events,
+                            if not view:
+                                # This is the receiver-side UART hand-off after the
+                                # whole MAVLink record has reached the real PTY.
+                                emit_mavlink_frames("ns3_to_uart", output_parser, record, time.monotonic_ns())
+                        emit_event(
                             {
                                 "event": "serial_chunk_rx" if reassembler else "serial_rx",
                                 "channel": args.channel,
@@ -848,6 +885,7 @@ def parser() -> argparse.ArgumentParser:
     adapter.add_argument("--reassembly-timeout-ms", type=int, default=500)
     adapter.add_argument("--metrics-period-ms", type=int, default=1000)
     adapter.add_argument("--metrics-output")
+    adapter.add_argument("--event-logging", choices=("metrics_only", "batched_trace"), default="batched_trace")
     adapter.set_defaults(function=run_uart_adapter)
 
     mavlink = commands.add_parser("mavlink-probe")

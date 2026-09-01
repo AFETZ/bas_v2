@@ -34,6 +34,11 @@ run_in_container() {
     -e BAS_NATIVE_CHANNEL_STATE_MAX_AGE_S="${BAS_NATIVE_CHANNEL_STATE_MAX_AGE_S:-2.0}" \
     -e BAS_NATIVE_UPDATE_DISTANCE_THRESHOLD_M="${BAS_NATIVE_UPDATE_DISTANCE_THRESHOLD_M:-1.0}" \
     -e BAS_NATIVE_FIVE_TIMEOUT_SCALE="${BAS_NATIVE_FIVE_TIMEOUT_SCALE:-5.0}" \
+    -e BAS_NATIVE_LATENCY_MODE="${BAS_NATIVE_LATENCY_MODE:-0}" \
+    -e BAS_NATIVE_UAV_COUNT="${BAS_NATIVE_UAV_COUNT:-5}" \
+    -e BAS_NATIVE_UART_CHANNELS="${BAS_NATIVE_UART_CHANNELS:-control,payload}" \
+    -e BAS_NATIVE_PHY_RATE_BPS="${BAS_NATIVE_PHY_RATE_BPS:-1000000}" \
+    -e BAS_NATIVE_EVENT_LOGGING="${BAS_NATIVE_EVENT_LOGGING:-batched_trace}" \
     -e BAS_NATIVE_FIVE_HOST_UID="$(id -u)" \
     -e BAS_NATIVE_FIVE_HOST_GID="$(id -g)" \
     -e XDG_RUNTIME_DIR=/tmp/bas-native-five-xdg \
@@ -72,6 +77,29 @@ done
 
 RUN_ID="${BAS_NATIVE_FIVE_RUN_ID:-native-five-$(date -u +%Y%m%dT%H%M%SZ)}"
 [[ "$RUN_ID" =~ ^[a-zA-Z0-9_.-]+$ ]] || { printf 'Unsafe run ID: %s\n' "$RUN_ID" >&2; exit 2; }
+LATENCY_MODE="${BAS_NATIVE_LATENCY_MODE:-0}"
+UAV_COUNT="${BAS_NATIVE_UAV_COUNT:-5}"
+ACTIVE_UART_CHANNELS="${BAS_NATIVE_UART_CHANNELS:-control,payload}"
+PHY_RATE_BPS="${BAS_NATIVE_PHY_RATE_BPS:-1000000}"
+EVENT_LOGGING="${BAS_NATIVE_EVENT_LOGGING:-batched_trace}"
+[[ "$PHY_RATE_BPS" =~ ^[1-9][0-9]*$ ]] || { printf 'Invalid native PHY rate: %s\n' "$PHY_RATE_BPS" >&2; exit 2; }
+[[ "$UAV_COUNT" == 1 || "$UAV_COUNT" == 5 ]] || { printf 'UAV count must be 1 or 5: %s\n' "$UAV_COUNT" >&2; exit 2; }
+[[ ",$ACTIVE_UART_CHANNELS," == *,control,* ]] || { printf 'Control UART must remain active.\n' >&2; exit 2; }
+[[ "$EVENT_LOGGING" == metrics_only || "$EVENT_LOGGING" == batched_trace ]] || { printf 'Invalid event logging mode.\n' >&2; exit 2; }
+SCENARIO_MODE="product"
+[[ "$LATENCY_MODE" == 1 ]] && SCENARIO_MODE="latency_diagnostic"
+[[ "$SCENARIO_MODE" == latency_diagnostic || "$UAV_COUNT" == 5 ]] || {
+  printf 'The product flight proof requires five UAVs; one UAV is diagnostic-only.\n' >&2
+  exit 2
+}
+UAV_INDICES=()
+for ((index=1; index<=UAV_COUNT; ++index)); do UAV_INDICES+=("$index"); done
+TAP_UAVS=""
+TAP_ENDPOINTS=(gcs)
+for index in "${UAV_INDICES[@]}"; do
+  TAP_UAVS+="${TAP_UAVS:+,}tap-uav$index"
+  TAP_ENDPOINTS+=("uav$index")
+done
 RUN_DIR="$ROOT_DIR/runs/native-radio-realtime/$RUN_ID"
 [[ ! -e "$RUN_DIR" ]] || { printf 'Run directory exists: %s\n' "$RUN_DIR" >&2; exit 2; }
 RUNTIME_DIR="/tmp/bas-native-five-$RUN_ID"
@@ -86,7 +114,7 @@ UPSTREAM_SOURCE="$NS3_DIR/scratch/upstream-sionna-tap-spike.cc"
 BINARY="$NS3_DIR/build/scratch/ns3.48-upstream-sionna-tap-spike-default"
 PATCH_FILE="$ROOT_DIR/network/ns3/patches/mr2608-spike-compatibility.patch"
 REALTIME_CACHE_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-realtime-scene-cache.patch"
-SCENARIO="$ROOT_DIR/network/config/scenario_5uav_town01_native_product.yaml"
+SCENARIO="$ROOT_DIR/network/config/scenario_${UAV_COUNT}uav_town01_native_product.yaml"
 WORLD="$ROOT_DIR/.external/cavise_maps/Town01/gazebo/town01.sdf"
 CAMERA_FRAGMENT="$ROOT_DIR/network/ns3/runtime_live_cameras.sdf.inc"
 GAZEBO_RTF="${BAS_NATIVE_FIVE_GAZEBO_RTF:-1.0}"
@@ -198,8 +226,9 @@ PY
   printf 'stack_cpuset=%s\nradio_cpuset=%s\n' "$STACK_CPUSET" "$RADIO_CPUSET"
   printf 'profile=generic_native_spectrum_aloha_reference\n'
   printf 'technology_specific_modem=false\n'
-  printf 'uav_count=5\nradio_node_count=6\nshared_spectrum_channels=1\n'
-  printf 'carrier_hz=2400000000\nbandwidth_hz=5000000\nphy_rate_bps=1000000\ntx_power_w=0.01\n'
+  printf 'uav_count=%s\nradio_node_count=%s\nshared_spectrum_channels=1\n' "$UAV_COUNT" "$((UAV_COUNT + 1))"
+  printf 'carrier_hz=2400000000\nbandwidth_hz=5000000\nphy_rate_bps=%s\ntx_power_w=0.01\n' "$PHY_RATE_BPS"
+  printf 'event_logging=%s\nactive_uart_channels=%s\nlatency_mode=%s\n' "$EVENT_LOGGING" "$ACTIVE_UART_CHANNELS" "$LATENCY_MODE"
   printf 'solver_profile=realtime_minimal_solver_profile\n'
   printf 'cache_policy=displacement_or_time\nchannel_state_max_age_s=%s\nendpoint_displacement_threshold_m=%s\n' \
     "$CHANNEL_STATE_MAX_AGE_S" "$UPDATE_DISTANCE_THRESHOLD_M"
@@ -219,6 +248,13 @@ stop_pid() {
   [[ -n "$pid" ]] || return 0
   if kill -0 "$pid" 2>/dev/null; then
     kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+    for _ in $(seq 1 50); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+    fi
   fi
   wait "$pid" 2>/dev/null || true
 }
@@ -263,7 +299,9 @@ wait_for_file() {
 
 namespace_exists() { ip netns list | awk '{print $1}' | grep -Fxq "$1"; }
 
-for namespace in ams-gcs ams-ns3 ams-uav1 ams-uav2 ams-uav3 ams-uav4 ams-uav5; do
+NAMESPACES=(ams-gcs ams-ns3)
+for index in "${UAV_INDICES[@]}"; do NAMESPACES+=("ams-uav$index"); done
+for namespace in "${NAMESPACES[@]}"; do
   namespace_exists "$namespace" && { printf 'Namespace already exists: %s\n' "$namespace" >&2; exit 3; }
   ip netns add "$namespace"
   created_namespaces+=("$namespace")
@@ -274,7 +312,7 @@ ip link add v-n5-g type veth peer name v-n5-g-n3
 ip link set v-n5-g netns ams-gcs
 ip link set v-n5-g-n3 netns ams-ns3
 ip -n ams-gcs link set v-n5-g name eth0
-for index in 1 2 3 4 5; do
+for index in "${UAV_INDICES[@]}"; do
   ip link add "v-n5-u$index" type veth peer name "v-n5-u${index}-n3"
   ip link set "v-n5-u$index" netns "ams-uav$index"
   ip link set "v-n5-u${index}-n3" netns ams-ns3
@@ -285,7 +323,7 @@ ip -n ams-ns3 link set br-gcs type bridge mcast_snooping 0
 ip netns exec ams-ns3 ip tuntap add dev tap-gcs mode tap user 0
 ip -n ams-ns3 link set v-n5-g-n3 master br-gcs
 ip -n ams-ns3 link set tap-gcs master br-gcs
-for index in 1 2 3 4 5; do
+for index in "${UAV_INDICES[@]}"; do
   ip -n ams-ns3 link add "br-uav$index" type bridge
   ip -n ams-ns3 link set "br-uav$index" type bridge mcast_snooping 0
   ip netns exec ams-ns3 ip tuntap add dev "tap-uav$index" mode tap user 0
@@ -298,7 +336,7 @@ ip -n ams-gcs address add 10.71.0.10/24 dev eth0
 ip -n ams-gcs link set eth0 up
 ip -n ams-gcs route add default via 10.71.0.1 dev eth0
 ip -n ams-gcs route add 239.71.0.1/32 via 10.71.0.1 dev eth0
-for index in 1 2 3 4 5; do
+for index in "${UAV_INDICES[@]}"; do
   printf -v endpoint_mac '02:71:%02x:00:10:10' "$index"
   ip -n "ams-uav$index" link set eth0 addrgenmode none
   ip -n "ams-uav$index" link set eth0 address "$endpoint_mac"
@@ -310,22 +348,22 @@ for interface in v-n5-g-n3 tap-gcs br-gcs; do
   ip -n ams-ns3 link set "$interface" addrgenmode none
   ip -n ams-ns3 link set "$interface" up
 done
-for index in 1 2 3 4 5; do
+for index in "${UAV_INDICES[@]}"; do
   for interface in "v-n5-u${index}-n3" "tap-uav$index" "br-uav$index"; do
     ip -n ams-ns3 link set "$interface" addrgenmode none
     ip -n ams-ns3 link set "$interface" up
   done
 done
 ip -n ams-gcs neigh replace 10.71.0.1 lladdr 02:71:00:00:00:01 nud permanent dev eth0
-for index in 1 2 3 4 5; do
+for index in "${UAV_INDICES[@]}"; do
   ip -n "ams-uav$index" neigh replace "10.71.$index.1" lladdr 02:71:ff:00:00:01 nud permanent dev eth0
 done
 {
   ip -n ams-gcs neigh show dev eth0
-  for index in 1 2 3 4 5; do ip -n "ams-uav$index" neigh show dev eth0; done
+  for index in "${UAV_INDICES[@]}"; do ip -n "ams-uav$index" neigh show dev eth0; done
 } > "$RUN_DIR/logs/static_neighbors.txt"
 
-for instance in 0 1 2 3 4; do
+for ((instance=0; instance<UAV_COUNT; ++instance)); do
   setsid socat -d -d "pty,raw,echo=0,link=$UART_DIR/control-sitl-$instance,mode=660" \
     "pty,raw,echo=0,link=$UART_DIR/control-adapter-$instance,mode=660" \
     > "$RUN_DIR/logs/control_socat_uav$((instance + 1)).log" 2>&1 &
@@ -335,16 +373,17 @@ for instance in 0 1 2 3 4; do
     > "$RUN_DIR/logs/payload_socat_uav$((instance + 1)).log" 2>&1 &
   managed_pids+=("$!")
 done
-for instance in 0 1 2 3 4; do
+for ((instance=0; instance<UAV_COUNT; ++instance)); do
   for path in "$UART_DIR/control-sitl-$instance" "$UART_DIR/payload-sitl-$instance"; do
     for _ in $(seq 1 100); do [[ -e "$path" ]] && break; sleep 0.1; done
     [[ -e "$path" ]] || { printf 'PTY missing: %s\n' "$path" >&2; exit 1; }
   done
 done
 
-for index in 1 2 3 4 5; do
+for index in "${UAV_INDICES[@]}"; do
   instance=$((index - 1))
   for channel in control payload; do
+    [[ ",$ACTIVE_UART_CHANNELS," == *,$channel,* ]] || continue
     if [[ "$channel" == control ]]; then base_port=14600; else base_port=14700; fi
     setsid ip netns exec "ams-uav$index" python3 -u \
       "$ROOT_DIR/network/scripts/communication_vertical.py" uart-adapter \
@@ -353,6 +392,7 @@ for index in 1 2 3 4 5; do
       --bind "10.71.$index.10:$((base_port + index))" --peer "10.71.0.10:$base_port" \
       --event-log "$RUN_DIR/logs/${channel}_uart_uav$index.jsonl" \
       --metrics-output "$RUN_DIR/metrics/${channel}_uart_uav$index.json" \
+      --event-logging "$EVENT_LOGGING" \
       --ready-file "$RUN_DIR/logs/${channel}_uart_uav$index.ready" \
       > "$RUN_DIR/logs/${channel}_uart_uav$index.log" 2>&1 &
     managed_pids+=("$!")
@@ -365,9 +405,11 @@ for index in 1 2 3 4 5; do
     > "$RUN_DIR/logs/additional_uav$index.log" 2>&1 &
   managed_pids+=("$!")
 done
-for index in 1 2 3 4 5; do
-  wait_for_file "$RUN_DIR/logs/control_uart_uav$index.ready" 15 "control UART adapter"
-  wait_for_file "$RUN_DIR/logs/payload_uart_uav$index.ready" 15 "payload UART adapter"
+for index in "${UAV_INDICES[@]}"; do
+  for channel in control payload; do
+    [[ ",$ACTIVE_UART_CHANNELS," == *,$channel,* ]] || continue
+    wait_for_file "$RUN_DIR/logs/${channel}_uart_uav$index.ready" 15 "$channel UART adapter"
+  done
   wait_for_file "$RUN_DIR/logs/additional_uav$index.ready" 15 "additional endpoint"
 done
 
@@ -393,23 +435,23 @@ managed_pids+=("$!")
 
 fresh=0
 for _ in $(seq 1 2400); do
-  if python3 - "$NODE_STATE" <<'PY' >/dev/null 2>&1
+  if python3 - "$NODE_STATE" "$UAV_COUNT" <<'PY' >/dev/null 2>&1
 import json, sys
 value = json.load(open(sys.argv[1], encoding="utf-8"))
 nodes = {node["id"]: node for node in value.get("nodes", [])}
 assert value.get("source") == "ros_odometry"
 assert not value.get("missing_nodes") and not value.get("stale_nodes")
-assert all(not nodes[f"uav{i}"].get("stale") for i in range(1, 6))
+assert all(not nodes[f"uav{i}"].get("stale") for i in range(1, int(sys.argv[2]) + 1))
 PY
   then fresh=1; break; fi
   sleep 0.1
 done
-((fresh == 1)) || { printf 'Five live ROS odometry streams did not become fresh.\n' >&2; exit 1; }
+((fresh == 1)) || { printf 'Live ROS odometry streams did not become fresh.\n' >&2; exit 1; }
 python3 "$ROOT_DIR/scripts/product/town01_stack_health.py" \
   --scenario "$SCENARIO" --tracker-state "$NODE_STATE" --tracker-events "$NODE_EVENTS" \
   --output "$RUN_DIR/metrics/health.json" --timeout-s 180 \
   > "$RUN_DIR/logs/stack_health.log" 2>&1
-for index in 1 2 3 4 5; do
+for index in "${UAV_INDICES[@]}"; do
   timeout 15 ros2 topic info --verbose "/uav$index/odometry" \
     > "$RUN_DIR/logs/odometry_uav$index.txt" 2>&1 || true
 done
@@ -425,7 +467,7 @@ setsid python3 -u "$ROOT_DIR/scripts/product/capture_live_gazebo_screenshots.py"
   > "$RUN_DIR/logs/live_screenshot_capture.log" 2>&1 &
 managed_pids+=("$!")
 
-for endpoint in gcs uav1 uav2 uav3 uav4 uav5; do
+for endpoint in "${TAP_ENDPOINTS[@]}"; do
   setsid ip netns exec ams-ns3 tcpdump -U -i "tap-$endpoint" -nn \
     -w "$RUN_DIR/pcap/tap_${endpoint}.pcap" \
     > "$RUN_DIR/logs/tap_${endpoint}_tcpdump.log" 2>&1 &
@@ -447,12 +489,13 @@ setsid ip netns exec ams-ns3 env \
   PYTHONPATH="$PYTHON_DEPS" MPLCONFIGDIR="$RUNTIME_DIR/matplotlib" \
   NS_LOG='SionnaRtChannelModel=level_debug|prefix_time' \
   taskset -c "$RADIO_CPUSET" stdbuf -oL -eL "$BINARY" \
-  --uavCount=5 --tapGcs=tap-gcs --tapUavs=tap-uav1,tap-uav2,tap-uav3,tap-uav4,tap-uav5 \
+  --uavCount="$UAV_COUNT" --tapGcs=tap-gcs --tapUavs="$TAP_UAVS" \
   --scene="$SCENE" --positionFile="$NODE_STATE" --phaseFile="$PHASE_FILE" \
   --radioPcap="$RUN_DIR/pcap/native_radio.pcap" \
   --eventCsv="$RUN_DIR/logs/native_radio_events.csv" \
   --statsFile="$RUN_DIR/metrics/native_radio_stats.json" \
   --readyFile="$NS3_READY" --duration=2400 --txPowerW=0.01 \
+  --phyRateBps="$PHY_RATE_BPS" --eventLogging="$EVENT_LOGGING" \
   --channelStateMaxAgeS="$CHANNEL_STATE_MAX_AGE_S" \
   --updateDistanceThresholdM="$UPDATE_DISTANCE_THRESHOLD_M" \
   > "$NS3_FIFO" 2>&1 &
@@ -470,6 +513,7 @@ set +e
 ip netns exec ams-gcs python3 -u "$ROOT_DIR/scripts/product/native_radio_five_uav_scenario.py" run \
   --run-dir "$RUN_DIR" --node-state "$NODE_STATE" --phase-file "$PHASE_FILE" \
   --schedule-file "$SCHEDULE_FILE" --timeout-scale "$SCENARIO_TIMEOUT_SCALE" \
+  --mode="$SCENARIO_MODE" --uav-count="$UAV_COUNT" --channels="$ACTIVE_UART_CHANNELS" \
   > "$RUN_DIR/logs/flight_scenario.log" 2>&1
 SCENARIO_STATUS=$?
 set -e
@@ -497,11 +541,13 @@ NS3_PID=""
 wait "$NS3_LOGGER_PID" || true
 NS3_LOGGER_PID=""
 ip netns exec ams-gcs ss -H -tunap > "$RUN_DIR/logs/gcs_sockets_after_stop.txt" 2>&1 || true
-ip netns exec ams-gcs python3 -u "$ROOT_DIR/scripts/product/native_radio_five_uav_scenario.py" no-bypass-probe \
-  --run-dir "$RUN_DIR" --node-state "$NODE_STATE" --duration-s 10.5 \
-  --output "$RUN_DIR/metrics/no_bypass_summary.json" \
-  > "$RUN_DIR/logs/no_bypass_probe.log" 2>&1
-ip netns exec ams-gcs ss -H -tunap > "$RUN_DIR/logs/gcs_sockets_after_10s.txt" 2>&1 || true
+if [[ "$SCENARIO_MODE" == product ]]; then
+  ip netns exec ams-gcs python3 -u "$ROOT_DIR/scripts/product/native_radio_five_uav_scenario.py" no-bypass-probe \
+    --run-dir "$RUN_DIR" --node-state "$NODE_STATE" --duration-s 10.5 \
+    --output "$RUN_DIR/metrics/no_bypass_summary.json" \
+    > "$RUN_DIR/logs/no_bypass_probe.log" 2>&1
+  ip netns exec ams-gcs ss -H -tunap > "$RUN_DIR/logs/gcs_sockets_after_10s.txt" 2>&1 || true
+fi
 
 for pid in "${capture_pids[@]}"; do
   kill -INT -- "-$pid" 2>/dev/null || true
@@ -511,10 +557,12 @@ capture_pids=()
 touch "$MONITOR_STOP"
 sleep 2
 summary_args=(--run-dir "$RUN_DIR")
-if [[ -n "$ONE_UAV_RUN" ]]; then
+if [[ "$SCENARIO_MODE" == latency_diagnostic ]]; then
+  summary_args+=(--latency-diagnostic)
+elif [[ -n "$ONE_UAV_RUN" ]]; then
   [[ -d "$ONE_UAV_RUN" ]] || { printf 'One-UAV regression run is absent: %s\n' "$ONE_UAV_RUN" >&2; exit 2; }
   summary_args+=(--one-uav-run "$ONE_UAV_RUN")
 fi
 python3 "$ROOT_DIR/scripts/product/summarize_native_radio_five_uav.py" "${summary_args[@]}" \
   > "$RUN_DIR/logs/summary.log" 2>&1
-printf 'Native five-UAV run complete: %s\n' "$RUN_DIR"
+printf 'Native radio run complete: %s\n' "$RUN_DIR"
