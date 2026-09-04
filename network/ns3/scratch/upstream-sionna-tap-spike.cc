@@ -55,7 +55,9 @@ struct NodeCounters
     uint64_t macTx{0};
     uint64_t phyRxOk{0};
     uint64_t phyRxStart{0};
+    uint64_t phyRxEnd{0};
     uint64_t phyRxError{0};
+    uint64_t phyRxDrop{0};
     uint64_t phyTxStart{0};
     uint64_t phyTxEnd{0};
     uint64_t phyRxAbort{0};
@@ -101,7 +103,7 @@ std::string g_neighborDiscoveryMode{"preconfigured_static_neighbors"};
 std::string g_radioReason{"upstream_ideal_phy_arp_reentrancy_limit"};
 std::string g_solverProfile{"realtime_minimal_solver_profile"};
 bool g_technologySpecificModem{false};
-bool g_packetOutcomeAffected{false};
+std::vector<std::string> g_phasedArraySpectrumPropagationModels;
 uint32_t g_sionnaMaxDepth{1};
 bool g_sionnaLos{true};
 bool g_sionnaSpecularReflection{true};
@@ -113,6 +115,15 @@ bool g_sionnaSyntheticArray{true};
 uint32_t g_sionnaSeed{42};
 uint32_t g_sionnaMaxNumberOfPaths{90};
 double g_sionnaCacheJitterFraction{0.0};
+double g_txPowerW{0.0};
+double g_carrierHz{0.0};
+uint16_t g_wifiChannelNumber{0};
+uint16_t g_wifiChannelWidthMhz{0};
+uint16_t g_wifiActualChannelNumber{0};
+double g_wifiActualCenterFrequencyHz{0.0};
+std::string g_wifiDataMode;
+std::string g_wifiControlMode;
+std::string g_wifiSsid;
 
 class NativeRuntimeSampler;
 NativeRuntimeSampler* g_runtimeSampler{nullptr};
@@ -154,8 +165,10 @@ LogEvent(const std::string& event,
 {
     const bool packetEvent = event == "mac_tx" || event == "mac_tx_drop" ||
                              event == "phy_tx_start" || event == "phy_tx_end" ||
-                             event == "phy_rx_start" || event == "phy_rx_abort" ||
-                             event == "phy_rx_ok" || event == "phy_rx_error" ||
+                             event == "phy_rx_start" || event == "phy_rx_end" ||
+                             event == "phy_rx_abort" || event == "phy_rx_ok" ||
+                             event == "phy_rx_error" || event == "phy_rx_drop" ||
+                             event == "wifi_rx_power_dbm" || event == "wifi_monitor_rx" ||
                              event == "radio_queue_enqueue" || event == "radio_queue_dequeue" ||
                              event == "radio_queue_drop";
     if (g_eventLogging == "metrics_only" && packetEvent)
@@ -492,21 +505,134 @@ WifiPhyTxStart(uint32_t nodeIndex, Ptr<const Packet> packet, double)
 void
 WifiPhyRxStart(uint32_t nodeIndex,
                Ptr<const Packet> packet,
-               RxPowerWattPerChannelBand)
+               RxPowerWattPerChannelBand rxPowersW)
 {
     PhyRxStart(nodeIndex, packet);
+
+    // SpectrumWifiPhy builds this map after the channel propagation model has
+    // transformed the received PSD.  Reproduce SpectrumWifiPhy's total-power
+    // integration rule: sum only bands no wider than 20 MHz so nested wider
+    // channel views are not counted twice.
+    Watt_u totalRxPowerW{0.0};
+    uint32_t integratedBandCount{0};
+    for (const auto& [band, powerW] : rxPowersW)
+    {
+        Hz_u bandwidthHz{0.0};
+        for (const auto& [startHz, stopHz] : band.frequencies)
+        {
+            bandwidthHz += stopHz - startHz;
+        }
+        if (bandwidthHz <= 20e6)
+        {
+            totalRxPowerW += powerW;
+            ++integratedBandCount;
+        }
+    }
+
+    const double rxPowerDbm = totalRxPowerW > 0.0
+                                  ? WToDbm(totalRxPowerW)
+                                  : std::numeric_limits<double>::quiet_NaN();
+    std::ostringstream details;
+    details << PacketTraceDetails(packet) << ";rx_power_w=" << std::setprecision(17)
+            << totalRxPowerW << ";integrated_band_count=" << integratedBandCount
+            << ";source=PhyRxBegin.RxPowerWattPerChannelBand";
+    LogEvent("wifi_rx_power_dbm",
+             g_nodeNames.at(nodeIndex),
+             "",
+             packet->GetSize(),
+             rxPowerDbm,
+             details.str());
+}
+
+void
+WifiMonitorRx(uint32_t nodeIndex,
+              Ptr<const Packet> packet,
+              uint16_t frequencyMhz,
+              WifiTxVector txVector,
+              MpduInfo,
+              SignalNoiseDbm signalNoise,
+              uint16_t staId)
+{
+    // Exact ns-3.48 public trace, also used by the standalone reference.
+    // This is a successfully decoded MPDU sample, not an outage RSSI probe.
+    Ptr<Packet> payload = packet->Copy();
+    WifiMacHeader header;
+    payload->RemoveHeader(header);
+    std::ostringstream peer;
+    peer << header.GetAddr2();
+    std::ostringstream details;
+    details << (header.IsData() ? PacketTraceDetails(payload)
+                               : "packet_uid=" + std::to_string(packet->GetUid()))
+            << std::setprecision(17)
+            << ";signal_dbm=" << signalNoise.signal
+            << ";noise_interference_dbm=" << signalNoise.noise
+            << ";sinr_db=" << signalNoise.signal - signalNoise.noise
+            << ";frequency_mhz=" << frequencyMhz
+            << ";mode=" << txVector.GetMode(staId)
+            << ";mac_sequence=" << header.GetSequenceNumber()
+            << ";mac_retry=" << header.IsRetry()
+            << ";source=WifiPhy.MonitorSnifferRx.SignalNoiseDbm"
+            << ";sampling=successfully_received_mpdu";
+    LogEvent("wifi_monitor_rx", g_nodeNames.at(nodeIndex), peer.str(),
+             packet->GetSize(), signalNoise.signal, details.str());
+}
+
+void
+WifiPhyRxEnd(uint32_t nodeIndex, Ptr<const Packet> packet)
+{
+    ++g_nodeCounters.at(nodeIndex).phyRxEnd;
+    LogEvent("phy_rx_end",
+             g_nodeNames.at(nodeIndex),
+             "",
+             packet->GetSize(),
+             std::numeric_limits<double>::quiet_NaN(),
+             PacketTraceDetails(packet) + ";verdict=not_yet_available");
+}
+
+void
+WifiPhyStateRxOk(uint32_t nodeIndex,
+                 Ptr<const Packet> packet,
+                 double snr,
+                 WifiMode mode,
+                 WifiPreamble preamble)
+{
+    ++g_nodeCounters.at(nodeIndex).phyRxOk;
+    std::ostringstream details;
+    details << PacketTraceDetails(packet) << ";snr_linear=" << std::setprecision(17) << snr
+            << ";mode=" << mode << ";preamble=" << preamble
+            << ";source=WifiPhyStateHelper.RxOk";
+    LogEvent("phy_rx_ok", g_nodeNames.at(nodeIndex), "", packet->GetSize(), snr, details.str());
+    WriteRadioPcap(packet);
+}
+
+void
+WifiPhyStateRxError(uint32_t nodeIndex, Ptr<const Packet> packet, double snr)
+{
+    ++g_nodeCounters.at(nodeIndex).phyRxError;
+    std::ostringstream details;
+    details << PacketTraceDetails(packet) << ";snr_linear=" << std::setprecision(17) << snr
+            << ";source=WifiPhyStateHelper.RxError";
+    LogEvent("phy_rx_error",
+             g_nodeNames.at(nodeIndex),
+             "",
+             packet->GetSize(),
+             snr,
+             details.str());
 }
 
 void
 WifiPhyRxDrop(uint32_t nodeIndex, Ptr<const Packet> packet, WifiPhyRxfailureReason reason)
 {
-    ++g_nodeCounters.at(nodeIndex).phyRxError;
-    LogEvent("phy_rx_error",
+    ++g_nodeCounters.at(nodeIndex).phyRxDrop;
+    std::ostringstream details;
+    details << PacketTraceDetails(packet) << ";reason_code=" << static_cast<uint32_t>(reason)
+            << ";source=WifiPhy.PhyRxDrop";
+    LogEvent("phy_rx_drop",
              g_nodeNames.at(nodeIndex),
              "",
              packet->GetSize(),
              static_cast<double>(reason),
-             "wifi_rx_failure_reason");
+             details.str());
 }
 
 void
@@ -769,6 +895,23 @@ class NativeRuntimeSampler
         Simulator::Schedule(MilliSeconds(500), &NativeRuntimeSampler::PollLag, this);
     }
 
+    void PollSionnaPaths()
+    {
+        for (uint32_t uavIndex = 1; uavIndex < m_mobility.size(); ++uavIndex)
+        {
+            Ptr<const MatrixBasedChannelModel::ChannelParams> params =
+                m_channelModel->GetParams(m_mobility.front(), m_mobility.at(uavIndex));
+            if (params)
+            {
+                EmitPathObservation(0,
+                                    uavIndex,
+                                    params,
+                                    "sample=periodic;scope=cp_uav_reciprocal");
+            }
+        }
+        Simulator::Schedule(Seconds(1), &NativeRuntimeSampler::PollSionnaPaths, this);
+    }
+
     void ObserveReceivedPath(uint32_t receiverIndex, Ptr<const Packet> packet)
     {
         Ptr<Packet> copy = packet->Copy();
@@ -809,6 +952,18 @@ class NativeRuntimeSampler
         {
             return;
         }
+        std::ostringstream basis;
+        basis << "sample=packet_rx;packet_uid=" << packet->GetUid();
+        EmitPathObservation(transmitterIndex, receiverIndex, params, basis.str());
+    }
+
+  private:
+    void EmitPathObservation(
+        uint32_t transmitterIndex,
+        uint32_t receiverIndex,
+        Ptr<const MatrixBasedChannelModel::ChannelParams> params,
+        const std::string& basis)
+    {
         std::vector<double> delays;
         for (double delay : params->m_delay)
         {
@@ -818,7 +973,8 @@ class NativeRuntimeSampler
             }
         }
         std::ostringstream details;
-        details << "packet_uid=" << packet->GetUid() << ";delays_s=" << std::setprecision(12);
+        details << basis << ";channel_generation_time_s=" << std::setprecision(12)
+                << params->m_generatedTime.GetSeconds() << ";delays_s=";
         for (std::size_t index = 0; index < delays.size(); ++index)
         {
             if (index)
@@ -832,11 +988,10 @@ class NativeRuntimeSampler
                  g_nodeNames.at(transmitterIndex),
                  g_nodeNames.at(receiverIndex),
                  0,
-                 static_cast<double>(delays.size()),
+                 static_cast<double>(params->m_delay.size()),
                  details.str());
     }
 
-  private:
     Ptr<MatrixBasedChannelModel> m_channelModel;
     std::vector<Ptr<MobilityModel>> m_mobility;
 };
@@ -972,8 +1127,10 @@ WriteStats(const std::string& path)
 {
     uint64_t macTx = 0;
     uint64_t phyRxStart = 0;
+    uint64_t phyRxEnd = 0;
     uint64_t phyRxOk = 0;
     uint64_t phyRxError = 0;
+    uint64_t phyRxDrop = 0;
     uint64_t phyTxStart = 0;
     uint64_t phyTxEnd = 0;
     uint64_t phyRxAbort = 0;
@@ -988,8 +1145,10 @@ WriteStats(const std::string& path)
     {
         macTx += counters.macTx;
         phyRxStart += counters.phyRxStart;
+        phyRxEnd += counters.phyRxEnd;
         phyRxOk += counters.phyRxOk;
         phyRxError += counters.phyRxError;
+        phyRxDrop += counters.phyRxDrop;
         phyTxStart += counters.phyTxStart;
         phyTxEnd += counters.phyTxEnd;
         phyRxAbort += counters.phyRxAbort;
@@ -1001,6 +1160,10 @@ WriteStats(const std::string& path)
         wifiAssociations += counters.wifiAssociations;
         wifiDeassociations += counters.wifiDeassociations;
     }
+    const bool sionnaDrivesRxPsd =
+        g_phasedArraySpectrumPropagationModels.size() == 1 &&
+        g_phasedArraySpectrumPropagationModels.front() ==
+            "ns3::SionnaRtSpectrumPropagationLossModel";
     std::ofstream output(path, std::ios::out | std::ios::trunc);
     output << "{\n"
            << "  \"stop_reason\": \"" << g_stopReason << "\",\n"
@@ -1008,6 +1171,16 @@ WriteStats(const std::string& path)
            << "  \"radio_node_count\": " << g_nodeNames.size() << ",\n"
            << "  \"shared_spectrum_channel_count\": 1,\n"
            << "  \"radio_backend\": \"" << g_radioBackend << "\",\n"
+           << "  \"tx_power_w\": " << g_txPowerW << ",\n"
+           << "  \"carrier_hz\": " << g_carrierHz << ",\n"
+           << "  \"wifi_channel_number\": " << g_wifiChannelNumber << ",\n"
+           << "  \"wifi_channel_width_mhz\": " << g_wifiChannelWidthMhz << ",\n"
+           << "  \"wifi_actual_channel_number\": " << g_wifiActualChannelNumber << ",\n"
+           << "  \"wifi_actual_center_frequency_hz\": "
+           << g_wifiActualCenterFrequencyHz << ",\n"
+           << "  \"wifi_data_mode\": \"" << g_wifiDataMode << "\",\n"
+           << "  \"wifi_control_mode\": \"" << g_wifiControlMode << "\",\n"
+           << "  \"wifi_ssid\": \"" << g_wifiSsid << "\",\n"
            << "  \"tap_ingress_segment\": {\"type\": \"local_fast_csma\", \"radio_medium\": false},\n"
            << "  \"cache_policy\": \"displacement_or_time\",\n"
            << "  \"channel_state_max_age_s\": " << g_channelStateMaxAgeS << ",\n"
@@ -1021,8 +1194,10 @@ WriteStats(const std::string& path)
            << "  \"readiness_consecutive_samples\": " << g_readinessConsecutiveSamples << ",\n"
            << "  \"mac_tx_total\": " << macTx << ",\n"
            << "  \"phy_rx_start_total\": " << phyRxStart << ",\n"
+           << "  \"phy_rx_end_total\": " << phyRxEnd << ",\n"
            << "  \"phy_rx_ok_total\": " << phyRxOk << ",\n"
            << "  \"phy_rx_error_total\": " << phyRxError << ",\n"
+           << "  \"phy_rx_drop_total\": " << phyRxDrop << ",\n"
            << "  \"phy_tx_start_total\": " << phyTxStart << ",\n"
            << "  \"phy_tx_end_total\": " << phyTxEnd << ",\n"
            << "  \"phy_rx_abort_total\": " << phyRxAbort << ",\n"
@@ -1038,17 +1213,23 @@ WriteStats(const std::string& path)
            << "  \"uav_mac_tx\": " << (macTx - g_nodeCounters.front().macTx) << ",\n"
            << "  \"cp_phy_rx_start\": " << g_nodeCounters.front().phyRxStart << ",\n"
            << "  \"uav_phy_rx_start\": " << (phyRxStart - g_nodeCounters.front().phyRxStart) << ",\n"
+           << "  \"cp_phy_rx_end\": " << g_nodeCounters.front().phyRxEnd << ",\n"
+           << "  \"uav_phy_rx_end\": " << (phyRxEnd - g_nodeCounters.front().phyRxEnd) << ",\n"
            << "  \"cp_phy_rx_ok\": " << g_nodeCounters.front().phyRxOk << ",\n"
            << "  \"uav_phy_rx_ok\": " << (phyRxOk - g_nodeCounters.front().phyRxOk) << ",\n"
            << "  \"cp_phy_rx_error\": " << g_nodeCounters.front().phyRxError << ",\n"
            << "  \"uav_phy_rx_error\": " << (phyRxError - g_nodeCounters.front().phyRxError) << ",\n"
+           << "  \"cp_phy_rx_drop\": " << g_nodeCounters.front().phyRxDrop << ",\n"
+           << "  \"uav_phy_rx_drop\": " << (phyRxDrop - g_nodeCounters.front().phyRxDrop) << ",\n"
            << "  \"nodes\": {\n";
     for (std::size_t index = 0; index < g_nodeNames.size(); ++index)
     {
         const NodeCounters& counters = g_nodeCounters[index];
         output << "    \"" << g_nodeNames[index] << "\": {\"mac_tx\": " << counters.macTx
-               << ", \"phy_rx_start\": " << counters.phyRxStart << ", \"phy_rx_ok\": "
+               << ", \"phy_rx_start\": " << counters.phyRxStart << ", \"phy_rx_end\": "
+               << counters.phyRxEnd << ", \"phy_rx_ok\": "
                << counters.phyRxOk << ", \"phy_rx_error\": " << counters.phyRxError
+               << ", \"phy_rx_drop\": " << counters.phyRxDrop
                << ", \"phy_tx_start\": " << counters.phyTxStart
                << ", \"phy_tx_end\": " << counters.phyTxEnd
                << ", \"phy_rx_abort\": " << counters.phyRxAbort
@@ -1071,6 +1252,15 @@ WriteStats(const std::string& path)
            << "  \"custom_packet_error_model\": false,\n"
            << "  \"custom_scheduler\": false,\n"
            << "  \"sionna_in_process\": true,\n"
+           << "  \"phased_array_spectrum_propagation_model_count\": "
+           << g_phasedArraySpectrumPropagationModels.size() << ",\n"
+           << "  \"rx_psd_propagation_model\": \""
+           << (g_phasedArraySpectrumPropagationModels.empty()
+                   ? "none"
+                   : g_phasedArraySpectrumPropagationModels.front())
+           << "\",\n"
+           << "  \"sionna_drives_rx_psd\": " << (sionnaDrivesRxPsd ? "true" : "false")
+           << ",\n"
            << "  \"neighbor_discovery_mode\": \"" << g_neighborDiscoveryMode << "\",\n"
            << "  \"reason\": \"" << g_radioReason << "\",\n"
            << "  \"solver_profile\": \"" << g_solverProfile << "\",\n"
@@ -1091,7 +1281,7 @@ WriteStats(const std::string& path)
            << ", \"cache_expiry_jitter_fraction\": " << g_sionnaCacheJitterFraction
            << "},\n"
            << "  \"packet_outcome_affected\": "
-           << (g_packetOutcomeAffected ? "true" : "false") << "\n"
+           << (sionnaDrivesRxPsd ? "true" : "false") << "\n"
            << "}\n";
 }
 
@@ -1110,13 +1300,14 @@ main(int argc, char* argv[])
     bool technologySpecificModem = false;
     std::string neighborDiscoveryMode = "preconfigured_static_neighbors";
     std::string radioReason = "upstream_ideal_phy_arp_reentrancy_limit";
-    bool packetOutcomeAffected = false;
+    std::string ignoredLegacyPacketOutcomeClaim;
     std::string solverProfile = "realtime_minimal_solver_profile";
     std::string wifiDataMode = "HtMcs0";
-    std::string wifiControlMode = "HtMcs0";
+    std::string wifiControlMode = "ErpOfdmRate6Mbps";
     std::string wifiSsid = "bas-native-radio";
+    uint16_t wifiChannelNumber = 1;
     uint16_t wifiChannelWidthMhz = 20;
-    double carrierHz = 2.4e9;
+    double carrierHz = 2.412e9;
     std::string tapGcs = "tap-gcs";
     std::string tapUav = "tap-uav";
     std::string tapUavs;
@@ -1161,12 +1352,14 @@ main(int argc, char* argv[])
                      neighborDiscoveryMode);
     command.AddValue("radioReason", "Configured radio implementation rationale", radioReason);
     command.AddValue("packetOutcomeAffected",
-                     "Whether the Sionna integration changes packet outcomes",
-                     packetOutcomeAffected);
+                     "Deprecated compatibility input; packet outcome influence is derived from "
+                     "the installed spectrum propagation chain",
+                     ignoredLegacyPacketOutcomeClaim);
     command.AddValue("solverProfile", "Sionna solver profile identifier", solverProfile);
     command.AddValue("wifiDataMode", "Constant 802.11n data mode", wifiDataMode);
     command.AddValue("wifiControlMode", "Constant 802.11n control mode", wifiControlMode);
     command.AddValue("wifiSsid", "Infrastructure BSS SSID", wifiSsid);
+    command.AddValue("wifiChannelNumber", "802.11 channel number", wifiChannelNumber);
     command.AddValue("wifiChannelWidthMhz", "802.11n channel width", wifiChannelWidthMhz);
     command.AddValue("carrierHz", "Sionna and Wi-Fi carrier frequency", carrierHz);
     command.AddValue("tapGcs", "Existing command-post TAP device", tapGcs);
@@ -1217,14 +1410,21 @@ main(int argc, char* argv[])
                      "Deterministic per-pair cache threshold spread",
                      sionnaCacheJitterFraction);
     command.Parse(argc, argv);
+    g_txPowerW = txPowerW;
+    g_carrierHz = carrierHz;
+    g_wifiChannelNumber = wifiChannelNumber;
+    g_wifiChannelWidthMhz = wifiChannelWidthMhz;
+    g_wifiDataMode = wifiDataMode;
+    g_wifiControlMode = wifiControlMode;
+    g_wifiSsid = wifiSsid;
 
     NS_ABORT_MSG_IF(uavCount != 1 && uavCount != 5, "uavCount must be 1 or 5");
     NS_ABORT_MSG_IF(radioBackend != "aloha" && radioBackend != "wifi",
                     "radioBackend must be aloha or wifi");
     NS_ABORT_MSG_IF(radioBackend == "wifi" && wifiChannelWidthMhz != 20,
                     "the product Wi-Fi profile currently requires a 20 MHz channel");
-    NS_ABORT_MSG_IF(carrierHz != 2.4e9,
-                    "the product Wi-Fi profile currently requires a 2.4 GHz carrier");
+    NS_ABORT_MSG_IF(radioBackend == "wifi" && wifiChannelNumber == 0,
+                    "the product Wi-Fi profile requires an explicit channel number");
     NS_ABORT_MSG_IF(wifiSsid.empty(), "wifiSsid must not be empty");
     NS_ABORT_MSG_IF(radioProfile.empty() || neighborDiscoveryMode.empty() || radioReason.empty() ||
                         solverProfile.empty(),
@@ -1259,7 +1459,6 @@ main(int argc, char* argv[])
     g_technologySpecificModem = technologySpecificModem;
     g_neighborDiscoveryMode = neighborDiscoveryMode;
     g_radioReason = radioReason;
-    g_packetOutcomeAffected = packetOutcomeAffected;
     g_solverProfile = solverProfile;
     g_sionnaMaxDepth = sionnaMaxDepth;
     g_sionnaLos = sionnaLos;
@@ -1344,6 +1543,14 @@ main(int argc, char* argv[])
     solver.seed = sionnaSeed;
     sionna->SetRtPathSolverConfig(solver);
     channel->AddPhasedArraySpectrumPropagationLossModel(sionna);
+    g_phasedArraySpectrumPropagationModels.push_back(sionna->GetInstanceTypeId().GetName());
+    LogEvent("rx_psd_model_binding",
+             "ns3",
+             "",
+             0,
+             static_cast<double>(g_phasedArraySpectrumPropagationModels.size()),
+             "channel=ns3::MultiModelSpectrumChannel;sole_model=" +
+                 g_phasedArraySpectrumPropagationModels.front() + ";effect=received_psd");
 
     NetDeviceContainer radioDevices;
     if (radioBackend == "aloha")
@@ -1391,8 +1598,10 @@ main(int argc, char* argv[])
         const double txPowerDbm = 10.0 * std::log10(txPowerW * 1000.0);
         wifiPhy.Set("TxPowerStart", DoubleValue(txPowerDbm));
         wifiPhy.Set("TxPowerEnd", DoubleValue(txPowerDbm));
+        wifiPhy.SetPcapDataLinkType(WifiPhyHelper::DLT_IEEE802_11_RADIO);
         std::ostringstream channelSettings;
-        channelSettings << "{0, " << wifiChannelWidthMhz << ", BAND_2_4GHZ, 0}";
+        channelSettings << "{" << wifiChannelNumber << ", " << wifiChannelWidthMhz
+                        << ", BAND_2_4GHZ, 0}";
         wifiPhy.Set("ChannelSettings", StringValue(channelSettings.str()));
 
         WifiHelper wifi;
@@ -1401,6 +1610,8 @@ main(int argc, char* argv[])
                                      "DataMode",
                                      StringValue(wifiDataMode),
                                      "ControlMode",
+                                     StringValue(wifiControlMode),
+                                     "NonUnicastMode",
                                      StringValue(wifiControlMode));
         WifiMacHelper wifiMac;
         const Ssid ssid(wifiSsid);
@@ -1416,12 +1627,25 @@ main(int argc, char* argv[])
                         "Ssid",
                         SsidValue(ssid));
         radioDevices.Add(wifi.Install(wifiPhy, wifiMac, uavs));
+        wifiPhy.EnablePcap(radioPcap + ".radiotap", radioDevices);
+
+        Ptr<WifiNetDevice> referenceDevice = DynamicCast<WifiNetDevice>(radioDevices.Get(0));
+        NS_ABORT_MSG_IF(!referenceDevice, "expected reference WifiNetDevice");
+        g_wifiActualChannelNumber = referenceDevice->GetPhy()->GetChannelNumber();
+        g_wifiActualCenterFrequencyHz = MHzToHz(referenceDevice->GetPhy()->GetFrequency());
+        NS_ABORT_MSG_IF(g_wifiActualChannelNumber != wifiChannelNumber,
+                        "resolved Wi-Fi channel differs from product configuration");
+        NS_ABORT_MSG_IF(std::abs(g_wifiActualCenterFrequencyHz - carrierHz) > 0.5,
+                        "Sionna carrier differs from the resolved Wi-Fi center frequency: "
+                            << carrierHz << " versus " << g_wifiActualCenterFrequencyHz);
 
         for (uint32_t index = 0; index < radioDevices.GetN(); ++index)
         {
             AttachWifiAntenna(radioDevices.Get(index));
             Ptr<WifiNetDevice> device = DynamicCast<WifiNetDevice>(radioDevices.Get(index));
             NS_ABORT_MSG_IF(!device, "expected WifiNetDevice");
+            device->GetPhy()->TraceConnectWithoutContext(
+                "MonitorSnifferRx", MakeBoundCallback(&WifiMonitorRx, index));
             device->GetMac()->TraceConnectWithoutContext("MacTx",
                                                          MakeBoundCallback(&MacTx, index));
             device->GetMac()->TraceConnectWithoutContext("MacTxDrop",
@@ -1433,9 +1657,15 @@ main(int argc, char* argv[])
             device->GetPhy()->TraceConnectWithoutContext("PhyRxBegin",
                                                          MakeBoundCallback(&WifiPhyRxStart, index));
             device->GetPhy()->TraceConnectWithoutContext("PhyRxEnd",
-                                                         MakeBoundCallback(&PhyRxOk, index));
+                                                         MakeBoundCallback(&WifiPhyRxEnd, index));
             device->GetPhy()->TraceConnectWithoutContext("PhyRxDrop",
                                                          MakeBoundCallback(&WifiPhyRxDrop, index));
+            device->GetPhy()->GetState()->TraceConnectWithoutContext(
+                "RxOk",
+                MakeBoundCallback(&WifiPhyStateRxOk, index));
+            device->GetPhy()->GetState()->TraceConnectWithoutContext(
+                "RxError",
+                MakeBoundCallback(&WifiPhyStateRxError, index));
             device->GetRemoteStationManager()->TraceConnectWithoutContext(
                 "MacTxDataFailed",
                 MakeBoundCallback(&WifiDataRetry, index));
@@ -1531,6 +1761,7 @@ main(int argc, char* argv[])
         Simulator::ScheduleNow(&LivePositionSource::Poll, &positions);
     }
     Simulator::ScheduleNow(&NativeRuntimeSampler::PollLag, &metrics);
+    Simulator::Schedule(Seconds(1), &NativeRuntimeSampler::PollSionnaPaths, &metrics);
     Simulator::ScheduleNow(&SampleQueues);
     Simulator::ScheduleNow(&PollSignal);
     if (radioBackend == "wifi")

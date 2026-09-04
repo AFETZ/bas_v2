@@ -3,16 +3,22 @@ schema_version: 1
 
 scenario:
   name: scenario_5uav_town01_native_product
-  description: Five real Town01 UAVs sharing one native Spectrum/Aloha radio channel.
+  description: Five real Town01 UAVs sharing one native SpectrumWifiPhy 802.11n radio channel.
   map:
+    id: cavise_town01
+    kind: external_cavise_scene
+    customer_survey_asset: false
     town: Town01
     world_file: .external/cavise_maps/Town01/gazebo/town01.sdf
     scene_xml: .external/cavise_maps/Town01/map/scene.xml
+    camera_fragment: network/ns3/runtime_live_cameras.sdf.inc
+    gazebo_models: [cavise_town01]
 
 base_simulation:
   launch_package: multiagent_simulation
   launch_file: multiagent_simulation.launch.py
   sitl_home: "46.607213,14.278461,446,10"
+  sitl_defaults: network/config/town01_sitl.parm
   target_realtime_factor: 1.0
   functional_evidence_realtime_factor: 0.1
 
@@ -87,25 +93,7 @@ robots:
     antenna: omni
 
 radio:
-  profile: generic_native_spectrum_aloha_reference
-  technology_specific_modem: false
-  carrier_hz: 2400000000
-  bandwidth_hz: 5000000
-  phy_rate_bps: 1000000
-  tx_power_w: 0.01
-  shared_spectrum_channels: 1
-  native_radio_nodes: 6
-  neighbor_discovery_mode: preconfigured_static_neighbors
-  reason: upstream_ideal_phy_arp_reentrancy_limit
-  packet_outcome_affected: false
-  solver:
-    profile: realtime_minimal_solver_profile
-    max_depth: 1
-    los: true
-    specular_reflection: true
-    diffuse_reflection: false
-    diffraction: false
-    refraction: false
+  config: network/config/native_wifi_80211n_spectrum_product.yaml
 
 flight:
   moving_uav: uav1
@@ -122,6 +110,19 @@ flight:
     transit_north: [118.0, 110.0, 17.0]
     obstructed_candidate: [80.0, 110.0, 17.0]
     return: [20.0, 0.0, 17.0]
+  missions:
+    uav1:
+      - {name: los, position_m: [80.0, 0.0, 17.0], hold_s: 4.0}
+      - {name: transit_south, position_m: [118.0, 0.0, 17.0], hold_s: 0.0}
+      - {name: transit_north, position_m: [118.0, 110.0, 17.0], hold_s: 0.0}
+      - {name: obstructed_candidate, position_m: [80.0, 110.0, 17.0], hold_s: 4.0}
+      - {name: transit_north_return, position_m: [118.0, 110.0, 17.0], hold_s: 0.0}
+      - {name: transit_south_return, position_m: [118.0, 0.0, 17.0], hold_s: 0.0}
+      - {name: return, position_m: [20.0, 0.0, 17.0], hold_s: 4.0}
+  observations:
+    - {name: los, timeout_s: 180.0, probe_packets_per_uav: 0}
+    - {name: obstructed_candidate, timeout_s: 240.0, probe_packets_per_uav: 0}
+    - {name: return, timeout_s: 240.0, probe_packets_per_uav: 0}
 
 traffic:
   diagnostic_retry_interval_s: 20.0
@@ -134,3 +135,44 @@ traffic:
     interval_ms: 50
     duration_s: 1.0
     retransmissions: false
+  delivery_gates:
+    p2p_min_delivered_per_direction_per_uav: 9
+    p2mp_min_delivered_per_uav: 18
+    simultaneous_min_delivered_per_uav: 1
+    simultaneous_jain_fairness_min: 0.8
+
+evidence:
+  airborne_clearance_m: 6.0
+  landed_altitude_tolerance_m: 3.0
+  realtime_gates:
+    gazebo_mean_rtf_min: 0.95
+    gazebo_p5_rtf_min: 0.8
+    applied_position_age_p95_ms_max: 500.0
+  phase_aliases:
+    takeoff_complete: takeoff
+    hold_all: five_uav_hold
+    los: los_observation
+    obstructed_candidate: obstructed_observation
+    return: return_observation
+    landing_complete: landing
+  cameras:
+    overview:
+      topic: /native_radio/overview/image
+      pose: [50.0, 55.0, 140.0, 0.0, 1.5707, 0.0]
+      horizontal_fov_rad: 1.4
+    obstacle:
+      topic: /native_radio/obstacle/image
+      pose: [80.0, 110.0, 70.0, 0.0, 1.5707, 0.0]
+      horizontal_fov_rad: 1.0
+    uav_focus:
+      topic: /native_radio/uav_focus/image
+      pose: [50.0, 0.0, 90.0, 0.0, 1.5707, 1.5708]
+      horizontal_fov_rad: 1.2
+  screenshots:
+    - {phase: latency_stationary_warmup, stem: 00_stationary_overview, camera: uav_focus, altitude_state: landed, required_projected_uavs: [uav1, uav2, uav3, uav4, uav5]}
+    - {phase: takeoff, stem: 01_five_uav_takeoff, camera: overview, altitude_state: airborne, required_projected_uavs: [uav1, uav2, uav3, uav4, uav5]}
+    - {phase: five_uav_hold, stem: 02_five_uav_hold, camera: uav_focus, altitude_state: airborne, required_projected_uavs: [uav1, uav2, uav3, uav4, uav5]}
+    - {phase: los_observation, stem: 03_uav1_los, camera: uav_focus, mission_phase: los, required_projected_uavs: [uav1]}
+    - {phase: obstructed_observation, stem: 04_uav1_obstructed, camera: obstacle, mission_phase: obstructed_candidate, required_projected_uavs: [uav1]}
+    - {phase: p2mp, stem: 05_p2mp_or_shared_medium, camera: overview, altitude_state: landed, required_projected_uavs: [uav1, uav2, uav3, uav4, uav5]}
+    - {phase: landing, stem: 06_landing, camera: uav_focus, altitude_state: landed, required_projected_uavs: [uav1, uav2, uav3, uav4, uav5]}

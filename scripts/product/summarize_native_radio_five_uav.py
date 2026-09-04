@@ -14,8 +14,228 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
+import yaml
+
 
 UAVS = tuple(f"uav{index}" for index in range(1, 6))
+ROOT = Path(__file__).resolve().parents[2]
+RUNTIME_PHASE_ALIASES = {
+    "pre_no_bypass": "no_bypass_test",
+    "no_bypass_stop": "no_bypass_test",
+    "stationary_communication_smoke": "startup",
+}
+NATIVE_EVENT_ALIASES = {
+    "wifi_rx_power_dbm": "wifi_rx_power",
+    "phy_rx_end": "wifi_phy_rx_end",
+    "phy_rx_drop": "wifi_phy_rx_drop",
+    "sionna_paths": "sionna_link_state",
+}
+
+
+def canonical_phase(phase: str, aliases: dict[str, str] | None = None) -> str:
+    value = str(phase).strip()
+    if aliases and value in aliases:
+        return aliases[value]
+    return RUNTIME_PHASE_ALIASES.get(value, value or "startup")
+
+
+def load_scenario_config(path: Path) -> dict[str, Any]:
+    """Load evidence and causal contracts without embedding a map-specific profile."""
+
+    resolved = path.resolve()
+    value = yaml.safe_load(resolved.read_text(encoding="utf-8")) or {}
+    if not isinstance(value, dict):
+        raise ValueError(f"scenario config must contain a mapping: {resolved}")
+    evidence = value.get("evidence") or {}
+    flight = value.get("flight") or {}
+    scenario = value.get("scenario") or {}
+    if not isinstance(evidence, dict) or not isinstance(flight, dict) or not isinstance(scenario, dict):
+        raise ValueError(f"scenario/evidence/flight must be mappings: {resolved}")
+
+    raw_aliases = evidence.get("phase_aliases") or {}
+    if not isinstance(raw_aliases, dict):
+        raise ValueError(f"evidence.phase_aliases must be a mapping: {resolved}")
+    aliases = {
+        str(source): str(target)
+        for source, target in raw_aliases.items()
+    }
+    realtime_gates = evidence.get("realtime_gates") or {}
+    if not isinstance(realtime_gates, dict) or not realtime_gates:
+        raise ValueError(f"evidence.realtime_gates must be a non-empty mapping: {resolved}")
+    screenshots = evidence.get("screenshots") or []
+    if not isinstance(screenshots, list) or not screenshots:
+        raise ValueError(f"scenario evidence needs a non-empty screenshots list: {resolved}")
+    normalized_screenshots: list[dict[str, Any]] = []
+    stems: set[str] = set()
+    for record in screenshots:
+        if not isinstance(record, dict):
+            raise ValueError(f"invalid screenshot specification in {resolved}: {record!r}")
+        stem = str(record.get("stem", "")).strip()
+        raw_phase = str(record.get("phase", "")).strip()
+        phase = canonical_phase(raw_phase, aliases)
+        camera = str(record.get("camera", "")).strip()
+        if not stem or stem in stems or not raw_phase or not camera:
+            raise ValueError(f"invalid or duplicate screenshot specification: {record!r}")
+        stems.add(stem)
+        item = dict(record)
+        item.update({"stem": stem, "phase": phase, "camera": camera})
+        item["required_projected_uavs"] = [
+            str(name) for name in item.get("required_projected_uavs", UAVS)
+        ]
+        if not set(item["required_projected_uavs"]) <= set(UAVS):
+            raise ValueError(f"screenshot names an unknown projected UAV: {record!r}")
+        normalized_screenshots.append(item)
+
+    ground_positions: dict[str, list[float]] = {}
+    for robot in value.get("robots") or []:
+        if not isinstance(robot, dict):
+            continue
+        name = str(robot.get("name", ""))
+        position = robot.get("nominal_radio_position_m", robot.get("position"))
+        if name in UAVS and isinstance(position, list) and len(position) >= 3:
+            ground_positions[name] = [float(component) for component in position[:3]]
+    raw_missions = flight.get("missions") or {}
+    if not isinstance(raw_missions, dict):
+        raise ValueError(f"flight.missions must be a mapping: {resolved}")
+    mission_targets: dict[str, dict[str, list[float]]] = defaultdict(dict)
+    for uav, mission in raw_missions.items():
+        if str(uav) not in UAVS or not isinstance(mission, list):
+            continue
+        for waypoint in mission:
+            if not isinstance(waypoint, dict):
+                continue
+            position = waypoint.get("position_m")
+            name = str(waypoint.get("name", "")).strip()
+            if name and isinstance(position, list) and len(position) == 3:
+                target = [float(component) for component in position]
+                mission_targets[name][str(uav)] = target
+                mission_targets[canonical_phase(name, aliases)][str(uav)] = target
+
+    raw_observations = flight.get("observations") or []
+    if not isinstance(raw_observations, list):
+        raise ValueError(f"flight.observations must be a list: {resolved}")
+    observations = [
+        dict(item)
+        for item in raw_observations
+        if isinstance(item, dict)
+    ]
+    scenario_map = scenario.get("map") or {}
+    expectation = flight.get("causal_expectation") or {}
+    if not isinstance(scenario_map, dict) or not isinstance(expectation, dict):
+        raise ValueError(f"scenario.map and flight.causal_expectation must be mappings: {resolved}")
+    scenario_radio = value.get("radio") or {}
+    if not isinstance(scenario_radio, dict):
+        raise ValueError(f"radio must be a mapping: {resolved}")
+    radio_product: dict[str, Any] = {
+        str(key): item for key, item in scenario_radio.items() if key != "config"
+    }
+    sionna_product: dict[str, Any] = {}
+    radio_reference = scenario_radio.get("config")
+    radio_config_path: Path | None = None
+    if radio_reference:
+        candidate = Path(str(radio_reference))
+        candidates = (
+            [candidate]
+            if candidate.is_absolute()
+            else [ROOT / candidate, resolved.parent / candidate]
+        )
+        radio_config_path = next((item.resolve() for item in candidates if item.is_file()), None)
+        if radio_config_path is None:
+            raise ValueError(f"scenario radio config does not exist: {radio_reference}")
+        radio_config = yaml.safe_load(radio_config_path.read_text(encoding="utf-8")) or {}
+        if not isinstance(radio_config, dict) or not isinstance(radio_config.get("radio"), dict):
+            raise ValueError(f"radio product config must contain radio mapping: {radio_config_path}")
+        radio_product.update(radio_config["radio"])
+        if not isinstance(radio_config.get("sionna"), dict):
+            raise ValueError(f"radio product config must contain sionna mapping: {radio_config_path}")
+        sionna_product.update(radio_config["sionna"])
+    traffic = value.get("traffic") or {}
+    simultaneous = traffic.get("simultaneous_uplink") if isinstance(traffic, dict) else None
+    delivery_gates = traffic.get("delivery_gates") if isinstance(traffic, dict) else None
+    if (
+        not isinstance(traffic, dict)
+        or not isinstance(simultaneous, dict)
+        or not isinstance(delivery_gates, dict)
+    ):
+        raise ValueError(f"traffic product contract is incomplete: {resolved}")
+    return {
+        "path": str(resolved),
+        "scenario_name": str(scenario.get("name", resolved.stem)),
+        "map": dict(scenario_map),
+        "phase_aliases": aliases,
+        "screenshots": normalized_screenshots,
+        "ground_positions": ground_positions,
+        "mission_targets": dict(mission_targets),
+        "mission_tolerance_m": float(flight.get("mission_position_tolerance_m", 8.0)),
+        "airborne_clearance_m": float(evidence.get("airborne_clearance_m", 6.0)),
+        "landed_altitude_tolerance_m": float(
+            evidence.get("landed_altitude_tolerance_m", 3.0)
+        ),
+        "realtime_gates": {
+            "gazebo_mean_rtf_min": float(realtime_gates["gazebo_mean_rtf_min"]),
+            "gazebo_p5_rtf_min": float(realtime_gates["gazebo_p5_rtf_min"]),
+            "applied_position_age_p95_ms_max": float(
+                realtime_gates["applied_position_age_p95_ms_max"]
+            ),
+        },
+        "observations": observations,
+        "causal_expectation": dict(expectation),
+        "radio": {
+            "config": str(radio_config_path) if radio_config_path else None,
+            **radio_product,
+        },
+        "sionna": sionna_product,
+        "traffic": {
+            "diagnostic_retry_interval_s": float(traffic["diagnostic_retry_interval_s"]),
+            "forced_mavlink_stream_intervals": traffic["forced_mavlink_stream_intervals"],
+            "p2p_packets_per_direction_per_uav": int(
+                traffic["p2p_packets_per_direction_per_uav"]
+            ),
+            "p2mp_root_transmissions": int(traffic["p2mp_root_transmissions"]),
+            "simultaneous_uplink": {
+                "packets_per_uav": int(simultaneous["packets_per_uav"]),
+                "packet_payload_bytes": int(simultaneous["packet_payload_bytes"]),
+                "interval_ms": float(simultaneous["interval_ms"]),
+                "duration_s": float(simultaneous["duration_s"]),
+                "retransmissions": simultaneous["retransmissions"],
+            },
+            "delivery_gates": {
+                "p2p_min_delivered_per_direction_per_uav": int(
+                    delivery_gates["p2p_min_delivered_per_direction_per_uav"]
+                ),
+                "p2mp_min_delivered_per_uav": int(
+                    delivery_gates["p2mp_min_delivered_per_uav"]
+                ),
+                "simultaneous_min_delivered_per_uav": int(
+                    delivery_gates["simultaneous_min_delivered_per_uav"]
+                ),
+                "simultaneous_jain_fairness_min": float(
+                    delivery_gates["simultaneous_jain_fairness_min"]
+                ),
+            },
+        },
+    }
+
+
+def resolve_scenario_config_path(
+    explicit: Path | None, scenario: dict[str, Any]
+) -> Path:
+    """Resolve an explicit config, or the exact config recorded by the run."""
+
+    selected: str | Path | None = explicit
+    if selected is None:
+        recorded = scenario.get("scenario_config")
+        selected = str(recorded).strip() if recorded is not None else None
+    if not selected:
+        raise ValueError(
+            "--scenario-config is required when scenario_summary.json does not record scenario_config"
+        )
+    path = Path(selected).expanduser()
+    candidates = [path] if path.is_absolute() else [ROOT / path, path]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    raise ValueError(f"scenario config does not exist: {path}")
 
 
 def read_json(path: Path, default: Any = None) -> Any:
@@ -77,7 +297,9 @@ def distribution(values: Iterable[float]) -> dict[str, Any]:
     }
 
 
-def native_events(path: Path) -> list[dict[str, Any]]:
+def native_events(
+    path: Path, phase_aliases: dict[str, str] | None = None
+) -> list[dict[str, Any]]:
     try:
         with path.open(encoding="utf-8", newline="") as stream:
             rows = list(csv.DictReader(stream))
@@ -95,20 +317,166 @@ def native_events(path: Path) -> list[dict[str, Any]]:
             row["value"] = float(row["value"]) if row.get("value") else None
         except (KeyError, TypeError, ValueError):
             continue
+        raw_event = str(row.get("event", ""))
+        raw_phase = str(row.get("phase", ""))
+        row["raw_event"] = raw_event
+        row["event"] = NATIVE_EVENT_ALIASES.get(raw_event, raw_event)
+        row["raw_phase"] = raw_phase
+        row["phase"] = canonical_phase(raw_phase, phase_aliases)
         match = re.search(r"packet_uid=(\d+)", str(row.get("details", "")))
         row["packet_uid"] = int(match.group(1)) if match else None
-        for key in ("src_ip", "dst_ip", "flow"):
+        for key in ("src_ip", "dst_ip", "flow", "sample", "scope", "source", "verdict"):
             match = re.search(rf"(?:^|;){key}=([^;]+)", str(row.get("details", "")))
             row[key] = match.group(1) if match else None
-        for key in ("ip_protocol", "src_port", "dst_port"):
+        for key in ("ip_protocol", "src_port", "dst_port", "reason_code"):
             match = re.search(rf"(?:^|;){key}=(\d+)", str(row.get("details", "")))
             row[key] = int(match.group(1)) if match else None
+        for key in ("rx_power_w", "channel_generation_time_s", "signal_dbm", "noise_interference_dbm", "sinr_db", "frequency_mhz"):
+            match = re.search(rf"(?:^|;){key}=([-+0-9.eE]+)", str(row.get("details", "")))
+            try:
+                row[key] = float(match.group(1)) if match else None
+            except ValueError:
+                row[key] = None
+        row["rx_power_dbm"] = (
+            float(row["value"])
+            if row["event"] == "wifi_rx_power" and row.get("value") is not None
+            else None
+        )
+        row["decoder_snr_linear"] = (
+            float(row["value"])
+            if row["event"] in {"phy_rx_ok", "phy_rx_error"}
+            and isinstance(row.get("value"), float)
+            and math.isfinite(float(row["value"]))
+            and float(row["value"]) > 0.0
+            else None
+        )
+        row["decoder_snr_db"] = (
+            10.0 * math.log10(row["decoder_snr_linear"])
+            if row["decoder_snr_linear"] is not None
+            else None
+        )
         result.append(row)
     return result
 
 
+def native_product_runtime_contract(
+    stats: dict[str, Any], scenario_config: dict[str, Any]
+) -> dict[str, Any]:
+    """Validate that the observed process is the selected native Wi-Fi/Sionna product."""
+
+    radio = scenario_config.get("radio", {})
+    sionna = scenario_config.get("sionna", {})
+    solver = stats.get("sionna_solver", {})
+    exact = {
+        "five_uavs": stats.get("uav_count") == 5,
+        "six_radio_nodes": stats.get("radio_node_count") == 6,
+        "one_shared_spectrum_channel": stats.get("shared_spectrum_channel_count") == 1,
+        "native_ns3_phy": stats.get("native_ns3_phy") is True,
+        "native_ns3_mac": stats.get("native_ns3_mac") is True,
+        "no_custom_packet_error_model": stats.get("custom_packet_error_model") is False,
+        "no_custom_scheduler": stats.get("custom_scheduler") is False,
+        "wifi_backend": stats.get("radio_backend") == radio.get("backend") == "wifi",
+        "profile": stats.get("profile") == radio.get("profile"),
+        "uncalibrated_standard_reference": stats.get("technology_specific_modem") is False
+        and radio.get("technology_specific_modem") is False,
+        "neighbor_discovery_mode": stats.get("neighbor_discovery_mode")
+        == radio.get("neighbor_discovery_mode"),
+        "wifi_data_mode": stats.get("wifi_data_mode") == radio.get("data_mode"),
+        "wifi_control_mode": stats.get("wifi_control_mode") == radio.get("control_mode"),
+        "wifi_ssid": stats.get("wifi_ssid") == radio.get("ssid"),
+        "wifi_channel_number": stats.get("wifi_channel_number")
+        == radio.get("channel_number"),
+        "wifi_resolved_channel_number": stats.get("wifi_actual_channel_number")
+        == radio.get("channel_number"),
+        "single_sionna_rx_psd_model": stats.get(
+            "phased_array_spectrum_propagation_model_count"
+        )
+        == 1
+        and stats.get("rx_psd_propagation_model")
+        == "ns3::SionnaRtSpectrumPropagationLossModel",
+        "sionna_in_process": stats.get("sionna_in_process") is True,
+        "sionna_drives_rx_psd": stats.get("sionna_drives_rx_psd") is True,
+        "packet_outcome_affected": stats.get("packet_outcome_affected") is True,
+        "live_pose_snapshots_applied": isinstance(stats.get("pose_snapshots"), int)
+        and not isinstance(stats.get("pose_snapshots"), bool)
+        and stats["pose_snapshots"] > 0,
+        "no_stale_pose_samples": stats.get("stale_pose_samples") == 0,
+        "solver_profile": stats.get("solver_profile") == sionna.get("solver_profile"),
+    }
+    numeric_fields = {
+        "tx_power_w": (stats.get("tx_power_w"), radio.get("tx_power_w")),
+        "carrier_hz": (stats.get("carrier_hz"), radio.get("carrier_hz")),
+        "wifi_actual_center_frequency_hz": (
+            stats.get("wifi_actual_center_frequency_hz"),
+            radio.get("carrier_hz"),
+        ),
+        "wifi_channel_width_mhz": (
+            stats.get("wifi_channel_width_mhz"),
+            radio.get("channel_width_mhz"),
+        ),
+        "channel_state_max_age_s": (
+            stats.get("channel_state_max_age_s"),
+            sionna.get("channel_state_max_age_s"),
+        ),
+        "endpoint_displacement_threshold_m": (
+            stats.get("endpoint_displacement_threshold_m"),
+            sionna.get("endpoint_displacement_threshold_m"),
+        ),
+        "readiness_lag_max_ms": (
+            stats.get("readiness_lag_max_ms"),
+            sionna.get("readiness_lag_max_ms"),
+        ),
+    }
+    for name, (observed, expected) in numeric_fields.items():
+        exact[name] = (
+            isinstance(observed, (int, float))
+            and not isinstance(observed, bool)
+            and isinstance(expected, (int, float))
+            and not isinstance(expected, bool)
+            and math.isclose(float(observed), float(expected), rel_tol=1e-12, abs_tol=1e-12)
+        )
+    solver_fields = (
+        "max_depth",
+        "los",
+        "specular_reflection",
+        "diffuse_reflection",
+        "diffraction",
+        "edge_diffraction",
+        "refraction",
+        "synthetic_array",
+        "seed",
+        "max_number_of_paths",
+        "cache_expiry_jitter_fraction",
+    )
+    exact["sionna_solver_parameters"] = isinstance(solver, dict) and all(
+        field in solver
+        and field in sionna
+        and (
+            math.isclose(float(solver[field]), float(sionna[field]), rel_tol=1e-12, abs_tol=1e-12)
+            if isinstance(solver[field], (int, float))
+            and not isinstance(solver[field], bool)
+            and isinstance(sionna[field], (int, float))
+            and not isinstance(sionna[field], bool)
+            else solver[field] is sionna[field]
+            if isinstance(sionna[field], bool)
+            else solver[field] == sionna[field]
+        )
+        for field in solver_fields
+    )
+    return {"passed": all(exact.values()), "checks": exact}
+
+
 def build_topology(run_dir: Path, stats: dict[str, Any]) -> dict[str, Any]:
     wifi = stats.get("radio_backend") == "wifi"
+    uav_count = stats.get("uav_count")
+    radio_node_count = stats.get("radio_node_count")
+    shared_channel_count = stats.get("shared_spectrum_channel_count")
+    phased_model_count = stats.get("phased_array_spectrum_propagation_model_count")
+    native_devices = (
+        radio_node_count
+        if stats.get("native_ns3_phy") is True and stats.get("native_ns3_mac") is True
+        else 0
+    )
     nodes = {
         "cp": {
             "ipv4": ["10.71.0.1", "10.71.1.1"],
@@ -124,17 +492,17 @@ def build_topology(run_dir: Path, stats: dict[str, Any]) -> dict[str, Any]:
     pcap_names = sorted(path.name for path in (run_dir / "pcap").glob("*.pcap"))
     return {
         "ns3_processes": 1,
-        "radio_nodes": 6,
-        "uav_count": 5,
-        "native_radio_devices": 6,
-        "half_duplex_ideal_phys": 0 if wifi else 6,
-        "spectrum_wifi_phys": 6 if wifi else 0,
-        "qos_wifi_macs": 6 if wifi else 0,
-        "native_antennas": 6,
-        "mobility_models": 6,
-        "tap_boundaries": 6,
-        "shared_multi_model_spectrum_channels": 1,
-        "sionna_rt_spectrum_propagation_loss_models": 1,
+        "radio_nodes": radio_node_count,
+        "uav_count": uav_count,
+        "native_radio_devices": native_devices,
+        "half_duplex_ideal_phys": 0 if wifi else native_devices,
+        "spectrum_wifi_phys": native_devices if wifi else 0,
+        "qos_wifi_macs": native_devices if wifi else 0,
+        "native_antennas": radio_node_count,
+        "mobility_models": radio_node_count,
+        "tap_boundaries": radio_node_count,
+        "shared_multi_model_spectrum_channels": shared_channel_count,
+        "sionna_rt_spectrum_propagation_loss_models": phased_model_count,
         "radio_medium": (
             "native 802.11n QoS WifiMac/SpectrumWifiPhy"
             if wifi
@@ -240,6 +608,7 @@ def build_mobility(run_dir: Path, events: list[dict[str, Any]]) -> dict[str, Any
             "maximum_altitude_m": max((position[2] for position in positions), default=None),
             "stale_sample_count": stale,
             "applied_position_age_ms": distribution(ages),
+            "native_live_pose_samples": len(ages),
             "tracker_source_topics": dict(source_topics),
         }
     result["all_required_publishers_observed"] = all(
@@ -248,7 +617,12 @@ def build_mobility(run_dir: Path, events: list[dict[str, Any]]) -> dict[str, Any
     result["all_required_odometry_streams_observed"] = result[
         "all_required_publishers_observed"
     ]
-    result["all_mobility_models_updated"] = all(result["uavs"][uav]["sample_count"] > 0 for uav in UAVS)
+    result["all_tracker_streams_sampled"] = all(
+        result["uavs"][uav]["sample_count"] > 0 for uav in UAVS
+    )
+    result["all_mobility_models_updated"] = all(
+        result["uavs"][uav]["native_live_pose_samples"] > 0 for uav in UAVS
+    )
     return result
 
 
@@ -292,13 +666,21 @@ def agent_records(run_dir: Path) -> dict[str, list[dict[str, Any]]]:
 def build_p2p(scenario: dict[str, Any], agents: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
     sends = scenario.get("p2p", {}).get("downlink_sends", [])
     deliveries = scenario.get("p2p", {}).get("uplink_deliveries", [])
+    parameters = scenario.get("predeclared_parameters", {})
+    expected_packets = int(parameters.get("p2p_packets_per_direction_per_uav", 0) or 0)
     per_uav: dict[str, Any] = {}
     for uav in UAVS:
         down_offered = [item for item in sends if item.get("uav") == uav]
         down_received = [
             row
             for row in agents[uav]
-            if row.get("event") == "receive" and row.get("kind") == "p2p_downlink"
+            if row.get("event") == "receive"
+            and row.get("kind") == "p2p_downlink"
+            and row.get("sender_id") == 0
+            and row.get("receiver_id") == int(uav[3:])
+            and isinstance(row.get("sequence"), int)
+            and not isinstance(row.get("sequence"), bool)
+            and 0 <= row["sequence"] < expected_packets
         ]
         up_originated = [
             row
@@ -310,14 +692,14 @@ def build_p2p(scenario: dict[str, Any], agents: dict[str, list[dict[str, Any]]])
             "gcs_to_uav": {
                 "offered": len(down_offered),
                 "delivered_unique": len({row.get("sequence") for row in down_received}),
-                "missing_sequences": sorted(set(range(10)) - {int(row.get("sequence")) for row in down_received}),
+                "missing_sequences": sorted(set(range(expected_packets)) - {int(row.get("sequence")) for row in down_received}),
                 "duplicates": len(down_received) - len({row.get("sequence") for row in down_received}),
                 "latency_ms": distribution(row.get("latency_ms", 0.0) for row in down_received),
             },
             "uav_to_gcs": {
                 "independently_originated": len(up_originated),
                 "delivered_unique": len({row.get("sequence") for row in up_received}),
-                "missing_sequences": sorted(set(range(10)) - {int(row.get("sequence")) for row in up_received}),
+                "missing_sequences": sorted(set(range(expected_packets)) - {int(row.get("sequence")) for row in up_received}),
                 "duplicates": len(up_received) - len({row.get("sequence") for row in up_received}),
                 "latency_ms": distribution(row.get("latency_ms", 0.0) for row in up_received),
             },
@@ -326,6 +708,7 @@ def build_p2p(scenario: dict[str, Any], agents: dict[str, list[dict[str, Any]]])
         "protocol": "checksummed_logical_message_v1",
         "ns3_echo": False,
         "retransmissions": False,
+        "configured_packets_per_direction_per_uav": expected_packets,
         "per_uav": per_uav,
     }
 
@@ -376,12 +759,13 @@ def build_p2mp(
             starts += sum(row["event"] == "phy_rx_start" for row in node_rows)
             per_root.append({"sequence": sequence, "packet_uid": transmit["packet_uid"], "phy_outcome": state})
         sequences = {int(row.get("sequence")) for row in deliveries}
+        expected_sequences = set(range(len(roots)))
         per_receiver[uav] = {
             "receiver_phy_rx_start": starts,
             "receiver_phy_rx_ok": ok,
             "receiver_phy_rx_error": error,
             "receiver_application_deliveries": len(sequences),
-            "receiver_missing_sequences": sorted(set(range(20)) - sequences),
+            "receiver_missing_sequences": sorted(expected_sequences - sequences),
             "duplicates": len(deliveries) - len(sequences),
             "latency_ms": distribution(row.get("latency_ms", 0.0) for row in deliveries),
             "per_root_native_outcome": per_root,
@@ -447,7 +831,11 @@ def build_shared_medium(
                 )
             )
         delivered_unique = len({row.get("sequence") for row in delivered})
-        bits_per_second = delivered_unique * 256 * 8 / 1.0
+        duration_s = float(application.get("duration_s", 0.0) or 0.0)
+        payload_bytes = int(application.get("packet_payload_bytes", 0) or 0)
+        bits_per_second = (
+            delivered_unique * payload_bytes * 8 / duration_s if duration_s > 0.0 else 0.0
+        )
         throughput.append(bits_per_second)
         per_uav[uav] = {
             "offered_packets": len(offered_rows),
@@ -497,6 +885,54 @@ def build_shared_medium(
             ),
         },
     }
+
+
+def traffic_delivery_checks(
+    p2p: dict[str, Any],
+    p2mp: dict[str, Any],
+    shared: dict[str, Any],
+    traffic: dict[str, Any],
+) -> dict[str, bool]:
+    """Apply config-declared real endpoint delivery and fairness gates."""
+
+    gates = traffic["delivery_gates"]
+    p2p_packets = traffic["p2p_packets_per_direction_per_uav"]
+    p2p_passed = all(
+        p2p["per_uav"][uav]["gcs_to_uav"]["offered"] == p2p_packets
+        and p2p["per_uav"][uav]["gcs_to_uav"]["delivered_unique"]
+        >= gates["p2p_min_delivered_per_direction_per_uav"]
+        and p2p["per_uav"][uav]["gcs_to_uav"]["duplicates"] == 0
+        and p2p["per_uav"][uav]["uav_to_gcs"]["independently_originated"] == p2p_packets
+        and p2p["per_uav"][uav]["uav_to_gcs"]["delivered_unique"]
+        >= gates["p2p_min_delivered_per_direction_per_uav"]
+        and p2p["per_uav"][uav]["uav_to_gcs"]["duplicates"] == 0
+        for uav in UAVS
+    )
+    p2mp_roots = traffic["p2mp_root_transmissions"]
+    p2mp_passed = (
+        p2mp["root_transmissions"] == p2mp_roots
+        and p2mp["application_unicast_copies"] == 0
+        and p2mp["command_post_mac_tx"] == p2mp_roots
+        and all(
+            p2mp["per_receiver"][uav]["receiver_application_deliveries"]
+            >= gates["p2mp_min_delivered_per_uav"]
+            and p2mp["per_receiver"][uav]["duplicates"] == 0
+            for uav in UAVS
+        )
+    )
+    simultaneous_packets = traffic["simultaneous_uplink"]["packets_per_uav"]
+    shared_passed = (
+        all(
+            shared["per_uav"][uav]["offered_packets"] == simultaneous_packets
+            and shared["per_uav"][uav]["delivered_application_packets"]
+            >= gates["simultaneous_min_delivered_per_uav"]
+            for uav in UAVS
+        )
+        and isinstance(shared["jain_fairness"], (int, float))
+        and not isinstance(shared["jain_fairness"], bool)
+        and shared["jain_fairness"] >= gates["simultaneous_jain_fairness_min"]
+    )
+    return {"p2p": p2p_passed, "p2mp": p2mp_passed, "simultaneous": shared_passed}
 
 
 def parse_sionna_log(path: Path) -> dict[str, Any]:
@@ -617,6 +1053,7 @@ def build_realtime(
     events: list[dict[str, Any]],
     mobility: dict[str, Any],
     stats: dict[str, Any],
+    gates: dict[str, float],
 ) -> dict[str, Any]:
     lag = [float(row["value"]) for row in events if row["event"] == "realtime_lag" and row["value"] is not None]
     steady_lag = [
@@ -638,12 +1075,18 @@ def build_realtime(
     lag_stats = distribution(lag)
     steady_lag_stats = distribution(steady_lag)
     lag_bound_ms = float(stats.get("readiness_lag_max_ms", 250.0))
+    gazebo_mean_min = float(gates["gazebo_mean_rtf_min"])
+    gazebo_p5_min = float(gates["gazebo_p5_rtf_min"])
+    pose_age_max_ms = float(gates["applied_position_age_p95_ms_max"])
     ready = bool(
         steady_lag_stats["p95"] is not None
         and steady_lag_stats["p95"] <= lag_bound_ms
         and gazebo["p5"] is not None
-        and gazebo["p5"] >= 0.8
-        and (not pose_ages or max(pose_ages) <= 500.0)
+        and gazebo["mean"] is not None
+        and gazebo["mean"] >= gazebo_mean_min
+        and gazebo["p5"] >= gazebo_p5_min
+        and len(pose_ages) == len(UAVS)
+        and max(pose_ages) <= pose_age_max_ms
     )
     failed = not lag or gazebo["samples"] == 0
     classification = "failed" if failed else ("ready" if ready else "limited")
@@ -652,8 +1095,9 @@ def build_realtime(
         "realtime_readiness": classification,
         "predeclared_readiness_bounds": {
             "steady_ns3_lag_p95_ms_max": lag_bound_ms,
-            "gazebo_rtf_p5_min": 0.8,
-            "applied_position_age_p95_ms_max": 500.0,
+            "gazebo_rtf_mean_min": gazebo_mean_min,
+            "gazebo_rtf_p5_min": gazebo_p5_min,
+            "applied_position_age_p95_ms_max": pose_age_max_ms,
         },
         "sionna": sionna,
         "ns3_realtime_lag_ms": lag_stats,
@@ -680,117 +1124,154 @@ def radio_metric_availability(stats: dict[str, Any]) -> dict[str, str]:
     if stats.get("radio_backend") != "wifi":
         return LEGACY_UNAVAILABLE_RADIO_METRICS
     return {
-        "rx_power_dbm": "unavailable: the product runtime does not enable a per-MPDU MonitorSnifferRx export",
-        "rssi_dbm": "unavailable: the product runtime does not enable a per-MPDU MonitorSnifferRx export",
-        "snr_db": "unavailable: SpectrumWifiPhy does not export decoded SNR through the selected trace set",
-        "sinr_db": "unavailable: SpectrumWifiPhy evaluates interference internally without a selected per-packet SINR trace",
+        "rx_power_dbm": (
+            "observed from SpectrumWifiPhy PhyRxBegin RxPowerWattPerChannelBand after the sole "
+            "Sionna spectrum propagation model"
+        ),
+        "rssi_dbm": "unavailable: MonitorSnifferRx signal is useful-signal power, not total RSSI",
+        "snr_db": "available only for decoder verdicts through WifiPhyStateHelper RxOk/RxError",
+        "sinr_db": "derived: signal minus noise_interference dBm from MonitorSnifferRx; decoded MPDU samples only",
         "interference_power_dbm": "unavailable: no per-packet interference-power trace is selected",
-        "noise_power_dbm": "unavailable: no per-packet noise-power trace is selected",
-        "bler": "unavailable: NistErrorRateModel exposes packet outcomes, not a transport-block abstraction",
+        "noise_power_dbm": "native combined noise/interference in metrics/wifi_monitor_rx.csv; thermal-only separation unavailable",
+        "bler": "not_applicable: NistErrorRateModel has no transport-block abstraction",
     }
-
-REQUIRED_SCREENSHOTS = (
-    "01_five_uav_takeoff",
-    "02_five_uav_hold",
-    "03_uav1_los",
-    "04_uav1_obstructed",
-    "05_p2mp_or_shared_medium",
-    "06_landing",
-)
-
-
-def sionna_path_observations(path: Path) -> list[tuple[float, int]]:
-    observations: list[tuple[float, int]] = []
-    current_time: float | None = None
-    try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return observations
-    for line in lines:
-        match = re.match(r"\d+\s+\+([0-9.]+)s\s+(.*)", line)
-        if not match:
-            continue
-        message = match.group(2)
-        if "Building scene for antenna pair" in message:
-            current_time = float(match.group(1))
-            continue
-        count = re.search(r"Number of generated paths:\s*(\d+)", message)
-        if count and current_time is not None:
-            observations.append((current_time, int(count.group(1))))
-            current_time = None
-    return observations
-
 
 def screenshot_native_observation(
     metadata: dict[str, Any],
     events: list[dict[str, Any]],
-    path_observations: list[tuple[float, int]],
+    phase_aliases: dict[str, str],
 ) -> dict[str, Any]:
-    """Summarize native events close to a real camera-frame simulation time."""
+    """Summarize native events close to a real camera frame on the shared wall clock."""
 
-    timestamp = metadata.get("simulation_timestamp")
-    if not isinstance(timestamp, (int, float)):
-        return {"status": "unavailable: camera frame has no simulation timestamp"}
-    phase = str(metadata.get("scenario_phase", ""))
+    timestamp_ns = metadata.get("frame_received_monotonic_ns")
+    if not isinstance(timestamp_ns, int) or isinstance(timestamp_ns, bool):
+        return {"status": "unavailable: camera frame has no monotonic receive timestamp"}
+    phase = canonical_phase(str(metadata.get("scenario_phase", "")), phase_aliases)
     nearby = [
         event
         for event in events
-        if abs(float(event.get("time_s", -math.inf)) - float(timestamp)) <= 2.0
-        and canonical_phase(str(event.get("phase", ""))) == phase
+        if isinstance(event.get("wall_monotonic_ns"), int)
+        and abs(int(event["wall_monotonic_ns"]) - timestamp_ns) <= 2_000_000_000
+        and canonical_phase(str(event.get("phase", "")), phase_aliases) == phase
     ]
-    paths = [count for at_s, count in path_observations if abs(at_s - float(timestamp)) <= 2.0]
+    paths = [
+        int(event["value"])
+        for event in nearby
+        if event.get("event") == "sionna_link_state"
+        and isinstance(event.get("value"), (int, float))
+    ]
+    powers = [
+        float(event["rx_power_dbm"])
+        for event in nearby
+        if event.get("event") == "wifi_rx_power"
+        and isinstance(event.get("rx_power_dbm"), (int, float))
+    ]
     return {
-        "window_simulation_seconds": [float(timestamp) - 2.0, float(timestamp) + 2.0],
+        "window_wall_monotonic_ns": [timestamp_ns - 2_000_000_000, timestamp_ns + 2_000_000_000],
+        "camera_simulation_timestamp": metadata.get("simulation_timestamp"),
         "scenario_phase": phase,
         "sionna_path_observations": len(paths),
         "sionna_path_count_min": min(paths) if paths else "unavailable",
         "sionna_path_count_max": max(paths) if paths else "unavailable",
+        "wifi_rx_power_dbm": distribution(powers),
+        "wifi_phy_rx_end": sum(event.get("event") == "wifi_phy_rx_end" for event in nearby),
+        "wifi_phy_rx_drop": sum(event.get("event") == "wifi_phy_rx_drop" for event in nearby),
         "phy_rx_ok": sum(event.get("event") == "phy_rx_ok" for event in nearby),
         "phy_rx_error": sum(event.get("event") == "phy_rx_error" for event in nearby),
         "basis": (
-            "native PHY events and Sionna channel rebuild log entries within +/- 2 simulation "
-            "seconds of the hash-locked raw Gazebo frame"
+            "native Wi-Fi verdict/power events and cached Sionna link-state samples within +/- 2 "
+            "wall-clock seconds of the hash-locked raw Gazebo frame receive boundary"
         ),
     }
 
 
-def screenshot_status(run_dir: Path, events: list[dict[str, Any]]) -> dict[str, Any]:
+def screenshot_spatial_state_valid(
+    specification: dict[str, Any],
+    positions: dict[str, Any],
+    scenario_config: dict[str, Any],
+) -> bool:
+    if not all(name in positions for name in UAVS):
+        return False
+    try:
+        normalized_positions = {
+            name: [float(component) for component in positions[name][:3]]
+            for name in UAVS
+            if isinstance(positions[name], (list, tuple)) and len(positions[name]) >= 3
+        }
+    except (TypeError, ValueError):
+        return False
+    if set(normalized_positions) != set(UAVS):
+        return False
+    checks: list[bool] = []
+    mission_phase = specification.get("mission_phase")
+    if mission_phase:
+        targets = scenario_config["mission_targets"].get(str(mission_phase), {})
+        checks.append(
+            bool(targets)
+            and all(
+                name in positions
+                and math.dist(
+                    normalized_positions[name], target
+                )
+                <= scenario_config["mission_tolerance_m"]
+                for name, target in targets.items()
+            )
+        )
+    altitude_state = specification.get("altitude_state")
+    if altitude_state:
+        ground = scenario_config["ground_positions"]
+        if altitude_state == "airborne":
+            checks.append(
+                all(
+                    name in ground
+                    and normalized_positions[name][2]
+                    >= ground[name][2] + scenario_config["airborne_clearance_m"]
+                    for name in UAVS
+                )
+            )
+        elif altitude_state == "landed":
+            checks.append(
+                all(
+                    name in ground
+                    and abs(normalized_positions[name][2] - ground[name][2])
+                    <= scenario_config["landed_altitude_tolerance_m"]
+                    for name in UAVS
+                )
+            )
+        else:
+            checks.append(False)
+    return bool(checks) and all(checks)
+
+
+def screenshot_status(
+    run_dir: Path,
+    events: list[dict[str, Any]],
+    scenario_config: dict[str, Any],
+) -> dict[str, Any]:
     screenshot_dir = run_dir / "screenshots"
-    path_observations = sionna_path_observations(run_dir / "logs/ns3_sionna.log")
     records: dict[str, Any] = {}
-    for stem in REQUIRED_SCREENSHOTS:
+    for specification in scenario_config["screenshots"]:
+        stem = specification["stem"]
         metadata = read_json(screenshot_dir / f"{stem}.json", {})
         metadata = metadata if isinstance(metadata, dict) else {}
         image_path = screenshot_dir / f"{stem}.png"
         raw_path = screenshot_dir / f"{stem}.raw.png"
         image_exists = image_path.is_file()
         raw_exists = raw_path.is_file()
-        required_projected = {"uav1"} if stem == "04_uav1_obstructed" else set(UAVS)
+        required_projected = set(specification["required_projected_uavs"])
         projected = set(metadata.get("projected_uavs", []))
         positions = metadata.get("uav_positions", {})
-        spatial_state_valid = False
+        spatial_state_valid = screenshot_spatial_state_valid(
+            specification,
+            positions if isinstance(positions, dict) else {},
+            scenario_config,
+        )
         try:
             tracker_snapshot_age_s = float(
                 metadata.get("tracker_snapshot_wall_age_s", math.inf)
             )
         except (TypeError, ValueError):
             tracker_snapshot_age_s = math.inf
-        if isinstance(positions, dict) and all(name in positions for name in UAVS):
-            try:
-                if stem in {"01_five_uav_takeoff", "02_five_uav_hold"}:
-                    spatial_state_valid = all(float(positions[name][2]) >= 8.0 for name in UAVS)
-                elif stem == "03_uav1_los":
-                    spatial_state_valid = math.dist(
-                        positions["uav1"], [80.0, 0.0, 17.0]
-                    ) <= 8.0
-                elif stem == "04_uav1_obstructed":
-                    spatial_state_valid = math.dist(
-                        positions["uav1"], [80.0, 110.0, 17.0]
-                    ) <= 8.0
-                elif stem in {"05_p2mp_or_shared_medium", "06_landing"}:
-                    spatial_state_valid = all(float(positions[name][2]) <= 2.0 for name in UAVS)
-            except (IndexError, TypeError, ValueError):
-                spatial_state_valid = False
         hashes_match = bool(
             image_exists
             and raw_exists
@@ -804,6 +1285,11 @@ def screenshot_status(run_dir: Path, events: list[dict[str, Any]]) -> dict[str, 
             and raw_exists
             and hashes_match
             and metadata.get("run_id") == run_dir.name
+            and canonical_phase(str(metadata.get("scenario_phase", "")), scenario_config["phase_aliases"])
+            == specification["phase"]
+            and metadata.get("scenario_name") == scenario_config["scenario_name"]
+            and metadata.get("map_id") == scenario_config["map"].get("id")
+            and metadata.get("camera_name") == specification["camera"]
             and metadata.get("source") == "live_gazebo_runtime"
             and metadata.get("image_kind") == "annotated_live_frame"
             and sorted(metadata.get("fresh_uavs", [])) == list(UAVS)
@@ -816,39 +1302,25 @@ def screenshot_status(run_dir: Path, events: list[dict[str, Any]]) -> dict[str, 
             "raw_image_exists": raw_exists,
             "image_hashes_match_metadata": hashes_match,
             "required_projected_uavs": sorted(required_projected),
+            "configured_phase": specification["phase"],
+            "configured_camera": specification["camera"],
             "spatial_state_valid": spatial_state_valid,
             "metadata": metadata,
             "valid_live_capture": valid,
             "native_observation": (
-                screenshot_native_observation(metadata, events, path_observations)
+                screenshot_native_observation(
+                    metadata, events, scenario_config["phase_aliases"]
+                )
                 if valid
                 else {}
             ),
         }
     return {
         "screenshots_status": "passed" if all(item["valid_live_capture"] for item in records.values()) else "failed",
+        "scenario_config": scenario_config["path"],
+        "required_stems": [item["stem"] for item in scenario_config["screenshots"]],
         "records": records,
     }
-
-
-def canonical_phase(phase: str) -> str:
-    if phase == "takeoff_complete":
-        return "takeoff"
-    if phase == "hold_all":
-        return "five_uav_hold"
-    if phase == "los":
-        return "los_observation"
-    if phase == "obstructed_candidate":
-        return "obstructed_observation"
-    if phase == "return":
-        return "return_observation"
-    if phase == "landing_complete":
-        return "landing"
-    if phase == "pre_no_bypass" or phase == "no_bypass_stop":
-        return "no_bypass_test"
-    if phase == "stationary_communication_smoke":
-        return "startup"
-    return phase or "startup"
 
 
 def delay_values(details: str) -> list[float]:
@@ -869,12 +1341,108 @@ def packet_uid(row: dict[str, Any]) -> int | None:
     return int(value) if isinstance(value, int) else None
 
 
+def ip_belongs_to_node(address: Any, node: str) -> bool:
+    value = str(address or "")
+    if node == "cp":
+        return bool(re.fullmatch(r"10\.71\.(?:0|[1-5])\.1", value))
+    if node in UAVS:
+        return value == f"10.71.{int(node.removeprefix('uav'))}.10"
+    return False
+
+
+def packet_event_matches_link(event: dict[str, Any], tx: str, rx: str) -> bool:
+    """Match only IP-attributed packet events; management frames stay aggregate-only."""
+
+    node = str(event.get("node", ""))
+    if node not in {tx, rx}:
+        return False
+    return ip_belongs_to_node(event.get("src_ip"), tx) and ip_belongs_to_node(
+        event.get("dst_ip"), rx
+    )
+
+
+def receiver_event_evidence(
+    events: list[dict[str, Any]],
+    receiver: str,
+    *,
+    transmitter: str | None = None,
+    phase: str | None = None,
+) -> dict[str, Any]:
+    """Count Wi-Fi receive traces without treating neutral PhyRxEnd as a verdict."""
+
+    selected = [
+        event
+        for event in events
+        if event.get("node") == receiver
+        and (phase is None or event.get("phase") == phase)
+        and (
+            transmitter is None
+            or packet_event_matches_link(event, transmitter, receiver)
+        )
+    ]
+    powers_dbm = [
+        float(event["rx_power_dbm"])
+        for event in selected
+        if event.get("event") == "wifi_rx_power"
+        and isinstance(event.get("rx_power_dbm"), (int, float))
+        and math.isfinite(float(event["rx_power_dbm"]))
+    ]
+    powers_w = [
+        float(event["rx_power_w"])
+        for event in selected
+        if event.get("event") == "wifi_rx_power"
+        and isinstance(event.get("rx_power_w"), (int, float))
+        and math.isfinite(float(event["rx_power_w"]))
+    ]
+    decoder_snr_db = [
+        float(event["decoder_snr_db"])
+        for event in selected
+        if event.get("event") in {"phy_rx_ok", "phy_rx_error"}
+        and isinstance(event.get("decoder_snr_db"), (int, float))
+        and math.isfinite(float(event["decoder_snr_db"]))
+    ]
+    drop_reasons = Counter(
+        str(event.get("reason_code", "unavailable"))
+        for event in selected
+        if event.get("event") == "wifi_phy_rx_drop"
+    )
+    return {
+        "wifi_rx_power": sum(event.get("event") == "wifi_rx_power" for event in selected),
+        "wifi_rx_power_dbm": distribution(powers_dbm),
+        "wifi_rx_power_w": distribution(powers_w),
+        "wifi_phy_rx_end": sum(
+            event.get("event") == "wifi_phy_rx_end" for event in selected
+        ),
+        "wifi_phy_rx_drop": sum(
+            event.get("event") == "wifi_phy_rx_drop" for event in selected
+        ),
+        "wifi_phy_rx_drop_reason_counts": dict(drop_reasons),
+        "phy_rx_ok": sum(event.get("event") == "phy_rx_ok" for event in selected),
+        "phy_rx_error": sum(
+            event.get("event") == "phy_rx_error" for event in selected
+        ),
+        "decoder_snr_db": distribution(decoder_snr_db),
+        "attribution": (
+            "packet IP endpoints"
+            if transmitter is not None
+            else "receiver aggregate; no transmitter attribution"
+        ),
+        "decode_semantics": (
+            "wifi_phy_rx_end is a neutral signal-end trace; only phy_rx_ok and "
+            "phy_rx_error are decoder verdicts"
+        ),
+    }
+
+
 def real_value(value: float | None) -> float | str:
     return value if value is not None and math.isfinite(value) else "unavailable"
 
 
 def build_radio_observability(
-    run_dir: Path, events: list[dict[str, Any]], scenario: dict[str, Any]
+    run_dir: Path,
+    events: list[dict[str, Any]],
+    scenario: dict[str, Any],
+    phase_aliases: dict[str, str],
 ) -> dict[str, Any]:
     metrics_dir = run_dir / "metrics"
     metric_availability = radio_metric_availability(
@@ -886,10 +1454,38 @@ def build_radio_observability(
     mac_by_uid: defaultdict[int, list[dict[str, Any]]] = defaultdict(list)
     starts_by_uid: defaultdict[int, list[dict[str, Any]]] = defaultdict(list)
     ends_by_uid: defaultdict[int, list[dict[str, Any]]] = defaultdict(list)
+    neutral_ends_by_uid: defaultdict[int, list[dict[str, Any]]] = defaultdict(list)
+    drops_by_uid: defaultdict[int, list[dict[str, Any]]] = defaultdict(list)
+    powers_by_uid: defaultdict[int, list[dict[str, Any]]] = defaultdict(list)
     rows: list[dict[str, Any]] = []
     outcomes: defaultdict[tuple[str, str], dict[str, set[int]]] = defaultdict(
-        lambda: {"attempted": set(), "ok": set(), "error": set(), "start": set()}
+        lambda: {
+            "attempted": set(),
+            "ok": set(),
+            "error": set(),
+            "start": set(),
+            "end": set(),
+            "drop": set(),
+        }
     )
+
+    for event in events:
+        uid = packet_uid(event)
+        if uid is None:
+            continue
+        event_name = str(event.get("event"))
+        if event_name == "mac_tx":
+            mac_by_uid[uid].append(event)
+        elif event_name == "phy_rx_start":
+            starts_by_uid[uid].append(event)
+        elif event_name in {"phy_rx_ok", "phy_rx_error"}:
+            ends_by_uid[uid].append(event)
+        elif event_name == "wifi_phy_rx_end":
+            neutral_ends_by_uid[uid].append(event)
+        elif event_name == "wifi_phy_rx_drop":
+            drops_by_uid[uid].append(event)
+        elif event_name == "wifi_rx_power":
+            powers_by_uid[uid].append(event)
 
     for event in events:
         event_name = str(event.get("event"))
@@ -900,13 +1496,7 @@ def build_radio_observability(
             mobility_age[node] = event.get("value")
         elif event_name == "realtime_lag":
             lag_at_event = event.get("value")
-        elif uid is not None and event_name == "mac_tx":
-            mac_by_uid[uid].append(event)
-        elif uid is not None and event_name == "phy_rx_start":
-            starts_by_uid[uid].append(event)
-        elif uid is not None and event_name in {"phy_rx_ok", "phy_rx_error"}:
-            ends_by_uid[uid].append(event)
-        elif event_name == "sionna_paths" and event.get("peer"):
+        elif event_name == "sionna_link_state" and event.get("peer"):
             tx = node
             rx = str(event["peer"])
             uid = packet_uid(event)
@@ -916,6 +1506,11 @@ def build_radio_observability(
             matching_mac = [item for item in mac_by_uid.get(uid or -1, []) if item["node"] == tx]
             matching_start = [item for item in starts_by_uid.get(uid or -1, []) if item["node"] == rx]
             matching_end = [item for item in ends_by_uid.get(uid or -1, []) if item["node"] == rx]
+            matching_neutral_end = [
+                item for item in neutral_ends_by_uid.get(uid or -1, []) if item["node"] == rx
+            ]
+            matching_drop = [item for item in drops_by_uid.get(uid or -1, []) if item["node"] == rx]
+            matching_power = [item for item in powers_by_uid.get(uid or -1, []) if item["node"] == rx]
             outcome = outcomes[(tx, rx)]
             if uid is not None:
                 outcome["attempted"].add(uid)
@@ -928,12 +1523,41 @@ def build_radio_observability(
                         outcome["ok"].add(uid)
                     else:
                         outcome["error"].add(uid)
+                if matching_neutral_end:
+                    outcome["end"].add(uid)
+                if matching_drop:
+                    outcome["drop"].add(uid)
             distance = math.dist(tx_pos, rx_pos) if all(math.isfinite(value) for value in rx_pos) else None
+            path_count = (
+                int(event["value"])
+                if isinstance(event.get("value"), (int, float))
+                else len(delays)
+            )
+            rx_power_dbm = (
+                percentile(
+                    [
+                        float(item["rx_power_dbm"])
+                        for item in matching_power
+                        if isinstance(item.get("rx_power_dbm"), (int, float))
+                    ],
+                    50,
+                )
+                if matching_power
+                else None
+            )
+            decoder_snr_db = percentile(
+                [
+                    float(item["decoder_snr_db"])
+                    for item in matching_end
+                    if isinstance(item.get("decoder_snr_db"), (int, float))
+                ],
+                50,
+            )
             rows.append(
                 {
                     "timestamp_wall": float(event["wall_monotonic_ns"]) / 1e9,
                     "timestamp_sim": event["time_s"],
-                    "scenario_phase": canonical_phase(str(event["phase"])),
+                    "scenario_phase": canonical_phase(str(event["phase"]), phase_aliases),
                     "_packet_uid": uid,
                     "tx": tx,
                     "rx": rx,
@@ -944,19 +1568,28 @@ def build_radio_observability(
                     "rx_y": real_value(rx_pos[1]),
                     "rx_z": real_value(rx_pos[2]),
                     "distance_m": real_value(distance),
-                    "sionna_path_count": len(delays),
+                    "sionna_path_count": path_count,
+                    "sionna_channel_generation_time_s": real_value(
+                        event.get("channel_generation_time_s")
+                    ),
                     "sionna_los_available": "unavailable: current SionnaRtChannelParams exposes delays but not LOS identity",
                     "sionna_path_delay_min_ns": min(delays) * 1e9 if delays else "unavailable",
                     "sionna_path_delay_max_ns": max(delays) * 1e9 if delays else "unavailable",
                     "sionna_delay_spread_ns": (max(delays) - min(delays)) * 1e9 if delays else "unavailable",
-                    "rx_power_dbm": "unavailable",
+                    "rx_power_dbm": real_value(rx_power_dbm),
+                    "rx_power_w": real_value(
+                        matching_power[-1].get("rx_power_w") if matching_power else None
+                    ),
+                    "rx_power_match_basis": "packet_uid" if matching_power else "unavailable",
                     "rssi_dbm": "unavailable",
-                    "snr_db": "unavailable",
+                    "snr_db": real_value(decoder_snr_db),
                     "sinr_db": "unavailable",
                     "interference_power_dbm": "unavailable",
                     "noise_power_dbm": "unavailable",
                     "native_mac_tx": len(matching_mac),
                     "native_phy_rx_start": len(matching_start),
+                    "native_wifi_phy_rx_end": len(matching_neutral_end),
+                    "native_wifi_phy_rx_drop": len(matching_drop),
                     "native_phy_rx_ok": sum(item["event"] == "phy_rx_ok" for item in matching_end),
                     "native_phy_rx_error": sum(item["event"] == "phy_rx_error" for item in matching_end),
                     "packets_attempted": 1 if uid is not None else 0,
@@ -984,12 +1617,61 @@ def build_radio_observability(
         matching_mac = [item for item in mac_by_uid.get(uid or -1, []) if item["node"] == tx]
         matching_start = [item for item in starts_by_uid.get(uid or -1, []) if item["node"] == rx]
         matching_end = [item for item in ends_by_uid.get(uid or -1, []) if item["node"] == rx]
+        matching_neutral_end = [
+            item for item in neutral_ends_by_uid.get(uid or -1, []) if item["node"] == rx
+        ]
+        matching_drop = [item for item in drops_by_uid.get(uid or -1, []) if item["node"] == rx]
+        matching_power = [item for item in powers_by_uid.get(uid or -1, []) if item["node"] == rx]
+        power_match_basis = "packet_uid" if matching_power else "unavailable"
+        if uid is None:
+            receiver_window = [
+                item
+                for item in events
+                if item.get("node") == rx
+                and item.get("phase") == row["scenario_phase"]
+                and abs(float(item.get("time_s", -math.inf)) - float(row["timestamp_sim"]))
+                <= 0.5
+            ]
+            matching_neutral_end = [
+                item for item in receiver_window if item.get("event") == "wifi_phy_rx_end"
+            ]
+            matching_drop = [
+                item for item in receiver_window if item.get("event") == "wifi_phy_rx_drop"
+            ]
+            matching_end = [
+                item
+                for item in receiver_window
+                if item.get("event") in {"phy_rx_ok", "phy_rx_error"}
+            ]
+            matching_power = [
+                item for item in receiver_window if item.get("event") == "wifi_rx_power"
+            ]
+            if matching_power:
+                power_match_basis = "same_receiver_phase_plus_or_minus_0.5_simulation_seconds"
+        rx_power_values = [
+            float(item["rx_power_dbm"])
+            for item in matching_power
+            if isinstance(item.get("rx_power_dbm"), (int, float))
+        ]
+        decoder_snr_values = [
+            float(item["decoder_snr_db"])
+            for item in matching_end
+            if isinstance(item.get("decoder_snr_db"), (int, float))
+        ]
         row.update(
             {
                 "native_mac_tx": len(matching_mac),
                 "native_phy_rx_start": len(matching_start),
+                "native_wifi_phy_rx_end": len(matching_neutral_end),
+                "native_wifi_phy_rx_drop": len(matching_drop),
                 "native_phy_rx_ok": sum(item["event"] == "phy_rx_ok" for item in matching_end),
                 "native_phy_rx_error": sum(item["event"] == "phy_rx_error" for item in matching_end),
+                "rx_power_dbm": real_value(percentile(rx_power_values, 50)),
+                "rx_power_w": real_value(
+                    matching_power[-1].get("rx_power_w") if matching_power else None
+                ),
+                "rx_power_match_basis": power_match_basis,
+                "snr_db": real_value(percentile(decoder_snr_values, 50)),
                 "packets_attempted": 1 if uid is not None else 0,
                 "packets_delivered": sum(item["event"] == "phy_rx_ok" for item in matching_end),
                 "packet_error_count": sum(item["event"] == "phy_rx_error" for item in matching_end),
@@ -1000,6 +1682,10 @@ def build_radio_observability(
             outcome["attempted"].add(uid)
             if matching_start:
                 outcome["start"].add(uid)
+            if matching_neutral_end:
+                outcome["end"].add(uid)
+            if matching_drop:
+                outcome["drop"].add(uid)
             for end in matching_end:
                 outcome["ok" if end["event"] == "phy_rx_ok" else "error"].add(uid)
 
@@ -1011,10 +1697,13 @@ def build_radio_observability(
 
     columns = [
         "timestamp_wall", "timestamp_sim", "scenario_phase", "tx", "rx", "tx_x", "tx_y", "tx_z",
-        "rx_x", "rx_y", "rx_z", "distance_m", "sionna_path_count", "sionna_los_available",
-        "sionna_path_delay_min_ns", "sionna_path_delay_max_ns", "sionna_delay_spread_ns", "rx_power_dbm",
+        "rx_x", "rx_y", "rx_z", "distance_m", "sionna_path_count",
+        "sionna_channel_generation_time_s", "sionna_los_available", "sionna_path_delay_min_ns",
+        "sionna_path_delay_max_ns", "sionna_delay_spread_ns", "rx_power_dbm", "rx_power_w",
+        "rx_power_match_basis",
         "rssi_dbm", "snr_db", "sinr_db", "interference_power_dbm", "noise_power_dbm", "native_mac_tx",
-        "native_phy_rx_start", "native_phy_rx_ok", "native_phy_rx_error", "packets_attempted",
+        "native_phy_rx_start", "native_wifi_phy_rx_end", "native_wifi_phy_rx_drop",
+        "native_phy_rx_ok", "native_phy_rx_error", "packets_attempted",
         "packets_delivered", "packet_error_count", "empirical_per", "application_pdr", "goodput_bps",
         "end_to_end_latency_ms", "jitter_ms", "mobility_age_ms", "ns3_realtime_lag_ms", "gazebo_rtf",
     ]
@@ -1024,40 +1713,123 @@ def build_radio_observability(
         writer.writerows(rows)
 
     required_pairs = [("cp", uav) for uav in UAVS] + [(uav, "cp") for uav in UAVS]
-    summary_pairs = sorted(set(outcomes) | set(required_pairs))
+    summary_pairs = sorted(
+        set(outcomes)
+        | set(required_pairs)
+        | {(str(row["tx"]), str(row["rx"])) for row in rows}
+    )
+    reciprocal_path_samples = {
+        (str(event.get("node")), str(event.get("peer")), event.get("time_s"))
+        for event in events
+        if event.get("event") == "sionna_link_state"
+        and event.get("scope") == "cp_uav_reciprocal"
+    }
     links: dict[str, Any] = {}
     matrix_rows: list[dict[str, Any]] = []
     for tx, rx in summary_pairs:
-        samples = [row for row in rows if row["tx"] == tx and row["rx"] == rx]
-        result = outcomes[(tx, rx)]
-        attempted = len(result["attempted"])
-        ok = len(result["ok"])
-        error = len(result["error"])
-        per = error / attempted if attempted else None
+        direct_samples = [row for row in rows if row["tx"] == tx and row["rx"] == rx]
+        samples = direct_samples
+        path_sample_basis = "direct_sionna_channel_params"
+        if not samples and tx in UAVS and rx == "cp":
+            samples = [
+                row
+                for row in rows
+                if row["tx"] == "cp" and row["rx"] == tx
+                and ("cp", tx, row["timestamp_sim"]) in reciprocal_path_samples
+            ]
+            path_sample_basis = (
+                "reciprocal_cp_uav_channel_params" if samples else "unavailable"
+            )
+        link_packet_events = [
+            event for event in events if packet_event_matches_link(event, tx, rx)
+        ]
+        mac_tx_count = sum(
+            event.get("event") == "mac_tx" and event.get("node") == tx
+            for event in link_packet_events
+        )
+        rx_start_count = sum(
+            event.get("event") == "phy_rx_start" and event.get("node") == rx
+            for event in link_packet_events
+        )
+        ok = sum(
+            event.get("event") == "phy_rx_ok" and event.get("node") == rx
+            for event in link_packet_events
+        )
+        error = sum(
+            event.get("event") == "phy_rx_error" and event.get("node") == rx
+            for event in link_packet_events
+        )
+        verdicts = ok + error
+        per = error / verdicts if verdicts else None
         path_samples = [int(row["sionna_path_count"]) for row in samples]
-        state = "connected" if ok else ("no_path" if samples and not any(path_samples) else "degraded" if attempted else "no_samples")
+        attributed_receiver_evidence = receiver_event_evidence(
+            events, rx, transmitter=tx
+        )
+        receiver_evidence = receiver_event_evidence(events, rx)
+        if samples and not any(path_samples):
+            state = "no_path"
+        elif ok:
+            state = "connected"
+        elif error or attributed_receiver_evidence["wifi_phy_rx_drop"]:
+            state = "degraded"
+        elif samples:
+            state = "physical_path_observed"
+        elif mac_tx_count:
+            state = "attempted_without_receive_sample"
+        else:
+            state = "no_samples"
         item = {
             "tx": tx,
             "rx": rx,
             "samples": len(samples),
             "path_count": distribution(path_samples),
-            "native_mac_tx": attempted,
-            "native_phy_rx_start": len(result["start"]),
+            "path_sample_basis": path_sample_basis,
+            "native_mac_tx": mac_tx_count,
+            "native_phy_rx_start": rx_start_count,
+            "native_wifi_phy_rx_end": receiver_evidence["wifi_phy_rx_end"],
+            "native_wifi_phy_rx_drop": receiver_evidence["wifi_phy_rx_drop"],
             "native_phy_rx_ok": ok,
             "native_phy_rx_error": error,
+            "wifi_rx_power_dbm": receiver_evidence["wifi_rx_power_dbm"],
+            "decoder_snr_db": receiver_evidence["decoder_snr_db"],
+            "receive_event_attribution": receiver_evidence["attribution"],
+            "ip_attributed_receive_evidence": attributed_receiver_evidence,
+            "decode_semantics": receiver_evidence["decode_semantics"],
             "empirical_per": per,
+            "empirical_per_basis": (
+                "phy_rx_error / (phy_rx_ok + phy_rx_error)"
+                if verdicts
+                else "unavailable: no decoder verdicts attributable by IP endpoints"
+            ),
             "state": state,
         }
         links[f"{tx}->{rx}"] = item
         matrix_rows.append({
             "tx": tx, "rx": rx,
             "path_count": item["path_count"]["p50"],
-            "rssi_dbm": "unavailable", "snr_db": "unavailable", "sinr_db": "unavailable",
+            "rx_power_dbm": item["wifi_rx_power_dbm"]["p50"],
+            "rssi_dbm": "unavailable", "snr_db": item["decoder_snr_db"]["p50"],
+            "sinr_db": "unavailable",
             "per": per if per is not None else "unavailable", "pdr": "unavailable",
             "latency_p95_ms": "unavailable", "state": state,
         })
+    canonical_event_counts = Counter(str(event.get("event", "")) for event in events)
+    raw_event_counts = Counter(str(event.get("raw_event", "")) for event in events)
     write_json(metrics_dir / "radio_link_summary.json", {
         "source": "live native Sionna/PHY events only",
+        "event_schema": {
+            "canonical_events": {
+                "sionna_link_state": "Sionna channel-parameter path count and generation time",
+                "wifi_rx_power": "post-Sionna integrated receive power from PhyRxBegin",
+                "wifi_phy_rx_end": "neutral end-of-signal observation, not a decode verdict",
+                "wifi_phy_rx_drop": "Wi-Fi PHY receive drop with reason code",
+                "phy_rx_ok": "decoder success from WifiPhyStateHelper RxOk",
+                "phy_rx_error": "decoder failure from WifiPhyStateHelper RxError",
+            },
+            "accepted_legacy_aliases": NATIVE_EVENT_ALIASES,
+            "canonical_event_counts": dict(canonical_event_counts),
+            "raw_event_counts": dict(raw_event_counts),
+        },
         "metric_availability": metric_availability,
         "bler": metric_availability["bler"],
         "links": links,
@@ -1075,6 +1847,7 @@ def build_radio_observability(
         incident = [row for row in rows if row["tx"] == uav or row["rx"] == uav]
         paths = [int(row["sionna_path_count"]) for row in incident]
         distances = [float(row["distance_m"]) for row in incident if isinstance(row["distance_m"], float)]
+        receive_evidence = receiver_event_evidence(events, uav)
         ack_control = diagnostic.get("control", {}).get("ack_latency_ms")
         ack_payload = diagnostic.get("payload", {}).get("ack_latency_ms")
         uav_rows.append({
@@ -1096,14 +1869,20 @@ def build_radio_observability(
             "additional_rx": len(outcomes[("cp", uav)]["ok"]),
             "additional_pdr": len(outcomes[("cp", uav)]["ok"]) / len(outcomes[("cp", uav)]["attempted"]) if outcomes[("cp", uav)]["attempted"] else "unavailable",
             "additional_goodput_bps": "unavailable",
+            "mean_rx_power_dbm": receive_evidence["wifi_rx_power_dbm"]["mean"],
+            "min_rx_power_dbm": receive_evidence["wifi_rx_power_dbm"]["min"],
+            "max_rx_power_dbm": receive_evidence["wifi_rx_power_dbm"]["max"],
             "mean_rssi_dbm": "unavailable", "min_rssi_dbm": "unavailable",
-            "mean_snr_db": "unavailable", "min_snr_db": "unavailable",
+            "mean_snr_db": receive_evidence["decoder_snr_db"]["mean"],
+            "min_snr_db": receive_evidence["decoder_snr_db"]["min"],
             "mean_sinr_db": "unavailable", "min_sinr_db": "unavailable",
             "min_path_count": min(paths) if paths else "unavailable",
             "median_path_count": percentile(paths, 50) if paths else "unavailable",
             "max_path_count": max(paths) if paths else "unavailable",
-            "phy_rx_ok": sum(len(outcomes[(tx, uav)]["ok"]) for tx in {"cp", *UAVS} if tx != uav),
-            "phy_rx_error": sum(len(outcomes[(tx, uav)]["error"]) for tx in {"cp", *UAVS} if tx != uav),
+            "phy_rx_ok": receive_evidence["phy_rx_ok"],
+            "phy_rx_error": receive_evidence["phy_rx_error"],
+            "wifi_phy_rx_end": receive_evidence["wifi_phy_rx_end"],
+            "wifi_phy_rx_drop": receive_evidence["wifi_phy_rx_drop"],
             "distance_min_m": min(distances) if distances else "unavailable",
             "distance_max_m": max(distances) if distances else "unavailable",
         })
@@ -1112,6 +1891,359 @@ def build_radio_observability(
         writer.writeheader()
         writer.writerows(uav_rows)
     return {"radio_links": links, "radio_rows": len(rows), "metric_availability": metric_availability}
+
+
+def summarize_causal_link_probes(
+    run_dir: Path,
+    scenario: dict[str, Any],
+    scenario_config: dict[str, Any],
+    events: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Gate a config-declared clear -> shadow -> recovery experiment."""
+
+    expectation = scenario_config.get("causal_expectation", {})
+    output_path = run_dir / "metrics/causal_link_summary.json"
+    if not expectation:
+        result = {
+            "required": False,
+            "passed": True,
+            "status": "not_required",
+            "scenario_config": scenario_config["path"],
+            "expectation": {},
+            "expected_sequence": [],
+            "observed_sequence": [],
+            "phases": {},
+            "per_uav": {},
+            "failures": [],
+        }
+        write_json(output_path, result)
+        return result
+
+    failures: list[str] = []
+
+    def fail(message: str) -> None:
+        if message not in failures:
+            failures.append(message)
+
+    runtime_parameters = scenario.get("predeclared_parameters", {})
+    runtime_expectation = (
+        runtime_parameters.get("causal_expectation")
+        if isinstance(runtime_parameters, dict)
+        else None
+    )
+    if runtime_expectation != expectation:
+        fail(
+            "scenario_summary predeclared causal_expectation does not match the selected scenario config"
+        )
+
+    positive_observations: list[tuple[str, int]] = []
+    for record in scenario_config.get("observations", []):
+        try:
+            packet_count = int(record.get("probe_packets_per_uav", 0))
+        except (TypeError, ValueError):
+            packet_count = -1
+        if packet_count > 0:
+            positive_observations.append(
+                (
+                    canonical_phase(
+                        str(record.get("name", "")), scenario_config["phase_aliases"]
+                    ),
+                    packet_count,
+                )
+            )
+    expected_roles = ("clear", "shadow", "recovery")
+    if len(positive_observations) != 3:
+        fail("flight.observations must declare exactly three positive-packet causal phases")
+    for index, role in enumerate(expected_roles):
+        if index >= len(positive_observations) or role not in positive_observations[index][0].lower():
+            fail(f"causal observation {index + 1} must be the {role} phase")
+    expected_sequence = [name for name, _packets in positive_observations]
+
+    probes_value = scenario.get("causal_link_probes", [])
+    probes = probes_value if isinstance(probes_value, list) else []
+    if not isinstance(probes_value, list):
+        fail("scenario_summary.causal_link_probes must be a list")
+    normalized_probes = [probe for probe in probes if isinstance(probe, dict)]
+    if len(normalized_probes) != len(probes):
+        fail("scenario_summary.causal_link_probes contains a non-object record")
+    observed_sequence = [
+        canonical_phase(str(probe.get("phase", "")), scenario_config["phase_aliases"])
+        for probe in normalized_probes
+    ]
+    if observed_sequence != expected_sequence:
+        fail(
+            "causal probes must appear exactly once in configured clear -> shadow -> recovery order"
+        )
+    probes_by_phase: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+    for phase, probe in zip(observed_sequence, normalized_probes):
+        probes_by_phase[phase].append(probe)
+
+    controlled = [str(value) for value in expectation.get("controlled_uavs", [])]
+    shadowed = [str(value) for value in expectation.get("shadowed_uavs", [])]
+    if not controlled or not shadowed:
+        fail("causal_expectation must declare non-empty controlled_uavs and shadowed_uavs")
+    if set(controlled) & set(shadowed):
+        fail("controlled_uavs and shadowed_uavs must be disjoint")
+    if set(controlled) | set(shadowed) != set(UAVS):
+        fail("controlled_uavs and shadowed_uavs must partition all five UAVs")
+    if len(controlled) != len(set(controlled)) or len(shadowed) != len(set(shadowed)):
+        fail("causal UAV groups must not contain duplicates")
+
+    thresholds: dict[str, float] = {}
+    for key in (
+        "clear_min_pdr",
+        "shadow_max_pdr",
+        "recovery_min_pdr",
+        "minimum_shadow_pdr_drop",
+    ):
+        try:
+            value = float(expectation[key])
+        except (KeyError, TypeError, ValueError):
+            fail(f"causal_expectation.{key} must be a finite probability")
+            value = math.nan
+        if not math.isfinite(value) or value < 0.0 or value > 1.0:
+            fail(f"causal_expectation.{key} must be in [0, 1]")
+        thresholds[key] = value
+
+    phases: dict[str, Any] = {}
+    per_uav: dict[str, dict[str, Any]] = {uav: {"group": "unknown"} for uav in UAVS}
+    for uav in controlled:
+        if uav in per_uav:
+            per_uav[uav]["group"] = "controlled"
+    for uav in shadowed:
+        if uav in per_uav:
+            per_uav[uav]["group"] = "shadowed"
+
+    for index, (phase, configured_packets) in enumerate(positive_observations):
+        role = expected_roles[index] if index < len(expected_roles) else f"phase_{index + 1}"
+        matching = probes_by_phase.get(phase, [])
+        probe = matching[0] if len(matching) == 1 else {}
+        if len(matching) != 1:
+            fail(f"{phase}: expected exactly one probe record")
+        if probe.get("application_retransmissions") is not False:
+            fail(f"{phase}: application_retransmissions must be false")
+
+        phase_per_uav = probe.get("per_uav", {})
+        if not isinstance(phase_per_uav, dict) or set(phase_per_uav) != set(UAVS):
+            fail(f"{phase}: per_uav must contain exactly uav1..uav5")
+            phase_per_uav = phase_per_uav if isinstance(phase_per_uav, dict) else {}
+        phase_result: dict[str, Any] = {
+            "role": role,
+            "phase": phase,
+            "configured_packets_per_uav": configured_packets,
+            "application_retransmissions": probe.get("application_retransmissions"),
+            "offered_packets": probe.get("offered_packets"),
+            "delivered_packets": probe.get("delivered_packets"),
+            "per_uav": {},
+        }
+        offered_sum = 0
+        delivered_sum = 0
+        delivered_by_uav: dict[str, int] = {}
+        for uav in UAVS:
+            record = phase_per_uav.get(uav, {})
+            if not isinstance(record, dict):
+                record = {}
+            offered = record.get("offered_packets")
+            delivered = record.get("delivered_packets")
+            pdr = record.get("pdr")
+            counts_valid = (
+                isinstance(offered, int)
+                and not isinstance(offered, bool)
+                and isinstance(delivered, int)
+                and not isinstance(delivered, bool)
+                and offered == configured_packets
+                and 0 <= delivered <= offered
+            )
+            if not counts_valid:
+                fail(
+                    f"{phase}/{uav}: offered must equal configured packet count and delivered must be bounded"
+                )
+            offered_number = offered if isinstance(offered, int) and not isinstance(offered, bool) else 0
+            delivered_number = delivered if isinstance(delivered, int) and not isinstance(delivered, bool) else 0
+            offered_sum += offered_number
+            delivered_sum += delivered_number
+            delivered_by_uav[uav] = delivered_number
+            expected_pdr = delivered_number / offered_number if offered_number > 0 else math.nan
+            pdr_valid = (
+                isinstance(pdr, (int, float))
+                and not isinstance(pdr, bool)
+                and math.isfinite(float(pdr))
+                and 0.0 <= float(pdr) <= 1.0
+                and math.isclose(float(pdr), expected_pdr, rel_tol=0.0, abs_tol=1e-12)
+            )
+            if not pdr_valid:
+                fail(f"{phase}/{uav}: pdr must equal delivered_packets / offered_packets")
+
+            latencies = record.get("latency_ms", [])
+            latency_values = (
+                [float(value) for value in latencies]
+                if isinstance(latencies, list)
+                and all(
+                    isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                    and math.isfinite(float(value))
+                    and float(value) >= 0.0
+                    for value in latencies
+                )
+                else []
+            )
+            if len(latency_values) != delivered_number:
+                fail(f"{phase}/{uav}: latency sample count must equal delivered_packets")
+
+            position = record.get("position_m")
+            targets = scenario_config["mission_targets"].get(phase, {})
+            target = targets.get(uav)
+            position_error_m: float | None = None
+            try:
+                if target is not None and isinstance(position, list) and len(position) == 3:
+                    position_error_m = math.dist(
+                        [float(component) for component in position], target
+                    )
+            except (TypeError, ValueError):
+                position_error_m = None
+            if target is None or position_error_m is None:
+                fail(f"{phase}/{uav}: missing configured mission target or measured position")
+            elif position_error_m > scenario_config["mission_tolerance_m"]:
+                fail(f"{phase}/{uav}: position is outside configured mission tolerance")
+
+            path_values = [
+                int(event["value"])
+                for event in events
+                if event.get("event") == "sionna_link_state"
+                and event.get("phase") == phase
+                and event.get("node") == "cp"
+                and event.get("peer") == uav
+                and isinstance(event.get("value"), (int, float))
+                and math.isfinite(float(event["value"]))
+            ]
+            receive = receiver_event_evidence(
+                events, uav, phase=phase
+            )
+            if not path_values:
+                fail(f"{phase}/{uav}: no Sionna link-state sample")
+            receive_required = uav in controlled or role in {"clear", "recovery"} or delivered_number > 0
+            if receive_required and receive["wifi_rx_power"] == 0:
+                fail(f"{phase}/{uav}: no post-Sionna Wi-Fi receive-power sample")
+            if receive_required and receive["wifi_phy_rx_end"] == 0:
+                fail(f"{phase}/{uav}: no neutral Wi-Fi PhyRxEnd observation")
+            if delivered_number > 0 and receive["phy_rx_ok"] == 0:
+                fail(f"{phase}/{uav}: application delivery has no attributable PHY decode success")
+
+            pdr_number = float(pdr) if pdr_valid else None
+            phase_uav = {
+                "offered_packets": offered,
+                "delivered_packets": delivered,
+                "pdr": pdr_number,
+                "latency_ms": distribution(latency_values),
+                "position_m": position,
+                "target_position_m": target,
+                "position_error_m": position_error_m,
+                "native_evidence": {
+                    "sionna_path_count": distribution(path_values),
+                    "causal_attribution": (
+                        "cp<->UAV identity comes from sionna_link_state pair and endpoint "
+                        "probe identities; Wi-Fi receive traces are honest receiver+phase "
+                        "aggregates because the public PSDU trace may not expose IP endpoints"
+                    ),
+                    **receive,
+                },
+            }
+            phase_result["per_uav"][uav] = phase_uav
+            per_uav[uav][role] = phase_uav
+
+        sends = probe.get("sends", [])
+        deliveries = probe.get("deliveries", [])
+        if not isinstance(sends, list) or len(sends) != offered_sum:
+            fail(f"{phase}: sends length must equal summed per-UAV offered packets")
+        if not isinstance(deliveries, list) or len(deliveries) != delivered_sum:
+            fail(f"{phase}: deliveries length must equal summed per-UAV delivered packets")
+        if isinstance(sends, list):
+            send_keys = [
+                (record.get("uav"), record.get("wire_sequence"))
+                for record in sends
+                if isinstance(record, dict)
+            ]
+            send_counts = Counter(key[0] for key in send_keys)
+            if len(send_keys) != len(sends) or len(set(send_keys)) != len(send_keys):
+                fail(f"{phase}: sends must have unique (uav, wire_sequence) identities")
+            if any(send_counts[uav] != configured_packets for uav in UAVS):
+                fail(f"{phase}: sends must contain the configured offer count for every UAV")
+        else:
+            send_keys = []
+        if isinstance(deliveries, list):
+            delivery_keys = [
+                (record.get("uav"), record.get("wire_sequence"))
+                for record in deliveries
+                if isinstance(record, dict)
+            ]
+            delivery_counts = Counter(key[0] for key in delivery_keys)
+            if (
+                len(delivery_keys) != len(deliveries)
+                or len(set(delivery_keys)) != len(delivery_keys)
+                or not set(delivery_keys) <= set(send_keys)
+            ):
+                fail(f"{phase}: deliveries must be a unique subset of offered identities")
+            if any(
+                delivery_counts[uav] != delivered_by_uav.get(uav, -1)
+                for uav in UAVS
+            ):
+                fail(f"{phase}: delivery identities must match per-UAV delivered counts")
+        if probe.get("offered_packets") != offered_sum:
+            fail(f"{phase}: top-level offered_packets does not equal per-UAV sum")
+        if probe.get("delivered_packets") != delivered_sum:
+            fail(f"{phase}: top-level delivered_packets does not equal per-UAV sum")
+        phases[phase] = phase_result
+
+    for uav in UAVS:
+        records = per_uav[uav]
+        clear_pdr = records.get("clear", {}).get("pdr")
+        shadow_pdr = records.get("shadow", {}).get("pdr")
+        recovery_pdr = records.get("recovery", {}).get("pdr")
+        if not all(isinstance(value, float) for value in (clear_pdr, shadow_pdr, recovery_pdr)):
+            fail(f"{uav}: incomplete clear/shadow/recovery PDR sequence")
+            records["clear_to_shadow_pdr_drop"] = None
+            records["shadow_to_recovery_pdr_gain"] = None
+            continue
+        records["clear_to_shadow_pdr_drop"] = clear_pdr - shadow_pdr
+        records["shadow_to_recovery_pdr_gain"] = recovery_pdr - shadow_pdr
+        if clear_pdr < thresholds["clear_min_pdr"]:
+            fail(f"{uav}: clear PDR below clear_min_pdr")
+        if recovery_pdr < thresholds["recovery_min_pdr"]:
+            fail(f"{uav}: recovery PDR below recovery_min_pdr")
+        if uav in shadowed:
+            if shadow_pdr > thresholds["shadow_max_pdr"]:
+                fail(f"{uav}: shadow PDR above shadow_max_pdr")
+            if clear_pdr - shadow_pdr < thresholds["minimum_shadow_pdr_drop"]:
+                fail(f"{uav}: clear-to-shadow PDR drop below minimum_shadow_pdr_drop")
+        elif uav in controlled and shadow_pdr < thresholds["clear_min_pdr"]:
+            fail(f"{uav}: controlled-UAV PDR fell below clear_min_pdr during shadow phase")
+
+    result = {
+        "required": True,
+        "passed": not failures,
+        "status": "passed" if not failures else "failed",
+        "scenario_config": scenario_config["path"],
+        "expectation": expectation,
+        "runtime_predeclared_expectation": runtime_expectation,
+        "thresholds": thresholds,
+        "expected_sequence": expected_sequence,
+        "observed_sequence": observed_sequence,
+        "gate_contract": {
+            "application_retransmissions": False,
+            "identical_offered_packets_per_uav": True,
+            "all_five_positions_within_configured_mission_tolerance": True,
+            "all_phases_have_sionna_link_state_for_each_cp_uav_pair": True,
+            "receive_power_and_neutral_rx_end_required_when_delivery_is_expected_or_observed": True,
+            "decode_success_required_for_each_nonzero_application_delivery_set": True,
+            "controlled_uavs_hold_clear_min_pdr_during_shadow": True,
+            "wifi_phy_rx_end_is_not_a_success_verdict": True,
+        },
+        "phases": phases,
+        "per_uav": per_uav,
+        "failures": failures,
+    }
+    write_json(output_path, result)
+    return result
 
 
 def active_diagnostic_uavs(scenario: dict[str, Any]) -> tuple[str, ...]:
@@ -1340,6 +2472,8 @@ def summarize_native_contention(
     half_duplex: defaultdict[str, Counter[str]] = defaultdict(Counter)
     return_mac_uids: set[int] = set()
     return_rx_start_uids: set[int] = set()
+    return_rx_end_uids: set[int] = set()
+    return_rx_drop_uids: set[int] = set()
     return_rx_ok_uids: set[int] = set()
     return_rx_error_uids: set[int] = set()
     for row in events:
@@ -1356,7 +2490,10 @@ def summarize_native_contention(
                 "time_s": row.get("time_s"), "node": node, "event": name,
                 "value": value, "bytes": row.get("bytes"), "details": row.get("details"),
             })
-        if name in {"phy_tx_start", "phy_tx_end", "phy_rx_start", "phy_rx_abort", "phy_rx_ok", "phy_rx_error"}:
+        if name in {
+            "phy_tx_start", "phy_tx_end", "phy_rx_start", "phy_rx_abort",
+            "wifi_phy_rx_end", "wifi_phy_rx_drop", "phy_rx_ok", "phy_rx_error",
+        }:
             half_duplex[node][name] += 1
         uid = packet_uid(row)
         if uid is not None and node.startswith("uav") and name == "mac_tx" and row.get("dst_port") == 14600:
@@ -1364,6 +2501,10 @@ def summarize_native_contention(
         if uid is not None and node == "cp" and row.get("dst_port") == 14600:
             if name == "phy_rx_start":
                 return_rx_start_uids.add(uid)
+            elif name == "wifi_phy_rx_end":
+                return_rx_end_uids.add(uid)
+            elif name == "wifi_phy_rx_drop":
+                return_rx_drop_uids.add(uid)
             elif name == "phy_rx_ok":
                 return_rx_ok_uids.add(uid)
             elif name == "phy_rx_error":
@@ -1392,9 +2533,15 @@ def summarize_native_contention(
     return_chain = {
         "uav_to_gcs_mac_tx": len(return_mac_uids),
         "cp_phy_rx_start": len(return_rx_start_uids),
+        "cp_wifi_phy_rx_end": len(return_rx_end_uids),
+        "cp_wifi_phy_rx_drop": len(return_rx_drop_uids),
         "cp_phy_rx_ok": len(return_rx_ok_uids),
         "cp_phy_rx_error": len(return_rx_error_uids),
         "no_cp_rx_candidate": len(return_mac_uids - return_rx_start_uids),
+        "decode_semantics": (
+            "wifi_phy_rx_end is not counted as success; only WifiPhyStateHelper "
+            "phy_rx_ok/phy_rx_error events are decoder verdicts"
+        ),
         "no_cp_rx_candidate_reason": (
             "SpectrumWifiPhy MPDU trace UIDs are not identical to the pre-enqueue MSDU UID; "
             "application ACK accounting remains authoritative"
@@ -1432,9 +2579,36 @@ def summarize_observer_mode(run_dir: Path, events: list[dict[str, Any]]) -> dict
     return result
 
 
+def export_wifi_monitor(run_dir: Path, events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Export native MPDU observations; no interpolation across missing receptions."""
+    rows = [e for e in events if e.get("event") == "wifi_monitor_rx"]
+    fields = ["time_s", "wall_monotonic_ns", "phase", "node", "peer", "src_ip", "dst_ip",
+              "x", "y", "z", "bytes", "signal_dbm", "noise_interference_dbm", "sinr_db",
+              "frequency_mhz", "details"]
+    with (run_dir / "metrics/wifi_monitor_rx.csv").open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+    summary = {
+        "samples": len(rows), "level": "successfully_decoded_mpdu",
+        "source": "native WifiPhy.MonitorSnifferRx.SignalNoiseDbm",
+        "signal_dbm": distribution(e["signal_dbm"] for e in rows if e.get("signal_dbm") is not None),
+        "noise_interference_dbm": distribution(e["noise_interference_dbm"] for e in rows if e.get("noise_interference_dbm") is not None),
+        "sinr_db": distribution(e["sinr_db"] for e in rows if e.get("sinr_db") is not None),
+        "sinr_origin": "derived: native signal dBm minus native combined noise/interference dBm",
+        "outage_value": None, "outage_reason": "no decoded MPDU means no MonitorSnifferRx sample",
+        "total_rssi_dbm": None, "total_rssi_reason": "signal power excludes simultaneous signals and noise",
+        "bler": None, "bler_status": "not_applicable: no block abstraction in this PHY",
+        "pcap": "pcap/native_radio.pcap.radiotap-*.pcap is native 802.11/radiotap; native_radio.pcap is derived Ethernet",
+    }
+    write_json(run_dir / "metrics/wifi_monitor_summary.json", summary)
+    return summary
+
+
 def write_latency_diagnostic_report(run_dir: Path, observer_reference: Path | None = None) -> int:
     scenario = read_json(run_dir / "metrics/scenario_summary.json", {})
     events = native_events(run_dir / "logs/native_radio_events.csv")
+    export_wifi_monitor(run_dir, events)
     latency = summarize_latency_operations(run_dir, scenario)
     load = summarize_adapter_load(run_dir, scenario)
     stats = read_json(run_dir / "metrics/native_radio_stats.json", {})
@@ -1506,9 +2680,90 @@ def write_latency_diagnostic_report(run_dir: Path, observer_reference: Path | No
     return 0 if scenario.get("status") == "diagnostic_complete" else 1
 
 
+def add_optional_one_uav_regression_check(
+    functional_checks: dict[str, bool],
+    one_uav_run: Path | None,
+    one_uav_summary: dict[str, Any] | None,
+) -> None:
+    if one_uav_run is not None:
+        functional_checks["one_uav_regression"] = bool(
+            one_uav_summary and one_uav_summary.get("status") == "passed"
+        )
+
+
+def recorded_tx_power_w(
+    stats: dict[str, Any],
+    scenario: dict[str, Any],
+    scenario_config: dict[str, Any] | None = None,
+) -> float | None:
+    candidates = [stats.get("tx_power_w"), scenario.get("tx_power_w")]
+    for container in (stats.get("radio"), scenario.get("radio")):
+        if isinstance(container, dict):
+            candidates.append(container.get("tx_power_w"))
+    parameters = scenario.get("predeclared_parameters", {})
+    if isinstance(parameters, dict):
+        candidates.append(parameters.get("tx_power_w"))
+    if scenario_config is not None and isinstance(scenario_config.get("radio"), dict):
+        candidates.append(scenario_config["radio"].get("tx_power_w"))
+    for candidate in candidates:
+        if (
+            isinstance(candidate, (int, float))
+            and not isinstance(candidate, bool)
+            and math.isfinite(float(candidate))
+            and float(candidate) > 0.0
+        ):
+            return float(candidate)
+    return None
+
+
+def scenario_motion_pattern(scenario: dict[str, Any]) -> dict[str, Any]:
+    parameters = scenario.get("predeclared_parameters", {})
+    missions = parameters.get("flight_missions", {}) if isinstance(parameters, dict) else {}
+    if isinstance(missions, dict) and missions:
+        normalized_missions: dict[str, Any] = {}
+        for raw_uav, waypoints in missions.items():
+            key = str(raw_uav)
+            if key.isdigit():
+                key = f"uav{key}"
+            if key in UAVS:
+                normalized_missions[key] = waypoints
+        mission_uavs = sorted(
+            uav for uav, waypoints in normalized_missions.items() if waypoints
+        )
+        source = "scenario_summary.predeclared_parameters.flight_missions"
+        waypoint_counts = {
+            uav: len(waypoints) if isinstance(waypoints, list) else None
+            for uav, waypoints in normalized_missions.items()
+        }
+    else:
+        legacy_mission = scenario.get("mission", {})
+        moving = legacy_mission.get("moving_uav") if isinstance(legacy_mission, dict) else None
+        mission_uavs = [str(moving)] if moving in UAVS else []
+        source = "scenario_summary.mission.moving_uav"
+        waypoint_counts = {
+            str(moving): legacy_mission.get("item_count")
+        } if moving in UAVS else {}
+    return {
+        "source": source,
+        "mission_uavs": mission_uavs,
+        "holding_uavs": sorted(set(UAVS) - set(mission_uavs)),
+        "configured_waypoints_per_uav": waypoint_counts,
+        "mission_uav_displacement_m": scenario.get("mission_uav_displacement_m", {}),
+        "holding_uav_displacement_m": scenario.get("holding_uav_displacement_m", {}),
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
+    parser.add_argument(
+        "--scenario-config",
+        type=Path,
+        help=(
+            "scenario YAML supplying phase aliases, screenshot requirements, and causal "
+            "expectations; defaults to scenario_summary.json:scenario_config"
+        ),
+    )
     parser.add_argument("--one-uav-run", type=Path)
     parser.add_argument("--latency-diagnostic", action="store_true")
     parser.add_argument("--observer-reference-run", type=Path)
@@ -1521,20 +2776,36 @@ def main() -> int:
         )
     metrics_dir = run_dir / "metrics"
     scenario = read_json(metrics_dir / "scenario_summary.json", {})
+    if not isinstance(scenario, dict):
+        parser.error(f"invalid scenario summary: {metrics_dir / 'scenario_summary.json'}")
+    try:
+        scenario_config_path = resolve_scenario_config_path(args.scenario_config, scenario)
+        scenario_config = load_scenario_config(scenario_config_path)
+    except (OSError, ValueError, yaml.YAMLError) as error:
+        parser.error(str(error))
     stats = read_json(metrics_dir / "native_radio_stats.json", {})
     no_bypass = read_json(metrics_dir / "no_bypass_summary.json", {})
-    events = native_events(run_dir / "logs/native_radio_events.csv")
+    events = native_events(
+        run_dir / "logs/native_radio_events.csv", scenario_config["phase_aliases"]
+    )
+    export_wifi_monitor(run_dir, events)
     agents = agent_records(run_dir)
 
     topology = build_topology(run_dir, stats)
+    native_contract = native_product_runtime_contract(stats, scenario_config)
     mobility = build_mobility(run_dir, events)
     mavlink = build_mavlink(scenario)
     p2p = build_p2p(scenario, agents)
     p2mp = build_p2mp(scenario, agents, events)
     shared = build_shared_medium(scenario, agents, events)
-    realtime = build_realtime(run_dir, events, mobility, stats)
-    observability = build_radio_observability(run_dir, events, scenario)
-    screenshots = screenshot_status(run_dir, events)
+    realtime = build_realtime(
+        run_dir, events, mobility, stats, scenario_config["realtime_gates"]
+    )
+    observability = build_radio_observability(
+        run_dir, events, scenario, scenario_config["phase_aliases"]
+    )
+    screenshots = screenshot_status(run_dir, events, scenario_config)
+    causal = summarize_causal_link_probes(run_dir, scenario, scenario_config, events)
     one_uav = None
     if args.one_uav_run:
         one_uav = read_json(args.one_uav_run.resolve() / "metrics/native_product_summary.json", None)
@@ -1542,12 +2813,38 @@ def main() -> int:
             one_uav = read_json(args.one_uav_run.resolve() / "metrics/product_summary.json", None)
 
     sequential = scenario.get("dual_uart_diagnostics", {}).get("sequential", {})
-    p2p_verified = all(
-        p2p["per_uav"][uav]["gcs_to_uav"]["offered"] == 10
-        and p2p["per_uav"][uav]["uav_to_gcs"]["independently_originated"] == 10
-        for uav in UAVS
+    runtime_parameters = scenario.get("predeclared_parameters", {})
+    runtime_traffic = (
+        runtime_parameters.get("traffic", {}) if isinstance(runtime_parameters, dict) else {}
     )
+    configured_traffic = scenario_config["traffic"]
+    traffic_config_lineage = runtime_traffic == configured_traffic
+    delivery_checks = traffic_delivery_checks(p2p, p2mp, shared, configured_traffic)
+    runtime_map = scenario.get("map", {})
+    scenario_config_lineage = bool(
+        scenario.get("scenario_name") == scenario_config["scenario_name"]
+        and isinstance(runtime_map, dict)
+        and runtime_map.get("id") == scenario_config["map"].get("id")
+    )
+    process_snapshot_path = run_dir / "logs/process_snapshot.txt"
+    process_text = process_snapshot_path.read_text(
+        encoding="utf-8", errors="replace"
+    ) if process_snapshot_path.exists() else ""
+    forbidden = {
+        "network/radio_provider/provider.py": "network/radio_provider/provider.py" in process_text,
+        "scripts/product/town01_radio_state.py": "scripts/product/town01_radio_state.py" in process_text,
+        "AmsStockSionnaPacketErrorModel": "AmsStockSionnaPacketErrorModel" in process_text,
+        "centralized_priority_scheduler": "centralized_priority_scheduler" in process_text,
+        "custom_five_uav_packet_engine": "ams-tap-packet-engine" in process_text,
+    }
     functional_checks = {
+        "scenario_config_lineage": scenario_config_lineage,
+        "traffic_config_lineage": traffic_config_lineage,
+        "native_wifi_sionna_runtime_contract": native_contract["passed"],
+        "realtime_scheduler_gazebo_and_pose_gates": realtime["realtime_readiness"]
+        == "ready",
+        "runtime_process_snapshot_observed": bool(process_text.strip()),
+        "no_forbidden_custom_or_bypass_components": not any(forbidden.values()),
         "five_real_sitl_and_gazebo_lifecycle": scenario.get("status") == "passed",
         "five_real_odometry_sources": mobility.get(
             "all_required_odometry_streams_observed", False
@@ -1561,44 +2858,45 @@ def main() -> int:
             and sequential.get(uav, {}).get("payload", {}).get("response_received")
             for uav in UAVS
         ),
-        "p2p_exact_offers_all_five": p2p_verified,
-        "p2mp_twenty_single_root_sends": p2mp["root_transmissions"] == 20
-        and p2mp["application_unicast_copies"] == 0
-        and p2mp["command_post_mac_tx"] == 20,
-        "simultaneous_uplink_exact_offers": all(
-            shared["per_uav"][uav]["offered_packets"] == 20 for uav in UAVS
-        ),
+        "p2p_configured_offers_and_delivery_all_five": delivery_checks["p2p"],
+        "p2mp_configured_root_and_delivery_all_five": delivery_checks["p2mp"],
+        "simultaneous_uplink_delivery_and_fairness": delivery_checks["simultaneous"],
         "flight_land_auto_disarm_all_five": all(
             scenario.get("uavs", {}).get(uav, {}).get("phases", {}).get("auto_disarm")
             for uav in UAVS
         ),
         "no_bypass_all_five": bool(no_bypass.get("passed")),
         "live_gazebo_evidence": screenshots["screenshots_status"] == "passed",
-        "one_uav_regression": bool(one_uav and one_uav.get("status") == "passed"),
         "exact_seven_pcaps": topology["exact_pcap_count"] == 7,
     }
+    if causal["required"]:
+        functional_checks["causal_clear_shadow_recovery"] = bool(causal["passed"])
+    add_optional_one_uav_regression_check(
+        functional_checks, args.one_uav_run, one_uav
+    )
     functional_status = "passed" if all(functional_checks.values()) else "failed"
     if functional_status != "passed" and realtime["realtime_readiness"] == "ready":
         # Timing alone is not product readiness when the same RTF=1 run did
         # not complete the native control/flight proof.
         realtime["realtime_readiness"] = "limited"
         realtime["functional_prerequisite"] = "failed"
-    process_text = (run_dir / "logs/process_snapshot.txt").read_text(
-        encoding="utf-8", errors="replace"
-    ) if (run_dir / "logs/process_snapshot.txt").exists() else ""
-    forbidden = {
-        "network/radio_provider/provider.py": "network/radio_provider/provider.py" in process_text,
-        "scripts/product/town01_radio_state.py": "scripts/product/town01_radio_state.py" in process_text,
-        "AmsStockSionnaPacketErrorModel": "AmsStockSionnaPacketErrorModel" in process_text,
-        "centralized_priority_scheduler": "centralized_priority_scheduler" in process_text,
-        "custom_five_uav_packet_engine": "ams-tap-packet-engine" in process_text,
-    }
     status = "functional_native_path" if functional_status == "passed" else "realtime_failed"
     if functional_status == "passed":
         status = "realtime_ready" if realtime["realtime_readiness"] == "ready" else "realtime_limited"
+    runtime_tx_power_w = recorded_tx_power_w(stats, scenario)
+    tx_power_w = recorded_tx_power_w(stats, scenario, scenario_config)
+    tx_power_basis = (
+        "native stats/scenario summary"
+        if runtime_tx_power_w is not None
+        else "selected scenario radio product config"
+        if tx_power_w is not None
+        else "unavailable"
+    )
     operating_envelope = {
         "uav_count": 5,
-        "motion_pattern": "five-UAV flight with UAV1 moving and UAV2..UAV5 holding",
+        "motion_pattern": scenario_motion_pattern(scenario),
+        "tx_power_w": tx_power_w,
+        "tx_power_basis": tx_power_basis,
         "cache_policy": stats.get("cache_policy", "displacement_or_time"),
         "update_period_s": stats.get("channel_state_max_age_s"),
         "displacement_threshold_m": stats.get("endpoint_displacement_threshold_m"),
@@ -1622,12 +2920,20 @@ def main() -> int:
     write_json(metrics_dir / "operating_envelope.json", operating_envelope)
     summary = {
         "run_id": run_dir.name,
+        "scenario_config": scenario_config["path"],
+        "scenario_config_lineage": scenario_config_lineage,
         "functional_five_uav_native_path": functional_status,
         "functional_checks": functional_checks,
         "realtime_readiness": realtime["realtime_readiness"],
         "profile": stats.get("profile", scenario.get("profile")),
         "technology_specific_modem": bool(stats.get("technology_specific_modem", False)),
         "native_topology": topology,
+        "native_wifi_sionna_runtime_contract": native_contract,
+        "traffic_product_contract": {
+            "passed": traffic_config_lineage,
+            "configured": configured_traffic,
+            "runtime_predeclared": runtime_traffic,
+        },
         "mobility": mobility,
         "mavlink": mavlink,
         "p2p": p2p,
@@ -1639,6 +2945,8 @@ def main() -> int:
             "points": scenario.get("flight_points"),
             "holding_uav_displacement_m": scenario.get("holding_uav_displacement_m"),
             "uavs": scenario.get("uavs"),
+            "causal_expectation": scenario_config["causal_expectation"],
+            "causal_link_probes": causal,
         },
         "realtime": realtime,
         "observability": observability,
@@ -1646,6 +2954,7 @@ def main() -> int:
         "operating_envelope": operating_envelope,
         "no_bypass": no_bypass,
         "one_uav_regression": one_uav,
+        "one_uav_regression_required": bool(args.one_uav_run),
         "forbidden_custom_components_present": forbidden,
     }
     write_json(metrics_dir / "native_topology.json", topology)
@@ -1663,23 +2972,44 @@ def main() -> int:
         f"- Realtime readiness: **{realtime['realtime_readiness']}** (measured independently)",
         "- Topology: one ns-3 process, six native PHY/MAC devices, one shared Spectrum channel.",
         (
-            "- Radio: 2.4 GHz, 20 MHz 802.11n QoS SpectrumWifiPhy, HtMcs0, 0.01 W, "
-            "maxDepth 1, LOS + specular."
+            "- Radio: native 802.11n QoS SpectrumWifiPhy; Tx power="
+            f"{tx_power_w if tx_power_w is not None else 'unavailable'} W "
+            f"({tx_power_basis})."
             if stats.get("radio_backend") == "wifi"
-            else "- Radio: 2.4 GHz, 5 MHz, 1 Mbit/s, 0.01 W, maxDepth 1, LOS + specular."
+            else "- Radio: native Aloha/ideal PHY reference; Tx power="
+            f"{tx_power_w if tx_power_w is not None else 'unavailable'} W "
+            f"({tx_power_basis})."
         ),
         f"- P2MP: {p2mp['root_transmissions']} application roots, {p2mp['command_post_mac_tx']} command-post MacTx.",
         f"- Simultaneous uplink Jain fairness: {shared['jain_fairness']}",
         f"- No-bypass after common native process stop: {no_bypass.get('passed')}",
-        f"- One-UAV regression attached: {one_uav is not None}",
-        f"- Radio-link observations: {observability['radio_rows']}; RSSI/SNR/SINR are explicitly unavailable when the selected native API does not expose them.",
+        (
+            f"- One-UAV regression: {'passed' if functional_checks.get('one_uav_regression') else 'failed'} (required)."
+            if args.one_uav_run
+            else "- One-UAV regression: not requested; not part of this run's gate."
+        ),
+        f"- Radio-link observations: {observability['radio_rows']}; post-Sionna receive power is reported separately from unavailable RSSI/SINR metrics.",
         f"- BLER: {observability['metric_availability']['bler']}",
         f"- Live Gazebo screenshots: {screenshots['screenshots_status']}.",
+        f"- Causal clear -> shadow -> recovery gate: {causal['status']}.",
         "",
         "All packet and timing results above are derived from endpoint logs, native ns-3 traces, ROS tracker snapshots, Gazebo stats, and process-resource samples in this run directory.",
     ]
+    if causal["required"]:
+        report.extend(["", "## Causal link probe"])
+        for uav in UAVS:
+            record = causal["per_uav"].get(uav, {})
+            report.append(
+                f"- {uav} ({record.get('group', 'unknown')}): "
+                f"clear={record.get('clear', {}).get('pdr')}, "
+                f"shadow={record.get('shadow', {}).get('pdr')}, "
+                f"recovery={record.get('recovery', {}).get('pdr')}."
+            )
+        if causal["failures"]:
+            report.append(f"- Gate failures: {'; '.join(causal['failures'])}")
     report.extend(["", "## Live Gazebo frames"])
-    for stem in REQUIRED_SCREENSHOTS:
+    for specification in scenario_config["screenshots"]:
+        stem = specification["stem"]
         record = screenshots["records"][stem]
         if not record["valid_live_capture"]:
             report.append(f"- `{stem}`: unavailable in this run.")
@@ -1695,10 +3025,11 @@ def main() -> int:
                 f"[Hash-locked raw Gazebo frame](screenshots/{stem}.raw.png); the displayed "
                 "frame adds explicitly disclosed pinhole-projected live-odometry labels.",
                 "",
-                "Native evidence in the +/- 2 simulation-second frame window: "
+                "Native evidence in the +/- 2 wall-clock-second frame window: "
                 f"Sionna path observations={observation['sionna_path_observations']}, "
                 f"path count={observation['sionna_path_count_min']}..{observation['sionna_path_count_max']}, "
-                f"PHY RxEndOk/RxEndError={observation['phy_rx_ok']}/{observation['phy_rx_error']}.",
+                f"Wi-Fi PhyRxEnd/PhyRxDrop={observation['wifi_phy_rx_end']}/{observation['wifi_phy_rx_drop']}, "
+                f"decoder RxOk/RxError={observation['phy_rx_ok']}/{observation['phy_rx_error']}.",
             ]
         )
     (run_dir / "report.md").write_text("\n".join(report) + "\n", encoding="utf-8")

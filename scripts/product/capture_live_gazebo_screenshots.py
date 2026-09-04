@@ -15,33 +15,13 @@ from pathlib import Path
 import cv2
 import numpy as np
 import rclpy
+import yaml
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 
 
-CAPTURES = {
-    "takeoff": ("01_five_uav_takeoff", "overview"),
-    "five_uav_hold": ("02_five_uav_hold", "uav_focus"),
-    "los_observation": ("03_uav1_los", "uav_focus"),
-    "obstructed_observation": ("04_uav1_obstructed", "obstacle"),
-    "p2mp": ("05_p2mp_or_shared_medium", "overview"),
-    "simultaneous_uplink": ("05_p2mp_or_shared_medium", "overview"),
-    "landing": ("06_landing", "uav_focus"),
-}
-
-CAMERAS = {
-    "overview": {"pose": [50.0, 55.0, 140.0, 0.0, 1.5707, 0.0], "horizontal_fov": 1.4},
-    "obstacle": {"pose": [80.0, 110.0, 70.0, 0.0, 1.5707, 0.0], "horizontal_fov": 1.0},
-    "uav_focus": {
-        "pose": [50.0, 0.0, 90.0, 0.0, 1.5707, 1.5708],
-        "horizontal_fov": 1.2,
-    },
-}
-
-POSITION_GATES = {
-    "los_observation": ("uav1", [80.0, 0.0, 17.0], 8.0),
-    "obstructed_observation": ("uav1", [80.0, 110.0, 17.0], 8.0),
-}
+ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_SCENARIO_CONFIG = ROOT / "network/config/scenario_5uav_town01_native_product.yaml"
 
 PALETTE = {
     "cp": (255, 80, 20),
@@ -53,15 +33,60 @@ PALETTE = {
 }
 
 
-def canonical_phase(value: str) -> str:
-    if value == "takeoff_complete":
-        return "takeoff"
+def load_capture_config(path: Path) -> dict[str, object]:
+    value = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    evidence = value.get("evidence") or {}
+    cameras = evidence.get("cameras") or {}
+    screenshots = evidence.get("screenshots") or []
+    if not isinstance(cameras, dict) or not cameras:
+        raise RuntimeError(f"scenario has no evidence cameras: {path}")
+    if not isinstance(screenshots, list) or not screenshots:
+        raise RuntimeError(f"scenario has no evidence screenshots: {path}")
+    for name, camera in cameras.items():
+        if not isinstance(camera, dict) or len(camera.get("pose", [])) != 6:
+            raise RuntimeError(f"invalid camera {name!r} in {path}")
+        camera["horizontal_fov"] = float(camera["horizontal_fov_rad"])
+    captures: dict[str, dict[str, object]] = {}
+    for item in screenshots:
+        if not isinstance(item, dict):
+            raise RuntimeError(f"invalid screenshot entry in {path}")
+        phase = str(item.get("phase", ""))
+        if not phase or item.get("camera") not in cameras or not item.get("stem"):
+            raise RuntimeError(f"invalid screenshot specification in {path}: {item!r}")
+        captures[phase] = item
+    robots = {
+        str(robot["name"]): [float(component) for component in robot["position"][:3]]
+        for robot in value.get("robots", [])
+    }
+    mission_targets: dict[str, dict[str, list[float]]] = {}
+    for uav, mission in ((value.get("flight") or {}).get("missions") or {}).items():
+        for waypoint in mission:
+            mission_targets.setdefault(str(waypoint["name"]), {})[str(uav)] = [
+                float(component) for component in waypoint["position_m"]
+            ]
     return {
-        "hold_all": "five_uav_hold",
-        "los": "los_observation",
-        "obstructed_candidate": "obstructed_observation",
-        "landing_complete": "landing",
-    }.get(value, value)
+        "scenario_name": str((value.get("scenario") or {}).get("name", path.stem)),
+        "map_id": str(((value.get("scenario") or {}).get("map") or {}).get("id", "unknown")),
+        "cameras": cameras,
+        "captures": captures,
+        "phase_aliases": {
+            str(key): str(alias)
+            for key, alias in (evidence.get("phase_aliases") or {}).items()
+        },
+        "robots": robots,
+        "mission_targets": mission_targets,
+        "mission_tolerance_m": float(
+            (value.get("flight") or {}).get("mission_position_tolerance_m", 8.0)
+        ),
+        "airborne_clearance_m": float(evidence.get("airborne_clearance_m", 6.0)),
+        "landed_altitude_tolerance_m": float(
+            evidence.get("landed_altitude_tolerance_m", 3.0)
+        ),
+    }
+
+
+def canonical_phase(value: str, aliases: dict[str, str]) -> str:
+    return aliases.get(value, value)
 
 
 def rotation_matrix(roll: float, pitch: float, yaw: float) -> np.ndarray:
@@ -77,9 +102,13 @@ def rotation_matrix(roll: float, pitch: float, yaw: float) -> np.ndarray:
 
 
 def project_position(
-    position: list[float], camera: str, width: int, height: int
+    position: list[float],
+    camera: str,
+    width: int,
+    height: int,
+    cameras: dict[str, dict[str, object]],
 ) -> dict[str, float | int | bool]:
-    spec = CAMERAS[camera]
+    spec = cameras[camera]
     pose = spec["pose"]
     relative_world = np.asarray(position, dtype=float) - np.asarray(pose[:3], dtype=float)
     local = rotation_matrix(*pose[3:]).T @ relative_world
@@ -98,11 +127,17 @@ def project_position(
 
 
 def annotate_frame(
-    image: np.ndarray, camera: str, phase: str, positions: dict[str, list[float]]
+    image: np.ndarray,
+    camera: str,
+    phase: str,
+    positions: dict[str, list[float]],
+    cameras: dict[str, dict[str, object]],
 ) -> tuple[np.ndarray, dict[str, dict[str, float | int | bool]]]:
     annotated = image.copy()
     projections = {
-        name: project_position(position, camera, image.shape[1], image.shape[0])
+        name: project_position(
+            position, camera, image.shape[1], image.shape[0], cameras
+        )
         for name, position in positions.items()
         if name == "cp" or name.startswith("uav")
     }
@@ -186,15 +221,25 @@ class Capture(Node):
     def __init__(self, args: argparse.Namespace) -> None:
         super().__init__("native_radio_live_screenshot_capture")
         self.args = args
-        self.frames: dict[str, Image] = {}
+        self.config = load_capture_config(args.scenario_config)
+        self.cameras = self.config["cameras"]
+        self.captures = self.config["captures"]
+        self.phase_aliases = self.config["phase_aliases"]
+        self.frames: dict[str, tuple[Image, int]] = {}
         self.done: set[str] = set()
-        self.create_subscription(Image, "/native_radio/overview/image", lambda msg: self.frame("overview", msg), 1)
-        self.create_subscription(Image, "/native_radio/obstacle/image", lambda msg: self.frame("obstacle", msg), 1)
-        self.create_subscription(Image, "/native_radio/uav_focus/image", lambda msg: self.frame("uav_focus", msg), 1)
+        self.last_phase: str | None = None
+        self.phase_seen_monotonic_ns = 0
+        for name, camera in self.cameras.items():
+            self.create_subscription(
+                Image,
+                str(camera["topic"]),
+                lambda message, camera_name=name: self.frame(camera_name, message),
+                1,
+            )
         self.create_timer(0.2, self.poll)
 
     def frame(self, camera: str, message: Image) -> None:
-        self.frames[camera] = message
+        self.frames[camera] = (message, time.monotonic_ns())
 
     def poll(self) -> None:
         if self.args.stop_file.exists():
@@ -202,23 +247,30 @@ class Capture(Node):
             rclpy.shutdown()
             return
         try:
-            phase = canonical_phase(self.args.phase_file.read_text(encoding="utf-8").strip())
+            phase = canonical_phase(
+                self.args.phase_file.read_text(encoding="utf-8").strip(),
+                self.phase_aliases,
+            )
         except OSError:
             return
-        capture = CAPTURES.get(phase)
+        if phase != self.last_phase:
+            self.last_phase = phase
+            self.phase_seen_monotonic_ns = time.monotonic_ns()
+        capture = self.captures.get(phase)
         if not capture:
             return
-        stem, camera = capture
+        stem, camera = str(capture["stem"]), str(capture["camera"])
         if stem in self.done or camera not in self.frames:
             return
         positions, fresh_uavs, command_post, tracker_time = load_positions(self.args.node_state)
         tracker_snapshot_age_s = time.time() - tracker_time if tracker_time is not None else math.inf
         if len(fresh_uavs) != 5 or command_post is None or tracker_snapshot_age_s > 1.0:
             return
-        gate = POSITION_GATES.get(phase)
-        if gate and math.dist(positions.get(gate[0], [math.inf] * 3), gate[1]) > gate[2]:
+        if not self.spatial_gate_valid(capture, positions):
             return
-        message = self.frames[camera]
+        message, frame_received_monotonic_ns = self.frames[camera]
+        if frame_received_monotonic_ns < self.phase_seen_monotonic_ns:
+            return
         channels = 3 if message.encoding.lower() in {"rgb8", "bgr8"} else 4
         image = np.frombuffer(message.data, dtype=np.uint8)
         expected = message.height * message.step
@@ -239,6 +291,7 @@ class Capture(Node):
             camera,
             phase,
             {**{name: positions[name] for name in fresh_uavs}, "cp": command_post},
+            self.cameras,
         )
         if not cv2.imwrite(str(raw_output), image) or not cv2.imwrite(str(output), annotated):
             return
@@ -248,12 +301,17 @@ class Capture(Node):
         metadata = {
             "run_id": self.args.run_id,
             "wall_timestamp": datetime.now(timezone.utc).isoformat(),
+            "frame_received_monotonic_ns": frame_received_monotonic_ns,
+            "capture_monotonic_ns": time.monotonic_ns(),
             "tracker_snapshot_wall_age_s": tracker_snapshot_age_s,
             "simulation_timestamp": message.header.stamp.sec + message.header.stamp.nanosec / 1e9,
             "scenario_phase": phase,
+            "scenario_config": str(self.args.scenario_config),
+            "scenario_name": self.config["scenario_name"],
+            "map_id": self.config["map_id"],
             "camera_name": camera,
-            "camera_pose": CAMERAS[camera]["pose"],
-            "camera_horizontal_fov_rad": CAMERAS[camera]["horizontal_fov"],
+            "camera_pose": self.cameras[camera]["pose"],
+            "camera_horizontal_fov_rad": self.cameras[camera]["horizontal_fov"],
             "fresh_uavs": fresh_uavs,
             "projected_uavs": projected_uavs,
             "uav_positions": {name: positions[name] for name in fresh_uavs},
@@ -269,6 +327,34 @@ class Capture(Node):
         (self.args.output / f"{stem}.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
         self.done.add(stem)
 
+    def spatial_gate_valid(
+        self, capture: dict[str, object], positions: dict[str, list[float]]
+    ) -> bool:
+        mission_phase = capture.get("mission_phase")
+        if mission_phase:
+            targets = self.config["mission_targets"].get(str(mission_phase), {})
+            tolerance = float(self.config["mission_tolerance_m"])
+            if not targets or any(
+                math.dist(positions.get(uav, [math.inf] * 3), target) > tolerance
+                for uav, target in targets.items()
+            ):
+                return False
+        altitude_state = capture.get("altitude_state")
+        initial = self.config["robots"]
+        if altitude_state == "airborne":
+            clearance = float(self.config["airborne_clearance_m"])
+            return all(
+                uav in positions and positions[uav][2] >= origin[2] + clearance
+                for uav, origin in initial.items()
+            )
+        if altitude_state == "landed":
+            tolerance = float(self.config["landed_altitude_tolerance_m"])
+            return all(
+                uav in positions and abs(positions[uav][2] - origin[2]) <= tolerance
+                for uav, origin in initial.items()
+            )
+        return True
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -277,6 +363,7 @@ def main() -> int:
     parser.add_argument("--node-state", type=Path, required=True)
     parser.add_argument("--phase-file", type=Path, required=True)
     parser.add_argument("--stop-file", type=Path, required=True)
+    parser.add_argument("--scenario-config", type=Path, default=DEFAULT_SCENARIO_CONFIG)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     rclpy.init()

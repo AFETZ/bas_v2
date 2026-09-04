@@ -4,19 +4,23 @@ schema_version: 1
 radio:
   backend: wifi
   profile: native_wifi_80211n_spectrum_reference_v1
-  technology_specific_modem: true
+  technology_specific_modem: false
   standard: 802.11n
+  calibration: uncalibrated_standard_reference
+  non_unicast_mode: ErpOfdmRate6Mbps
+  antenna: isotropic_single_element_0_dbi
+  control_basic_rates: native_ns3_80211n_2_4ghz_basic_set
   ssid: bas-native-radio
-  carrier_hz: 2400000000
+  channel_number: 1
+  carrier_hz: 2412000000
   channel_width_mhz: 20
   data_mode: HtMcs0
-  control_mode: HtMcs0
+  control_mode: ErpOfdmRate6Mbps
   tx_power_w: 0.01
   legacy_aloha_phy_rate_bps: 1000000
   shared_spectrum_channels: 1
   neighbor_discovery_mode: preconfigured_static_neighbors
   reason: deterministic_external_endpoint_arp
-  packet_outcome_affected: false
 
 sionna:
   solver_profile: realtime_minimal_solver_profile
