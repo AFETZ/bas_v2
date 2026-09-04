@@ -224,6 +224,9 @@ class Capture(Node):
         self.config = load_capture_config(args.scenario_config)
         self.cameras = self.config["cameras"]
         self.captures = self.config["captures"]
+        if args.source_state:
+            for phase, stem in (("jammer_active", "07_jammer_active"), ("jammer_recovery", "08_jammer_recovery")):
+                self.captures[phase] = dict(phase=phase, stem=stem, camera="overview")
         self.phase_aliases = self.config["phase_aliases"]
         self.frames: dict[str, tuple[Image, int]] = {}
         self.done: set[str] = set()
@@ -253,6 +256,15 @@ class Capture(Node):
             )
         except OSError:
             return
+        source_state = None
+        if self.args.source_state and self.args.source_state.is_file():
+            try:
+                source_state = json.loads(self.args.source_state.read_text())
+                source_phase = "jammer_active" if source_state["enabled_sources"] else "jammer_recovery"
+                if self.captures[source_phase]["stem"] not in self.done:
+                    phase = source_phase
+            except (OSError, ValueError, KeyError):
+                pass
         if phase != self.last_phase:
             self.last_phase = phase
             self.phase_seen_monotonic_ns = time.monotonic_ns()
@@ -320,6 +332,7 @@ class Capture(Node):
             "image_kind": "annotated_live_frame",
             "annotation": "labels are pinhole projections of the simultaneous live ROS odometry snapshot",
             "raw_image": raw_output.name,
+            "radio_source_state": source_state,
             "raw_image_sha256": sha256(raw_output),
             "annotated_image_sha256": sha256(output),
             "projections": projections,
@@ -363,6 +376,7 @@ def main() -> int:
     parser.add_argument("--node-state", type=Path, required=True)
     parser.add_argument("--phase-file", type=Path, required=True)
     parser.add_argument("--stop-file", type=Path, required=True)
+    parser.add_argument("--source-state", type=Path)
     parser.add_argument("--scenario-config", type=Path, default=DEFAULT_SCENARIO_CONFIG)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)

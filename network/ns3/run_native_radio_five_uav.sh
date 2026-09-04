@@ -368,6 +368,9 @@ if [[ -n "${BAS_NATIVE_EXTERNAL_CONFIG:-}" && "$SCENARIO_MODE" != latency_diagno
 fi
 if [[ "${BAS_NATIVE_FIVE_SKIP_BUILD:-0}" == 1 ]]; then
   [[ -x "$BINARY" ]] || { printf 'Requested binary reuse but binary is absent.\n' >&2; exit 2; }
+  [[ "$BINARY" -nt "$PROJECT_SOURCE" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" ]] || {
+    printf 'Binary predates native source/header; rerun without BAS_NATIVE_FIVE_SKIP_BUILD.\n' >&2; exit 2;
+  }
   printf 'Reused focused native target after exact project/upstream source synchronization.\n' \
     > "$RUN_DIR/logs/ns3_build.log"
 else
@@ -408,6 +411,7 @@ PY
     "$LAUNCH_WORLD" "$GAZEBO_RTF" "$SCENARIO_TIMEOUT_SCALE"
   printf 'stack_cpuset=%s\nradio_cpuset=%s\n' "$STACK_CPUSET" "$RADIO_CPUSET"
   printf 'radio_config=%s\nradio_backend=%s\n' "$RADIO_CONFIG" "$RADIO_BACKEND"
+  printf 'native_sources=%s\nexternal_endpoint_config=%s\n' "${BAS_NATIVE_SOURCES:-none}" "${BAS_NATIVE_EXTERNAL_CONFIG:-none}"
   printf 'profile=%s\n' "$RADIO_PROFILE"
   printf 'technology_specific_modem=%s\n' "$TECHNOLOGY_SPECIFIC_MODEM"
   printf 'uav_count=%s\nradio_node_count=%s\nshared_spectrum_channels=1\n' "$UAV_COUNT" "$((UAV_COUNT + 1))"
@@ -688,9 +692,12 @@ for camera in overview obstacle uav_focus; do
     > "$RUN_DIR/logs/gazebo_${camera}_image_bridge.log" 2>&1 &
   managed_pids+=("$!")
 done
+capture_source_args=()
+[[ -n "${BAS_NATIVE_SOURCES:-}" ]] && capture_source_args+=(--source-state "$RUN_DIR/logs/native_sources.json.state")
 setsid python3 -u "$ROOT_DIR/scripts/product/capture_live_gazebo_screenshots.py" \
   --run-id "$RUN_ID" --output "$RUN_DIR/screenshots" --node-state "$NODE_STATE" \
   --phase-file "$PHASE_FILE" --stop-file "$MONITOR_STOP" --scenario-config "$SCENARIO" \
+  "${capture_source_args[@]}" \
   > "$RUN_DIR/logs/live_screenshot_capture.log" 2>&1 &
 managed_pids+=("$!")
 

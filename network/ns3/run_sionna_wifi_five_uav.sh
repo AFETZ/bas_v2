@@ -89,7 +89,7 @@ export LD_LIBRARY_PATH="$NS3_DIR/build/lib:${LD_LIBRARY_PATH:-}"
 export SIONNA_MITSUBA_VARIANT=cuda_ad_mono_polarized
 export MPLCONFIGDIR="$RUN_DIR/matplotlib"
 cp "$SMOKE_SOURCE" "$NS3_DIR/scratch/upstream-sionna-wifi-smoke.cc"
-cp "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" "$NS3_DIR/scratch/"
+cp "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" "$ROOT_DIR/network/ns3/scratch/native-radio-map.h" "$NS3_DIR/scratch/"
 cp "$FIVE_SOURCE" "$NS3_DIR/scratch/upstream-sionna-wifi-five-uav.cc"
 
 if [[ ! -f "$NS3_DIR/cmake-cache/CMakeCache.txt" ]]; then

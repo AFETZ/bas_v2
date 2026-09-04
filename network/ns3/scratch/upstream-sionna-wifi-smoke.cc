@@ -28,6 +28,7 @@
 #include "ns3/wifi-net-device.h"
 
 #include "native-spectrum-sources.h"
+#include "native-radio-map.h"
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -105,12 +106,16 @@ main(int argc, char* argv[])
     std::string scene = "simple_street_canyon_with_cars";
     std::string output = "sionna-wifi-smoke.json";
     std::string sources;
+    std::string heatmapCsv;
+    double heatmapTimeS = 4.0;
     double simulationSeconds = 4.0;
     uint32_t offeredPackets = 20;
     uint32_t packetSize = 128;
     double distanceM = 20.0;
 
     CommandLine command(__FILE__);
+    command.AddValue("heatmapCsv", "Offline native PSD map CSV instead of packets", heatmapCsv);
+    command.AddValue("heatmapTimeS", "Instantaneous source time for map", heatmapTimeS);
     command.AddValue("sources", "Resolved native waveform source JSON", sources);
     command.AddValue("scene", "Sionna RT built-in scene", scene);
     command.AddValue("output", "JSON result path", output);
@@ -146,15 +151,19 @@ main(int argc, char* argv[])
     solver.syntheticArray = true;
     solver.seed = 42;
     sionna->SetRtPathSolverConfig(solver);
+    Ptr<bas::SourcePropagation> sourceRouter;
     if (sources.empty())
         channel->AddPhasedArraySpectrumPropagationLossModel(sionna);
     else
-        channel->AddPhasedArraySpectrumPropagationLossModel(bas::InstallSpectrumSources(
+    {
+        sourceRouter = bas::InstallSpectrumSources(
             sionna, channel, sources, scene, solver, 90,
             [](const std::string& event, const std::string& id, double power, const std::string& detail) {
                 std::cout << Simulator::Now().GetSeconds() << ',' << event << ',' << id << ','
                           << power << ',' << detail << std::endl;
-            }));
+            });
+        channel->AddPhasedArraySpectrumPropagationLossModel(sourceRouter);
+    }
 
     NodeContainer apNode;
     apNode.Create(1);
@@ -196,6 +205,14 @@ main(int argc, char* argv[])
         "SignalArrival", MakeBoundCallback(&SignalArrival, std::string("ap")));
     DynamicCast<WifiNetDevice>(staDevice.Get(0))->GetPhy()->TraceConnectWithoutContext(
         "SignalArrival", MakeBoundCallback(&SignalArrival, std::string("sta")));
+
+    if (!heatmapCsv.empty())
+    {
+        auto antenna = DynamicCast<SpectrumWifiPhy>(DynamicCast<WifiNetDevice>(apDevice.Get(0))->GetPhy())->GetAntenna()->GetObject<PhasedArrayModel>();
+        bas::WriteRadioMap(heatmapCsv, sionna, sourceRouter, apMobility, antenna, heatmapTimeS);
+        Simulator::Destroy();
+        return 0;
+    }
 
     InternetStackHelper stack;
     stack.Install(apNode);

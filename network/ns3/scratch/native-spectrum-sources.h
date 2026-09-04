@@ -7,6 +7,9 @@
 #include "ns3/pointer.h"
 #include "pybind11/stl.h"
 #include <functional>
+#include <array>
+#include <filesystem>
+#include <memory>
 #include <map>
 
 namespace bas
@@ -29,6 +32,8 @@ class SourcePropagation : public PhasedArraySpectrumPropagationLossModel
     }
     Ptr<SionnaRtSpectrumPropagationLossModel> reference;
     std::map<Ptr<SpectrumPhy>, Ptr<SionnaRtSpectrumPropagationLossModel>> sources;
+    std::map<Ptr<SpectrumPhy>, Ptr<SpectrumValue>> sourcePsds;
+    std::map<Ptr<SpectrumPhy>, std::array<double, 4>> sourceTimes;
   private:
     int64_t DoAssignStreams(int64_t) override { return 0; }
     Ptr<SpectrumSignalParameters> DoCalcRxPowerSpectralDensity(
@@ -43,6 +48,8 @@ class SourcePropagation : public PhasedArraySpectrumPropagationLossModel
     void DoDispose() override
     {
         sources.clear();
+        sourcePsds.clear();
+        sourceTimes.clear();
         reference = nullptr;
         PhasedArraySpectrumPropagationLossModel::DoDispose();
     }
@@ -59,6 +66,16 @@ inline Ptr<SourcePropagation> InstallSpectrumSources(
     router->reference = reference;
     auto text = py::module_::import("pathlib").attr("Path")(config).attr("read_text")();
     py::list entries = py::module_::import("json").attr("loads")(text)["segments"];
+    auto active = std::make_shared<unsigned>(0);
+    auto state = [config, active](bool start) {
+        if (start) ++*active;
+        else if (*active) --*active;
+        std::ofstream output(config + ".state.tmp");
+        output << "{\"enabled_sources\":" << *active << ",\"sim_time_s\":"
+               << Simulator::Now().GetSeconds() << "}";
+        output.close();
+        std::filesystem::rename(config + ".state.tmp", config + ".state");
+    };
     std::map<double, Ptr<SionnaRtSpectrumPropagationLossModel>> frequencies;
     DoubleValue referenceFrequency;
     reference->GetChannelModelAttribute("Frequency", referenceFrequency);
@@ -125,16 +142,20 @@ inline Ptr<SourcePropagation> InstallSpectrumSources(
             frequencies[hz] = model;
         }
         router->sources[generator] = frequencies.at(hz);
+        router->sourcePsds[generator] = psd;
+        router->sourceTimes[generator] = {start, stop, period, duty};
         const auto details = "source=ns3::WaveformGenerator;center_hz=" + std::to_string(hz) +
             ";bandwidth_hz=" + std::to_string(bandwidth) + ";power_w=" + std::to_string(power) +
             ";gain_dbi=" + std::to_string(gain) + ";pattern=" + pattern +
             ";azimuth_rad=" + std::to_string(angles[0]) + ";downtilt_rad=" + std::to_string(angles[1]) +
             ";duty_cycle=" + std::to_string(duty) + ";period_s=" + std::to_string(period);
-        Simulator::Schedule(Seconds(start), [generator, emit, id, power, details]() {
+        Simulator::Schedule(Seconds(start), [generator, emit, id, power, details, state]() {
+            state(true);
             emit("jammer_on", id, power, details);
             generator->Start();
         });
-        Simulator::Schedule(Seconds(stop), [generator, emit, id, details]() {
+        Simulator::Schedule(Seconds(stop), [generator, emit, id, details, state]() {
+            state(false);
             generator->Stop();
             emit("jammer_off", id, 0.0, details);
         });
