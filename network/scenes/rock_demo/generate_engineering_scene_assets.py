@@ -11,6 +11,46 @@ ROOT = Path(__file__).resolve().parents[3]
 WORLD_DIR = ROOT / "src/multiagent_simulation/worlds/rock_demo"
 
 
+def face_normal(
+    vertices: list[tuple[float, float, float]], face: tuple[int, int, int]
+) -> tuple[float, float, float]:
+    """Return the deterministic unit normal for a one-based triangular face."""
+
+    a, b, c = (vertices[index - 1] for index in face)
+    ab = (b[0] - a[0], b[1] - a[1], b[2] - a[2])
+    ac = (c[0] - a[0], c[1] - a[1], c[2] - a[2])
+    normal = (
+        ab[1] * ac[2] - ab[2] * ac[1],
+        ab[2] * ac[0] - ab[0] * ac[2],
+        ab[0] * ac[1] - ab[1] * ac[0],
+    )
+    length = math.sqrt(sum(value * value for value in normal))
+    if length == 0.0:
+        raise ValueError(f"degenerate face: {face}")
+    return tuple(0.0 if abs(value / length) < 0.5e-12 else value / length for value in normal)
+
+
+def write_normals_and_faces(
+    stream,
+    vertices: list[tuple[float, float, float]],
+    faces: list[tuple[int, int, int]],
+    *,
+    vertex_offset: int = 0,
+    normal_offset: int = 0,
+) -> None:
+    """Write one face normal per triangle for Gazebo/DART mesh collisions."""
+
+    for face in faces:
+        nx, ny, nz = face_normal(vertices, face)
+        stream.write(f"vn {nx:.9f} {ny:.9f} {nz:.9f}\n")
+    for index, (a, b, c) in enumerate(faces, start=1):
+        normal = normal_offset + index
+        stream.write(
+            f"f {a + vertex_offset}//{normal} "
+            f"{b + vertex_offset}//{normal} {c + vertex_offset}//{normal}\n"
+        )
+
+
 def terrain_height(x: float, y: float) -> float:
     ridge = 95.0 * math.exp(-(((x - 1800.0) / 1700.0) ** 2 + ((y + 1600.0) / 1300.0) ** 2))
     hill = 70.0 * math.exp(-(((x + 2100.0) / 1400.0) ** 2 + ((y - 1700.0) / 1200.0) ** 2))
@@ -41,8 +81,7 @@ def write_terrain(path: Path, n: int = 33, extent_m: float = 5000.0) -> None:
         stream.write("o engineering_terrain\n")
         for x, y, z in vertices:
             stream.write(f"v {x:.3f} {y:.3f} {z:.3f}\n")
-        for a, b, c in faces:
-            stream.write(f"f {a} {b} {c}\n")
+        write_normals_and_faces(stream, vertices, faces)
 
 
 def box_vertices(cx: float, cy: float, sx: float, sy: float, sz: float) -> list[tuple[float, float, float]]:
@@ -80,21 +119,57 @@ def write_buildings(path: Path) -> None:
     ]
     with path.open("w", encoding="utf-8") as stream:
         stream.write("# Deterministic engineering settlement blocks, ENU meters.\n")
-        offset = 0
+        vertex_offset = 0
+        normal_offset = 0
         for name, cx, cy, sx, sy, sz in buildings:
             stream.write(f"o {name}\n")
-            for x, y, z in box_vertices(cx, cy, sx, sy, sz):
+            vertices = box_vertices(cx, cy, sx, sy, sz)
+            for x, y, z in vertices:
                 stream.write(f"v {x:.3f} {y:.3f} {z:.3f}\n")
-            for face in local_faces:
-                a, b, c = (idx + offset for idx in face)
-                stream.write(f"f {a} {b} {c}\n")
-            offset += 8
+            write_normals_and_faces(
+                stream,
+                vertices,
+                local_faces,
+                vertex_offset=vertex_offset,
+                normal_offset=normal_offset,
+            )
+            vertex_offset += len(vertices)
+            normal_offset += len(local_faces)
+
+
+def write_blocker(path: Path) -> None:
+    vertices = [
+        (170.0, -140.0, 0.0),
+        (230.0, -140.0, 0.0),
+        (230.0, 140.0, 0.0),
+        (170.0, 140.0, 0.0),
+        (170.0, -140.0, 140.0),
+        (230.0, -140.0, 140.0),
+        (230.0, 140.0, 140.0),
+        (170.0, 140.0, 140.0),
+    ]
+    faces = [
+        (1, 2, 3), (1, 3, 4),
+        (5, 8, 7), (5, 7, 6),
+        (1, 5, 6), (1, 6, 2),
+        (4, 3, 7), (4, 7, 8),
+        (1, 4, 8), (1, 8, 5),
+        (2, 6, 7), (2, 7, 3),
+    ]
+    with path.open("w", encoding="utf-8") as stream:
+        stream.write("# Shared Gazebo/Sionna radio-blocker mesh.\n")
+        stream.write("# Coordinates are ENU meters in the rock_demo world frame.\n")
+        stream.write("o radio_blocker\n")
+        for x, y, z in vertices:
+            stream.write(f"v {x:.3f} {y:.3f} {z:.3f}\n")
+        write_normals_and_faces(stream, vertices, faces)
 
 
 def main() -> int:
     WORLD_DIR.mkdir(parents=True, exist_ok=True)
     write_terrain(WORLD_DIR / "engineering_terrain.obj")
     write_buildings(WORLD_DIR / "engineering_buildings.obj")
+    write_blocker(WORLD_DIR / "radio_blocker.obj")
     return 0
 
 

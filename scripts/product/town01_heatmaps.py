@@ -18,7 +18,6 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from network.radio_provider.provider import query_tcp  # noqa: E402
 
 
 METRICS = ("rssi_dbm", "sinr_db", "js_db", "service_available")
@@ -121,6 +120,54 @@ def plot_matrix(
     plt.close(figure)
 
 
+def native_maps(csv_path: Path, run_dir: Path) -> int:
+    """Plot exact native-PSD predictions; never turn them into measured PDR."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    rows = list(csv.DictReader(csv_path.open()))
+    xs = sorted({float(r["x_m"]) for r in rows})
+    ys = sorted({float(r["y_m"]) for r in rows})
+    matrices = {}
+    for field in ("signal_w", "noise_w", "jammer_w"):
+        matrix = np.full((len(ys),len(xs)), np.nan)
+        for r in rows:
+            matrix[ys.index(float(r["y_m"])), xs.index(float(r["x_m"]))] = float(r[field])
+        matrices[field] = matrix
+    s, n, j = (matrices[k] for k in ("signal_w", "noise_w", "jammer_w"))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        baseline = {"rssi_dbm":10*np.log10((s+n)*1000), "sinr_db":10*np.log10(s/n),
+                    "js_linear":np.where(s>0, 0, np.nan)}
+        jammer = {"rssi_dbm":10*np.log10((s+n+j)*1000), "sinr_db":10*np.log10(s/(n+j)),
+                  "js_linear":j/s}
+    for data in (baseline, jammer):
+        data["conditional_availability"] = np.where(np.isfinite(data["sinr_db"]), data["sinr_db"]>=10, np.nan)
+    delta = {k:jammer[k]-baseline[k] for k in baseline}
+    directory = run_dir/"heatmaps"
+    directory.mkdir(parents=True, exist_ok=True)
+    units = dict(rssi_dbm="dBm (sum S+J+N)", sinr_db="dB", js_linear="J/S linear power ratio", conditional_availability="SINR >= 10 dB; engineering criterion, not PDR")
+    for phase, values in (("baseline",baseline),("jammer",jammer),("delta",delta)):
+        for metric, matrix in values.items():
+            fig, ax = plt.subplots(figsize=(7,5))
+            shown = ax.imshow(np.ma.masked_invalid(matrix), origin="lower",
+                extent=(xs[0],xs[-1],ys[0],ys[-1]), aspect="equal")
+            fig.colorbar(shown, ax=ax, label=units[metric] if phase != "delta" else "change: "+units[metric].replace("dBm", "dB"))
+            ax.set(xlabel="x (m)", ylabel="y (m)", title=f"{phase}: {metric}\nNative Sionna received-PSD prediction, z=2 m")
+            fig.tight_layout()
+            fig.savefig(directory/f"{phase}_{metric}.png", dpi=160)
+            plt.close(fig)
+    summary = dict(source_csv=str(csv_path), level="offline native received-PSD prediction",
+        model="SionnaRtSpectrumPropagationLossModel; no custom PER", extent_m=[xs[0],xs[-1],ys[0],ys[-1]],
+        z_m=2, grid_shape=[len(ys),len(xs)], source_time_s=float(rows[0]["source_time_s"]),
+        frequency_hz=2412000000, channel_width_mhz=20, tx_power_w=.01, noise_figure_db=7,
+        time_mode="instantaneous configured source state, not duty-cycle averaged",
+        js_units="linear; baseline J=0 so dB delta is undefined",
+        availability="SINR >=10 dB is a declared engineering condition, not measured PDR",
+        unavailable="non-finite powers/ratios are masked; no zero substituted for an unavailable dB measurement")
+    (directory/"heatmap_summary.json").write_text(json.dumps(summary,indent=2)+"\n")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
@@ -128,7 +175,11 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=5090)
     parser.add_argument("--points", type=int, default=7)
     parser.add_argument("--altitude-m", type=float, default=20.0)
+    parser.add_argument("--native-csv", type=Path)
     args = parser.parse_args()
+    if args.native_csv:
+        return native_maps(args.native_csv, args.run_dir)
+    from network.radio_provider.provider import query_tcp
     if not 3 <= args.points <= 31:
         raise SystemExit("--points must be in 3..31")
 

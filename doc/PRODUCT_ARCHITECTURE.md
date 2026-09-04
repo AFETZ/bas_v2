@@ -1,112 +1,87 @@
-# Product Architecture
+# Архитектура RC1
 
-## Supported structure
+Основной путь: `MAVProxy/сценарий → BSF1 → GCS TAP → native Wi-Fi AP/STA →
+UAV TAP → BSF1 → настоящий UART ArduPilot`. Обратные ACK и телеметрия идут
+тем же путём. У каждого SITL свои control/payload UART, SYSID и ROS odometry.
+Payload UART является вторым MAVLink UART, не видео.
 
-```text
-Gazebo + ArduPilot SITL
-        |
- ROS odometry
-        |
- Position Tracker
-        |
- Channel Model Service
-   |              |
-Sionna RT    Simple models
-        |
- per-link state
-        |
-       ns-3
-        |
- UART / Ethernet / GCS / additional data endpoints
-```
+Gazebo моделирует движение и коллизии. ArduPilot исполняет команды и автономную
+миссию. Position tracker атомарно передаёт настоящую одометрию в MobilityModel.
+`SionnaRtSpectrumPropagationLossModel` рассчитывает received PSD. Стандартные
+SpectrumWifiPhy, NistErrorRateModel, Wi-Fi association, MAC/ARQ, QoS queues и
+конкуренция за эфир ns-3 определяют приём. JSON используется для входов/журналов,
+а custom JSON/PER provider не участвует в этом тракте.
 
-Gazebo supplies the physical scene and vehicle motion. Five ArduPilot SITL
-instances supply flight-control behavior. ROS odometry is normalized by the
-position tracker into a common coordinate frame. The channel model service
-selects Sionna RT or a declared engineering model and publishes timestamped
-per-link physical state. ns-3 consumes that state while forwarding real
-endpoint packets and applying shared-medium behavior.
+## Общая радиосеть
 
-## Customer map asset flow
+Одна BSS: НПУ — AP, БАС — STA. Межбортовой P2P проходит реальные штатные BSS hops.
+P2MP создаёт один application multicast root; каждый получатель фиксирует свою
+уникальную доставку. Это не пять application unicast sends; multicast не имеет
+выдуманного MAC ACK. Одновременный uplink использует тот же эфир.
 
-Official CAVISE bundles are the canonical customer-map geometry. Sionna loads
-the bundle's existing `map/scene.xml` and PLY meshes. The bundle's Blender file
-is the editable master; Gazebo visual and simplified collision meshes are
-derived from that same geometry and coordinate frame. ZIP, PLY, and Blender
-assets stay outside Git and may be loaded by ROI or tile.
+IEEE 802.11n reference: 2412 MHz, channel 1, 20 MHz, 10 dBm, HtMcs0,
+control/basic ErpOfdmRate6Mbps, один изотропный элемент. Калибровки изделия нет.
+Конфигурация: `network/config/native_wifi_80211n_spectrum_product.yaml`.
 
-`map/transforms.xml` is the transformation authority. Selection records the
-source, Sionna, and Gazebo frames, any SUMO offset, and whether static vertices
-are already baked before a Gazebo derivative is made. The legacy synthetic
-`m4_canonical` scene is a smoke fixture only and cannot satisfy the customer
-10 km by 10 km map requirement. See
-[CAVISE map integration](CAVISE_MAP_INTEGRATION.md).
+## Источники и альтернативное распространение
 
-## Responsibility boundaries
+`native-spectrum-sources.h` только связывает WaveformGenerator/антенну/позицию
+с public phased-array API. Перед каждой передачей выбирается ровно одна native
+propagation model; потери двух моделей не складываются. Параметры источника:
+position, orientation, frequency/bandwidth, rectangular PSD, feed gain, power,
+iso/tr38901 antenna, start/stop, period/duty, continuous/pulsed/sweep.
+Частотные сегменты имеют отдельные модели нужной частоты. События излучения
+планирует ns-3; TTL геометрии не откладывает включение или перестройку.
 
-| Component | Owns | Does not own |
-| --- | --- | --- |
-| Gazebo + SITL | vehicle dynamics, sensors, flight-control execution | packet arbitration or RF propagation |
-| Position tracker | coordinate normalization, position/orientation freshness | propagation or packet delivery |
-| Sionna RT | LOS/NLOS, reflections, path loss, RSSI, SINR, jammer effects | queues, contention, or MAC arbitration |
-| Simple models | declared low-cost propagation estimates | hidden replacement of Sionna in high-fidelity regions |
-| ns-3 | packet path, bounded queues, contention, priority, arbitration, MAC behavior | ray tracing or scene geometry |
-| Endpoint adapters | serial/Ethernet framing and bounded pacing | bypass routes around ns-3 |
+По умолчанию всегда Sionna, без fallback при ошибке. Явный
+`BAS_NATIVE_PROPAGATION_PROFILE=friis` выбирает штатный FriisSpectrumPropagationLossModel.
+`hybrid` применяет Friis только когда оба конца имеют x>2000 m и z≥200 m,
+а расстояние ≥500 m; остальные links использует Sionna. Это инженерное правило
+для открытой высокой трассы вне Town01, не автоматический детектор LOS.
+Для Friis разрешены только изотропные элементы. Экранирование холмами, городской
+клаттер, направленные антенны и наземные трассы этим простым профилем не подтверждены.
+Возле границы возможен скачок между моделями. В статистике выбор записан явно.
 
-Sionna never performs MAC arbitration. ns-3 performs arbitration.
+## Время и отказ
 
-## Time and channel-state contract
+Gazebo RTF=1; ns-3 RealtimeSimulatorImpl работает по wall clock. Модельное время
+ns-3, ROS/Gazebo и host monotonic хранятся раздельно. RTT — разность host monotonic.
+Синхронный RT solve может задержать обработку; p95 не ограничивает редкий максимум.
+Кэш 20 s/10 m с jitter .5 досрочно распределяет обновления пар; это аппроксимация,
+с измеренной ошибкой/задержкой возле препятствия. Частые координаты не означают
+частый пересчёт канала. Отчёт вычисляет возраст из native generated time.
 
-- Physical/channel state and packet state update at different frequencies.
-- ns-3 continues packet processing between Sionna updates.
-- Every Sionna-derived link state carries its source timestamp, observation
-  timestamp, and configured maximum age.
-- Expired state cannot be used silently forever. The consumer records the
-  stale event and follows a configured fail-closed or fallback policy.
-- High-fidelity Sionna updates may be periodic or event-driven by movement,
-  blockage, jammer transitions, or requested packet-path fidelity.
-- Queue and packet clocks remain tied to the wall-clock pacing policy during
-  real-time and HitL runs.
+Устаревание odometry более 1.5 s останавливает native процесс. Python/Sionna
+exception не включает упрощённую модель. Heartbeat native scheduler обновляется
+каждые 0.5 модельной секунды; внешний gateway прекращает передачу при его устаревании.
+BSF1 host timestamp и deadline исключают воспроизведение старых команд после stall.
+Замедление Gazebo не объявляется пригодным для аппаратного HIL.
 
-## Hybrid propagation
+## Внешний контроллер и НПУ
 
-The channel service chooses a model per link or region. High-fidelity regions
-use Sionna RT. Distant or simple LOS links may use FSPL, log-distance, two-ray,
-or another explicitly named engineering model. Each result records its model,
-parameters, timestamp, and validity age so fallback behavior is observable.
+`external_endpoint.py` использует тот же BSF1. Serial 8N1, UDP и TCP client имеют
+ограниченные очереди/реассемблирование, deadline, reconnect и watchdog.
+Radio socket создаётся в ams-uav1, внешний Ethernet socket — в host namespace;
+дополнительный сетевой маршрут между НПУ и FC не создаётся. Serial подключается
+через конфигурацию. Это эмулятор приёмопередатчика, не flight-HIL с датчиками.
 
-## Packet and endpoint topology
+`native_operator_bridge.py` раскрывает пять local UDP MAVLink links для готового
+MAVProxy внутри ams-gcs. Он передаёт исходные байты через BSF1, без synthetic ACK.
+Сценарий и оператор выбираются существующим runner; новый orchestrator не введён.
 
-Each UAV has separate `control` and `payload` MAVLink UART paths plus an
-`additional_data` path. Additional data supports point-to-point and
-point-to-multipoint destinations. The GCS and HitL serial/Ethernet adapters use
-the same ns-3 ingress and egress path. Stopping ns-3 must break that path;
-direct SITL/GCS shortcuts are not part of product operation.
+## Геометрия и наблюдения
 
-## Reproducibility boundary
+Канонические Town01 PLY не изменяются. Gazebo visual OBJ содержит те же вершины и
+треугольники с вычисленными normals/materials. Исходные Town01 collision proxies
+являются упрощёнными bounding boxes; это не точный interior mesh зданий.
+Customer добавляет constrained-triangulated поле 10×10 km, высотно непрерывное
+сопряжение с внешним контуром исходных поверхностей, холмы и здание с заданными
+этажами. Новые visual/collision/Sionna meshes имеют единый PLY-источник.
 
-Docker dependency locking and pinned runtime dependencies remain in place.
-Rebuilds occur only when their inputs change. Cryptographic evidence, receipts,
-signatures, hash chains, and qualification manifests are not product runtime
-components.
-
-## Current implementation facts
-
-- `network/config/scenario_5uav.yaml` defines five unique UAV system IDs and
-  DDS ports, but its checked-in terrain is only about 200 m by 150 m.
-- The launch file assigns unique SITL/FDM port offsets for the five instances.
-- ns-3 currently offers a CSMA shared-medium engineering surrogate.
-- The TCP JSON-lines Sionna provider is the current in-repository channel
-  service path; a separate pybind path remains diagnostic.
-- Town01 is inspected, checksum-verified, externally prepared, and selected as
-  the active development map with its measured 3.191 km by 3.191 km footprint.
-- Town01 exercises the canonical asset path but does not satisfy the separate
-  10 km by 10 km or up-to-200 m product requirements.
-- The Town01 Gazebo development derivative preserves 867,887 source PLY
-  vertices in the Sionna frame with an identity transform. Its surface and
-  building collisions are axis-aligned approximations and vegetation is
-  omitted for runtime cost.
-- `make run-town01` exercises five SITLs, Gazebo, ROS odometry, real Sionna RT,
-  ns-3, dual UARTs, additional data, the flight lifecycle, and run artifacts.
-  It is a development integration command, not the final customer demo.
-- Live physical HitL serial/Ethernet gateways are not yet complete.
+MonitorSnifferRx даёт полезную мощность и combined noise/interference только
+декодированных MPDU; SignalArrival даёт мощность сигнала до решения о приёме.
+RxOk/RxError — decoder attempts; PhyRxEnd — нейтральное окончание сигнала.
+Native queue traces наблюдают AC occupancy и время до удаления MPDU, включая
+backoff/retry. Полный raw Wi-Fi capture — radiotap DLT127; Ethernet/TAP PCAP —
+производное представление. Карты — offline native PSD predictions без live overhead.
+Raw кадры получены с камер текущего Gazebo и связаны с odometry и временем.

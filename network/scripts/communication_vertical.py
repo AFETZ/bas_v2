@@ -197,6 +197,7 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
                         "msgid": int(message.get_msgId()),
                         "message_name": str(message.get_type()),
                         "message_bytes": len(message.get_msgbuf()),
+                        "frame_hex": bytes(message.get_msgbuf()).hex(),
                         "command": int(message.command) if hasattr(message, "command") else None,
                         "confirmation": int(message.confirmation) if hasattr(message, "confirmation") else None,
                         "target_system": int(message.target_system) if hasattr(message, "target_system") else None,

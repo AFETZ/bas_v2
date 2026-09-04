@@ -27,16 +27,25 @@ The ROS package world assets are the validated runtime source of truth:
 mesh. `engineering_buildings.obj` adds settlement blocks. `radio_blocker.obj`
 is the rock-shadow obstacle used for the low-altitude link demo.
 
-Gazebo uses the terrain/building/rock meshes as visual geometry. The drone
-physics still uses a stable ground plane plus a box collision proxy for the
-rock, so headless SITL does not crash on arbitrary OBJ collision meshes.
-Sionna uses the OBJ meshes as RF geometry.
+Gazebo uses the terrain, building, and rock OBJ meshes as both visual and
+static collision geometry. Sionna loads those exact same OBJ files as RF
+geometry in the same ENU metre frame; there is no flat ground or box collision
+proxy in the runtime world. This deterministic engineering scene is useful for
+matched-geometry integration, but it is not surveyed or customer-map terrain.
+
+The runtime world selects Gazebo Physics' Bullet Featherstone engine in its
+SDF. The Gazebo Harmonic DART backend cannot construct SDF mesh collisions,
+while the selected engine loads these exact triangle meshes for contact.
 
 Regenerate the deterministic engineering meshes with:
 
 ```bash
 ./network/scenes/rock_demo/generate_engineering_scene_assets.py
 ```
+
+The generator writes one deterministic unit normal per triangle so mesh
+loaders receive complete geometry; vertices and faces remain the shared shape
+consumed by both Gazebo and Sionna.
 
 ## Canonical Portable Obstacle
 

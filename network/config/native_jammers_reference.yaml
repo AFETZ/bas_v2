@@ -1,0 +1,18 @@
+schema_version: 1
+# Simulation-only test source; parameters are not a real product calibration.
+# Copy this config for campaigns; no physical RF transmitter is used.
+sources:
+  - id: source1
+    position_m: [10, 10, 2]
+    orientation_rad: [0, 0]
+    pattern: iso
+    gain_dbi: 0
+    center_hz: 2412000000
+    bandwidth_hz: 20000000
+    spectral_shape: rectangular
+    power_w: 0.001
+    mode: continuous
+    start_s: 3
+    stop_s: 5
+    period_s: 0.01
+    duty_cycle: 1

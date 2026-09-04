@@ -2,17 +2,17 @@
 schema_version: 1
 
 scenario:
-  name: scenario_5uav_town01_native_product
+  name: scenario_5uav_customer_native_product
   description: Five real Town01 UAVs sharing one native SpectrumWifiPhy 802.11n radio channel.
   map:
-    id: cavise_town01
+    id: customer_10km
     kind: external_cavise_scene
     customer_survey_asset: false
     town: Town01
-    world_file: .external/cavise_maps/Town01/gazebo/town01.sdf
-    scene_xml: .external/cavise_maps/Town01/map/scene.xml
+    world_file: .external/customer_10km/customer.sdf
+    scene_xml: .external/customer_10km/scene.xml
     camera_fragment: network/ns3/runtime_live_cameras.sdf.inc
-    gazebo_models: [cavise_town01]
+    gazebo_models: [cavise_town01, customer_field]
 
 base_simulation:
   launch_package: multiagent_simulation

@@ -4,6 +4,14 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 IMAGE="${BAS_CONTAINER_IMAGE:-multiagent_simulation:latest}"
 CONTAINER_NAME="${BAS_NATIVE_FIVE_CONTAINER_NAME:-bas-v2-native-radio-five-uav}"
+SCENARIO_KEY="${BAS_NATIVE_FIVE_SCENARIO:-town01}"
+GUI="${BAS_NATIVE_FIVE_GUI:-0}"
+
+[[ "$SCENARIO_KEY" == town01 || "$SCENARIO_KEY" == rock_demo || "$SCENARIO_KEY" == customer ]] || {
+  printf 'Scenario must be town01, rock_demo or customer: %s\n' "$SCENARIO_KEY" >&2
+  exit 2
+}
+[[ "$GUI" == 0 || "$GUI" == 1 ]] || { printf 'BAS_NATIVE_FIVE_GUI must be 0 or 1.\n' >&2; exit 2; }
 
 run_in_container() {
   command -v docker >/dev/null 2>&1 || { printf 'Docker is required.\n' >&2; return 2; }
@@ -16,18 +24,39 @@ run_in_container() {
     printf 'Native five-UAV container is already running: %s\n' "$CONTAINER_NAME" >&2
     return 3
   }
-  python3 "$ROOT_DIR/scripts/product/prepare_town01_gazebo.py"
+  if [[ "$SCENARIO_KEY" == town01 ]]; then
+    python3 "$ROOT_DIR/scripts/product/prepare_town01_gazebo.py"
+  fi
   local -a gpu_args=()
   if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
     gpu_args=(--gpus all -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=graphics,utility,compute)
+  fi
+  local -a gui_args=()
+  if [[ "$GUI" == 1 ]]; then
+    [[ -n "${DISPLAY:-}" ]] || { printf 'DISPLAY is required for the Gazebo GUI.\n' >&2; return 2; }
+    [[ -d /tmp/.X11-unix ]] || { printf 'X11 socket directory is unavailable.\n' >&2; return 2; }
+    gui_args=(-e DISPLAY="$DISPLAY" -e QT_X11_NO_MITSHM=1 -v /tmp/.X11-unix:/tmp/.X11-unix:rw)
+    local xauthority_file="${XAUTHORITY:-${HOME}/.Xauthority}"
+    if [[ -f "$xauthority_file" ]]; then
+      gui_args+=(-e XAUTHORITY=/tmp/bas-native-xauthority -v "$xauthority_file:/tmp/bas-native-xauthority:ro")
+    fi
   fi
   docker run --rm \
     --name "$CONTAINER_NAME" \
     --label bas.product=native-radio-five-uav \
     --privileged --network=host --user 0:0 \
     "${gpu_args[@]}" \
+    "${gui_args[@]}" \
     -e BAS_NATIVE_FIVE_IN_CONTAINER=1 \
+    -e BAS_SOURCE_HEAD="$(git -C "$ROOT_DIR" rev-parse HEAD)" \
+    -e BAS_SOURCE_DIRTY="$(git -C "$ROOT_DIR" status --porcelain | wc -l)" \
+    -e BAS_NATIVE_PROPAGATION_PROFILE="${BAS_NATIVE_PROPAGATION_PROFILE:-sionna}" \
+    -e BAS_NATIVE_OPERATOR_SECONDS="${BAS_NATIVE_OPERATOR_SECONDS:-0}" \
+    -e BAS_NATIVE_SOURCES="${BAS_NATIVE_SOURCES:-}" \
+    -e BAS_NATIVE_EXTERNAL_CONFIG="${BAS_NATIVE_EXTERNAL_CONFIG:-}" \
     -e BAS_NATIVE_FIVE_RUN_ID="${BAS_NATIVE_FIVE_RUN_ID:-}" \
+    -e BAS_NATIVE_FIVE_SCENARIO="$SCENARIO_KEY" \
+    -e BAS_NATIVE_FIVE_GUI="$GUI" \
     -e BAS_NATIVE_FIVE_SKIP_BUILD="${BAS_NATIVE_FIVE_SKIP_BUILD:-0}" \
     -e BAS_NATIVE_FIVE_ONE_UAV_RUN="${BAS_NATIVE_FIVE_ONE_UAV_RUN:-}" \
     -e BAS_NATIVE_FIVE_GAZEBO_RTF="${BAS_NATIVE_FIVE_GAZEBO_RTF:-1.0}" \
@@ -39,6 +68,7 @@ run_in_container() {
     -e BAS_NATIVE_UART_CHANNELS="${BAS_NATIVE_UART_CHANNELS:-control,payload}" \
     -e BAS_NATIVE_RADIO_BACKEND="${BAS_NATIVE_RADIO_BACKEND:-}" \
     -e BAS_NATIVE_WIFI_DATA_MODE="${BAS_NATIVE_WIFI_DATA_MODE:-}" \
+    -e BAS_NATIVE_WIFI_CHANNEL_NUMBER="${BAS_NATIVE_WIFI_CHANNEL_NUMBER:-}" \
     -e BAS_NATIVE_WIFI_CHANNEL_WIDTH_MHZ="${BAS_NATIVE_WIFI_CHANNEL_WIDTH_MHZ:-}" \
     -e BAS_NATIVE_PHY_RATE_BPS="${BAS_NATIVE_PHY_RATE_BPS:-}" \
     -e BAS_NATIVE_EVENT_LOGGING="${BAS_NATIVE_EVENT_LOGGING:-batched_trace}" \
@@ -59,7 +89,7 @@ run_in_container() {
       source /workspace/multiagent_simulation/install/setup.bash
       export PATH="/home/ubuntu/.local/bin:$PATH"
       export GZ_VERSION=harmonic
-      export GZ_SIM_RESOURCE_PATH="${GZ_SIM_RESOURCE_PATH:-}:$PWD/src/multiagent_simulation/models:$PWD/src/multiagent_simulation/worlds:$PWD/src:$PWD/.external/cavise_maps/Town01/gazebo"
+      export GZ_SIM_RESOURCE_PATH="${GZ_SIM_RESOURCE_PATH:-}:$PWD/src/multiagent_simulation/models:$PWD/src/multiagent_simulation/worlds:$PWD/src"
       set -u
       exec ./network/ns3/run_native_radio_five_uav.sh
     '
@@ -87,6 +117,10 @@ EVENT_LOGGING="${BAS_NATIVE_EVENT_LOGGING:-batched_trace}"
 [[ "$UAV_COUNT" == 1 || "$UAV_COUNT" == 5 ]] || { printf 'UAV count must be 1 or 5: %s\n' "$UAV_COUNT" >&2; exit 2; }
 [[ ",$ACTIVE_UART_CHANNELS," == *,control,* ]] || { printf 'Control UART must remain active.\n' >&2; exit 2; }
 [[ "$EVENT_LOGGING" == metrics_only || "$EVENT_LOGGING" == batched_trace ]] || { printf 'Invalid event logging mode.\n' >&2; exit 2; }
+[[ "$SCENARIO_KEY" == town01 || "$UAV_COUNT" == 5 ]] || {
+  printf 'The rock_demo product scenario requires all five UAVs.\n' >&2
+  exit 2
+}
 SCENARIO_MODE="product"
 [[ "$LATENCY_MODE" == 1 ]] && SCENARIO_MODE="latency_diagnostic"
 [[ "$SCENARIO_MODE" == latency_diagnostic || "$UAV_COUNT" == 5 ]] || {
@@ -108,7 +142,6 @@ ONE_UAV_RUN="${BAS_NATIVE_FIVE_ONE_UAV_RUN:-}"
 UART_DIR="$RUNTIME_DIR/uart"
 WORK_DIR="$RUNTIME_DIR/work"
 NS3_DIR="$ROOT_DIR/.external/ns-3-sionna-native"
-RADIO_CONFIG="$ROOT_DIR/network/config/native_wifi_80211n_spectrum_product.yaml"
 PYTHON_DEPS="$NS3_DIR/.python-deps-py310"
 PYTHON_TOOLING="$NS3_DIR/.tooling-py310"
 PROJECT_SOURCE="$ROOT_DIR/network/ns3/scratch/upstream-sionna-tap-spike.cc"
@@ -117,13 +150,16 @@ BINARY="$NS3_DIR/build/scratch/ns3.48-upstream-sionna-tap-spike-default"
 PATCH_FILE="$ROOT_DIR/network/ns3/patches/mr2608-spike-compatibility.patch"
 REALTIME_CACHE_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-realtime-scene-cache.patch"
 PHASED_ARRAY_ADAPTER_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-spectrumwifi-phased-array-adapter.patch"
-SCENARIO="$ROOT_DIR/network/config/scenario_${UAV_COUNT}uav_town01_native_product.yaml"
-WORLD="$ROOT_DIR/.external/cavise_maps/Town01/gazebo/town01.sdf"
-CAMERA_FRAGMENT="$ROOT_DIR/network/ns3/runtime_live_cameras.sdf.inc"
+if [[ "$SCENARIO_KEY" == customer ]]; then
+  SCENARIO="$ROOT_DIR/network/config/scenario_5uav_customer_native_product.yaml"
+elif [[ "$SCENARIO_KEY" == rock_demo ]]; then
+  SCENARIO="$ROOT_DIR/network/config/scenario_5uav_rock_demo_native_product.yaml"
+else
+  SCENARIO="$ROOT_DIR/network/config/scenario_${UAV_COUNT}uav_town01_native_product.yaml"
+fi
 GAZEBO_RTF="${BAS_NATIVE_FIVE_GAZEBO_RTF:-1.0}"
 SCENARIO_TIMEOUT_SCALE="${BAS_NATIVE_FIVE_TIMEOUT_SCALE:-5.0}"
-LAUNCH_WORLD="$WORK_DIR/town01-native-live-cameras.sdf"
-SCENE="$ROOT_DIR/.external/cavise_maps/Town01/map/scene.xml"
+LAUNCH_WORLD="$WORK_DIR/${SCENARIO_KEY}-native-live-cameras.sdf"
 NODE_STATE="$RUN_DIR/logs/node_state.json"
 NODE_EVENTS="$RUN_DIR/logs/node_state.jsonl"
 PHASE_FILE="$RUN_DIR/logs/current_phase.txt"
@@ -144,10 +180,46 @@ else
   RADIO_CPUSET="$STACK_CPUSET"
 fi
 
+[[ -f "$SCENARIO" ]] || { printf 'Missing scenario config: %s\n' "$SCENARIO" >&2; exit 2; }
+mapfile -t SCENARIO_VALUES < <(python3 - "$ROOT_DIR" "$SCENARIO" <<'PY'
+from pathlib import Path
+import sys
+import yaml
+
+root = Path(sys.argv[1]).resolve()
+config = yaml.safe_load(Path(sys.argv[2]).read_text(encoding="utf-8"))
+scenario = config["scenario"]
+scene_map = scenario["map"]
+base = config["base_simulation"]
+radio = config["radio"]
+for value in (
+    scene_map["world_file"],
+    scene_map["scene_xml"],
+    scene_map["camera_fragment"],
+    radio["config"],
+    base["sitl_defaults"],
+):
+    path = Path(str(value))
+    print(str((root / path).resolve()) if not path.is_absolute() else str(path))
+print(scene_map["id"])
+PY
+)
+(( ${#SCENARIO_VALUES[@]} == 6 )) || {
+  printf 'Invalid scenario config: expected six resolved product values.\n' >&2
+  exit 2
+}
+WORLD="${SCENARIO_VALUES[0]}"
+SCENE="${SCENARIO_VALUES[1]}"
+CAMERA_FRAGMENT="${SCENARIO_VALUES[2]}"
+RADIO_CONFIG="${SCENARIO_VALUES[3]}"
+SITL_DEFAULTS="${SCENARIO_VALUES[4]}"
+MAP_ID="${SCENARIO_VALUES[5]}"
+
 for required_file in "$PROJECT_SOURCE" "$PATCH_FILE" "$REALTIME_CACHE_PATCH" \
-  "$PHASED_ARRAY_ADAPTER_PATCH" "$RADIO_CONFIG" "$SCENARIO" "$WORLD" "$SCENE" "$CAMERA_FRAGMENT"; do
+  "$PHASED_ARRAY_ADAPTER_PATCH" "$RADIO_CONFIG" "$WORLD" "$SCENE" "$CAMERA_FRAGMENT" "$SITL_DEFAULTS"; do
   [[ -f "$required_file" ]] || { printf 'Missing input: %s\n' "$required_file" >&2; exit 2; }
 done
+export GZ_SIM_RESOURCE_PATH="${GZ_SIM_RESOURCE_PATH:-}:$(dirname "$WORLD")"
 mapfile -t RADIO_VALUES < <(python3 - "$RADIO_CONFIG" <<'PY'
 import sys
 import yaml
@@ -161,6 +233,7 @@ for item in (
     str(radio["technology_specific_modem"]).lower(),
     radio["data_mode"],
     radio["control_mode"],
+    str(radio["channel_number"]),
     str(radio["channel_width_mhz"]),
     str(radio["carrier_hz"]),
     str(radio["tx_power_w"]),
@@ -168,7 +241,6 @@ for item in (
     radio["ssid"],
     radio["neighbor_discovery_mode"],
     radio["reason"],
-    str(radio["packet_outcome_affected"]).lower(),
     sionna["solver_profile"],
     str(sionna["max_depth"]),
     str(sionna["los"]).lower(),
@@ -193,19 +265,19 @@ PY
   printf 'Invalid native product radio config: expected 29 resolved values, got %s\n' "${#RADIO_VALUES[@]}" >&2
   exit 2
 }
-RADIO_BACKEND="${BAS_NATIVE_RADIO_BACKEND:-${RADIO_VALUES[0]}}"
+RADIO_BACKEND="${RADIO_VALUES[0]}"
 RADIO_PROFILE="${RADIO_VALUES[1]}"
 TECHNOLOGY_SPECIFIC_MODEM="${RADIO_VALUES[2]}"
-WIFI_DATA_MODE="${BAS_NATIVE_WIFI_DATA_MODE:-${RADIO_VALUES[3]}}"
+WIFI_DATA_MODE="${RADIO_VALUES[3]}"
 WIFI_CONTROL_MODE="${RADIO_VALUES[4]}"
-WIFI_CHANNEL_WIDTH_MHZ="${BAS_NATIVE_WIFI_CHANNEL_WIDTH_MHZ:-${RADIO_VALUES[5]}}"
-CARRIER_HZ="${RADIO_VALUES[6]}"
-TX_POWER_W="${RADIO_VALUES[7]}"
-PHY_RATE_BPS="${BAS_NATIVE_PHY_RATE_BPS:-${RADIO_VALUES[8]}}"
-WIFI_SSID="${RADIO_VALUES[9]}"
-NEIGHBOR_DISCOVERY_MODE="${RADIO_VALUES[10]}"
-RADIO_REASON="${RADIO_VALUES[11]}"
-PACKET_OUTCOME_AFFECTED="${RADIO_VALUES[12]}"
+WIFI_CHANNEL_NUMBER="${RADIO_VALUES[5]}"
+WIFI_CHANNEL_WIDTH_MHZ="${RADIO_VALUES[6]}"
+CARRIER_HZ="${RADIO_VALUES[7]}"
+TX_POWER_W="${RADIO_VALUES[8]}"
+PHY_RATE_BPS="${RADIO_VALUES[9]}"
+WIFI_SSID="${RADIO_VALUES[10]}"
+NEIGHBOR_DISCOVERY_MODE="${RADIO_VALUES[11]}"
+RADIO_REASON="${RADIO_VALUES[12]}"
 SOLVER_PROFILE="${RADIO_VALUES[13]}"
 SIONNA_MAX_DEPTH="${RADIO_VALUES[14]}"
 SIONNA_LOS="${RADIO_VALUES[15]}"
@@ -218,12 +290,28 @@ SIONNA_SYNTHETIC_ARRAY="${RADIO_VALUES[21]}"
 SIONNA_SEED="${RADIO_VALUES[22]}"
 SIONNA_MAX_NUMBER_OF_PATHS="${RADIO_VALUES[23]}"
 SIONNA_CACHE_JITTER_FRACTION="${RADIO_VALUES[24]}"
-CHANNEL_STATE_MAX_AGE_S="${BAS_NATIVE_CHANNEL_STATE_MAX_AGE_S:-${RADIO_VALUES[25]}}"
-UPDATE_DISTANCE_THRESHOLD_M="${BAS_NATIVE_UPDATE_DISTANCE_THRESHOLD_M:-${RADIO_VALUES[26]}}"
+CHANNEL_STATE_MAX_AGE_S="${RADIO_VALUES[25]}"
+UPDATE_DISTANCE_THRESHOLD_M="${RADIO_VALUES[26]}"
 READINESS_LAG_MAX_MS="${RADIO_VALUES[27]}"
 READINESS_CONSECUTIVE_SAMPLES="${RADIO_VALUES[28]}"
+reject_product_override() {
+  local name="$1" requested="$2" configured="$3"
+  [[ -z "$requested" || "$requested" == "$configured" ]] || {
+    printf '%s=%s conflicts with selected product config value %s.\n' \
+      "$name" "$requested" "$configured" >&2
+    exit 2
+  }
+}
+reject_product_override BAS_NATIVE_RADIO_BACKEND "${BAS_NATIVE_RADIO_BACKEND:-}" "$RADIO_BACKEND"
+reject_product_override BAS_NATIVE_WIFI_DATA_MODE "${BAS_NATIVE_WIFI_DATA_MODE:-}" "$WIFI_DATA_MODE"
+reject_product_override BAS_NATIVE_WIFI_CHANNEL_NUMBER "${BAS_NATIVE_WIFI_CHANNEL_NUMBER:-}" "$WIFI_CHANNEL_NUMBER"
+reject_product_override BAS_NATIVE_WIFI_CHANNEL_WIDTH_MHZ "${BAS_NATIVE_WIFI_CHANNEL_WIDTH_MHZ:-}" "$WIFI_CHANNEL_WIDTH_MHZ"
+reject_product_override BAS_NATIVE_PHY_RATE_BPS "${BAS_NATIVE_PHY_RATE_BPS:-}" "$PHY_RATE_BPS"
+reject_product_override BAS_NATIVE_CHANNEL_STATE_MAX_AGE_S "${BAS_NATIVE_CHANNEL_STATE_MAX_AGE_S:-}" "$CHANNEL_STATE_MAX_AGE_S"
+reject_product_override BAS_NATIVE_UPDATE_DISTANCE_THRESHOLD_M "${BAS_NATIVE_UPDATE_DISTANCE_THRESHOLD_M:-}" "$UPDATE_DISTANCE_THRESHOLD_M"
 [[ "$RADIO_BACKEND" == wifi || "$RADIO_BACKEND" == aloha ]] || { printf 'Invalid radio backend: %s\n' "$RADIO_BACKEND" >&2; exit 2; }
 [[ "$PHY_RATE_BPS" =~ ^[1-9][0-9]*$ ]] || { printf 'Invalid native PHY rate: %s\n' "$PHY_RATE_BPS" >&2; exit 2; }
+[[ "$WIFI_CHANNEL_NUMBER" =~ ^[1-9][0-9]*$ ]] || { printf 'Invalid Wi-Fi channel number: %s\n' "$WIFI_CHANNEL_NUMBER" >&2; exit 2; }
 [[ "$WIFI_CHANNEL_WIDTH_MHZ" =~ ^[1-9][0-9]*$ ]] || { printf 'Invalid Wi-Fi channel width: %s\n' "$WIFI_CHANNEL_WIDTH_MHZ" >&2; exit 2; }
 [[ "$(git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" rev-parse HEAD)" == d2add90b452d600cfb4859baed8e9ea633519447 ]] || {
   printf 'Official ns-3.48 exact revision is absent.\n' >&2
@@ -255,6 +343,8 @@ PY
 [[ -x "$PYTHON_TOOLING/bin/cmake" ]] || { printf 'Pinned CMake tooling is absent.\n' >&2; exit 2; }
 
 mkdir -p "$RUN_DIR"/{logs,metrics,pcap,screenshots,plots} "$UART_DIR" "$WORK_DIR"
+printf 'Starting native five-UAV demo: scenario=%s map=%s gui=%s run=%s\n' \
+  "$SCENARIO_KEY" "$MAP_ID" "$GUI" "$RUN_ID"
 python3 "$ROOT_DIR/scripts/product/inject_native_radio_runtime_cameras.py" \
   --world "$WORLD" --fragment "$CAMERA_FRAGMENT" --output "$LAUNCH_WORLD"
 printf '%q ' "$0" "$@" > "$RUN_DIR/command.txt"
@@ -269,18 +359,30 @@ fi
 export PATH="$PYTHON_TOOLING/bin:$PATH"
 export PYTHONPATH="$PYTHON_TOOLING:$PYTHON_DEPS:${PYTHONPATH:-}"
 cp "$PROJECT_SOURCE" "$UPSTREAM_SOURCE"
+cp "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" "$NS3_DIR/scratch/"
+source_args=()
+if [[ -n "${BAS_NATIVE_SOURCES:-}" ]]; then
+  python3 "$ROOT_DIR/scripts/product/prepare_native_sources.py" \
+    --config "$ROOT_DIR/$BAS_NATIVE_SOURCES" --output "$RUN_DIR/logs/native_sources.json"
+  source_args+=(--sources="$RUN_DIR/logs/native_sources.json")
+fi
+if [[ -n "${BAS_NATIVE_EXTERNAL_CONFIG:-}" && "$SCENARIO_MODE" != latency_diagnostic ]]; then
+  printf 'External controller requires BAS_NATIVE_LATENCY_MODE=1 (safe requests only).\n' >&2
+  exit 2
+fi
 if [[ "${BAS_NATIVE_FIVE_SKIP_BUILD:-0}" == 1 ]]; then
   [[ -x "$BINARY" ]] || { printf 'Requested binary reuse but binary is absent.\n' >&2; exit 2; }
+  [[ "$BINARY" -nt "$PROJECT_SOURCE" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" ]] || {
+    printf 'Binary predates native source/header; rerun without BAS_NATIVE_FIVE_SKIP_BUILD.\n' >&2; exit 2;
+  }
   printf 'Reused focused native target after exact project/upstream source synchronization.\n' \
     > "$RUN_DIR/logs/ns3_build.log"
 else
   (
     cd "$NS3_DIR"
-    for build_directory in "$NS3_DIR/build" "$NS3_DIR/cmake-cache"; do
-      [[ "$(dirname "$build_directory")" == "$NS3_DIR" ]] || exit 2
-      rm -rf "$build_directory"
-    done
-    PYTHONPATH="$PYTHON_TOOLING:$PYTHON_DEPS" ./ns3 configure --enable-examples --enable-tests --enable-python-bindings
+    if [[ ! -f "$NS3_DIR/cmake-cache/CMakeCache.txt" ]]; then
+      PYTHONPATH="$PYTHON_TOOLING:$PYTHON_DEPS" ./ns3 configure --enable-examples --enable-tests --enable-python-bindings
+    fi
     PYTHONPATH="$PYTHON_TOOLING:$PYTHON_DEPS" ./ns3 build upstream-sionna-tap-spike
   ) > "$RUN_DIR/logs/ns3_build.log" 2>&1
 fi
@@ -295,7 +397,8 @@ PY
 {
   printf 'run_id=%s\n' "$RUN_ID"
   printf 'started_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  printf 'git_head=%s\n' "$(git -C "$ROOT_DIR" rev-parse HEAD)"
+  printf 'git_head=%s\n' "${BAS_SOURCE_HEAD:-$(git -C "$ROOT_DIR" rev-parse HEAD)}"
+  printf 'source_dirty_paths=%s\n' "${BAS_SOURCE_DIRTY:-unknown}"
   printf 'ns3_version=3.48\n'
   printf 'ns3_exact_sha=%s\n' "$(git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" rev-parse HEAD)"
   printf 'ns3_compatibility_patch=true\n'
@@ -305,16 +408,19 @@ PY
   printf 'cmake_version=%s\n' "$(cmake --version | head -n1 | awk '{print $3}')"
   printf 'ros_domain_id=%s\n' "$ROS_DOMAIN_ID"
   printf 'gz_partition=%s\n' "$GZ_PARTITION"
-  printf 'scenario=%s\nworld=%s\nscene=%s\n' "$SCENARIO" "$WORLD" "$SCENE"
+  printf 'scenario_key=%s\nscenario=%s\nmap_id=%s\nworld=%s\nscene=%s\n' \
+    "$SCENARIO_KEY" "$SCENARIO" "$MAP_ID" "$WORLD" "$SCENE"
+  printf 'gui=%s\n' "$GUI"
   printf 'launch_world=%s\ngazebo_requested_rtf=%s\nscenario_timeout_scale=%s\n' \
     "$LAUNCH_WORLD" "$GAZEBO_RTF" "$SCENARIO_TIMEOUT_SCALE"
   printf 'stack_cpuset=%s\nradio_cpuset=%s\n' "$STACK_CPUSET" "$RADIO_CPUSET"
   printf 'radio_config=%s\nradio_backend=%s\n' "$RADIO_CONFIG" "$RADIO_BACKEND"
+  printf 'native_sources=%s\nexternal_endpoint_config=%s\n' "${BAS_NATIVE_SOURCES:-none}" "${BAS_NATIVE_EXTERNAL_CONFIG:-none}"
   printf 'profile=%s\n' "$RADIO_PROFILE"
   printf 'technology_specific_modem=%s\n' "$TECHNOLOGY_SPECIFIC_MODEM"
   printf 'uav_count=%s\nradio_node_count=%s\nshared_spectrum_channels=1\n' "$UAV_COUNT" "$((UAV_COUNT + 1))"
-  printf 'carrier_hz=%s\nchannel_width_mhz=%s\nwifi_data_mode=%s\nwifi_control_mode=%s\n' \
-    "$CARRIER_HZ" "$WIFI_CHANNEL_WIDTH_MHZ" "$WIFI_DATA_MODE" "$WIFI_CONTROL_MODE"
+  printf 'carrier_hz=%s\nchannel_number=%s\nchannel_width_mhz=%s\nwifi_data_mode=%s\nwifi_control_mode=%s\n' \
+    "$CARRIER_HZ" "$WIFI_CHANNEL_NUMBER" "$WIFI_CHANNEL_WIDTH_MHZ" "$WIFI_DATA_MODE" "$WIFI_CONTROL_MODE"
   printf 'phy_rate_bps=%s\ntx_power_w=%s\nwifi_ssid=%s\n' "$PHY_RATE_BPS" "$TX_POWER_W" "$WIFI_SSID"
   printf 'event_logging=%s\nactive_uart_channels=%s\nlatency_mode=%s\n' "$EVENT_LOGGING" "$ACTIVE_UART_CHANNELS" "$LATENCY_MODE"
   printf 'solver_profile=%s\n' "$SOLVER_PROFILE"
@@ -331,7 +437,7 @@ PY
   printf 'readiness_lag_max_ms=%s\nreadiness_consecutive_samples=%s\n' \
     "$READINESS_LAG_MAX_MS" "$READINESS_CONSECUTIVE_SAMPLES"
   printf 'neighbor_discovery_mode=%s\n' "$NEIGHBOR_DISCOVERY_MODE"
-  printf 'reason=%s\npacket_outcome_affected=%s\n' "$RADIO_REASON" "$PACKET_OUTCOME_AFFECTED"
+  printf 'reason=%s\npacket_outcome_affected=derived_from_runtime_propagation_chain\n' "$RADIO_REASON"
 } > "$RUN_DIR/environment.txt"
 
 managed_pids=()
@@ -482,6 +588,20 @@ for index in "${UAV_INDICES[@]}"; do
   instance=$((index - 1))
   for channel in control payload; do
     [[ ",$ACTIVE_UART_CHANNELS," == *,$channel,* ]] || continue
+    if [[ "$index" == 1 && "$channel" == control && -n "${BAS_NATIVE_EXTERNAL_CONFIG:-}" ]]; then
+      python3 - "$ROOT_DIR/$BAS_NATIVE_EXTERNAL_CONFIG" "$RUN_DIR/logs/external_endpoint.yaml" "$NS3_READY.heartbeat" <<'PYCFG'
+import sys,yaml
+config=yaml.safe_load(open(sys.argv[1]))
+config['radio_watchdog_file']=sys.argv[3]
+config['radio_namespace']=config.pop('namespace','ams-uav1')
+with open(sys.argv[2],'w') as f: yaml.safe_dump(config,f)
+PYCFG
+      setsid python3 -u "$ROOT_DIR/network/scripts/external_endpoint.py" \
+        --config "$RUN_DIR/logs/external_endpoint.yaml" --output "$RUN_DIR/external_endpoint" \
+        > "$RUN_DIR/logs/external_endpoint.log" 2>&1 &
+      managed_pids+=("$!")
+      continue
+    fi
     if [[ "$channel" == control ]]; then base_port=14600; else base_port=14700; fi
     setsid ip netns exec "ams-uav$index" python3 -u \
       "$ROOT_DIR/network/scripts/communication_vertical.py" uart-adapter \
@@ -498,6 +618,7 @@ for index in "${UAV_INDICES[@]}"; do
   setsid ip netns exec "ams-uav$index" python3 -u \
     "$ROOT_DIR/scripts/product/native_radio_five_uav_scenario.py" additional-agent \
     --index "$index" --schedule-file "$SCHEDULE_FILE" \
+    --scenario-config "$SCENARIO" \
     --event-log "$RUN_DIR/logs/additional_uav$index.jsonl" \
     --ready-file "$RUN_DIR/logs/additional_uav$index.ready" \
     > "$RUN_DIR/logs/additional_uav$index.log" 2>&1 &
@@ -506,18 +627,28 @@ done
 for index in "${UAV_INDICES[@]}"; do
   for channel in control payload; do
     [[ ",$ACTIVE_UART_CHANNELS," == *,$channel,* ]] || continue
+    if [[ "$index" == 1 && "$channel" == control && -n "${BAS_NATIVE_EXTERNAL_CONFIG:-}" ]]; then
+      wait_for_file "$RUN_DIR/external_endpoint/metrics.json" 15 "external endpoint"
+      continue
+    fi
     wait_for_file "$RUN_DIR/logs/${channel}_uart_uav$index.ready" 15 "$channel UART adapter"
   done
   wait_for_file "$RUN_DIR/logs/additional_uav$index.ready" 15 "additional endpoint"
 done
 
 export ROS_DOMAIN_ID GZ_PARTITION
+GAZEBO_GUI=false
+HEADLESS_RENDERING=true
+if [[ "$GUI" == 1 ]]; then
+  GAZEBO_GUI=true
+  HEADLESS_RENDERING=false
+fi
 cd "$WORK_DIR"
 setsid taskset -c "$STACK_CPUSET" ros2 launch multiagent_simulation multiagent_simulation.launch.py \
   robots_config_file:="$SCENARIO" world_file:="$LAUNCH_WORLD" robot_model:=iris_radio_headless \
-  gui:=false rviz:=false headless_rendering:=true generate_sensor_models:=false \
+  gui:="$GAZEBO_GUI" rviz:=false headless_rendering:="$HEADLESS_RENDERING" generate_sensor_models:=false \
   use_mapping_camera:=false use_navigation_camera:=false use_zed_camera:=false \
-  start_mavproxy:=false sitl_extra_defaults:="$ROOT_DIR/network/config/town01_sitl.parm" \
+  start_mavproxy:=false sitl_extra_defaults:="$SITL_DEFAULTS" \
   control_uart:="$UART_DIR/control-sitl-{instance}" \
   payload_uart:="$UART_DIR/payload-sitl-{instance}" \
   > "$RUN_DIR/logs/gazebo_sitl.log" 2>&1 &
@@ -572,9 +703,12 @@ for camera in overview obstacle uav_focus; do
     > "$RUN_DIR/logs/gazebo_${camera}_image_bridge.log" 2>&1 &
   managed_pids+=("$!")
 done
+capture_source_args=()
+[[ -n "${BAS_NATIVE_SOURCES:-}" ]] && capture_source_args+=(--source-state "$RUN_DIR/logs/native_sources.json.state")
 setsid python3 -u "$ROOT_DIR/scripts/product/capture_live_gazebo_screenshots.py" \
   --run-id "$RUN_ID" --output "$RUN_DIR/screenshots" --node-state "$NODE_STATE" \
-  --phase-file "$PHASE_FILE" --stop-file "$MONITOR_STOP" \
+  --phase-file "$PHASE_FILE" --stop-file "$MONITOR_STOP" --scenario-config "$SCENARIO" \
+  "${capture_source_args[@]}" \
   > "$RUN_DIR/logs/live_screenshot_capture.log" 2>&1 &
 managed_pids+=("$!")
 
@@ -604,15 +738,18 @@ setsid ip netns exec ams-ns3 env \
   --uavCount="$UAV_COUNT" --radioBackend="$RADIO_BACKEND" \
   --radioProfile="$RADIO_PROFILE" --technologySpecificModem="$TECHNOLOGY_SPECIFIC_MODEM" \
   --neighborDiscoveryMode="$NEIGHBOR_DISCOVERY_MODE" --radioReason="$RADIO_REASON" \
-  --packetOutcomeAffected="$PACKET_OUTCOME_AFFECTED" --solverProfile="$SOLVER_PROFILE" \
+  --solverProfile="$SOLVER_PROFILE" \
   --wifiDataMode="$WIFI_DATA_MODE" --wifiControlMode="$WIFI_CONTROL_MODE" \
+  --wifiChannelNumber="$WIFI_CHANNEL_NUMBER" \
   --wifiChannelWidthMhz="$WIFI_CHANNEL_WIDTH_MHZ" --wifiSsid="$WIFI_SSID" \
   --carrierHz="$CARRIER_HZ" --tapGcs=tap-gcs --tapUavs="$TAP_UAVS" \
+  --propagationProfile="${BAS_NATIVE_PROPAGATION_PROFILE:-sionna}" \
   --scene="$SCENE" --positionFile="$NODE_STATE" --phaseFile="$PHASE_FILE" \
   --radioPcap="$RUN_DIR/pcap/native_radio.pcap" \
   --eventCsv="$RUN_DIR/logs/native_radio_events.csv" \
   --statsFile="$RUN_DIR/metrics/native_radio_stats.json" \
   --readyFile="$NS3_READY" --duration=2400 --txPowerW="$TX_POWER_W" \
+  "${source_args[@]}" \
   --phyRateBps="$PHY_RATE_BPS" --eventLogging="$EVENT_LOGGING" \
   --channelStateMaxAgeS="$CHANNEL_STATE_MAX_AGE_S" \
   --updateDistanceThresholdM="$UPDATE_DISTANCE_THRESHOLD_M" \
@@ -638,12 +775,21 @@ done
 
 ps -eo pid,ppid,pgid,etimes,cmd > "$RUN_DIR/logs/process_snapshot.txt"
 
+if [[ "${BAS_NATIVE_OPERATOR_SECONDS:-0}" != 0 ]]; then
+  printf 'latency_stationary_warmup\n' > "$PHASE_FILE"
+  printf 'MAVProxy bridge ready in ams-gcs: udpout:127.0.0.1:14551 .. 14555\n'
+  ip netns exec ams-gcs python3 -u "$ROOT_DIR/scripts/product/native_operator_bridge.py" \
+    --run-dir "$RUN_DIR" --node-state "$NODE_STATE" --duration-s "$BAS_NATIVE_OPERATOR_SECONDS" \
+    > "$RUN_DIR/logs/operator_bridge.log" 2>&1
+  exit 0
+fi
+
 set +e
 ip netns exec ams-gcs python3 -u "$ROOT_DIR/scripts/product/native_radio_five_uav_scenario.py" run \
   --run-dir "$RUN_DIR" --node-state "$NODE_STATE" --phase-file "$PHASE_FILE" \
   --schedule-file "$SCHEDULE_FILE" --timeout-scale "$SCENARIO_TIMEOUT_SCALE" \
   --mode="$SCENARIO_MODE" --uav-count="$UAV_COUNT" --channels="$ACTIVE_UART_CHANNELS" \
-  --radio-profile="$RADIO_PROFILE" \
+  --radio-profile="$RADIO_PROFILE" --scenario-config="$SCENARIO" \
   > "$RUN_DIR/logs/flight_scenario.log" 2>&1
 SCENARIO_STATUS=$?
 set -e
@@ -674,7 +820,7 @@ ip netns exec ams-gcs ss -H -tunap > "$RUN_DIR/logs/gcs_sockets_after_stop.txt" 
 if [[ "$SCENARIO_MODE" == product ]]; then
   ip netns exec ams-gcs python3 -u "$ROOT_DIR/scripts/product/native_radio_five_uav_scenario.py" no-bypass-probe \
     --run-dir "$RUN_DIR" --node-state "$NODE_STATE" --duration-s 10.5 \
-    --radio-profile="$RADIO_PROFILE" \
+    --radio-profile="$RADIO_PROFILE" --scenario-config="$SCENARIO" \
     --output "$RUN_DIR/metrics/no_bypass_summary.json" \
     > "$RUN_DIR/logs/no_bypass_probe.log" 2>&1
   ip netns exec ams-gcs ss -H -tunap > "$RUN_DIR/logs/gcs_sockets_after_10s.txt" 2>&1 || true
@@ -687,7 +833,7 @@ done
 capture_pids=()
 touch "$MONITOR_STOP"
 sleep 2
-summary_args=(--run-dir "$RUN_DIR")
+summary_args=(--run-dir "$RUN_DIR" --scenario-config "$SCENARIO")
 if [[ "$SCENARIO_MODE" == latency_diagnostic ]]; then
   summary_args+=(--latency-diagnostic)
 elif [[ -n "$ONE_UAV_RUN" ]]; then

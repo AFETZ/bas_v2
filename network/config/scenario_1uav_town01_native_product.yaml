@@ -5,14 +5,43 @@ scenario:
   name: scenario_1uav_town01_native_product
   description: One real ArduPilot/Gazebo UAV through native ns-3 Sionna Spectrum.
   map:
+    id: cavise_town01
+    kind: external_cavise_scene
+    customer_survey_asset: false
     town: Town01
     world_file: .external/cavise_maps/Town01/gazebo/town01.sdf
     scene_xml: .external/cavise_maps/Town01/map/scene.xml
+    camera_fragment: network/ns3/runtime_live_cameras.sdf.inc
+    gazebo_models: [cavise_town01]
 
 base_simulation:
   launch_package: multiagent_simulation
   launch_file: multiagent_simulation.launch.py
   sitl_home: "46.607213,14.278461,446,10"
+  sitl_defaults: network/config/town01_sitl.parm
+
+flight:
+  hold_time_s: 4.0
+
+traffic:
+  diagnostic_retry_interval_s: 20.0
+  forced_mavlink_stream_intervals: false
+  p2p_packets_per_direction_per_uav: 10
+  p2mp_root_transmissions: 20
+  simultaneous_uplink:
+    packets_per_uav: 20
+    packet_payload_bytes: 256
+    interval_ms: 50
+    duration_s: 1.0
+    retransmissions: false
+  delivery_gates:
+    p2p_min_delivered_per_direction_per_uav: 9
+    p2mp_min_delivered_per_uav: 18
+    simultaneous_min_delivered_per_uav: 1
+    simultaneous_jain_fairness_min: 0.8
+
+radio:
+  config: network/config/native_wifi_80211n_spectrum_product.yaml
 
 command_post:
   id: cp

@@ -82,3 +82,13 @@ Keep active documents short:
 - Development plan: at most 300 lines.
 - Status: at most 150 lines.
 - Task report: at most 100 lines.
+
+## Current delivery
+
+Complete `release/bas-v2-rc1` against `doc/DELIVERY_SCOPE.md`; record actual
+results and remaining blockers in `network/STATUS.md`. Preserve user edits.
+Keep native ns-3.48 Wi-Fi PHY/MAC with in-process Sionna RT as the default.
+No custom PER/ACK/MAC, direct SITL bypass, or silent propagation fallback.
+Dependencies remain pinned; use upstream APIs and thin adapters. Full traces
+and external scene assets stay outside Git. Physical flight-control hardware
+tests need the separate authorization stated in the user request.
