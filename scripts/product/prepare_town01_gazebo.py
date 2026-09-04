@@ -157,6 +157,7 @@ def convert_ply_to_obj(source: Path, target: Path, category: str) -> MeshResult:
     mins = [math.inf, math.inf, math.inf]
     maxs = [-math.inf, -math.inf, -math.inf]
     triangles = 0
+    vertices = []
     colour = " ".join(CATEGORY_COLOURS[category].split()[:3])
     target.with_suffix(".mtl").write_text(
         f"newmtl surface\nKa {colour}\nKd {colour}\nKs 0 0 0\nd 1\nillum 1\n",
@@ -174,6 +175,7 @@ def convert_ply_to_obj(source: Path, target: Path, category: str) -> MeshResult:
                     raise DerivativeError(f"truncated vertex data: {source}")
                 values = header.vertex_struct.unpack(raw)
                 xyz = tuple(float(values[index]) for index in header.xyz_indices)
+                vertices.append(xyz)
                 for axis, value in enumerate(xyz):
                     mins[axis] = min(mins[axis], value)
                     maxs[axis] = max(maxs[axis], value)
@@ -195,7 +197,16 @@ def convert_ply_to_obj(source: Path, target: Path, category: str) -> MeshResult:
                 if any(index < 1 or index > header.vertex_count for index in indices):
                     raise DerivativeError(f"face index outside vertex range: {source}")
                 for offset in range(1, count - 1):
-                    dst.write(f"f {indices[0]} {indices[offset]} {indices[offset + 1]}\n")
+                    ids = (indices[0], indices[offset], indices[offset + 1])
+                    a, b, c = (vertices[i-1] for i in ids)
+                    u = [b[i]-a[i] for i in range(3)]
+                    v = [c[i]-a[i] for i in range(3)]
+                    normal = (u[1]*v[2]-u[2]*v[1], u[2]*v[0]-u[0]*v[2], u[0]*v[1]-u[1]*v[0])
+                    length = math.sqrt(sum(x*x for x in normal))
+                    n = [x/length for x in normal] if length > 0 else [0, 0, 1]
+                    dst.write(f"vn {n[0]:.9g} {n[1]:.9g} {n[2]:.9g}\n")
+                    ni = triangles + 1
+                    dst.write(f"f {ids[0]}//{ni} {ids[1]}//{ni} {ids[2]}//{ni}\n")
                     triangles += 1
         os.replace(temporary, target)
     finally:
