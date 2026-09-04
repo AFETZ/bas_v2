@@ -226,7 +226,7 @@ class Capture(Node):
         self.captures = self.config["captures"]
         if args.source_state:
             for phase, stem in (("jammer_active", "07_jammer_active"), ("jammer_recovery", "08_jammer_recovery")):
-                self.captures[phase] = dict(phase=phase, stem=stem, camera="overview")
+                self.captures[phase] = dict(phase=phase, stem=stem, camera="uav_focus")
         self.phase_aliases = self.config["phase_aliases"]
         self.frames: dict[str, tuple[Image, int]] = {}
         self.done: set[str] = set()

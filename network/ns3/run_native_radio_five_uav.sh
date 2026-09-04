@@ -593,9 +593,10 @@ for index in "${UAV_INDICES[@]}"; do
 import sys,yaml
 config=yaml.safe_load(open(sys.argv[1]))
 config['radio_watchdog_file']=sys.argv[3]
+config['radio_namespace']=config.pop('namespace','ams-uav1')
 with open(sys.argv[2],'w') as f: yaml.safe_dump(config,f)
 PYCFG
-      setsid ip netns exec ams-uav1 python3 -u "$ROOT_DIR/network/scripts/external_endpoint.py" \
+      setsid python3 -u "$ROOT_DIR/network/scripts/external_endpoint.py" \
         --config "$RUN_DIR/logs/external_endpoint.yaml" --output "$RUN_DIR/external_endpoint" \
         > "$RUN_DIR/logs/external_endpoint.log" 2>&1 &
       managed_pids+=("$!")

@@ -96,6 +96,37 @@ def main():
         for p in vertices: f.write(struct.pack('<fff',*p))
         for t in faces: f.write(struct.pack('<Biii',3,*t))
     converted=convert_ply_to_obj(ply,out/'field.obj','terrain')
+    # Additional reference building, not a replacement or scale change of Town01.
+    # Fifteen actual storeys are defined by 16 floor/roof slabs at 3 m spacing.
+    def ground_z(x,y):
+        for ids in faces:
+            tri=[vertices[i] for i in ids]
+            if Polygon(tri).covers(Point(x,y)):
+                xyz=np.array(tri)
+                coefficients=np.linalg.solve(np.column_stack((xyz[:,:2],np.ones(3))),xyz[:,2])
+                return float(coefficients@[x,y,1])
+        raise ValueError('tower must lie on the external field')
+    terrain_corners=[ground_z(x,y) for x in (1188,1212) for y in (-809,-791)]
+    datum=max(terrain_corners)+.1
+    tower_v,tower_f=[],[]
+    def cuboid(x0,x1,y0,y1,z0,z1):
+        start=len(tower_v)
+        tower_v.extend([(x0,y0,z0),(x1,y0,z0),(x1,y1,z0),(x0,y1,z0),
+                        (x0,y0,z1),(x1,y0,z1),(x1,y1,z1),(x0,y1,z1)])
+        for q in ((0,3,2,1),(4,5,6,7),(0,1,5,4),(1,2,6,5),(2,3,7,6),(3,0,4,7)):
+            tower_f.extend([[start+q[0],start+q[1],start+q[2]],[start+q[0],start+q[2],start+q[3]]])
+    cuboid(1188,1212,-809,-791,min(terrain_corners)-.5,datum)
+    for floor in range(16):
+        cuboid(1187.5,1212.5,-809.5,-790.5,datum+floor*3,datum+floor*3+.25)
+    for bounds in ((1188,1188.4,-809,-791),(1211.6,1212,-809,-791),
+                   (1188,1212,-809,-808.6),(1188,1212,-791.4,-791)):
+        cuboid(*bounds,datum,datum+45)
+    tower=out/'reference_tower.ply'
+    with tower.open('wb') as f:
+        f.write(('ply\nformat binary_little_endian 1.0\nelement vertex %d\nproperty float x\nproperty float y\nproperty float z\nelement face %d\nproperty list uchar int vertex_indices\nend_header\n'%(len(tower_v),len(tower_f))).encode())
+        for v in tower_v:f.write(struct.pack('<fff',*v))
+        for t in tower_f:f.write(struct.pack('<Biii',3,*t))
+    convert_ply_to_obj(tower,out/'reference_tower.obj','building')
     scene=ET.parse(src/'map/scene.xml')
     for element in scene.findall('.//string[@name="filename"]'):
         value=Path(element.get('value'))
@@ -105,6 +136,11 @@ def main():
     shape=ET.SubElement(scene.getroot(),'shape',type='ply',id='mesh_customer_field')
     ET.SubElement(shape,'string',name='filename',value=str(ply))
     ET.SubElement(shape,'ref',id='mat_customer_field',name='bsdf')
+    material=ET.SubElement(scene.getroot(),'bsdf',type='itu-radio-material',id='mat_reference_tower')
+    ET.SubElement(material,'string',name='type',value='brick')
+    shape=ET.SubElement(scene.getroot(),'shape',type='ply',id='mesh_reference_tower')
+    ET.SubElement(shape,'string',name='filename',value=str(tower))
+    ET.SubElement(shape,'ref',id='mat_reference_tower',name='bsdf')
     scene.write(out/'scene.xml',encoding='unicode')
     world=ET.parse(src/'gazebo/town01.sdf')
     for uri in world.findall('.//mesh/uri'):
@@ -116,6 +152,9 @@ def main():
         node=ET.SubElement(link,tag,name='field_'+tag)
         geom=ET.SubElement(node,'geometry'); mesh=ET.SubElement(geom,'mesh')
         ET.SubElement(mesh,'uri').text=str(out/'field.obj')
+        node=ET.SubElement(link,tag,name='reference_tower_'+tag)
+        geom=ET.SubElement(node,'geometry'); mesh=ET.SubElement(geom,'mesh')
+        ET.SubElement(mesh,'uri').text=str(out/'reference_tower.obj')
     world.write(out/'customer.sdf',encoding='unicode')
     area=sum(abs(np.cross(np.subtract(vertices[b][:2],vertices[a][:2]),np.subtract(vertices[c][:2],vertices[a][:2])))/2 for a,b,c in faces)
     summary=dict(source='canonical CAVISE Town01 unchanged plus synthetic field/hills',extent_m=[-5000,5000,-5000,5000],
@@ -124,7 +163,9 @@ def main():
         external_area_error_m2=abs(area-field.area),seam_samples=len(seam_errors),seam_interpolation_max_error_m=max(seam_errors,default=None),
         geometry='same float32 PLY vertices and triangles exported to Gazebo OBJ visual and exact mesh collision',
         town01_transform='identity',terrain_provenance='synthetic scenario, not survey',
-        building_floors=None,building_floors_reason='Town01 meshes have no storey metadata; no exact floor count inferred',
+        reference_tower=dict(position_xy_m=[1200,-800],storeys=15,floor_height_m=3,slabs=16,
+            roof_height_above_datum_m=45.25,datum_m=datum,source='synthetic engineering geometry, not survey'),
+        town01_building_floors=None,town01_building_floors_reason='no exact storey count inferred from Town01 mesh height',
         material='explicit generic ITU concrete reference for external terrain; not measured soil',
         shapely=shapely.__version__,geos=shapely.geos_version_string)
     (out/'geometry_summary.json').write_text(json.dumps(summary,indent=2)+'\n')

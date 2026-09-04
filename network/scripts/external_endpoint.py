@@ -2,6 +2,7 @@
 """Serial/UDP/TCP endpoint for the existing BSF1 native radio boundary."""
 from __future__ import annotations
 import argparse
+import ctypes
 from collections import deque
 import json
 import os
@@ -62,8 +63,24 @@ def run(config, output, duration=None):
     if ns and os.stat("/proc/self/ns/net").st_ino != os.stat("/var/run/netns/"+ns).st_ino:
         raise ValueError(f"run this adapter with ip netns exec {ns}")
     peer = tuple(radio["peer"])
-    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    udp.bind(tuple(radio["bind"]))
+    # Socket namespace is fixed at creation. Keep the physical endpoint in the
+    # host network namespace, and only the radio socket inside its modeled TAP.
+    radio_namespace = config.get("radio_namespace")
+    saved = os.open("/proc/self/ns/net", os.O_RDONLY) if radio_namespace else None
+    target = os.open("/var/run/netns/"+radio_namespace, os.O_RDONLY) if radio_namespace else None
+    libc = ctypes.CDLL(None, use_errno=True)
+    try:
+        if target is not None and libc.setns(target, 0) != 0:
+            raise OSError(ctypes.get_errno(), "cannot enter radio namespace")
+        udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        udp.bind(tuple(radio["bind"]))
+    finally:
+        if saved is not None:
+            restored = libc.setns(saved, 0)
+            os.close(saved)
+            os.close(target)
+            if restored != 0:
+                raise OSError(ctypes.get_errno(), "cannot restore endpoint namespace")
     udp.setblocking(False)
     counters = TransportCounters()
     encoder = Encoder(channel=config["channel"], uav_id=int(config["uav_id"]),

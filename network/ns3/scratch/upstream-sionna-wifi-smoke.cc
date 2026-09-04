@@ -294,7 +294,7 @@ main(int argc, char* argv[])
          << "  \"velocity_y_m_s\": " << velocityY << ",\n"
          << "  \"schema_version\": 1,\n"
          << "  \"radio\": \"ns3::SpectrumWifiPhy\",\n"
-         << "  \"propagation\": \"ns3::SionnaRtSpectrumPropagationLossModel\",\n"
+         << "  \"propagation\": \"" << (propagationProfile=="sionna" ? "ns3::SionnaRtSpectrumPropagationLossModel" : "bas::ExplicitNativeSionnaFriisSelection") << "\",\n"
          << "  \"scalar_fallback\": false,\n"
          << "  \"scene\": \"" << scene << "\",\n"
          << "  \"offered_packets\": " << offeredPackets*staCount << ",\n"

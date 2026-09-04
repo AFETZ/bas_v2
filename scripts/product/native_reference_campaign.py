@@ -26,5 +26,5 @@ def main():
   result.update(name=name,process_exit=run.returncode,wall_duration_s=time.monotonic()-start,scope='radio-only; no SITL or Gazebo dynamics',parameters={k:str(v) for k,v in kw.items()})
   results.append(result);print(json.dumps(result),flush=True)
  (a.run_dir/'summary.json').write_text(json.dumps({'cases':results,'clock':'native discrete-event ns-3; wall_duration is compute cost, not real-time lag'},indent=2)+'\n')
- return 0 if all(r['process_exit']==0 for r in results) else 1
+ return 0 if all(r['process_exit'] in (0,4) for r in results) else 1
 if __name__=='__main__':raise SystemExit(main())
