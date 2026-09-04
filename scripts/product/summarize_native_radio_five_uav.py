@@ -540,7 +540,7 @@ def build_mobility(run_dir: Path, events: list[dict[str, Any]]) -> dict[str, Any
     snapshots = read_jsonl(run_dir / "logs/node_state.jsonl")
     topic_details: dict[str, Any] = {}
     result: dict[str, Any] = {
-        "atomic_five_uav_snapshots": True,
+        "atomic_pose_snapshots": True,
         "fail_closed_timeout_s": 1.5,
         "uavs": {},
     }
@@ -2703,6 +2703,11 @@ def write_latency_diagnostic_report(run_dir: Path, observer_reference: Path | No
         "",
         "RSSI/SNR/SINR and BLER retain their explicit native-API availability status in `control_latency_summary.json`.",
     ]
+    if native_sources["sources"]:
+        report.extend(["", "## Native Spectrum sources", "", "See metrics/native_source_summary.json for baseline/active/recovery native powers, decoded SINR, and receive-attempt outcomes."])
+        for stem in ("07_jammer_active","08_jammer_recovery"):
+            if (run_dir/"screenshots"/(stem+".raw.png")).exists():
+                report.extend(["", f"![{stem}](screenshots/{stem}.png)", "", f"[Unmodified live Gazebo frame](screenshots/{stem}.raw.png)"])
     (run_dir / "report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
     print(json.dumps({"run_dir": str(run_dir), "diagnostic": scenario.get("status")}, sort_keys=True))
     return 0 if scenario.get("status") == "diagnostic_complete" else 1
@@ -2781,6 +2786,30 @@ def scenario_motion_pattern(scenario: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def summarize_native_sources(run_dir: Path, events: list[dict[str, Any]]) -> dict[str, Any]:
+    switches=[e for e in events if e["event"] in {"jammer_on","jammer_off"}]
+    result={"sources":switches,"windows":{},"measurement_scope":"native decoder/SignalArrival samples; application PDR needs distinct application offers",
+        "units":{"time":"ns-3 seconds","foreign_power":"dBm, native SpectrumWifiPhy.SignalArrival","noise_interference":"dBm, native decoded MPDU sample","sinr":"dB, derived S/(I+N) on decoded samples"}}
+    if switches:
+        on=min(e["time_s"] for e in switches if e["event"]=="jammer_on")
+        off=max((e["time_s"] for e in switches if e["event"]=="jammer_off"),default=max(e["time_s"] for e in events))
+        for name,low,high in (("baseline",max(0,on-10),on),("active",on,off),("recovery",off,off+10)):
+            selected=[e for e in events if low<=e["time_s"]<high]
+            decoded=[e for e in selected if e["event"]=="wifi_monitor_rx"]
+            ok=sum(e["event"]=="phy_rx_ok" for e in selected)
+            error=sum(e["event"]=="phy_rx_error" for e in selected)
+            result["windows"][name]={"start_sim_s":low,"stop_sim_s":high,"decoded_mpdu_samples":len(decoded),
+                "noise_interference_dbm":distribution([e["noise_interference_dbm"] for e in decoded if e.get("noise_interference_dbm") is not None]),
+                "sinr_db":distribution([e["sinr_db"] for e in decoded if e.get("sinr_db") is not None]),
+                "foreign_power_dbm_by_receiver":{node:distribution([e["value"] for e in selected if e["event"]=="spectrum_signal_arrival" and e["node"]==node and "foreign_signal=1" in str(e.get("details")) and e.get("value") is not None and math.isfinite(e["value"])]) for node in ("cp",*UAVS)},
+                "decoder_success_attempts":ok,"decoder_failure_attempts":error,"decoder_attempt_per":error/(ok+error) if ok+error else None,
+                "decoder_per_denominator":"all RxOk + RxError callbacks in window, retries retained; preamble/CCA drops excluded",
+                "other_phy_drops":sum(e["event"]=="wifi_phy_rx_drop" for e in selected),
+                "application_pdr":None,"application_pdr_reason":"no phase-specific offered-unique-message set; see separate source campaign"}
+    write_json(run_dir/"metrics/native_source_summary.json",result)
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
@@ -2833,6 +2862,7 @@ def main() -> int:
         run_dir, events, scenario, scenario_config["phase_aliases"]
     )
     screenshots = screenshot_status(run_dir, events, scenario_config)
+    native_sources = summarize_native_sources(run_dir, events)
     causal = summarize_causal_link_probes(run_dir, scenario, scenario_config, events)
     one_uav = None
     if args.one_uav_run:
