@@ -128,6 +128,10 @@ std::string g_wifiSsid;
 
 class NativeRuntimeSampler;
 NativeRuntimeSampler* g_runtimeSampler{nullptr};
+std::map<Mac48Address, uint32_t> g_wifiRadioIndices;
+std::string g_runtimeHeartbeat;
+std::string g_propagationProfile{"sionna"};
+void ObserveWifiPath(uint32_t receiver, Mac48Address sender, Ptr<const Packet> packet);
 
 void ObserveReceivedPath(uint32_t nodeIndex, Ptr<const Packet> packet);
 
@@ -573,6 +577,7 @@ WifiMonitorRx(uint32_t nodeIndex,
     payload->RemoveHeader(header);
     std::ostringstream peer;
     peer << header.GetAddr2();
+    ObserveWifiPath(nodeIndex, header.GetAddr2(), packet);
     std::ostringstream details;
     details << (header.IsData() ? PacketTraceDetails(payload)
                                : "packet_uid=" + std::to_string(packet->GetUid()))
@@ -888,6 +893,13 @@ class NativeRuntimeSampler
 
     void PollLag()
     {
+        if (!g_runtimeHeartbeat.empty())
+        {
+            std::ofstream heartbeat(g_runtimeHeartbeat + ".tmp");
+            heartbeat << Simulator::Now().GetSeconds() << '\n';
+            heartbeat.close();
+            std::filesystem::rename(g_runtimeHeartbeat + ".tmp", g_runtimeHeartbeat);
+        }
         Ptr<RealtimeSimulatorImpl> realtime =
             DynamicCast<RealtimeSimulatorImpl>(Simulator::GetImplementation());
         if (realtime)
@@ -970,6 +982,14 @@ class NativeRuntimeSampler
         EmitPathObservation(transmitterIndex, receiverIndex, params, basis.str());
     }
 
+    void ObserveWifiPath(uint32_t receiver, uint32_t transmitter, Ptr<const Packet> packet)
+    {
+        if (receiver == transmitter) return;
+        auto params = m_channelModel->GetParams(m_mobility.at(transmitter), m_mobility.at(receiver));
+        if (params) EmitPathObservation(transmitter, receiver, params,
+            "sample=decoded_wifi_mpdu;packet_uid=" + std::to_string(packet->GetUid()));
+    }
+
   private:
     void EmitPathObservation(
         uint32_t transmitterIndex,
@@ -1016,6 +1036,13 @@ ObserveReceivedPath(uint32_t nodeIndex, Ptr<const Packet> packet)
     {
         g_runtimeSampler->ObserveReceivedPath(nodeIndex, packet);
     }
+}
+
+void ObserveWifiPath(uint32_t receiver, Mac48Address sender, Ptr<const Packet> packet)
+{
+    const auto tx = g_wifiRadioIndices.find(sender);
+    if (g_runtimeSampler && tx != g_wifiRadioIndices.end())
+        g_runtimeSampler->ObserveWifiPath(receiver, tx->second, packet);
 }
 
 void
@@ -1174,7 +1201,7 @@ WriteStats(const std::string& path)
         wifiDeassociations += counters.wifiDeassociations;
     }
     const bool sionnaDrivesRxPsd =
-        g_phasedArraySpectrumPropagationModels.size() == 1 &&
+        g_propagationProfile == "sionna" && g_phasedArraySpectrumPropagationModels.size() == 1 &&
         g_phasedArraySpectrumPropagationModels.front() ==
             "ns3::SionnaRtSpectrumPropagationLossModel";
     std::ofstream output(path, std::ios::out | std::ios::trunc);
@@ -1265,6 +1292,7 @@ WriteStats(const std::string& path)
            << "  \"custom_packet_error_model\": false,\n"
            << "  \"custom_scheduler\": false,\n"
            << "  \"sionna_in_process\": true,\n"
+           << "  \"selected_propagation_profile\": \"" << g_propagationProfile << "\",\n"
            << "  \"phased_array_spectrum_propagation_model_count\": "
            << g_phasedArraySpectrumPropagationModels.size() << ",\n"
            << "  \"rx_psd_propagation_model\": \""
@@ -1386,6 +1414,7 @@ main(int argc, char* argv[])
     command.AddValue("eventCsv", "Native radio and position event CSV", eventCsv);
     command.AddValue("statsFile", "Final native radio counters", statsFile);
     command.AddValue("readyFile", "Readiness file", readyFile);
+    command.AddValue("propagationProfile", "Explicit sionna, friis or hybrid", g_propagationProfile);
     command.AddValue("phaseFile", "Current product flight phase file", phaseFile);
     command.AddValue("duration", "Maximum wall-clock run duration", duration);
     command.AddValue("txPowerW", "Spectrum transmitter power in watts", txPowerW);
@@ -1557,19 +1586,25 @@ main(int argc, char* argv[])
     solver.syntheticArray = sionnaSyntheticArray;
     solver.seed = sionnaSeed;
     sionna->SetRtPathSolverConfig(solver);
-    if (sourceConfig.empty())
+    NS_ABORT_MSG_IF(g_propagationProfile != "sionna" && g_propagationProfile != "friis" &&
+                    g_propagationProfile != "hybrid", "invalid explicit propagation profile");
+    if (sourceConfig.empty() && g_propagationProfile == "sionna")
         channel->AddPhasedArraySpectrumPropagationLossModel(sionna);
     else
     {
-        auto router = bas::InstallSpectrumSources(sionna, channel, sourceConfig, scene,
+        Ptr<bas::SourcePropagation> router;
+        if (sourceConfig.empty()) { router=CreateObject<bas::SourcePropagation>(); router->reference=sionna; }
+        else router = bas::InstallSpectrumSources(sionna, channel, sourceConfig, scene,
             solver, sionnaMaxNumberOfPaths,
             [](const std::string& event, const std::string& id, double value,
                const std::string& details) { LogEvent(event, id, "", 0, value, details); });
+        router->profile=g_propagationProfile;
         channel->AddPhasedArraySpectrumPropagationLossModel(router);
         LogEvent("source_propagation_dispatch", "ns3", "", 0, router->sources.size(),
-                 "wrapper=bas::SourcePropagation;all_delegates=ns3::SionnaRtSpectrumPropagationLossModel;one_model_per_signal=true");
+                 "wrapper=bas::SourcePropagation;selected_profile=" + g_propagationProfile + ";one_model_per_signal=true");
     }
-    g_phasedArraySpectrumPropagationModels.push_back(sionna->GetInstanceTypeId().GetName());
+    g_phasedArraySpectrumPropagationModels.push_back(g_propagationProfile == "sionna"
+        ? sionna->GetInstanceTypeId().GetName() : "bas::ExplicitNativeSionnaFriisSelection");
     LogEvent("rx_psd_model_binding",
              "ns3",
              "",
@@ -1779,6 +1814,9 @@ main(int argc, char* argv[])
 
     LivePositionSource positions(positionFile, mobility, Seconds(1.5));
     NativeRuntimeSampler metrics(sionna->GetChannelModel(), cpMobility, uavMobility);
+    for (uint32_t index = 0; index < radioDevices.GetN(); ++index)
+        g_wifiRadioIndices[Mac48Address::ConvertFrom(radioDevices.Get(index)->GetAddress())] = index;
+    g_runtimeHeartbeat = readyFile + ".heartbeat";
     g_runtimeSampler = &metrics;
     if (radioBackend == "wifi")
     {

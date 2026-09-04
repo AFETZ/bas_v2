@@ -7,8 +7,8 @@ CONTAINER_NAME="${BAS_NATIVE_FIVE_CONTAINER_NAME:-bas-v2-native-radio-five-uav}"
 SCENARIO_KEY="${BAS_NATIVE_FIVE_SCENARIO:-town01}"
 GUI="${BAS_NATIVE_FIVE_GUI:-0}"
 
-[[ "$SCENARIO_KEY" == town01 || "$SCENARIO_KEY" == rock_demo ]] || {
-  printf 'Scenario must be town01 or rock_demo: %s\n' "$SCENARIO_KEY" >&2
+[[ "$SCENARIO_KEY" == town01 || "$SCENARIO_KEY" == rock_demo || "$SCENARIO_KEY" == customer ]] || {
+  printf 'Scenario must be town01, rock_demo or customer: %s\n' "$SCENARIO_KEY" >&2
   exit 2
 }
 [[ "$GUI" == 0 || "$GUI" == 1 ]] || { printf 'BAS_NATIVE_FIVE_GUI must be 0 or 1.\n' >&2; exit 2; }
@@ -50,6 +50,8 @@ run_in_container() {
     -e BAS_NATIVE_FIVE_IN_CONTAINER=1 \
     -e BAS_SOURCE_HEAD="$(git -C "$ROOT_DIR" rev-parse HEAD)" \
     -e BAS_SOURCE_DIRTY="$(git -C "$ROOT_DIR" status --porcelain | wc -l)" \
+    -e BAS_NATIVE_PROPAGATION_PROFILE="${BAS_NATIVE_PROPAGATION_PROFILE:-sionna}" \
+    -e BAS_NATIVE_OPERATOR_SECONDS="${BAS_NATIVE_OPERATOR_SECONDS:-0}" \
     -e BAS_NATIVE_SOURCES="${BAS_NATIVE_SOURCES:-}" \
     -e BAS_NATIVE_EXTERNAL_CONFIG="${BAS_NATIVE_EXTERNAL_CONFIG:-}" \
     -e BAS_NATIVE_FIVE_RUN_ID="${BAS_NATIVE_FIVE_RUN_ID:-}" \
@@ -148,7 +150,9 @@ BINARY="$NS3_DIR/build/scratch/ns3.48-upstream-sionna-tap-spike-default"
 PATCH_FILE="$ROOT_DIR/network/ns3/patches/mr2608-spike-compatibility.patch"
 REALTIME_CACHE_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-realtime-scene-cache.patch"
 PHASED_ARRAY_ADAPTER_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-spectrumwifi-phased-array-adapter.patch"
-if [[ "$SCENARIO_KEY" == rock_demo ]]; then
+if [[ "$SCENARIO_KEY" == customer ]]; then
+  SCENARIO="$ROOT_DIR/network/config/scenario_5uav_customer_native_product.yaml"
+elif [[ "$SCENARIO_KEY" == rock_demo ]]; then
   SCENARIO="$ROOT_DIR/network/config/scenario_5uav_rock_demo_native_product.yaml"
 else
   SCENARIO="$ROOT_DIR/network/config/scenario_${UAV_COUNT}uav_town01_native_product.yaml"
@@ -585,8 +589,14 @@ for index in "${UAV_INDICES[@]}"; do
   for channel in control payload; do
     [[ ",$ACTIVE_UART_CHANNELS," == *,$channel,* ]] || continue
     if [[ "$index" == 1 && "$channel" == control && -n "${BAS_NATIVE_EXTERNAL_CONFIG:-}" ]]; then
+      python3 - "$ROOT_DIR/$BAS_NATIVE_EXTERNAL_CONFIG" "$RUN_DIR/logs/external_endpoint.yaml" "$NS3_READY.heartbeat" <<'PYCFG'
+import sys,yaml
+config=yaml.safe_load(open(sys.argv[1]))
+config['radio_watchdog_file']=sys.argv[3]
+with open(sys.argv[2],'w') as f: yaml.safe_dump(config,f)
+PYCFG
       setsid ip netns exec ams-uav1 python3 -u "$ROOT_DIR/network/scripts/external_endpoint.py" \
-        --config "$ROOT_DIR/$BAS_NATIVE_EXTERNAL_CONFIG" --output "$RUN_DIR/external_endpoint" \
+        --config "$RUN_DIR/logs/external_endpoint.yaml" --output "$RUN_DIR/external_endpoint" \
         > "$RUN_DIR/logs/external_endpoint.log" 2>&1 &
       managed_pids+=("$!")
       continue
@@ -732,6 +742,7 @@ setsid ip netns exec ams-ns3 env \
   --wifiChannelNumber="$WIFI_CHANNEL_NUMBER" \
   --wifiChannelWidthMhz="$WIFI_CHANNEL_WIDTH_MHZ" --wifiSsid="$WIFI_SSID" \
   --carrierHz="$CARRIER_HZ" --tapGcs=tap-gcs --tapUavs="$TAP_UAVS" \
+  --propagationProfile="${BAS_NATIVE_PROPAGATION_PROFILE:-sionna}" \
   --scene="$SCENE" --positionFile="$NODE_STATE" --phaseFile="$PHASE_FILE" \
   --radioPcap="$RUN_DIR/pcap/native_radio.pcap" \
   --eventCsv="$RUN_DIR/logs/native_radio_events.csv" \
@@ -762,6 +773,15 @@ done
 [[ -s "$NS3_READY" ]] || { printf 'Native ns-3/Sionna readiness timed out.\n' >&2; exit 1; }
 
 ps -eo pid,ppid,pgid,etimes,cmd > "$RUN_DIR/logs/process_snapshot.txt"
+
+if [[ "${BAS_NATIVE_OPERATOR_SECONDS:-0}" != 0 ]]; then
+  printf 'latency_stationary_warmup\n' > "$PHASE_FILE"
+  printf 'MAVProxy bridge ready in ams-gcs: udpout:127.0.0.1:14551 .. 14555\n'
+  ip netns exec ams-gcs python3 -u "$ROOT_DIR/scripts/product/native_operator_bridge.py" \
+    --run-dir "$RUN_DIR" --node-state "$NODE_STATE" --duration-s "$BAS_NATIVE_OPERATOR_SECONDS" \
+    > "$RUN_DIR/logs/operator_bridge.log" 2>&1
+  exit 0
+fi
 
 set +e
 ip netns exec ams-gcs python3 -u "$ROOT_DIR/scripts/product/native_radio_five_uav_scenario.py" run \

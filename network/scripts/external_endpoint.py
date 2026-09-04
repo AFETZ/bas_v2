@@ -10,7 +10,7 @@ import signal
 import socket
 import time
 import yaml
-from serial_transport import Encoder, Reassembler, TransportCounters
+from serial_transport import Encoder, Reassembler, TransportCounters, decode_chunk
 
 
 class BoundedQueue:
@@ -70,7 +70,9 @@ def run(config, output, duration=None):
                       direction="uart_to_gcs", max_payload=192)
     def decoder():
         return Reassembler(channel=config["channel"], uav_id=int(config["uav_id"]),
-                           direction="gcs_to_uart", timeout_ms=250, counters=counters)
+                           direction="gcs_to_uart", timeout_ms=max(1,min(250,int(config["queues"]["deadline_s"]*500))), counters=counters,
+                           max_buffer_records=config["queues"]["packets"], max_buffer_bytes=config["queues"]["bytes"],
+                           max_age_ms=config["queues"]["deadline_s"]*1000)
     reassembler = decoder()
     policy = config["queues"]
     to_radio = BoundedQueue(policy["packets"], policy["bytes"], policy["deadline_s"])
@@ -83,7 +85,7 @@ def run(config, output, duration=None):
     started = last_device_rx = last_radio_rx = time.monotonic()
     report_at = started
     metrics = dict(endpoint_to_radio_bytes=0, radio_to_endpoint_bytes=0, reconnects=0,
-                   io_errors=0, unexpected_peer=0, max_queue_delay_ms=0.0,
+                   io_errors=0, unexpected_peer=0, stale_radio_drops=0, max_queue_delay_ms=0.0,
                    controller_kind=kind, hardware_validation="not_performed",
                    framing="BSF1; unchanged endpoint bytes", clock="host_monotonic")
     output.mkdir(parents=True, exist_ok=True)
@@ -134,6 +136,7 @@ def run(config, output, duration=None):
             if not radio_live:
                 to_radio.clear()
                 to_device.clear()
+                reassembler = decoder()
             try:
                 if device is not None:
                     try:
@@ -160,6 +163,16 @@ def run(config, output, duration=None):
                     data, source = udp.recvfrom(65535)
                     if source == peer:
                         last_radio_rx = now
+                        try:
+                            age = (time.monotonic_ns()-decode_chunk(data).sent_monotonic_ns)/1e9
+                        except ValueError:
+                            counters.malformed_chunks += 1
+                            continue
+                        # Both BSF1 adapters run on this simulation host. An external
+                        # controller's own clock is never used for this deadline.
+                        if not radio_live or age > policy["deadline_s"] or age < 0:
+                            metrics["stale_radio_drops"] += 1
+                            continue
                         records = reassembler.ingest(data)
                         if device is not None and radio_live:
                             for record in records:

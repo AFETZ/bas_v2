@@ -31,6 +31,8 @@ class SourcePropagation : public PhasedArraySpectrumPropagationLossModel
         return tid;
     }
     Ptr<SionnaRtSpectrumPropagationLossModel> reference;
+    std::string profile{"sionna"};
+    Ptr<FriisSpectrumPropagationLossModel> freeSpace{CreateObject<FriisSpectrumPropagationLossModel>()};
     std::map<Ptr<SpectrumPhy>, Ptr<SionnaRtSpectrumPropagationLossModel>> sources;
     std::map<Ptr<SpectrumPhy>, Ptr<SpectrumValue>> sourcePsds;
     std::map<Ptr<SpectrumPhy>, std::array<double, 4>> sourceTimes;
@@ -41,6 +43,19 @@ class SourcePropagation : public PhasedArraySpectrumPropagationLossModel
         Ptr<const MobilityModel> b, Ptr<const PhasedArrayModel> aa,
         Ptr<const PhasedArrayModel> ba) const override
     {
+        const auto x = a->GetPosition();
+        const auto y = b->GetPosition();
+        const bool farField = x.x > 2000 && y.x > 2000 && x.z >= 200 && y.z >= 200 &&
+                              CalculateDistance(x, y) >= 500;
+        if (profile == "friis" || (profile == "hybrid" && farField))
+        {
+            NS_ABORT_MSG_IF(!DynamicCast<const IsotropicAntennaModel>(aa->GetAntennaElement()) ||
+                            !DynamicCast<const IsotropicAntennaModel>(ba->GetAntennaElement()),
+                            "explicit free-space profile supports isotropic elements only");
+            auto result = params->Copy();
+            result->psd = freeSpace->CalcRxPowerSpectralDensity(params, a, b);
+            return result;
+        }
         auto entry = sources.find(params->txPhy);
         auto selected = entry == sources.end() ? reference : entry->second;
         return selected->CalcRxPowerSpectralDensity(params, a, b, aa, ba);

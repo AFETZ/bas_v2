@@ -45,7 +45,9 @@ def test_real_bidirectional_endpoints(tmp_path, kind):
     external = listener = None
     if kind == "serial":
         master, slave = pty.openpty()
-        endpoint = dict(kind=kind, device=os.ttyname(slave), baud=115200,
+        serial_path = tmp_path/"controller"
+        serial_path.symlink_to(os.ttyname(slave))
+        endpoint = dict(kind=kind, device=str(serial_path), baud=115200,
                         bytesize=8, parity="N", stopbits=1)
     elif kind == "udp":
         external = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -108,6 +110,17 @@ def test_real_bidirectional_endpoints(tmp_path, kind):
         assert metrics["peak_queue_bytes"] <= 4096
         if kind == "tcp_client":
             assert metrics["reconnects"] >= 2
+        if kind == "serial":
+            os.close(master)
+            os.close(slave)
+            time.sleep(.2)
+            master, slave = pty.openpty()
+            serial_path.unlink()
+            serial_path.symlink_to(os.ttyname(slave))
+            time.sleep(.3)
+            os.write(master, b"after-device-reconnect")
+            datagram, _ = radio.recvfrom(65535)
+            assert decoder.ingest(datagram) == [b"after-device-reconnect"]
     finally:
         process.terminate()
         _, errors = process.communicate(timeout=5)
@@ -120,3 +133,31 @@ def test_real_bidirectional_endpoints(tmp_path, kind):
         if master is not None:
             os.close(master)
             os.close(slave)
+
+
+def test_native_heartbeat_and_old_radio_bytes_fail_closed(tmp_path):
+    radio=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);radio.bind(('127.0.0.1',0))
+    device=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);device.bind(('127.0.0.1',0));device.settimeout(.2)
+    heartbeat=tmp_path/'native.heartbeat'
+    config=dict(uav_id=1,channel='control',endpoint=dict(kind='udp',bind=['127.0.0.1',port()],peer=list(device.getsockname())),
+        radio=dict(bind=['127.0.0.1',port()],peer=list(radio.getsockname())),queues=dict(packets=4,bytes=4096,deadline_s=.15),
+        watchdog_s=.3,reconnect_s=.1,radio_watchdog_file=str(heartbeat))
+    path=tmp_path/'cfg.yaml';path.write_text(yaml.safe_dump(config))
+    proc=subprocess.Popen([sys.executable,str(ROOT/'network/scripts/external_endpoint.py'),'--config',str(path),'--output',str(tmp_path/'out')])
+    encoder=Encoder(channel='control',uav_id=1,direction='gcs_to_uart')
+    try:
+        deadline=time.monotonic()+4
+        while not (tmp_path/'out/metrics.json').exists() and time.monotonic()<deadline:time.sleep(.02)
+        for frame in encoder.encode(b'blocked-no-live-native-runtime'):radio.sendto(frame,tuple(config['radio']['bind']))
+        with pytest.raises(socket.timeout):device.recvfrom(4096)
+        old=encoder.encode(b'old-command')
+        time.sleep(.2);heartbeat.write_text('native simulation tick')
+        for frame in old:radio.sendto(frame,tuple(config['radio']['bind']))
+        with pytest.raises(socket.timeout):device.recvfrom(4096)
+        heartbeat.touch()
+        for frame in encoder.encode(b'fresh-command'):radio.sendto(frame,tuple(config['radio']['bind']))
+        assert device.recvfrom(4096)[0]==b'fresh-command'
+        time.sleep(.3)
+        assert json.loads((tmp_path/'out/metrics.json').read_text())['stale_radio_drops']>=2
+    finally:
+        proc.terminate();proc.wait(timeout=5);radio.close();device.close()
