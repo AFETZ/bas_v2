@@ -19,11 +19,6 @@ inline void WriteRadioMap(const std::string& output,
     Ptr<SionnaRtSpectrumPropagationLossModel> model, Ptr<SourcePropagation> sources,
     Ptr<MobilityModel> txMobility, Ptr<PhasedArrayModel> txArray, double sourceTime)
 {
-    auto rxArray = CreateObjectWithAttributes<UniformPlanarArray>(
-        "NumColumns", UintegerValue(1), "NumRows", UintegerValue(1));
-    PhasedArrayModel::ComplexVector weights(1);
-    weights[0] = {1, 0};
-    rxArray->SetBeamformingVector(weights);
     auto txPsd = WifiSpectrumValueHelper::CreateHtOfdmTxPowerSpectralDensity({2412}, 20, .01, 20);
     // Configured thermal floor, exactly as InterferenceHelper::CalculateSnr in ns-3.48.
     // This is a derived map input, not an additional runtime noise measurement.
@@ -43,6 +38,11 @@ inline void WriteRadioMap(const std::string& output,
             auto node = CreateObject<Node>();
             auto rxMobility = CreateObject<ConstantPositionMobilityModel>();
             node->AggregateObject(rxMobility);
+            auto rxArray = CreateObjectWithAttributes<UniformPlanarArray>(
+                "NumColumns", UintegerValue(1), "NumRows", UintegerValue(1));
+            PhasedArrayModel::ComplexVector weights(1);
+            weights[0] = {1, 0};
+            rxArray->SetBeamformingVector(weights);
             const Vector xyz(column*20.0, row*20.0-20.0, 2.0);
             rxMobility->SetPosition(xyz);
             auto params = Create<SpectrumSignalParameters>();

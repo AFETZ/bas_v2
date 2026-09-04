@@ -1448,8 +1448,8 @@ def receiver_event_evidence(
     }
 
 
-def real_value(value: float | None) -> float | str:
-    return value if value is not None and math.isfinite(value) else "unavailable"
+def real_value(value: float | None) -> float | None:
+    return value if value is not None and math.isfinite(value) else None
 
 
 def build_radio_observability(
@@ -1587,19 +1587,19 @@ def build_radio_observability(
                         event.get("channel_generation_time_s")
                     ),
                     "sionna_los_available": "unavailable: current SionnaRtChannelParams exposes delays but not LOS identity",
-                    "sionna_path_delay_min_ns": min(delays) * 1e9 if delays else "unavailable",
-                    "sionna_path_delay_max_ns": max(delays) * 1e9 if delays else "unavailable",
-                    "sionna_delay_spread_ns": (max(delays) - min(delays)) * 1e9 if delays else "unavailable",
+                    "sionna_path_delay_min_ns": min(delays) * 1e9 if delays else None,
+                    "sionna_path_delay_max_ns": max(delays) * 1e9 if delays else None,
+                    "sionna_delay_spread_ns": (max(delays) - min(delays)) * 1e9 if delays else None,
                     "rx_power_dbm": real_value(rx_power_dbm),
                     "rx_power_w": real_value(
                         matching_power[-1].get("rx_power_w") if matching_power else None
                     ),
-                    "rx_power_match_basis": "packet_uid" if matching_power else "unavailable",
-                    "rssi_dbm": "unavailable",
+                    "rx_power_match_basis": "packet_uid" if matching_power else None,
+                    "rssi_dbm": None,
                     "snr_db": real_value(decoder_snr_db),
-                    "sinr_db": "unavailable",
-                    "interference_power_dbm": "unavailable",
-                    "noise_power_dbm": "unavailable",
+                    "sinr_db": None,
+                    "interference_power_dbm": None,
+                    "noise_power_dbm": None,
                     "native_mac_tx": len(matching_mac),
                     "native_phy_rx_start": len(matching_start),
                     "native_wifi_phy_rx_end": len(matching_neutral_end),
@@ -1609,14 +1609,14 @@ def build_radio_observability(
                     "packets_attempted": 1 if uid is not None else 0,
                     "packets_delivered": sum(item["event"] == "phy_rx_ok" for item in matching_end),
                     "packet_error_count": sum(item["event"] == "phy_rx_error" for item in matching_end),
-                    "empirical_per": "unavailable",
-                    "application_pdr": "unavailable",
-                    "goodput_bps": "unavailable",
-                    "end_to_end_latency_ms": "unavailable",
-                    "jitter_ms": "unavailable",
+                    "empirical_per": None,
+                    "application_pdr": None,
+                    "goodput_bps": None,
+                    "end_to_end_latency_ms": None,
+                    "jitter_ms": None,
                     "mobility_age_ms": real_value(mobility_age.get(rx)),
                     "ns3_realtime_lag_ms": real_value(lag_at_event),
-                    "gazebo_rtf": "unavailable",
+                    "gazebo_rtf": None,
                 }
             )
 
@@ -1636,7 +1636,7 @@ def build_radio_observability(
         ]
         matching_drop = [item for item in drops_by_uid.get(uid or -1, []) if item["node"] == rx]
         matching_power = [item for item in powers_by_uid.get(uid or -1, []) if item["node"] == rx]
-        power_match_basis = "packet_uid" if matching_power else "unavailable"
+        power_match_basis = "packet_uid" if matching_power else None
         if uid is None:
             receiver_window = [
                 item
@@ -1707,7 +1707,7 @@ def build_radio_observability(
         key = (str(row["tx"]), str(row["rx"]))
         values = outcomes[key]
         attempts = len(values["attempted"])
-        row["empirical_per"] = len(values["error"]) / attempts if attempts else "unavailable"
+        row["empirical_per"] = None  # UID deduplication is not a PHY-attempt denominator
 
     columns = [
         "timestamp_wall", "timestamp_sim", "scenario_phase", "tx", "rx", "tx_x", "tx_y", "tx_z",
@@ -1752,7 +1752,7 @@ def build_radio_observability(
                 and ("cp", tx, row["timestamp_sim"]) in reciprocal_path_samples
             ]
             path_sample_basis = (
-                "reciprocal_cp_uav_channel_params" if samples else "unavailable"
+                "reciprocal_cp_uav_channel_params" if samples else None
             )
         link_packet_events = [
             event for event in events if packet_event_matches_link(event, tx, rx)
@@ -1822,10 +1822,10 @@ def build_radio_observability(
             "tx": tx, "rx": rx,
             "path_count": item["path_count"]["p50"],
             "rx_power_dbm": item["wifi_rx_power_dbm"]["p50"],
-            "rssi_dbm": "unavailable", "snr_db": item["decoder_snr_db"]["p50"],
-            "sinr_db": "unavailable",
-            "per": per if per is not None else "unavailable", "pdr": "unavailable",
-            "latency_p95_ms": "unavailable", "state": state,
+            "rssi_dbm": None, "snr_db": item["decoder_snr_db"]["p50"],
+            "sinr_db": None,
+            "per": per if per is not None else None, "pdr": None,
+            "latency_p95_ms": None, "state": state,
         })
     canonical_event_counts = Counter(str(event.get("event", "")) for event in events)
     raw_event_counts = Counter(str(event.get("raw_event", "")) for event in events)
@@ -1866,39 +1866,39 @@ def build_radio_observability(
         ack_payload = diagnostic.get("payload", {}).get("ack_latency_ms")
         uav_rows.append({
             "uav": uav,
-            "control_packets_tx": control.get("records_encoded", "unavailable"),
-            "control_packets_rx": control.get("records_reassembled", "unavailable"),
-            "control_pdr": control.get("records_reassembled", 0) / control["records_encoded"] if control.get("records_encoded") else "unavailable",
-            "control_per": "unavailable",
-            "control_rtt_p50_ms": ack_control if ack_control is not None else "unavailable",
-            "control_rtt_p95_ms": ack_control if ack_control is not None else "unavailable",
-            "control_rtt_max_ms": ack_control if ack_control is not None else "unavailable",
-            "payload_packets_tx": payload.get("records_encoded", "unavailable"),
-            "payload_packets_rx": payload.get("records_reassembled", "unavailable"),
-            "payload_pdr": payload.get("records_reassembled", 0) / payload["records_encoded"] if payload.get("records_encoded") else "unavailable",
-            "payload_per": "unavailable",
-            "payload_rtt_p50_ms": ack_payload if ack_payload is not None else "unavailable",
-            "payload_rtt_p95_ms": ack_payload if ack_payload is not None else "unavailable",
+            "control_packets_tx": control.get("records_encoded", None),
+            "control_packets_rx": control.get("records_reassembled", None),
+            "control_pdr": None,  # Opposite-direction UART counters are not a delivery denominator
+            "control_per": None,
+            "control_rtt_p50_ms": ack_control if ack_control is not None else None,
+            "control_rtt_p95_ms": ack_control if ack_control is not None else None,
+            "control_rtt_max_ms": ack_control if ack_control is not None else None,
+            "payload_packets_tx": payload.get("records_encoded", None),
+            "payload_packets_rx": payload.get("records_reassembled", None),
+            "payload_pdr": None,
+            "payload_per": None,
+            "payload_rtt_p50_ms": ack_payload if ack_payload is not None else None,
+            "payload_rtt_p95_ms": ack_payload if ack_payload is not None else None,
             "additional_tx": len(outcomes[(uav, "cp")]["attempted"]),
             "additional_rx": len(outcomes[("cp", uav)]["ok"]),
-            "additional_pdr": len(outcomes[("cp", uav)]["ok"]) / len(outcomes[("cp", uav)]["attempted"]) if outcomes[("cp", uav)]["attempted"] else "unavailable",
-            "additional_goodput_bps": "unavailable",
+            "additional_pdr": None,  # Application delivery is reported by the application harness
+            "additional_goodput_bps": None,
             "mean_rx_power_dbm": receive_evidence["wifi_rx_power_dbm"]["mean"],
             "min_rx_power_dbm": receive_evidence["wifi_rx_power_dbm"]["min"],
             "max_rx_power_dbm": receive_evidence["wifi_rx_power_dbm"]["max"],
-            "mean_rssi_dbm": "unavailable", "min_rssi_dbm": "unavailable",
+            "mean_rssi_dbm": None, "min_rssi_dbm": None,
             "mean_snr_db": receive_evidence["decoder_snr_db"]["mean"],
             "min_snr_db": receive_evidence["decoder_snr_db"]["min"],
-            "mean_sinr_db": "unavailable", "min_sinr_db": "unavailable",
-            "min_path_count": min(paths) if paths else "unavailable",
-            "median_path_count": percentile(paths, 50) if paths else "unavailable",
-            "max_path_count": max(paths) if paths else "unavailable",
+            "mean_sinr_db": None, "min_sinr_db": None,
+            "min_path_count": min(paths) if paths else None,
+            "median_path_count": percentile(paths, 50) if paths else None,
+            "max_path_count": max(paths) if paths else None,
             "phy_rx_ok": receive_evidence["phy_rx_ok"],
             "phy_rx_error": receive_evidence["phy_rx_error"],
             "wifi_phy_rx_end": receive_evidence["wifi_phy_rx_end"],
             "wifi_phy_rx_drop": receive_evidence["wifi_phy_rx_drop"],
-            "distance_min_m": min(distances) if distances else "unavailable",
-            "distance_max_m": max(distances) if distances else "unavailable",
+            "distance_min_m": min(distances) if distances else None,
+            "distance_max_m": max(distances) if distances else None,
         })
     with (metrics_dir / "per_uav_network_summary.csv").open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=list(uav_rows[0]))
@@ -2699,7 +2699,7 @@ def write_latency_diagnostic_report(run_dir: Path, observer_reference: Path | No
         f"- MAVLink PING supported: {ping.get('supported', False)}; attempts/UAV: {ping.get('attempts_per_uav', 0)}.",
         f"- Observer mode: {observer['event_logging']} ({observer['native_event_rows']} native event rows).",
         "",
-        "`mavlink_latency_chain.csv` contains every operation and attempt.  It deliberately marks UAV UART ACK and GCS UART boundaries unavailable where this UDP-only topology or MAVLink COMMAND_ACK lacks an exact, retry-safe correlation key; no timestamps are reconstructed.",
+        "`mavlink_latency_chain.csv` contains every operation and attempt. Exact MAVLink bytes correlate the UART write, real ACK UART read and GCS reception. A returned ACK does not identify which repeated command caused it; retry-attempt RTT remains null when ambiguous. GCS is UDP, so no GCS UART timestamp exists.",
         "",
         "RSSI/SNR/SINR and BLER retain their explicit native-API availability status in `control_latency_summary.json`.",
     ]
@@ -2930,10 +2930,9 @@ def main() -> int:
         "displacement_threshold_m": stats.get("endpoint_displacement_threshold_m"),
         "solver_calls_per_s": None,
         "channel_state_age_ms": {
-            "p50": None,
-            "p95": (stats.get("channel_state_max_age_s") or 0) * 1000.0,
-            "max": (stats.get("channel_state_max_age_s") or 0) * 1000.0,
-            "basis": "bounded maximum configured for live cache; per-solve generated timestamps are in native log",
+            **distribution([max(0., (float(e["time_s"])-float(e["channel_generation_time_s"]))*1000)
+                for e in events if e.get("event")=="sionna_link_state" and isinstance(e.get("channel_generation_time_s"),(int,float))]),
+            "basis": "sim time minus native channel generation time; observed links only",
         },
         "ns3_lag_ms": realtime.get("steady_ns3_realtime_lag_ms"),
         "gazebo_rtf": realtime.get("gazebo_rtf"),
