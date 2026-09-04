@@ -1,61 +1,66 @@
 # Product Status
 
-Updated: 2026-09-04. A status is supported only by the named runtime artifact;
-an implemented path or a validator result is not a readiness claim.
+Updated: 2026-09-05. Current branch: release/bas-v2-rc1.
+Original native-radio-wifi worktree and its user edits were preserved.
 
-| Stage | Status | Evidence and current boundary | Next one task |
-| --- | --- | --- | --- |
-| P0 Process reset | done | Product-first rules and changed-path checks are present. | Maintain only as needed. |
-| P1 Five-UAV baseline | done | Five live SITLs, Gazebo models and ROS odometry completed the lifecycle in `runs/town01-full-20260827T064100Z`. | Preserve this baseline. |
-| P2 Communication vertical slice | done | Five independent dual-UART paths, endpoint diagnostics, native P2P/P2MP and stop proof passed in `runs/town01-communication-20260827T120000Z`. | Preserve the communication plane. |
-| P3 Shared 10 km scene | deferred | Town01 remains the scoped development scene. | Scope the expansion separately. |
-| P4 Interference and medium access | done | `runs/town01-qos-final-20260904` passed bounded overload; `native-wifi-five-product-final-v3-20260904` passed the existing TAP/UART boundary with a native 802.11n QoS `SpectrumWifiPhy` BSS and in-process Sionna. | Preserve the versioned QoS and native-Wi-Fi contracts. |
-| P5 HitL and real time | software_ready_hitl_limited | Two full five-SITL Town01 Wi-Fi/Sionna runs passed at RTF 1. Primary steady scheduler-lag p95 was 0.084 ms and Gazebo mean RTF was 0.994559; hardware HitL is still unproved. | Scope hardware HitL separately. |
-| P6 Scalability and hybrid propagation | todo | This first cache-backed operating-envelope sample is not a capacity matrix. | Measure the declared age/position-threshold matrix after P5 succeeds. |
-| P7 Integrated demo | scoped_ready | The current five-UAV Town01 scope passed 15/15 functional checks, flight lifecycle, ten UART paths, P2P/P2MP, live screenshots, realtime and stop-based no-bypass. P3/P6 expansion is not claimed. | Do not begin another product feature under this closure. |
+software_release_status=verified (local software RC, measured reference envelope)
+full_tz_status=blocked_external
+hardware_validation_status=blocked_external
 
-## Bounded overload
+| Requirement | Status | Actual verification |
+| --- | --- | --- |
+| R1 five SITL/Gazebo | verified | customer-final-01/02: flight, LAND, auto-disarm, real odometry and cleanup |
+| R2 UART/P2P/P2MP | verified | Ten UART; 50/50 parallel one-shot; P2P 100/100; P2MP 20 roots/100 deliveries; native stop proof |
+| R3 native radio | verified | ns-3.48 Wi-Fi PHY/MAC/ARQ/queues and in-process Sionna, no bypass/custom PER |
+| R4 sources | verified | Eight WaveformGenerator cases, packet impact, pulse/sweep/orientation/multiple/non-overlap, two integrated on/off runs |
+| R5 observability | verified | Native S/N and predecode power; derived RSSI/J/S, application PDR/goodput/IPDV, queue/airtime, raw Gazebo, radiotap and map point comparison |
+| R6 external FC | blocked_external | Serial/UDP/TCP software tests, real SITL UART gateway/MAVProxy ACK; no physical FC |
+| R7 timing/cache/scale | verified | 1/5 SITL, 16 radio-only STA, three cache profiles, explicit native Friis/hybrid studies |
+| R8 shared scene | verified | 10×10 km field/Town01, 188.791 m terrain relief, explicit 15-storey addition, shared meshes |
+| R9 operator | verified | Existing MAVProxy, SYSID selection and commands through modeled path; Makefile/CLI |
+| R10 delivery | verified | Two full runs, pinned source/image/dependencies, local package and clean restored bootstrap |
 
-The audited accounting fix is commit `26fa99c`; the control-protection implementation
-is commit `28c52f5` and its hardening is `dbe1046`. The exact old scheduler backlog
-was unbounded offered traffic entering ingress/Sionna/queue lifecycle work before
-admission. The legacy backoff argument mismatch allowed 45,927 rich retry rows, and
-every callback reparsed and hashed the frame, serialized about 2 KiB JSON, and
-synchronously flushed it. BSF1 was one fragment per record and was not causal.
+## Final runtime measurements
 
-Controlled overload offered 33.8048 Mbit/s and admitted 12.8608 Mbit/s. Control PDR
-was 1.0 with 1.335 ms p95 latency; lower classes delivered 12.637333 Mbit/s total,
-scheduler-lag p95 was 6.125 ms, Gazebo mean RTF was 1.000414, and pending was zero.
-All 18,600 packet IDs have terminal accounting. Before/after lag was
-7,594.223/6.125 ms, events per delivered logical packet 12.8266/7.5254, and pending
-15,013/0. The shaping-disabled meltdown point offered/admitted 33.8048 Mbit/s and is
-characterization-only, not pass/fail or a saturation sweep. Compact evidence is in
-`metrics/controlled_overload_summary.json`, `metrics/meltdown_characterization.json`,
-`metrics/event_profile.json`, and `doc/results/town01_bounded_overload_v2.md`.
+runs/native-radio-realtime/rc1-customer-final-01 and ...-02 passed all 20 gates.
+Both: five flight/LAND/auto-disarm, ten UART, P2P/P2MP/shared delivery and 10.5 s no-bypass.
+Steady ns-3 lag p95/max: 0.336842/58.01054 ms and 16.076663/108.432918 ms.
+Gazebo RTF mean: .996636/.995554; cold start reported separately.
+Actual sampled channel age p95: 13.928/13.870 s; maximum 19.880 s.
+Runtime HEADs: 547a536 and 2fb157b; later report-only additions retain raw data.
+Focused tests: 40 passed; latest reporting tests: 21 passed.
 
-## Native Wi-Fi/Sionna Town01 product path
+## Limits that remain
 
-The exact upstream base is `d2add90b452d600cfb4859baed8e9ea633519447`. The product
-runtime uses six native Wi-Fi PHY/MAC pairs, one shared `MultiModelSpectrumChannel`,
-and only `SionnaRtSpectrumPropagationLossModel`; there is no scalar propagation
-fallback or application bypass. Five real SITLs and Gazebo vehicles passed lifecycle,
-real control/payload ACKs, ten SERIAL1/SERIAL2 paths, 100/100 P2P deliveries, one-root
-P2MP with 100 receiver deliveries, and simultaneous uplink Jain fairness 1.0.
+- No physical FC or ttyUSB/ttyACM/serial-by-id device. PTY is software validation,
+  not hardware or flight-HIL. Needed: FC, serial/COM or Ethernet access and safe bench.
+- Cache 20 s/10 m delayed path disappearance by 1 s and missed a 1 s recovery;
+  four no-path mismatches remain visible. Do not infer accuracy from low scheduler lag.
+- 16 STA test is radio-only; its 11.63 wall s / 8 sim s does not establish 16-SITL real time.
+- At 10 dBm, 500/1000/2000 m native reference links delivered 0/100; no power retuning.
+- RSSI/J/S energy sums use native arrivals plus configured thermal floor. Decoder S/N
+  has decoded-frame sampling bias. Airtime is not CCA busy-state fraction. Application
+  PDR and PHY decoder PER have different denominators. Unattributable values stay null.
+- Terrain/tower are synthetic; original Town01 collision proxies are approximate.
+  CAVISE third-party redistribution terms are not supplied. Assets stay local.
+- Software RC is ready for repeatable bench review, not a hard-RT guarantee or full-TZ claim.
 
-The initial fixed cache was not repeatable because several synchronous
-`CalculatePaths` calls expired at the same simulation timestamp, creating 180–260 ms
-backlog. Deterministic per-pair threshold spread with configured maxima 20 s/10 m
-removed the burst. Final repeat lag p95 values were 0.084 and 0.105 ms. The primary
-run applied 1,956 live-pose snapshots, had zero stale samples, and passed the 10.5 s
-stop-based no-bypass test. Versioned evidence and details are in
-`network/ns3/evidence/native_wifi_80211n_spectrum_product_v1.json` and
-`doc/results/native_wifi_five_uav_product_v1.md`.
+## Delivery and commands
 
-## Current boundary
+Package: /home/bas/bas_v2-delivery/rc1-2026-09-05-final
+Archive readability and source bundle verification passed. A separate checkout restored
+source/dependencies/scenes, built its ROS workspace, and passed bootstrap with 0 errors/warnings.
+Source bundle is refreshed to the final delivery commit; runtime image remains pinned.
+Publishing target: release/bas-v2-rc1 → native-radio-wifi, draft review; no main merge.
 
-Hardware HitL, jammer campaigns, and a cache/scalability matrix remain outside this
-result. The selected Wi-Fi traces do not export per-MPDU RSSI, SNR, SINR,
-interference power, or BLER; unavailable values are not synthesized. The 20 s/10 m
-cache settings are the measured envelope, and meltdown is only one tested point.
-Logical pending is proved zero after drain; physical queue emptiness at that exact
-accounting cutoff was not independently sampled.
+make demo-preflight DEMO_GUI=0 DEMO_BOOTSTRAP=1
+make prepare-customer
+BAS_NATIVE_FIVE_RUN_ID=my-demo BAS_NATIVE_SOURCES=network/config/native_jammers_town01.yaml make demo-customer DEMO_GUI=0
+make operator DEMO_GUI=0
+make gcs
+make stop
+
+Use doc/USER_GUIDE.md for endpoints, maps/cache/matrix and troubleshooting.
+Use doc/VALIDATION_REPORT.md and doc/DELIVERY_SCOPE.md for scopes and failed diagnostics.
+Next hardware step: connect an authorized safe FC bench and run REQUEST_MESSAGE through
+the same gateway; retain hardware_validation_status=blocked_external until actually tested.

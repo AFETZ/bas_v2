@@ -2959,8 +2959,8 @@ def plot_native_overview(run_dir: Path, events: list[dict[str, Any]]) -> None:
 
 
 def summarize_native_sources(run_dir: Path, events: list[dict[str, Any]]) -> dict[str, Any]:
-    switches=[e for e in events if e["event"] in {"jammer_on","jammer_off"}]
-    result={"sources":switches,"windows":{},"measurement_scope":"native decoder/SignalArrival samples; application PDR needs distinct application offers",
+    switches=[dict(e, x=None, y=None, z=None, coordinate_reason="source switch has no mobility trace; position is configured in logs/native_sources.json") for e in events if e["event"] in {"jammer_on","jammer_off"}]
+    result={"sources":switches,"configured_sources":read_json(run_dir/"logs/native_sources.json", {}),"windows":{},"measurement_scope":"native decoder/SignalArrival samples; application PDR needs distinct application offers",
         "units":{"time":"ns-3 seconds","foreign_power":"dBm, native SpectrumWifiPhy.SignalArrival","noise_interference":"dBm, native decoded MPDU sample","sinr":"dB, derived S/(I+N) on decoded samples"}}
     if switches:
         on=min(e["time_s"] for e in switches if e["event"]=="jammer_on")

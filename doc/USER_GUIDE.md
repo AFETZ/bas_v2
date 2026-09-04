@@ -28,6 +28,7 @@ reference_tower.ply,reference_tower.obj,geometry_summary.json}`. Shapely уст�
 в отдельный pinned target. Геометрия не меняет каноническую Town01.
 
 Для offline-восстановления из локального delivery package загрузите
+исходники через `git clone --branch release/bas-v2-rc1 source.bundle bas_v2`, затем
 `runtime-image.tar` командой `docker load -i runtime-image.tar`, распакуйте
 `native-dependencies.tar.gz` и `scene-assets.tar.gz` в корень исходников, затем
 выполните preflight и `make prepare-customer`. Gazebo derivatives/customer XML
@@ -178,3 +179,9 @@ absolute IPDV jitter последовательных уникальных до�
 При несовпадении исходников с бинарником запустите без `BAS_NATIVE_FIVE_SKIP_BUILD=1`.
 Не повышайте cache TTL или мощность, чтобы скрыть ошибку. Сохраняйте failed run.
 Отчёт можно открыть `xdg-open runs/native-radio-realtime/<RUN_ID>/report.md`.
+
+Локальная упаковка: `./scripts/product/package_rc1.sh /absolute/new/package-dir`.
+Скрипт сохраняет текущий committed HEAD, pinned image/dependencies, scene assets и
+все RC1 runs. Каталог должен быть новым и вне checkout. Исходники следует сначала
+закоммитить; uncommitted code не попадает в source bundle. Большие файлы не отправляются
+в GitHub. Failed packaging log сохраняйте вместе с диагностикой.
