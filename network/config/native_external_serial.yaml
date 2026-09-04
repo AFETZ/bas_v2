@@ -1,0 +1,18 @@
+schema_version: 1
+namespace: ams-uav1
+uav_id: 1
+channel: control
+endpoint:
+  kind: serial
+  device: /dev/serial/by-id/REPLACE_WITH_CONTROLLER
+  baud: 115200
+  bytesize: 8
+  parity: N
+  stopbits: 1
+radio:
+  bind: [10.71.1.10, 14601]
+  peer: [10.71.0.10, 14600]
+queues: {packets: 64, bytes: 65536, deadline_s: 1.0}
+watchdog_s: 2.0
+reconnect_s: 0.5
+# Launch in place of the uav1 control UART adapter, never beside the same port.
