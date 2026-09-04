@@ -68,6 +68,24 @@ make run-town01
 The command writes its self-contained result under `runs/town01-full-*` and
 cleans up its container, namespaces, TAP devices, and child processes.
 
+For the native Wi-Fi/Sionna presentation path, first run the non-mutating
+preflight. On a fresh workstation, the explicit bootstrap mode installs only
+missing ignored dependencies and refuses to overwrite an incompatible setup:
+
+```bash
+make demo-preflight
+make demo-preflight DEMO_BOOTSTRAP=1
+make demo-town01
+```
+
+The aligned rugged engineering scene is selected separately with
+`make demo-rugged`. Both demo commands enable the live GUI by default; use
+`DEMO_GUI=0` for a headless evidence run. Stop either demo from another
+terminal with `make demo-stop`. `DEMO_BOOTSTRAP=1` can also be supplied directly
+to either demo command on a new machine. Town01 remains an external licensed
+asset; set `CAVISE_MAPS_DIR` to its official bundle directory before bootstrap
+when it is not already prepared.
+
 During development:
 
 ```bash

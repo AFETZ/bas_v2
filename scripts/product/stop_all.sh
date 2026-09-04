@@ -5,7 +5,14 @@ RUNTIME_DIR="${BAS_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp}/bas-v2-${UID}}"
 CONTAINER_NAME="${BAS_BASE_CONTAINER_NAME:-bas-v2-baseline}"
 NETWORK_CONTAINER_NAME="${BAS_NETWORK_CONTAINER_NAME:-bas-v2-network}"
 TOWN01_CONTAINER_NAME="${BAS_TOWN01_CONTAINER_NAME:-bas-v2-town01-full-stack}"
+NATIVE_FIVE_CONTAINER_NAME="${BAS_NATIVE_FIVE_CONTAINER_NAME:-bas-v2-native-radio-five-uav}"
 stopped=0
+
+if [[ ! "$NATIVE_FIVE_CONTAINER_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]; then
+  printf 'Refusing unsafe native five-UAV container name: %s\n' \
+    "$NATIVE_FIVE_CONTAINER_NAME" >&2
+  exit 2
+fi
 
 if command -v docker >/dev/null 2>&1 \
   && [[ "$(docker inspect --format '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || true)" == "true" ]]; then
@@ -30,6 +37,19 @@ if command -v docker >/dev/null 2>&1 \
   fi
   printf 'Stopping Town01 full-stack container %s.\n' "$TOWN01_CONTAINER_NAME"
   docker stop --timeout 15 "$TOWN01_CONTAINER_NAME" >/dev/null
+  stopped=$((stopped + 1))
+fi
+
+if command -v docker >/dev/null 2>&1 \
+  && [[ "$(docker inspect --format '{{.State.Running}}' "$NATIVE_FIVE_CONTAINER_NAME" 2>/dev/null || true)" == "true" ]]; then
+  product_label="$(docker inspect --format '{{index .Config.Labels "bas.product"}}' "$NATIVE_FIVE_CONTAINER_NAME")"
+  if [[ "$product_label" != "native-radio-five-uav" ]]; then
+    printf 'Refusing to stop container %s: missing bas.product=native-radio-five-uav label.\n' \
+      "$NATIVE_FIVE_CONTAINER_NAME" >&2
+    exit 1
+  fi
+  printf 'Stopping native five-UAV demo container %s.\n' "$NATIVE_FIVE_CONTAINER_NAME"
+  docker stop --timeout 15 "$NATIVE_FIVE_CONTAINER_NAME" >/dev/null
   stopped=$((stopped + 1))
 fi
 

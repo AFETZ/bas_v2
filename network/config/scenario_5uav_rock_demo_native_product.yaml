@@ -1,0 +1,200 @@
+# Five real ArduPilot/Gazebo UAVs on the native ns-3/Sionna rugged-map path.
+schema_version: 1
+
+scenario:
+  name: scenario_5uav_rock_demo_native_product
+  description: >-
+    Five autonomous UAV missions across a deterministic 10 km rugged engineering
+    terrain. Identical application probes observe clear, terrain/object-shadow,
+    and recovered links while Sionna alone drives the native Wi-Fi receive PSD.
+  map:
+    id: rock_demo_rugged_village_10km_v2
+    kind: deterministic_engineering_scene
+    customer_survey_asset: false
+    world_file: src/multiagent_simulation/worlds/rock_demo/rock_demo.sdf
+    scene_xml: src/multiagent_simulation/worlds/rock_demo/sionna_scene.xml
+    camera_fragment: network/ns3/runtime_rugged_village_cameras.sdf.inc
+    size_m: [10000.0, 10000.0]
+    terrain_z_range_m: [0.0, 101.054]
+    coordinate_frame: ENU_m
+    gazebo_models: [engineering_terrain_visual, engineering_buildings_visual, radio_blocker]
+    shared_geometry:
+      - src/multiagent_simulation/worlds/rock_demo/engineering_terrain.obj
+      - src/multiagent_simulation/worlds/rock_demo/engineering_buildings.obj
+      - src/multiagent_simulation/worlds/rock_demo/radio_blocker.obj
+
+base_simulation:
+  launch_package: multiagent_simulation
+  launch_file: multiagent_simulation.launch.py
+  # Exact match for the Gazebo world's WGS84 anchor and ENU heading.
+  sitl_home: "-35.3632621,149.1652374,10,0"
+  sitl_defaults: network/config/town01_sitl.parm
+  target_realtime_factor: 1.0
+
+command_post:
+  id: cp
+  role: command_post
+  gazebo_model_name: command_post
+  position_m: [-400.0, 0.0, 25.0]
+  orientation_quat_xyzw: [0.0, 0.0, 0.0, 1.0]
+  antenna: omni
+
+robots:
+  - name: uav1
+    role: uav
+    instance: 0
+    system_id: 1
+    dds_udp_port: 2019
+    master_tcp_port: 5760
+    sitl_udp_port: 5501
+    fdm_udp_port: 9002
+    mavproxy_out: 127.0.0.1:14601
+    position: [-300.0, -120.0, 10.5, 0.0, 0.0, 0.0]
+    nominal_radio_position_m: [-300.0, -120.0, 10.5]
+    antenna: omni
+  - name: uav2
+    role: uav
+    instance: 1
+    system_id: 2
+    dds_udp_port: 2020
+    master_tcp_port: 5770
+    sitl_udp_port: 5511
+    fdm_udp_port: 9012
+    mavproxy_out: 127.0.0.1:14602
+    position: [-300.0, -60.0, 10.2, 0.0, 0.0, 0.0]
+    nominal_radio_position_m: [-300.0, -60.0, 10.2]
+    antenna: omni
+  - name: uav3
+    role: uav
+    instance: 2
+    system_id: 3
+    dds_udp_port: 2021
+    master_tcp_port: 5780
+    sitl_udp_port: 5521
+    fdm_udp_port: 9022
+    mavproxy_out: 127.0.0.1:14603
+    position: [-300.0, 0.0, 9.9, 0.0, 0.0, 0.0]
+    nominal_radio_position_m: [-300.0, 0.0, 9.9]
+    antenna: omni
+  - name: uav4
+    role: uav
+    instance: 3
+    system_id: 4
+    dds_udp_port: 2022
+    master_tcp_port: 5790
+    sitl_udp_port: 5531
+    fdm_udp_port: 9032
+    mavproxy_out: 127.0.0.1:14604
+    position: [-300.0, 60.0, 9.6, 0.0, 0.0, 0.0]
+    nominal_radio_position_m: [-300.0, 60.0, 9.6]
+    antenna: omni
+  - name: uav5
+    role: uav
+    instance: 4
+    system_id: 5
+    dds_udp_port: 2023
+    master_tcp_port: 5800
+    sitl_udp_port: 5541
+    fdm_udp_port: 9042
+    mavproxy_out: 127.0.0.1:14605
+    position: [-300.0, 120.0, 9.5, 0.0, 0.0, 0.0]
+    nominal_radio_position_m: [-300.0, 120.0, 9.5]
+    antenna: omni
+
+radio:
+  config: network/config/native_wifi_rugged_village_product.yaml
+
+flight:
+  takeoff_relative_altitude_m:
+    uav1: 65.0
+    uav2: 75.0
+    uav3: 85.0
+    uav4: 95.0
+    uav5: 105.0
+  hold_time_s: 4.0
+  mission_position_tolerance_m: 12.0
+  missions:
+    uav1:
+      - {name: clear_observation, position_m: [-120.0, -160.0, 75.0], hold_s: 30.0}
+      - {name: shadow_transit_south, position_m: [200.0, -260.0, 75.0], hold_s: 0.0}
+      - {name: shadow_observation, position_m: [420.0, 0.0, 75.0], hold_s: 55.0}
+      - {name: recovery_transit_south, position_m: [200.0, -260.0, 75.0], hold_s: 0.0}
+      - {name: recovery_observation, position_m: [-300.0, -120.0, 75.0], hold_s: 45.0}
+    uav2:
+      - {name: clear_observation, position_m: [-120.0, -80.0, 85.0], hold_s: 30.0}
+      - {name: shadow_transit_north, position_m: [200.0, 300.0, 85.0], hold_s: 0.0}
+      - {name: shadow_observation, position_m: [420.0, 180.0, 85.0], hold_s: 55.0}
+      - {name: recovery_transit_north, position_m: [200.0, 300.0, 85.0], hold_s: 0.0}
+      - {name: recovery_observation, position_m: [-300.0, -60.0, 85.0], hold_s: 45.0}
+    uav3:
+      - {name: clear_observation, position_m: [-120.0, 0.0, 95.0], hold_s: 30.0}
+      - {name: shadow_observation, position_m: [420.0, 450.0, 95.0], hold_s: 55.0}
+      - {name: recovery_observation, position_m: [-300.0, 0.0, 95.0], hold_s: 45.0}
+    uav4:
+      - {name: clear_observation, position_m: [-120.0, 80.0, 105.0], hold_s: 30.0}
+      - {name: shadow_observation, position_m: [-500.0, 450.0, 105.0], hold_s: 55.0}
+      - {name: recovery_observation, position_m: [-300.0, 60.0, 105.0], hold_s: 45.0}
+    uav5:
+      - {name: clear_observation, position_m: [-120.0, 160.0, 115.0], hold_s: 30.0}
+      - {name: shadow_observation, position_m: [-500.0, -450.0, 115.0], hold_s: 55.0}
+      - {name: recovery_observation, position_m: [-300.0, 120.0, 115.0], hold_s: 45.0}
+  observations:
+    - {name: clear_observation, timeout_s: 180.0, probe_packets_per_uav: 40}
+    - {name: shadow_observation, timeout_s: 240.0, probe_packets_per_uav: 40}
+    - {name: recovery_observation, timeout_s: 240.0, probe_packets_per_uav: 40}
+  causal_expectation:
+    controlled_uavs: [uav3, uav4, uav5]
+    shadowed_uavs: [uav1, uav2]
+    clear_min_pdr: 0.9
+    shadow_max_pdr: 0.25
+    recovery_min_pdr: 0.9
+    minimum_shadow_pdr_drop: 0.65
+
+traffic:
+  diagnostic_retry_interval_s: 20.0
+  forced_mavlink_stream_intervals: false
+  p2p_packets_per_direction_per_uav: 10
+  p2mp_root_transmissions: 20
+  simultaneous_uplink:
+    packets_per_uav: 20
+    packet_payload_bytes: 256
+    interval_ms: 50
+    duration_s: 1.0
+    retransmissions: false
+  delivery_gates:
+    p2p_min_delivered_per_direction_per_uav: 9
+    p2mp_min_delivered_per_uav: 18
+    simultaneous_min_delivered_per_uav: 1
+    simultaneous_jain_fairness_min: 0.8
+
+evidence:
+  airborne_clearance_m: 6.0
+  landed_altitude_tolerance_m: 3.0
+  realtime_gates:
+    gazebo_mean_rtf_min: 0.95
+    gazebo_p5_rtf_min: 0.8
+    applied_position_age_p95_ms_max: 500.0
+  phase_aliases:
+    takeoff_complete: takeoff
+    hold_all: five_uav_hold
+    landing_complete: landing
+  cameras:
+    overview:
+      topic: /native_radio/overview/image
+      pose: [-40.0, 40.0, 1350.0, 0.0, 1.570796, 0.0]
+      horizontal_fov_rad: 1.25
+    obstacle:
+      topic: /native_radio/obstacle/image
+      pose: [-80.0, -850.0, 520.0, 0.0, 0.58, 1.570796]
+      horizontal_fov_rad: 1.15
+    uav_focus:
+      topic: /native_radio/uav_focus/image
+      pose: [-500.0, 0.0, 260.0, 0.0, 0.42, 0.0]
+      horizontal_fov_rad: 1.25
+  screenshots:
+    - {phase: takeoff, stem: 01_five_uav_takeoff, camera: overview, altitude_state: airborne, required_projected_uavs: [uav1, uav2, uav3, uav4, uav5]}
+    - {phase: five_uav_hold, stem: 02_five_uav_hold, camera: overview, altitude_state: airborne, required_projected_uavs: [uav1, uav2, uav3, uav4, uav5]}
+    - {phase: clear_observation, stem: 03_five_uav_clear, camera: overview, mission_phase: clear_observation, required_projected_uavs: [uav1, uav2, uav3, uav4, uav5]}
+    - {phase: shadow_observation, stem: 04_five_uav_shadow, camera: overview, mission_phase: shadow_observation, required_projected_uavs: [uav1, uav2, uav3, uav4, uav5]}
+    - {phase: recovery_observation, stem: 05_five_uav_recovery, camera: overview, mission_phase: recovery_observation, required_projected_uavs: [uav1, uav2, uav3, uav4, uav5]}
+    - {phase: landing, stem: 06_landing, camera: overview, altitude_state: landed, required_projected_uavs: [uav1, uav2, uav3, uav4, uav5]}
