@@ -53,8 +53,10 @@ inline void WriteRadioMap(const std::string& output,
                 for (auto& [phy, sourceModel] : sources->sources)
                 {
                     auto times = sources->sourceTimes.at(phy);
+                    const auto cycle = Seconds(times[2]).GetNanoSeconds();
+                    const auto phase = (Seconds(sourceTime)-Seconds(times[0])).GetNanoSeconds() % cycle;
                     if (sourceTime < times[0] || sourceTime >= times[1] ||
-                        std::fmod(sourceTime-times[0], times[2]) >= times[2]*times[3])
+                        phase >= Seconds(times[2]*times[3]).GetNanoSeconds())
                         continue;
                     auto signal = Create<SpectrumSignalParameters>();
                     auto sourcePsd = sources->sourcePsds.at(phy);

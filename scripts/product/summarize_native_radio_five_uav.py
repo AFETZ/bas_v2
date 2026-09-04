@@ -675,6 +675,42 @@ def agent_records(run_dir: Path) -> dict[str, list[dict[str, Any]]]:
     return {uav: read_jsonl(run_dir / f"logs/additional_{uav}.jsonl") for uav in UAVS}
 
 
+def application_metrics(offered: list[dict[str, Any]], received: list[dict[str, Any]]) -> dict[str, Any]:
+    """Unique payload delivery, wall-clock goodput and absolute IPDV on one host."""
+    sends = {row["sequence"]: row for row in offered if isinstance(row.get("sequence"), int)}
+    matched: dict[int, dict[str, Any]] = {}
+    for row in received:
+        seq = row.get("sequence")
+        sent = sends.get(seq)
+        if sent is None or seq in matched:
+            continue
+        if any(row.get(key) != sent.get(key) for key in ("source_monotonic_ns", "payload_length")):
+            continue
+        if "checksum" in row and "checksum" in sent and row["checksum"] != sent["checksum"]:
+            continue
+        if isinstance(row.get("received_monotonic_ns"), int) and isinstance(sent.get("source_monotonic_ns"), int):
+            matched[seq] = row
+    starts = [row["source_monotonic_ns"] for row in sends.values() if isinstance(row.get("source_monotonic_ns"), int)]
+    ends = starts + [row["received_monotonic_ns"] for row in matched.values()]
+    duration = (max(ends) - min(starts)) / 1e9 if starts else None
+    payload_bytes = sum(row["payload_length"] for row in matched.values())
+    delays = [(row["received_monotonic_ns"] - row["source_monotonic_ns"]) / 1e6 for _, row in sorted(matched.items())]
+    ipdv = [abs(b - a) for a, b in zip(delays, delays[1:])]
+    pdr = len(matched) / len(sends) if sends else None
+    return {
+        "basis": "derived from unique sequence, source monotonic timestamp, payload length and checksum where logged; same-host clocks",
+        "offered_unique": len(sends), "delivered_unique": len(matched),
+        "pdr": pdr, "application_loss_fraction": 1 - pdr if pdr is not None else None,
+        "delivered_payload_bytes": payload_bytes,
+        "observation_interval_s": duration,
+        "interval_definition": "first offered timestamp through last offered or matched receipt; includes scheduled spacing",
+        "goodput_bps": payload_bytes * 8 / duration if duration and duration > 0 else None,
+        "one_way_latency_ms": distribution(delays),
+        "jitter_absolute_ipdv_ms": distribution(ipdv),
+        "jitter_definition": "absolute difference of successive delivered one-way delays in sequence order, including sequence gaps; null distribution if fewer than two receipts",
+    }
+
+
 def build_p2p(scenario: dict[str, Any], agents: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
     sends = scenario.get("p2p", {}).get("downlink_sends", [])
     deliveries = scenario.get("p2p", {}).get("uplink_deliveries", [])
@@ -706,14 +742,16 @@ def build_p2p(scenario: dict[str, Any], agents: dict[str, list[dict[str, Any]]])
                 "delivered_unique": len({row.get("sequence") for row in down_received}),
                 "missing_sequences": sorted(set(range(expected_packets)) - {int(row.get("sequence")) for row in down_received}),
                 "duplicates": len(down_received) - len({row.get("sequence") for row in down_received}),
-                "latency_ms": distribution(row.get("latency_ms", 0.0) for row in down_received),
+                "latency_ms": distribution(row["latency_ms"] for row in down_received if row.get("latency_ms") is not None),
+                "application_metrics": application_metrics(down_offered, down_received),
             },
             "uav_to_gcs": {
                 "independently_originated": len(up_originated),
                 "delivered_unique": len({row.get("sequence") for row in up_received}),
                 "missing_sequences": sorted(set(range(expected_packets)) - {int(row.get("sequence")) for row in up_received}),
                 "duplicates": len(up_received) - len({row.get("sequence") for row in up_received}),
-                "latency_ms": distribution(row.get("latency_ms", 0.0) for row in up_received),
+                "latency_ms": distribution(row["latency_ms"] for row in up_received if row.get("latency_ms") is not None),
+                "application_metrics": application_metrics(up_originated, up_received),
             },
         }
     return {
@@ -779,7 +817,8 @@ def build_p2mp(
             "receiver_application_deliveries": len(sequences),
             "receiver_missing_sequences": sorted(expected_sequences - sequences),
             "duplicates": len(deliveries) - len(sequences),
-            "latency_ms": distribution(row.get("latency_ms", 0.0) for row in deliveries),
+            "latency_ms": distribution(row["latency_ms"] for row in deliveries if row.get("latency_ms") is not None),
+            "application_metrics": application_metrics(roots, deliveries),
             "per_root_native_outcome": per_root,
         }
     return {
@@ -857,6 +896,7 @@ def build_shared_medium(
             "delivered_application_packets": delivered_unique,
             "pdr": delivered_unique / len(offered_rows) if offered_rows else None,
             "throughput_bps": bits_per_second,
+            "application_metrics": application_metrics(offered_rows, delivered),
         }
     overlaps = 0
     overlapping_uids: set[int] = set()
@@ -985,7 +1025,11 @@ def parse_sionna_log(path: Path) -> dict[str, Any]:
         if pair:
             channel_started = at_ns
             a, b = sorted((int(pair.group(1)), int(pair.group(2))))
-            peer = f"cp-uav{max(a, b) - 1}" if min(a, b) == 1 else f"node{a}-node{b}"
+            # Product topology: ghost node0, CP node1, then the real UAVs.
+            # Later IDs are auxiliary sources; never label them as extra UAVs.
+            def role(i):
+                return "cp" if i==1 else f"uav{i-1}" if 2<=i<=len(UAVS)+1 else f"ns3_node{i}"
+            peer = f"{role(a)}-{role(b)}"
             pair_computations[peer] += 1
         if "Loading Sionna RT scene:" in text:
             scene_started = at_ns
@@ -2712,6 +2756,8 @@ def write_latency_diagnostic_report(run_dir: Path, observer_reference: Path | No
         for stem in ("07_jammer_active","08_jammer_recovery"):
             if (run_dir/"screenshots"/(stem+".raw.png")).exists():
                 report.extend(["", f"![{stem}](screenshots/{stem}.png)", "", f"[Unmodified live Gazebo frame](screenshots/{stem}.raw.png)"])
+    plot_native_overview(run_dir,events)
+    report.extend(["", "![Native radio, timing and movement](plots/native_overview.png)"])
     (run_dir / "report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
     print(json.dumps({"run_dir": str(run_dir), "diagnostic": scenario.get("status")}, sort_keys=True))
     return 0 if scenario.get("status") == "diagnostic_complete" else 1
@@ -2788,6 +2834,38 @@ def scenario_motion_pattern(scenario: dict[str, Any]) -> dict[str, Any]:
         "mission_uav_displacement_m": scenario.get("mission_uav_displacement_m", {}),
         "holding_uav_displacement_m": scenario.get("holding_uav_displacement_m", {}),
     }
+
+
+def plot_native_overview(run_dir: Path, events: list[dict[str, Any]]) -> None:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    fig,axes=plt.subplots(2,2,figsize=(12,8))
+    lag=[e for e in events if e["event"]=="realtime_lag" and e.get("value") is not None]
+    axes[0,0].plot([e["time_s"] for e in lag],[e["value"] for e in lag],linewidth=.8)
+    axes[0,0].set(title="Native scheduler lag (cold start included)",xlabel="ns-3 time (s)",ylabel="wall minus sim (ms)",yscale="symlog")
+    for node in ("cp","uav1"):
+        samples=[e for e in events if e["event"]=="wifi_monitor_rx" and e["node"]==node]
+        samples=samples[::max(1,len(samples)//1500)]
+        for key,label in (("signal_dbm","signal"),("noise_interference_dbm","noise + interference")):
+            valid=[e for e in samples if e.get(key) is not None]
+            axes[0,1].plot([e["time_s"] for e in valid],[e[key] for e in valid],linewidth=.5,label=f"{node} {label}")
+    axes[0,1].set(title="Decoded MPDU samples only",xlabel="ns-3 time (s)",ylabel="native SignalNoiseDbm (dBm)")
+    axes[0,1].legend(fontsize=7)
+    states=[e for e in events if e["event"]=="sionna_link_state" and e.get("channel_generation_time_s") is not None]
+    states=states[::max(1,len(states)//2000)]
+    axes[1,0].scatter([e["time_s"] for e in states],[e["time_s"]-e["channel_generation_time_s"] for e in states],s=1)
+    axes[1,0].set(title="Observed channel age, all sampled links",xlabel="ns-3 time (s)",ylabel="sim minus native generated time (s)")
+    for node in UAVS:
+        poses=[e for e in events if e["event"]=="live_pose" and e["node"]==node]
+        axes[1,1].plot([e["x"] for e in poses],[e["y"] for e in poses],linewidth=1,label=node)
+    axes[1,1].scatter([5],[0],marker='s',label='CP antenna')
+    axes[1,1].set(title="Mobility from live ROS odometry",xlabel="world x (m)",ylabel="world y (m)")
+    axes[1,1].legend(fontsize=7);axes[1,1].set_aspect('equal',adjustable='datalim')
+    for axis in axes.flat:axis.grid(alpha=.2)
+    fig.suptitle(run_dir.name);fig.tight_layout()
+    (run_dir/'plots').mkdir(exist_ok=True)
+    fig.savefig(run_dir/'plots/native_overview.png',dpi=160);plt.close(fig)
 
 
 def summarize_native_sources(run_dir: Path, events: list[dict[str, Any]]) -> dict[str, Any]:

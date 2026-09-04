@@ -58,7 +58,7 @@ operator:
 	BAS_NATIVE_FIVE_SCENARIO="$(DEMO_SCENARIO)" BAS_NATIVE_OPERATOR_SECONDS="$(OPERATOR_DURATION)" BAS_NATIVE_FIVE_GUI="$(DEMO_GUI)" ./network/ns3/run_native_radio_five_uav.sh
 
 gcs:
-	docker exec -it bas-v2-native-radio-five-uav ip netns exec ams-gcs /home/ubuntu/.local/bin/mavproxy.py --master=udpout:127.0.0.1:14551 --master=udpout:127.0.0.1:14552 --master=udpout:127.0.0.1:14553 --master=udpout:127.0.0.1:14554 --master=udpout:127.0.0.1:14555
+	docker exec -it bas-v2-native-radio-five-uav ip netns exec ams-gcs /home/ubuntu/.local/bin/mavproxy.py --master=udpout:127.0.0.1:14551 --master=udpout:127.0.0.1:14552 --master=udpout:127.0.0.1:14553 --master=udpout:127.0.0.1:14554 --master=udpout:127.0.0.1:14555 --aircraft=/workspace/multiagent_simulation/runs/operator
 
 native-sources:
 	BAS_NATIVE_SOURCES_CAMPAIGN=1 ./network/ns3/run_sionna_wifi_five_uav.sh
