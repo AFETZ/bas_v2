@@ -146,6 +146,7 @@ active на t=4 s. Это мгновенная received-PSD prediction с тем
 - `report.md`, `metrics/five_uav_native_summary.json`, `operating_envelope.json`;
 - `wifi_monitor_rx.csv`, `radio_link_metrics.csv`, `radio_link_summary.json`;
 - `native_queue_events.csv`, `native_queue_summary.json`, `native_source_summary.json`;
+- `received_energy.csv`, `receiver_power_timeline.csv`, `received_energy_summary.json`;
 - P2P/P2MP/shared summaries с уникальными application deliveries;
 - `screenshots/*.raw.png` (исходные кадры), `*.png` (подписи), `*.json` (время/позиции);
 - `pcap/*radiotap*.pcap` (native 802.11 DLT127) и отдельно Ethernet/TAP captures.
@@ -156,6 +157,15 @@ MPDU. Это не total RSSI при outage. PER decoder attempts имеет яв
 берётся из endpoint root/delivery sets, не из отношения встречных UART counters.
 Пустая CSV ячейка/null означает отсутствие численного измерения; источник и причина
 сохраняются в availability/summary. BLER для этого PHY: not_applicable.
+
+Отдельный `received_energy.csv` интегрирует фактические received powers/durations
+из SignalArrival до решения декодера: RSSI, J/S и энергетический SINR. Thermal floor
+вычислен из штатных 7 dB noise figure, 290 K и ширины канала; это configured/derived,
+а не измерение шума. В no-path нет строки полезного сигнала; timeline продолжает
+показывать пришедшую помеху. Собственная TX leakage не моделируется. Wi-Fi airtime —
+объединение настоящих TX intervals с retries; это не CCA busy fraction.
+P2P/P2MP/shared JSON содержат goodput полезных байтов за явно заданное окно и
+absolute IPDV jitter последовательных уникальных доставок по host monotonic.
 
 ## Остановка и ошибки
 

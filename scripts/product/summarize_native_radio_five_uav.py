@@ -11,6 +11,7 @@ import math
 import re
 import statistics
 import struct
+from bisect import bisect_right
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable
@@ -1184,10 +1185,10 @@ def radio_metric_availability(stats: dict[str, Any]) -> dict[str, str]:
             "observed from SpectrumWifiPhy PhyRxBegin RxPowerWattPerChannelBand after the sole "
             "Sionna spectrum propagation model"
         ),
-        "rssi_dbm": "unavailable: MonitorSnifferRx signal is useful-signal power, not total RSSI",
+        "rssi_dbm": "derived incoming-power interval sums in received_energy.csv and receiver_power_timeline.csv; configured thermal floor; MonitorSnifferRx signal alone is not RSSI",
         "snr_db": "available only for decoder verdicts through WifiPhyStateHelper RxOk/RxError",
         "sinr_db": "derived: signal minus noise_interference dBm from MonitorSnifferRx; decoded MPDU samples only",
-        "interference_power_dbm": "unavailable: no per-packet interference-power trace is selected",
+        "interference_power_dbm": "native combined noise/interference in wifi_monitor_rx.csv; separately integrated native foreign and other-Wi-Fi arrivals in received_energy.csv",
         "noise_power_dbm": "native combined noise/interference in metrics/wifi_monitor_rx.csv; thermal-only separation unavailable",
         "bler": "not_applicable: NistErrorRateModel has no transport-block abstraction",
     }
@@ -2673,12 +2674,100 @@ def export_wifi_monitor(run_dir: Path, events: list[dict[str, Any]]) -> dict[str
         "sinr_db": distribution(e["sinr_db"] for e in rows if e.get("sinr_db") is not None),
         "sinr_origin": "derived: native signal dBm minus native combined noise/interference dBm",
         "outage_value": None, "outage_reason": "no decoded MPDU means no MonitorSnifferRx sample",
-        "total_rssi_dbm": None, "total_rssi_reason": "signal power excludes simultaneous signals and noise",
+        "total_rssi_dbm": None, "total_rssi_reason": "this trace exports useful signal; separate received_energy.csv sums native arrivals with configured thermal noise",
         "bler": None, "bler_status": "not_applicable: no block abstraction in this PHY",
         "pcap": "pcap/native_radio.pcap.radiotap-*.pcap is native 802.11/radiotap; native_radio.pcap is derived Ethernet",
     }
     write_json(run_dir / "metrics/wifi_monitor_summary.json", summary)
     return summary
+
+
+def export_received_energy(run_dir: Path, events: list[dict[str, Any]], stats: dict[str, Any]) -> None:
+    """Integrate public SignalArrival powers/durations, without another RT solve."""
+    if stats.get("radio_backend") != "wifi":
+        return
+    # Exact ns-3.48 WifiPhy RxNoiseFigure default (unchanged by this runner).
+    noise_w = 1.3803e-23 * 290 * float(stats["wifi_channel_width_mhz"]) * 1e6 * 10 ** (7 / 10)
+    arrivals: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in events:
+        if row.get("event") != "spectrum_signal_arrival" or row.get("value") is None:
+            continue
+        detail = str(row.get("details", ""))
+        duration = re.search(r"duration_s=([-+0-9.eE]+)", detail)
+        if duration:
+            arrivals[str(row["node"])].append({"event": row, "start": row["time_s"],
+                "duration": float(duration.group(1)), "w": 10 ** ((row["value"] - 30) / 10),
+                "foreign": "foreign_signal=1" in detail})
+    output = []
+    timelines = []
+    end_time = max((row["time_s"] for row in events), default=0)
+    for receiver, signals in arrivals.items():
+        changes: defaultdict[float, list[float]] = defaultdict(lambda: [0., 0.])
+        changes[0.]; changes[end_time]
+        for s in signals:
+            kind = int(s["foreign"])
+            changes[s["start"]][kind] += s["w"]
+            changes[s["start"] + s["duration"]][kind] -= s["w"]
+        times = sorted(changes)
+        powers = []; energy = [[0., 0.]]; active = [0., 0.]
+        for i, t in enumerate(times):
+            if i:
+                dt = t - times[i-1]
+                energy.append([energy[-1][k] + powers[-1][k] * dt for k in (0, 1)])
+            active = [active[k] + changes[t][k] for k in (0, 1)]
+            powers.append([max(0., value) for value in active])
+            if i < len(times)-1:
+                wifi_w, jammer_w = powers[-1]
+                timelines.append({"rx": receiver, "sim_start_s": t, "sim_end_s": times[i+1],
+                    "wifi_sum_w": wifi_w, "jammer_sum_w": jammer_w, "configured_noise_w": noise_w,
+                    "total_rssi_dbm": 10 * math.log10((wifi_w + jammer_w + noise_w) * 1000)})
+        def integral(t: float, k: int) -> float:
+            i = max(0, min(len(times)-1, bisect_right(times, t)-1))
+            return energy[i][k] + powers[i][k] * (t-times[i])
+        for s in signals:
+            if s["foreign"] or s["duration"] <= 0:
+                continue
+            start, duration = s["start"], s["duration"]
+            wifi_w, jammer_w = [(integral(start+duration, k)-integral(start, k))/duration for k in (0, 1)]
+            jammer_w = max(0., jammer_w)
+            other_w = max(0., wifi_w-s["w"])
+            e = s["event"]; sender = int(e["peer"])
+            tx = "cp" if sender == 1 else f"uav{sender-1}" if 2 <= sender <= len(UAVS)+1 else f"ns3_node{sender}"
+            output.append({"wall_monotonic_s": e["wall_monotonic_ns"]/1e9,
+                "sim_time_s": start, "phase": e["phase"], "tx": tx, "rx": receiver,
+                "rx_x_m": e["x"], "rx_y_m": e["y"], "rx_z_m": e["z"], "duration_s": duration,
+                "signal_dbm": e["value"], "path_loss_db": 10*math.log10(float(stats["tx_power_w"])*1000)-e["value"],
+                "jammer_mean_w": jammer_w, "other_wifi_mean_w": other_w,
+                "configured_noise_w": noise_w, "js_linear": jammer_w/s["w"],
+                "energy_ratio_sinr_db": 10*math.log10(s["w"]/(other_w+jammer_w+noise_w)),
+                "interval_mean_total_rssi_dbm": 10*math.log10((s["w"]+other_w+jammer_w+noise_w)*1000)})
+    for name, rows in (("received_energy.csv", output), ("receiver_power_timeline.csv", timelines)):
+        if rows:
+            with (run_dir/"metrics"/name).open("w", newline="") as stream:
+                writer=csv.DictWriter(stream, fieldnames=list(rows[0])); writer.writeheader(); writer.writerows(rows)
+    starts = {}; intervals: defaultdict[str, list[tuple[float,float]]] = defaultdict(list)
+    for row in events:
+        key = (str(row.get("node")), packet_uid(row))
+        if row.get("event") == "phy_tx_start": starts[key] = row["time_s"]
+        elif row.get("event") == "phy_tx_end" and key in starts:
+            intervals[key[0]].append((starts.pop(key), row["time_s"]))
+    def union_seconds(values: list[tuple[float,float]]) -> float:
+        total=0.; end=-math.inf
+        for a,b in sorted(values): total += max(0., b-max(a,end)); end=max(end,b)
+        return total
+    write_json(run_dir/"metrics/received_energy_summary.json", {
+        "origin": "derived from native SpectrumWifiPhy.SignalArrival positive in-band power and exact duration; all candidates before decoder decisions",
+        "noise_origin": "configured ns-3.48 default RxNoiseFigure=7 dB, k=1.3803e-23, T=290 K, actual channel width; not a noise measurement",
+        "samples": len(output), "timeline_intervals": len(timelines),
+        "definition": "linear energy sums over each native arrival interval; J/S and SINR are energy ratios, not NistErrorRateModel decision inputs or decoder-weighted SINR",
+        "limits": "simulation incoming power, not physical receiver calibration; excludes own TX leakage; 1 us logged start-time resolution; no-path Wi-Fi has no signal row; idle RSSI is configured thermal floor; no interpolation of missing paths; no packet outcome changed",
+        "path_loss_definition": "configured isotropic transmitter dBm minus native received signal dBm; only this uniform-power iso reference profile",
+        "wifi_on_air_observation_s": end_time,
+        "wifi_on_air_fraction_by_node": {node: union_seconds(values)/end_time if end_time else None for node,values in intervals.items()},
+        "wifi_channel_on_air_fraction": union_seconds([v for values in intervals.values() for v in values])/end_time if end_time else None,
+        "airtime_definition": "union of actual PhyTxBegin/PhyTxEnd intervals including native retries, divided by native observed simulation interval; excludes jammer and is not a CCA busy-state fraction",
+        "unmatched_tx_starts": len(starts),
+    })
 
 
 def write_latency_diagnostic_report(run_dir: Path, observer_reference: Path | None = None) -> int:
@@ -2688,6 +2777,7 @@ def write_latency_diagnostic_report(run_dir: Path, observer_reference: Path | No
     latency = summarize_latency_operations(run_dir, scenario)
     load = summarize_adapter_load(run_dir, scenario)
     stats = read_json(run_dir / "metrics/native_radio_stats.json", {})
+    export_received_energy(run_dir, events, stats)
     contention = summarize_native_contention(run_dir, events, stats)
     observer = summarize_observer_mode(run_dir, events)
     ping = scenario.get("latency_diagnostic", {}).get("mavlink_ping", {})
@@ -2928,6 +3018,7 @@ def main() -> int:
         run_dir / "logs/native_radio_events.csv", scenario_config["phase_aliases"]
     )
     export_wifi_monitor(run_dir, events)
+    export_received_energy(run_dir, events, stats)
     agents = agent_records(run_dir)
 
     topology = build_topology(run_dir, stats)
@@ -3108,6 +3199,8 @@ def main() -> int:
     report = [
         f"# Native five-UAV radio run: {run_dir.name}",
         "",
+        "- [Received energy, interval RSSI and J/S](metrics/received_energy.csv); [power timeline](metrics/receiver_power_timeline.csv); [origins, bounds and measured Wi-Fi airtime](metrics/received_energy_summary.json).",
+        "- [P2P goodput/IPDV/PDR](metrics/p2p_summary.json); [P2MP per receiver](metrics/p2mp_summary.json); [shared uplink](metrics/shared_medium_summary.json).",
         f"- Functional five-UAV native path: **{functional_status}**",
         f"- Realtime readiness: **{realtime['realtime_readiness']}** (measured independently)",
         "- Topology: one ns-3 process, six native PHY/MAC devices, one shared Spectrum channel.",
