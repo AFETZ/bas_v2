@@ -10,12 +10,24 @@ index 4ae6c0556..65ae5b5e0 100644
  namespace py = pybind11;
  
  namespace ns3
-@@ -51,6 +52,9 @@ SionnaRtChannelModel::DoDispose()
+@@ -51,6 +52,21 @@ SionnaRtChannelModel::DoDispose()
      NS_LOG_FUNCTION(this);
      m_channelMatrixMap.clear();
      m_channelParamsMap.clear();
 +    m_pairPositionSnapshots.clear();
-+    m_cachedScene = py::none();
++    if (m_cachedScene)
++    {
++        if (Py_IsInitialized() && PyGILState_Check())
++        {
++            m_cachedScene = py::none();
++        }
++        else
++        {
++            // A static ns-3 Ptr may be released after py::scoped_interpreter.
++            // Detach the already-finalized Python handle without Py_DECREF.
++            (void)m_cachedScene.release();
++        }
++    }
 +    m_cachedSceneFingerprint.clear();
  }
  
