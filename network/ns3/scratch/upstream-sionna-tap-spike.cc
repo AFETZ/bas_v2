@@ -8,6 +8,7 @@
 #include "ns3/ethernet-header.h"
 #include "ns3/half-duplex-ideal-phy.h"
 #include "ns3/internet-module.h"
+#include "ns3/isotropic-antenna-model.h"
 #include "ns3/ism-spectrum-value-helper.h"
 #include "ns3/llc-snap-header.h"
 #include "ns3/mobility-module.h"
@@ -18,9 +19,15 @@
 #include "ns3/realtime-simulator-impl.h"
 #include "ns3/sionna-rt-spectrum-propagation-loss-model.h"
 #include "ns3/spectrum-helper.h"
+#include "ns3/spectrum-wifi-helper.h"
+#include "ns3/spectrum-wifi-phy.h"
+#include "ns3/sta-wifi-mac.h"
 #include "ns3/tap-bridge-module.h"
 #include "ns3/uniform-planar-array.h"
+#include "ns3/wifi-module.h"
+#include "ns3/wifi-net-device.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <csignal>
@@ -56,6 +63,9 @@ struct NodeCounters
     uint64_t queueEnqueue{0};
     uint64_t queueDequeue{0};
     uint64_t queueDrop{0};
+    uint64_t wifiDataRetries{0};
+    uint64_t wifiAssociations{0};
+    uint64_t wifiDeassociations{0};
     uint32_t queueMaxDepth{0};
 };
 
@@ -68,6 +78,10 @@ uint64_t g_poseSnapshots{0};
 uint64_t g_stalePoseSamples{0};
 uint64_t g_pathObservations{0};
 uint64_t g_realtimeLagSamples{0};
+double g_latestRealtimeLagMs{std::numeric_limits<double>::infinity()};
+double g_readinessLagMaxMs{50.0};
+uint32_t g_readinessConsecutiveSamples{3};
+uint32_t g_healthyLagSamples{0};
 Ptr<PcapFileWrapper> g_radioPcap;
 std::ofstream g_events;
 volatile std::sig_atomic_t g_stopRequested = 0;
@@ -80,6 +94,25 @@ uint64_t g_pendingEventWrites{0};
 std::chrono::steady_clock::time_point g_lastEventFlush{std::chrono::steady_clock::now()};
 std::unordered_map<uint64_t, Time> g_queueEnqueueAt;
 std::vector<Ptr<Queue<Packet>>> g_queues;
+std::vector<Ptr<StaWifiMac>> g_wifiStations;
+std::string g_radioBackend{"aloha"};
+std::string g_radioProfile{"generic_native_spectrum_aloha_reference"};
+std::string g_neighborDiscoveryMode{"preconfigured_static_neighbors"};
+std::string g_radioReason{"upstream_ideal_phy_arp_reentrancy_limit"};
+std::string g_solverProfile{"realtime_minimal_solver_profile"};
+bool g_technologySpecificModem{false};
+bool g_packetOutcomeAffected{false};
+uint32_t g_sionnaMaxDepth{1};
+bool g_sionnaLos{true};
+bool g_sionnaSpecularReflection{true};
+bool g_sionnaDiffuseReflection{false};
+bool g_sionnaDiffraction{false};
+bool g_sionnaEdgeDiffraction{false};
+bool g_sionnaRefraction{false};
+bool g_sionnaSyntheticArray{true};
+uint32_t g_sionnaSeed{42};
+uint32_t g_sionnaMaxNumberOfPaths{90};
+double g_sionnaCacheJitterFraction{0.0};
 
 class NativeRuntimeSampler;
 NativeRuntimeSampler* g_runtimeSampler{nullptr};
@@ -171,19 +204,80 @@ FlushEvents()
     }
 }
 
+std::optional<Mac48Address>
+RadioMacForAddress(Ipv4Address address)
+{
+    if (address == Ipv4Address("10.71.0.10"))
+    {
+        return Mac48Address("02:71:ff:00:00:01");
+    }
+    for (uint32_t index = 1; index < g_nodeNames.size(); ++index)
+    {
+        std::ostringstream endpoint;
+        endpoint << "10.71." << index << ".10";
+        if (address == Ipv4Address(endpoint.str().c_str()))
+        {
+            std::ostringstream mac;
+            mac << "02:71:" << std::hex << std::setfill('0') << std::setw(2) << index
+                << ":00:10:10";
+            return Mac48Address(mac.str().c_str());
+        }
+    }
+    if (address.IsMulticast())
+    {
+        return Mac48Address::GetMulticast(address);
+    }
+    if (address == Ipv4Address("255.255.255.255"))
+    {
+        return Mac48Address::GetBroadcast();
+    }
+    return std::nullopt;
+}
+
 void
 WriteRadioPcap(Ptr<const Packet> packet)
 {
     Ptr<Packet> copy = packet->Copy();
-    AlohaNoackMacHeader aloha;
     LlcSnapHeader llc;
-    if (copy->RemoveHeader(aloha) == 0 || copy->RemoveHeader(llc) == 0)
+    Mac48Address source;
+    Mac48Address destination;
+    if (g_radioBackend == "aloha")
+    {
+        AlohaNoackMacHeader aloha;
+        if (copy->RemoveHeader(aloha) == 0 || copy->RemoveHeader(llc) == 0)
+        {
+            return;
+        }
+        source = aloha.GetSource();
+        destination = aloha.GetDestination();
+    }
+    else
+    {
+        if (copy->RemoveHeader(llc) == 0 || llc.GetType() != Ipv4L3Protocol::PROT_NUMBER)
+        {
+            return;
+        }
+        Ipv4Header ipv4;
+        if (copy->PeekHeader(ipv4) == 0)
+        {
+            return;
+        }
+        const auto sourceMac = RadioMacForAddress(ipv4.GetSource());
+        const auto destinationMac = RadioMacForAddress(ipv4.GetDestination());
+        if (!sourceMac || !destinationMac)
+        {
+            return;
+        }
+        source = *sourceMac;
+        destination = *destinationMac;
+    }
+    if (llc.GetType() != Ipv4L3Protocol::PROT_NUMBER)
     {
         return;
     }
     EthernetHeader ethernet(false);
-    ethernet.SetSource(aloha.GetSource());
-    ethernet.SetDestination(aloha.GetDestination());
+    ethernet.SetSource(source);
+    ethernet.SetDestination(destination);
     ethernet.SetLengthType(llc.GetType());
     copy->AddHeader(ethernet);
     g_radioPcap->Write(Simulator::Now(), copy);
@@ -196,19 +290,41 @@ PacketTraceDetails(Ptr<const Packet> packet)
     details << "packet_uid=" << packet->GetUid();
 
     Ptr<Packet> copy = packet->Copy();
-    AlohaNoackMacHeader aloha;
     LlcSnapHeader llc;
-    if (copy->RemoveHeader(aloha) == 0 || copy->RemoveHeader(llc) == 0 ||
-        llc.GetType() != Ipv4L3Protocol::PROT_NUMBER)
+    std::optional<Mac48Address> sourceMac;
+    std::optional<Mac48Address> destinationMac;
+    if (g_radioBackend == "aloha")
+    {
+        AlohaNoackMacHeader aloha;
+        if (copy->RemoveHeader(aloha) == 0 || copy->RemoveHeader(llc) == 0)
+        {
+            return details.str();
+        }
+        sourceMac = aloha.GetSource();
+        destinationMac = aloha.GetDestination();
+    }
+    else if (copy->RemoveHeader(llc) == 0)
     {
         return details.str();
     }
-    details << ";src_mac=" << aloha.GetSource() << ";dst_mac=" << aloha.GetDestination();
+    if (llc.GetType() != Ipv4L3Protocol::PROT_NUMBER)
+    {
+        return details.str();
+    }
 
     Ipv4Header ipv4;
     if (copy->RemoveHeader(ipv4) == 0)
     {
         return details.str();
+    }
+    if (g_radioBackend == "wifi")
+    {
+        sourceMac = RadioMacForAddress(ipv4.GetSource());
+        destinationMac = RadioMacForAddress(ipv4.GetDestination());
+    }
+    if (sourceMac && destinationMac)
+    {
+        details << ";src_mac=" << *sourceMac << ";dst_mac=" << *destinationMac;
     }
     details << ";src_ip=" << ipv4.GetSource() << ";dst_ip=" << ipv4.GetDestination()
             << ";ip_protocol=" << static_cast<uint32_t>(ipv4.GetProtocol());
@@ -349,7 +465,10 @@ PhyRxStart(uint32_t nodeIndex, Ptr<const Packet> packet)
              packet->GetSize(),
              std::numeric_limits<double>::quiet_NaN(),
              PacketTraceDetails(packet));
-    ObserveReceivedPath(nodeIndex, packet);
+    if (g_radioBackend == "aloha")
+    {
+        ObserveReceivedPath(nodeIndex, packet);
+    }
 }
 
 void
@@ -362,6 +481,60 @@ PhyRxError(uint32_t nodeIndex, Ptr<const Packet> packet)
              packet->GetSize(),
              std::numeric_limits<double>::quiet_NaN(),
              PacketTraceDetails(packet));
+}
+
+void
+WifiPhyTxStart(uint32_t nodeIndex, Ptr<const Packet> packet, double)
+{
+    PhyTxStart(nodeIndex, packet);
+}
+
+void
+WifiPhyRxStart(uint32_t nodeIndex,
+               Ptr<const Packet> packet,
+               RxPowerWattPerChannelBand)
+{
+    PhyRxStart(nodeIndex, packet);
+}
+
+void
+WifiPhyRxDrop(uint32_t nodeIndex, Ptr<const Packet> packet, WifiPhyRxfailureReason reason)
+{
+    ++g_nodeCounters.at(nodeIndex).phyRxError;
+    LogEvent("phy_rx_error",
+             g_nodeNames.at(nodeIndex),
+             "",
+             packet->GetSize(),
+             static_cast<double>(reason),
+             "wifi_rx_failure_reason");
+}
+
+void
+WifiDataRetry(uint32_t nodeIndex, Mac48Address peer)
+{
+    ++g_nodeCounters.at(nodeIndex).wifiDataRetries;
+    std::ostringstream details;
+    details << "peer_mac=" << peer;
+    LogEvent("wifi_data_retry", g_nodeNames.at(nodeIndex), "", 0,
+             std::numeric_limits<double>::quiet_NaN(), details.str());
+}
+
+void
+WifiAssociated(uint32_t nodeIndex, Mac48Address ap)
+{
+    ++g_nodeCounters.at(nodeIndex).wifiAssociations;
+    std::ostringstream peer;
+    peer << ap;
+    LogEvent("wifi_associated", g_nodeNames.at(nodeIndex), peer.str(), 0);
+}
+
+void
+WifiDeassociated(uint32_t nodeIndex, Mac48Address ap)
+{
+    ++g_nodeCounters.at(nodeIndex).wifiDeassociations;
+    std::ostringstream peer;
+    peer << ap;
+    LogEvent("wifi_deassociated", g_nodeNames.at(nodeIndex), peer.str(), 0);
 }
 
 std::optional<Vector>
@@ -582,6 +755,15 @@ class NativeRuntimeSampler
         {
             const double lagMs = (realtime->RealtimeNow() - Simulator::Now()).GetSeconds() * 1000.0;
             ++g_realtimeLagSamples;
+            g_latestRealtimeLagMs = lagMs;
+            if (lagMs <= g_readinessLagMaxMs)
+            {
+                ++g_healthyLagSamples;
+            }
+            else
+            {
+                g_healthyLagSamples = 0;
+            }
             LogEvent("realtime_lag", "ns3", "", 0, lagMs, "lag_ms");
         }
         Simulator::Schedule(MilliSeconds(500), &NativeRuntimeSampler::PollLag, this);
@@ -688,6 +870,29 @@ WriteReady(const std::string& path)
     output << "ready\n";
 }
 
+void
+WriteReadyWhenWifiAssociated(const std::string& path)
+{
+    const bool associated = !g_wifiStations.empty() &&
+                            std::all_of(g_wifiStations.begin(),
+                                        g_wifiStations.end(),
+                                        [](const Ptr<StaWifiMac>& mac) {
+                                            return mac && mac->IsAssociated();
+                                        });
+    const bool realtimeReady = g_realtimeLagSamples > 1 &&
+                               g_healthyLagSamples >= g_readinessConsecutiveSamples;
+    if (associated && realtimeReady)
+    {
+        std::ostringstream details;
+        details << "all_stations_associated;lag_ms=" << g_latestRealtimeLagMs
+                << ";healthy_samples=" << g_healthyLagSamples;
+        LogEvent("wifi_bss_ready", "cp", "", 0, g_wifiStations.size(), details.str());
+        WriteReady(path);
+        return;
+    }
+    Simulator::Schedule(MilliSeconds(100), &WriteReadyWhenWifiAssociated, path);
+}
+
 uint32_t
 AddRouterInterface(Ptr<Node> router, Ptr<NetDevice> device, const std::string& address)
 {
@@ -738,6 +943,31 @@ CreateAntenna()
 }
 
 void
+AttachWifiAntenna(Ptr<NetDevice> device)
+{
+    Ptr<WifiNetDevice> wifi = DynamicCast<WifiNetDevice>(device);
+    NS_ABORT_MSG_IF(!wifi, "expected WifiNetDevice");
+    Ptr<SpectrumWifiPhy> phy = DynamicCast<SpectrumWifiPhy>(wifi->GetPhy());
+    NS_ABORT_MSG_IF(!phy, "expected SpectrumWifiPhy");
+    Ptr<AntennaModel> antenna = CreateObject<IsotropicAntennaModel>();
+    phy->SetAntenna(antenna);
+    antenna->AggregateObject(CreateAntenna());
+}
+
+void
+SetWifiAddress(Ptr<NetDevice> device, const Mac48Address& address)
+{
+    Ptr<WifiNetDevice> wifi = DynamicCast<WifiNetDevice>(device);
+    NS_ABORT_MSG_IF(!wifi, "expected WifiNetDevice");
+    wifi->SetAddress(address);
+    Ptr<WifiMac> mac = wifi->GetMac();
+    for (uint8_t linkId = 0; linkId < mac->GetNLinks(); ++linkId)
+    {
+        mac->GetFrameExchangeManager(linkId)->SetAddress(address);
+    }
+}
+
+void
 WriteStats(const std::string& path)
 {
     uint64_t macTx = 0;
@@ -751,6 +981,9 @@ WriteStats(const std::string& path)
     uint64_t queueEnqueue = 0;
     uint64_t queueDequeue = 0;
     uint64_t queueDrop = 0;
+    uint64_t wifiDataRetries = 0;
+    uint64_t wifiAssociations = 0;
+    uint64_t wifiDeassociations = 0;
     for (const NodeCounters& counters : g_nodeCounters)
     {
         macTx += counters.macTx;
@@ -764,6 +997,9 @@ WriteStats(const std::string& path)
         queueEnqueue += counters.queueEnqueue;
         queueDequeue += counters.queueDequeue;
         queueDrop += counters.queueDrop;
+        wifiDataRetries += counters.wifiDataRetries;
+        wifiAssociations += counters.wifiAssociations;
+        wifiDeassociations += counters.wifiDeassociations;
     }
     std::ofstream output(path, std::ios::out | std::ios::trunc);
     output << "{\n"
@@ -771,6 +1007,7 @@ WriteStats(const std::string& path)
            << "  \"uav_count\": " << (g_nodeNames.size() - 1) << ",\n"
            << "  \"radio_node_count\": " << g_nodeNames.size() << ",\n"
            << "  \"shared_spectrum_channel_count\": 1,\n"
+           << "  \"radio_backend\": \"" << g_radioBackend << "\",\n"
            << "  \"tap_ingress_segment\": {\"type\": \"local_fast_csma\", \"radio_medium\": false},\n"
            << "  \"cache_policy\": \"displacement_or_time\",\n"
            << "  \"channel_state_max_age_s\": " << g_channelStateMaxAgeS << ",\n"
@@ -780,6 +1017,8 @@ WriteStats(const std::string& path)
            << "  \"stale_pose_samples\": " << g_stalePoseSamples << ",\n"
            << "  \"path_observations\": " << g_pathObservations << ",\n"
            << "  \"realtime_lag_samples\": " << g_realtimeLagSamples << ",\n"
+           << "  \"readiness_lag_max_ms\": " << g_readinessLagMaxMs << ",\n"
+           << "  \"readiness_consecutive_samples\": " << g_readinessConsecutiveSamples << ",\n"
            << "  \"mac_tx_total\": " << macTx << ",\n"
            << "  \"phy_rx_start_total\": " << phyRxStart << ",\n"
            << "  \"phy_rx_ok_total\": " << phyRxOk << ",\n"
@@ -791,6 +1030,9 @@ WriteStats(const std::string& path)
            << "  \"queue_enqueue_total\": " << queueEnqueue << ",\n"
            << "  \"queue_dequeue_total\": " << queueDequeue << ",\n"
            << "  \"queue_drop_total\": " << queueDrop << ",\n"
+           << "  \"wifi_data_retry_total\": " << wifiDataRetries << ",\n"
+           << "  \"wifi_association_total\": " << wifiAssociations << ",\n"
+           << "  \"wifi_deassociation_total\": " << wifiDeassociations << ",\n"
            << "  \"event_logging\": \"" << g_eventLogging << "\",\n"
            << "  \"cp_mac_tx\": " << g_nodeCounters.front().macTx << ",\n"
            << "  \"uav_mac_tx\": " << (macTx - g_nodeCounters.front().macTx) << ",\n"
@@ -814,20 +1056,42 @@ WriteStats(const std::string& path)
                << ", \"queue_enqueue\": " << counters.queueEnqueue
                << ", \"queue_dequeue\": " << counters.queueDequeue
                << ", \"queue_drop\": " << counters.queueDrop
+               << ", \"wifi_data_retries\": " << counters.wifiDataRetries
+               << ", \"wifi_associations\": " << counters.wifiAssociations
+               << ", \"wifi_deassociations\": " << counters.wifiDeassociations
                << ", \"queue_max_depth\": " << counters.queueMaxDepth << "}";
         output << (index + 1 == g_nodeNames.size() ? "\n" : ",\n");
     }
     output << "  },\n"
-           << "  \"profile\": \"generic_native_spectrum_aloha_reference\",\n"
-           << "  \"technology_specific_modem\": false,\n"
+           << "  \"profile\": \"" << g_radioProfile << "\",\n"
+           << "  \"technology_specific_modem\": "
+           << (g_technologySpecificModem ? "true" : "false") << ",\n"
            << "  \"native_ns3_phy\": true,\n"
            << "  \"native_ns3_mac\": true,\n"
            << "  \"custom_packet_error_model\": false,\n"
            << "  \"custom_scheduler\": false,\n"
            << "  \"sionna_in_process\": true,\n"
-           << "  \"neighbor_discovery_mode\": \"preconfigured_static_neighbors\",\n"
-           << "  \"reason\": \"upstream_ideal_phy_arp_reentrancy_limit\",\n"
-           << "  \"packet_outcome_affected\": false\n"
+           << "  \"neighbor_discovery_mode\": \"" << g_neighborDiscoveryMode << "\",\n"
+           << "  \"reason\": \"" << g_radioReason << "\",\n"
+           << "  \"solver_profile\": \"" << g_solverProfile << "\",\n"
+           << "  \"sionna_solver\": {\"max_depth\": " << g_sionnaMaxDepth
+           << ", \"los\": " << (g_sionnaLos ? "true" : "false")
+           << ", \"specular_reflection\": "
+           << (g_sionnaSpecularReflection ? "true" : "false")
+           << ", \"diffuse_reflection\": "
+           << (g_sionnaDiffuseReflection ? "true" : "false")
+           << ", \"diffraction\": " << (g_sionnaDiffraction ? "true" : "false")
+           << ", \"edge_diffraction\": "
+           << (g_sionnaEdgeDiffraction ? "true" : "false")
+           << ", \"refraction\": " << (g_sionnaRefraction ? "true" : "false")
+           << ", \"synthetic_array\": "
+           << (g_sionnaSyntheticArray ? "true" : "false")
+           << ", \"seed\": " << g_sionnaSeed
+           << ", \"max_number_of_paths\": " << g_sionnaMaxNumberOfPaths
+           << ", \"cache_expiry_jitter_fraction\": " << g_sionnaCacheJitterFraction
+           << "},\n"
+           << "  \"packet_outcome_affected\": "
+           << (g_packetOutcomeAffected ? "true" : "false") << "\n"
            << "}\n";
 }
 
@@ -836,9 +1100,23 @@ WriteStats(const std::string& path)
 int
 main(int argc, char* argv[])
 {
+    GlobalValue::Bind("SimulatorImplementationType", StringValue("ns3::RealtimeSimulatorImpl"));
+    GlobalValue::Bind("ChecksumEnabled", BooleanValue(true));
     py::scoped_interpreter python{};
 
     uint32_t uavCount = 1;
+    std::string radioBackend = "aloha";
+    std::string radioProfile = "generic_native_spectrum_aloha_reference";
+    bool technologySpecificModem = false;
+    std::string neighborDiscoveryMode = "preconfigured_static_neighbors";
+    std::string radioReason = "upstream_ideal_phy_arp_reentrancy_limit";
+    bool packetOutcomeAffected = false;
+    std::string solverProfile = "realtime_minimal_solver_profile";
+    std::string wifiDataMode = "HtMcs0";
+    std::string wifiControlMode = "HtMcs0";
+    std::string wifiSsid = "bas-native-radio";
+    uint16_t wifiChannelWidthMhz = 20;
+    double carrierHz = 2.4e9;
     std::string tapGcs = "tap-gcs";
     std::string tapUav = "tap-uav";
     std::string tapUavs;
@@ -857,9 +1135,40 @@ main(int argc, char* argv[])
     std::string eventLogging = "batched_trace";
     uint32_t flushEveryEvents = 256;
     uint32_t flushMaxDelayMs = 25;
+    double readinessLagMaxMs = 50.0;
+    uint32_t readinessConsecutiveSamples = 3;
+    uint32_t sionnaMaxDepth = 1;
+    bool sionnaLos = true;
+    bool sionnaSpecularReflection = true;
+    bool sionnaDiffuseReflection = false;
+    bool sionnaDiffraction = false;
+    bool sionnaEdgeDiffraction = false;
+    bool sionnaRefraction = false;
+    bool sionnaSyntheticArray = true;
+    uint32_t sionnaSeed = 42;
+    uint32_t sionnaMaxNumberOfPaths = 90;
+    double sionnaCacheJitterFraction = 0.0;
 
     CommandLine command(__FILE__);
     command.AddValue("uavCount", "Number of UAV radio nodes (supported: 1 or 5)", uavCount);
+    command.AddValue("radioBackend", "Native MAC/PHY backend: aloha or wifi", radioBackend);
+    command.AddValue("radioProfile", "Product radio profile identifier", radioProfile);
+    command.AddValue("technologySpecificModem",
+                     "Whether the backend is a technology-specific modem",
+                     technologySpecificModem);
+    command.AddValue("neighborDiscoveryMode",
+                     "Configured neighbor discovery mode",
+                     neighborDiscoveryMode);
+    command.AddValue("radioReason", "Configured radio implementation rationale", radioReason);
+    command.AddValue("packetOutcomeAffected",
+                     "Whether the Sionna integration changes packet outcomes",
+                     packetOutcomeAffected);
+    command.AddValue("solverProfile", "Sionna solver profile identifier", solverProfile);
+    command.AddValue("wifiDataMode", "Constant 802.11n data mode", wifiDataMode);
+    command.AddValue("wifiControlMode", "Constant 802.11n control mode", wifiControlMode);
+    command.AddValue("wifiSsid", "Infrastructure BSS SSID", wifiSsid);
+    command.AddValue("wifiChannelWidthMhz", "802.11n channel width", wifiChannelWidthMhz);
+    command.AddValue("carrierHz", "Sionna and Wi-Fi carrier frequency", carrierHz);
     command.AddValue("tapGcs", "Existing command-post TAP device", tapGcs);
     command.AddValue("tapUav", "Backward-compatible single UAV TAP device", tapUav);
     command.AddValue("tapUavs", "Comma-separated UAV TAP devices", tapUavs);
@@ -880,9 +1189,46 @@ main(int argc, char* argv[])
     command.AddValue("eventLogging", "metrics_only or batched_trace", eventLogging);
     command.AddValue("flushEveryEvents", "Batched trace flush event limit", flushEveryEvents);
     command.AddValue("flushMaxDelayMs", "Batched trace maximum flush delay", flushMaxDelayMs);
+    command.AddValue("readinessLagMaxMs", "Maximum scheduler lag before Wi-Fi readiness", readinessLagMaxMs);
+    command.AddValue("readinessConsecutiveSamples",
+                     "Consecutive healthy lag samples required before Wi-Fi readiness",
+                     readinessConsecutiveSamples);
+    command.AddValue("sionnaMaxDepth", "Sionna path solver maximum depth", sionnaMaxDepth);
+    command.AddValue("sionnaLos", "Enable Sionna LOS paths", sionnaLos);
+    command.AddValue("sionnaSpecularReflection",
+                     "Enable Sionna specular reflection paths",
+                     sionnaSpecularReflection);
+    command.AddValue("sionnaDiffuseReflection",
+                     "Enable Sionna diffuse reflection paths",
+                     sionnaDiffuseReflection);
+    command.AddValue("sionnaDiffraction", "Enable Sionna diffraction paths", sionnaDiffraction);
+    command.AddValue("sionnaEdgeDiffraction",
+                     "Enable Sionna edge diffraction paths",
+                     sionnaEdgeDiffraction);
+    command.AddValue("sionnaRefraction", "Enable Sionna refraction paths", sionnaRefraction);
+    command.AddValue("sionnaSyntheticArray",
+                     "Enable Sionna synthetic arrays",
+                     sionnaSyntheticArray);
+    command.AddValue("sionnaSeed", "Sionna solver random seed", sionnaSeed);
+    command.AddValue("sionnaMaxNumberOfPaths",
+                     "Maximum Sionna paths retained per link",
+                     sionnaMaxNumberOfPaths);
+    command.AddValue("sionnaCacheJitterFraction",
+                     "Deterministic per-pair cache threshold spread",
+                     sionnaCacheJitterFraction);
     command.Parse(argc, argv);
 
     NS_ABORT_MSG_IF(uavCount != 1 && uavCount != 5, "uavCount must be 1 or 5");
+    NS_ABORT_MSG_IF(radioBackend != "aloha" && radioBackend != "wifi",
+                    "radioBackend must be aloha or wifi");
+    NS_ABORT_MSG_IF(radioBackend == "wifi" && wifiChannelWidthMhz != 20,
+                    "the product Wi-Fi profile currently requires a 20 MHz channel");
+    NS_ABORT_MSG_IF(carrierHz != 2.4e9,
+                    "the product Wi-Fi profile currently requires a 2.4 GHz carrier");
+    NS_ABORT_MSG_IF(wifiSsid.empty(), "wifiSsid must not be empty");
+    NS_ABORT_MSG_IF(radioProfile.empty() || neighborDiscoveryMode.empty() || radioReason.empty() ||
+                        solverProfile.empty(),
+                    "radio profile metadata must not be empty");
     if (tapUavs.empty())
     {
         tapUavs = tapUav;
@@ -897,22 +1243,45 @@ main(int argc, char* argv[])
 
     std::signal(SIGTERM, HandleSignal);
     std::signal(SIGINT, HandleSignal);
-    GlobalValue::Bind("SimulatorImplementationType", StringValue("ns3::RealtimeSimulatorImpl"));
-    GlobalValue::Bind("ChecksumEnabled", BooleanValue(true));
     NS_ABORT_MSG_IF(channelStateMaxAgeS <= 0.0 || updateDistanceThresholdM <= 0.0,
                     "channel-state age and displacement threshold must be positive");
     NS_ABORT_MSG_IF(phyRateBps == 0 || (eventLogging != "metrics_only" && eventLogging != "batched_trace") ||
-                        flushEveryEvents == 0 || flushMaxDelayMs == 0,
+                        flushEveryEvents == 0 || flushMaxDelayMs == 0 || readinessLagMaxMs <= 0.0 ||
+                        readinessConsecutiveSamples == 0 || sionnaMaxDepth == 0 ||
+                        sionnaMaxNumberOfPaths == 0 || sionnaCacheJitterFraction < 0.0 ||
+                        sionnaCacheJitterFraction > 0.9,
                     "invalid PHY rate or event logging configuration");
     g_channelStateMaxAgeS = channelStateMaxAgeS;
     g_updateDistanceThresholdM = updateDistanceThresholdM;
     g_eventLogging = eventLogging;
+    g_radioBackend = radioBackend;
+    g_radioProfile = radioProfile;
+    g_technologySpecificModem = technologySpecificModem;
+    g_neighborDiscoveryMode = neighborDiscoveryMode;
+    g_radioReason = radioReason;
+    g_packetOutcomeAffected = packetOutcomeAffected;
+    g_solverProfile = solverProfile;
+    g_sionnaMaxDepth = sionnaMaxDepth;
+    g_sionnaLos = sionnaLos;
+    g_sionnaSpecularReflection = sionnaSpecularReflection;
+    g_sionnaDiffuseReflection = sionnaDiffuseReflection;
+    g_sionnaDiffraction = sionnaDiffraction;
+    g_sionnaEdgeDiffraction = sionnaEdgeDiffraction;
+    g_sionnaRefraction = sionnaRefraction;
+    g_sionnaSyntheticArray = sionnaSyntheticArray;
+    g_sionnaSeed = sionnaSeed;
+    g_sionnaMaxNumberOfPaths = sionnaMaxNumberOfPaths;
+    g_sionnaCacheJitterFraction = sionnaCacheJitterFraction;
     g_flushEveryEvents = flushEveryEvents;
     g_flushMaxDelayMs = flushMaxDelayMs;
+    g_readinessLagMaxMs = readinessLagMaxMs;
+    g_readinessConsecutiveSamples = readinessConsecutiveSamples;
     Config::SetDefault("ns3::SionnaRtChannelModel::UpdatePeriod",
                        TimeValue(Seconds(channelStateMaxAgeS)));
     Config::SetDefault("ns3::SionnaRtChannelModel::UpdateDistanceThreshold",
                        DoubleValue(updateDistanceThresholdM));
+    Config::SetDefault("ns3::SionnaRtChannelModel::UpdateJitterFraction",
+                       DoubleValue(sionnaCacheJitterFraction));
 
     g_nodeNames.push_back("cp");
     for (uint32_t index = 1; index <= uavCount; ++index)
@@ -958,59 +1327,141 @@ main(int argc, char* argv[])
     channel->SetPropagationDelayModel(CreateObject<ConstantSpeedPropagationDelayModel>());
     Ptr<SionnaRtSpectrumPropagationLossModel> sionna =
         CreateObject<SionnaRtSpectrumPropagationLossModel>();
-    sionna->SetChannelModelAttribute("Frequency", DoubleValue(2.4e9));
+    sionna->SetChannelModelAttribute("Frequency", DoubleValue(carrierHz));
     sionna->SetChannelModelAttribute("Scenario", StringValue(scene));
     sionna->SetChannelModelAttribute("IsMergeShapeEnabled", BooleanValue(true));
-    sionna->SetChannelModelAttribute("MaxNumberOfPaths", DoubleValue(90));
+    sionna->SetChannelModelAttribute("MaxNumberOfPaths",
+                                     DoubleValue(static_cast<double>(sionnaMaxNumberOfPaths)));
     SionnaRtChannelModel::RtPathSolverConfig solver;
-    solver.maxDepth = 1;
-    solver.los = true;
-    solver.specularReflection = true;
-    solver.diffuseReflection = false;
-    solver.diffraction = false;
-    solver.edgeDiffraction = false;
-    solver.refraction = false;
-    solver.syntheticArray = true;
-    solver.seed = 42;
+    solver.maxDepth = sionnaMaxDepth;
+    solver.los = sionnaLos;
+    solver.specularReflection = sionnaSpecularReflection;
+    solver.diffuseReflection = sionnaDiffuseReflection;
+    solver.diffraction = sionnaDiffraction;
+    solver.edgeDiffraction = sionnaEdgeDiffraction;
+    solver.refraction = sionnaRefraction;
+    solver.syntheticArray = sionnaSyntheticArray;
+    solver.seed = sionnaSeed;
     sionna->SetRtPathSolverConfig(solver);
     channel->AddPhasedArraySpectrumPropagationLossModel(sionna);
 
-    SpectrumValue5MhzFactory spectrum;
-    Ptr<SpectrumValue> txPsd = spectrum.CreateTxPowerSpectralDensity(txPowerW, 1);
-    Ptr<SpectrumValue> noisePsd = spectrum.CreateConstant(1.381e-23 * 290.0);
-    AdhocAlohaNoackIdealPhyHelper radio;
-    radio.SetChannel(channel);
-    radio.SetTxPowerSpectralDensity(txPsd);
-    radio.SetNoisePowerSpectralDensity(noisePsd);
-    radio.SetPhyAttribute("Rate", DataRateValue(DataRate(phyRateBps)));
-    NetDeviceContainer radioDevices = radio.Install(radioNodes);
-
-    for (uint32_t index = 0; index < radioDevices.GetN(); ++index)
+    NetDeviceContainer radioDevices;
+    if (radioBackend == "aloha")
     {
-        Ptr<AlohaNoackNetDevice> device = DynamicCast<AlohaNoackNetDevice>(radioDevices.Get(index));
-        Ptr<HalfDuplexIdealPhy> phy = device->GetPhy()->GetObject<HalfDuplexIdealPhy>();
-        PointerValue queueValue;
-        device->GetAttribute("Queue", queueValue);
-        Ptr<Queue<Packet>> queue = queueValue.Get<Queue<Packet>>();
-        NS_ABORT_MSG_IF(!queue, "Aloha device queue is unavailable through its public Queue attribute");
-        g_queues.push_back(queue);
-        phy->SetAntenna(CreateAntenna());
-        device->TraceConnectWithoutContext("MacTx", MakeBoundCallback(&MacTx, index));
-        device->TraceConnectWithoutContext("MacTxDrop", MakeBoundCallback(&MacTxDrop, index));
-        queue->TraceConnectWithoutContext("Enqueue", MakeBoundCallback(&QueueEnqueue, index));
-        queue->TraceConnectWithoutContext("Dequeue", MakeBoundCallback(&QueueDequeue, index));
-        queue->TraceConnectWithoutContext("Drop", MakeBoundCallback(&QueueDrop, index));
-        phy->TraceConnectWithoutContext("TxStart", MakeBoundCallback(&PhyTxStart, index));
-        phy->TraceConnectWithoutContext("TxEnd", MakeBoundCallback(&PhyTxEnd, index));
-        phy->TraceConnectWithoutContext("RxEndOk", MakeBoundCallback(&PhyRxOk, index));
-        phy->TraceConnectWithoutContext("RxStart", MakeBoundCallback(&PhyRxStart, index));
-        phy->TraceConnectWithoutContext("RxAbort", MakeBoundCallback(&PhyRxAbort, index));
-        phy->TraceConnectWithoutContext("RxEndError", MakeBoundCallback(&PhyRxError, index));
+        SpectrumValue5MhzFactory spectrum;
+        Ptr<SpectrumValue> txPsd = spectrum.CreateTxPowerSpectralDensity(txPowerW, 1);
+        Ptr<SpectrumValue> noisePsd = spectrum.CreateConstant(1.381e-23 * 290.0);
+        AdhocAlohaNoackIdealPhyHelper radio;
+        radio.SetChannel(channel);
+        radio.SetTxPowerSpectralDensity(txPsd);
+        radio.SetNoisePowerSpectralDensity(noisePsd);
+        radio.SetPhyAttribute("Rate", DataRateValue(DataRate(phyRateBps)));
+        radioDevices = radio.Install(radioNodes);
+
+        for (uint32_t index = 0; index < radioDevices.GetN(); ++index)
+        {
+            Ptr<AlohaNoackNetDevice> device =
+                DynamicCast<AlohaNoackNetDevice>(radioDevices.Get(index));
+            Ptr<HalfDuplexIdealPhy> phy = device->GetPhy()->GetObject<HalfDuplexIdealPhy>();
+            PointerValue queueValue;
+            device->GetAttribute("Queue", queueValue);
+            Ptr<Queue<Packet>> queue = queueValue.Get<Queue<Packet>>();
+            NS_ABORT_MSG_IF(!queue,
+                            "Aloha device queue is unavailable through its public Queue attribute");
+            g_queues.push_back(queue);
+            phy->SetAntenna(CreateAntenna());
+            device->TraceConnectWithoutContext("MacTx", MakeBoundCallback(&MacTx, index));
+            device->TraceConnectWithoutContext("MacTxDrop", MakeBoundCallback(&MacTxDrop, index));
+            queue->TraceConnectWithoutContext("Enqueue", MakeBoundCallback(&QueueEnqueue, index));
+            queue->TraceConnectWithoutContext("Dequeue", MakeBoundCallback(&QueueDequeue, index));
+            queue->TraceConnectWithoutContext("Drop", MakeBoundCallback(&QueueDrop, index));
+            phy->TraceConnectWithoutContext("TxStart", MakeBoundCallback(&PhyTxStart, index));
+            phy->TraceConnectWithoutContext("TxEnd", MakeBoundCallback(&PhyTxEnd, index));
+            phy->TraceConnectWithoutContext("RxEndOk", MakeBoundCallback(&PhyRxOk, index));
+            phy->TraceConnectWithoutContext("RxStart", MakeBoundCallback(&PhyRxStart, index));
+            phy->TraceConnectWithoutContext("RxAbort", MakeBoundCallback(&PhyRxAbort, index));
+            phy->TraceConnectWithoutContext("RxEndError", MakeBoundCallback(&PhyRxError, index));
+        }
+    }
+    else
+    {
+        SpectrumWifiPhyHelper wifiPhy;
+        wifiPhy.SetChannel(channel);
+        wifiPhy.SetErrorRateModel("ns3::NistErrorRateModel");
+        const double txPowerDbm = 10.0 * std::log10(txPowerW * 1000.0);
+        wifiPhy.Set("TxPowerStart", DoubleValue(txPowerDbm));
+        wifiPhy.Set("TxPowerEnd", DoubleValue(txPowerDbm));
+        std::ostringstream channelSettings;
+        channelSettings << "{0, " << wifiChannelWidthMhz << ", BAND_2_4GHZ, 0}";
+        wifiPhy.Set("ChannelSettings", StringValue(channelSettings.str()));
+
+        WifiHelper wifi;
+        wifi.SetStandard(WIFI_STANDARD_80211n);
+        wifi.SetRemoteStationManager("ns3::ConstantRateWifiManager",
+                                     "DataMode",
+                                     StringValue(wifiDataMode),
+                                     "ControlMode",
+                                     StringValue(wifiControlMode));
+        WifiMacHelper wifiMac;
+        const Ssid ssid(wifiSsid);
+        wifiMac.SetType("ns3::ApWifiMac",
+                        "QosSupported",
+                        BooleanValue(true),
+                        "Ssid",
+                        SsidValue(ssid));
+        radioDevices.Add(wifi.Install(wifiPhy, wifiMac, NodeContainer(commandPost)));
+        wifiMac.SetType("ns3::StaWifiMac",
+                        "QosSupported",
+                        BooleanValue(true),
+                        "Ssid",
+                        SsidValue(ssid));
+        radioDevices.Add(wifi.Install(wifiPhy, wifiMac, uavs));
+
+        for (uint32_t index = 0; index < radioDevices.GetN(); ++index)
+        {
+            AttachWifiAntenna(radioDevices.Get(index));
+            Ptr<WifiNetDevice> device = DynamicCast<WifiNetDevice>(radioDevices.Get(index));
+            NS_ABORT_MSG_IF(!device, "expected WifiNetDevice");
+            device->GetMac()->TraceConnectWithoutContext("MacTx",
+                                                         MakeBoundCallback(&MacTx, index));
+            device->GetMac()->TraceConnectWithoutContext("MacTxDrop",
+                                                         MakeBoundCallback(&MacTxDrop, index));
+            device->GetPhy()->TraceConnectWithoutContext("PhyTxBegin",
+                                                         MakeBoundCallback(&WifiPhyTxStart, index));
+            device->GetPhy()->TraceConnectWithoutContext("PhyTxEnd",
+                                                         MakeBoundCallback(&PhyTxEnd, index));
+            device->GetPhy()->TraceConnectWithoutContext("PhyRxBegin",
+                                                         MakeBoundCallback(&WifiPhyRxStart, index));
+            device->GetPhy()->TraceConnectWithoutContext("PhyRxEnd",
+                                                         MakeBoundCallback(&PhyRxOk, index));
+            device->GetPhy()->TraceConnectWithoutContext("PhyRxDrop",
+                                                         MakeBoundCallback(&WifiPhyRxDrop, index));
+            device->GetRemoteStationManager()->TraceConnectWithoutContext(
+                "MacTxDataFailed",
+                MakeBoundCallback(&WifiDataRetry, index));
+            if (index > 0)
+            {
+                Ptr<StaWifiMac> station = DynamicCast<StaWifiMac>(device->GetMac());
+                NS_ABORT_MSG_IF(!station, "expected StaWifiMac on UAV radio");
+                g_wifiStations.push_back(station);
+                station->TraceConnectWithoutContext("Assoc",
+                                                    MakeBoundCallback(&WifiAssociated, index));
+                station->TraceConnectWithoutContext("DeAssoc",
+                                                    MakeBoundCallback(&WifiDeassociated, index));
+            }
+        }
     }
 
     ingressDevices.Get(1)->SetAddress(Mac48Address("02:71:00:00:00:01"));
     const Mac48Address cpRadioMac("02:71:ff:00:00:01");
-    radioDevices.Get(0)->SetAddress(cpRadioMac);
+    if (radioBackend == "wifi")
+    {
+        SetWifiAddress(radioDevices.Get(0), cpRadioMac);
+    }
+    else
+    {
+        radioDevices.Get(0)->SetAddress(cpRadioMac);
+    }
     InternetStackHelper internet;
     internet.Install(commandPost);
     const uint32_t ingressInterface =
@@ -1028,7 +1479,15 @@ main(int argc, char* argv[])
         std::ostringstream endpointMac;
         endpointMac << "02:71:" << std::hex << std::setfill('0') << std::setw(2) << index
                     << ":00:10:10";
-        radioDevices.Get(index)->SetAddress(Mac48Address(endpointMac.str().c_str()));
+        const Mac48Address uavRadioMac(endpointMac.str().c_str());
+        if (radioBackend == "wifi")
+        {
+            SetWifiAddress(radioDevices.Get(index), uavRadioMac);
+        }
+        else
+        {
+            radioDevices.Get(index)->SetAddress(uavRadioMac);
+        }
         AddPermanentArp(commandPost,
                         radioDevices.Get(0),
                         endpointAddress.str(),
@@ -1053,6 +1512,7 @@ main(int argc, char* argv[])
     tap.SetAttribute("Mode", StringValue("UseBridge"));
     tap.SetAttribute("DeviceName", StringValue(tapGcs));
     tap.Install(ghostGcs, ingressDevices.Get(0));
+    tap.SetAttribute("Mode", StringValue(radioBackend == "wifi" ? "UseLocal" : "UseBridge"));
     for (uint32_t index = 0; index < uavCount; ++index)
     {
         tap.SetAttribute("DeviceName", StringValue(uavTapNames[index]));
@@ -1062,11 +1522,25 @@ main(int argc, char* argv[])
     LivePositionSource positions(positionFile, mobility, Seconds(1.5));
     NativeRuntimeSampler metrics(sionna->GetChannelModel(), cpMobility, uavMobility);
     g_runtimeSampler = &metrics;
-    Simulator::ScheduleNow(&LivePositionSource::Poll, &positions);
+    if (radioBackend == "wifi")
+    {
+        positions.Poll();
+    }
+    else
+    {
+        Simulator::ScheduleNow(&LivePositionSource::Poll, &positions);
+    }
     Simulator::ScheduleNow(&NativeRuntimeSampler::PollLag, &metrics);
     Simulator::ScheduleNow(&SampleQueues);
     Simulator::ScheduleNow(&PollSignal);
-    Simulator::Schedule(MilliSeconds(250), &WriteReady, readyFile);
+    if (radioBackend == "wifi")
+    {
+        Simulator::ScheduleNow(&WriteReadyWhenWifiAssociated, readyFile);
+    }
+    else
+    {
+        Simulator::Schedule(MilliSeconds(250), &WriteReady, readyFile);
+    }
     Simulator::Stop(Seconds(duration));
 
     int result = 0;

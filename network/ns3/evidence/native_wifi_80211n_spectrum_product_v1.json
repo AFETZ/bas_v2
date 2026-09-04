@@ -1,0 +1,147 @@
+{
+  "schema_version": 1,
+  "scope": "five_real_sitl_town01_native_wifi_sionna_product_path",
+  "primary_run": "runs/native-radio-realtime/native-wifi-five-product-final-v3-20260904",
+  "repeat_run": "runs/native-radio-realtime/native-wifi-five-product-final-v2-20260904",
+  "focused_build_run": "runs/native-radio-realtime/native-wifi-five-product-jitter-20260904",
+  "measured_utc": "2026-09-04T08:10:55Z",
+  "source_base_commit": "900b6b07544bb437d587d78d030c61394dba6b63",
+  "ns3_exact_sha": "d2add90b452d600cfb4859baed8e9ea633519447",
+  "dependencies": {
+    "ns3": "3.48",
+    "python": "3.10.12",
+    "sionna": "1.2.0",
+    "sionna_rt": "1.2.0",
+    "mitsuba": "3.7.1",
+    "drjit": "1.2.0",
+    "pybind11": "2.11.1"
+  },
+  "configuration": {
+    "source": "network/config/native_wifi_80211n_spectrum_product.yaml",
+    "profile": "native_wifi_80211n_spectrum_reference_v1",
+    "radio": "802.11n QoS SpectrumWifiPhy infrastructure BSS",
+    "data_mode": "HtMcs0",
+    "control_mode": "HtMcs0",
+    "carrier_hz": 2400000000,
+    "channel_width_mhz": 20,
+    "tx_power_w": 0.01,
+    "sionna_solver": "LOS plus specular, depth 1, seed 42",
+    "channel_state_max_age_s": 20.0,
+    "endpoint_displacement_max_m": 10.0,
+    "per_pair_expiry_spread_fraction": 0.5,
+    "effective_age_range_s": [10.0, 20.0],
+    "effective_displacement_range_m": [5.0, 10.0]
+  },
+  "topology": {
+    "real_sitl": 5,
+    "gazebo_uav_models": 5,
+    "ros_odometry_publishers": 5,
+    "native_wifi_phy_mac_pairs": 6,
+    "shared_spectrum_channels": 1,
+    "uart_paths": 10,
+    "pcaps": 7,
+    "sionna_in_process": true,
+    "scalar_propagation_fallback": false,
+    "application_bypass": false
+  },
+  "functional_checks_passed": 15,
+  "functional_checks_total": 15,
+  "flight": {
+    "status": "passed",
+    "duration_s": 197.549,
+    "all_five_arm_takeoff_hold_land_auto_disarm": true,
+    "moving_uav": "uav1",
+    "los_observation": true,
+    "obstructed_observation": true,
+    "live_gazebo_captures": 6
+  },
+  "mavlink": {
+    "real_sitl_ack": true,
+    "control_ack_count": 5,
+    "control_ack_latency_ms": [5.940956, 4.467729, 3.652734, 3.720241, 32.376189],
+    "control_ack_p95_ms": 27.0891424,
+    "payload_ack_count": 5,
+    "payload_ack_latency_ms": [5.89467, 4.447572, 5.906542, 7.436895, 5.752264],
+    "payload_ack_p95_ms": 7.1308244,
+    "system_ids": [1, 2, 3, 4, 5]
+  },
+  "p2p": {
+    "offered": 100,
+    "delivered_unique": 100,
+    "duplicates": 0,
+    "all_five_bidirectional": true
+  },
+  "p2mp": {
+    "root_transmissions": 20,
+    "application_unicast_copies": 0,
+    "receiver_deliveries": 100,
+    "all_five_receivers": true
+  },
+  "shared_uplink": {
+    "offered": 100,
+    "delivered": 100,
+    "per_uav_delivered": [20, 20, 20, 20, 20],
+    "jain_fairness": 1.0
+  },
+  "scheduler": {
+    "steady_lag_samples": 395,
+    "steady_lag_p50_ms": 0.062167,
+    "steady_lag_p95_ms": 0.0842371,
+    "steady_lag_max_ms": 105.783199,
+    "repeat_lag_samples": 517,
+    "repeat_lag_p95_ms": 0.1053932,
+    "repeat_lag_max_ms": 802.493995,
+    "pre_fix_variable_p95_ms": [2.7538585, 162.3855008]
+  },
+  "sionna": {
+    "scene_initializations": 1,
+    "initial_pair_misses": 15,
+    "scene_cache_hits": 516,
+    "path_solves_total": 517,
+    "path_solves_per_wall_second": 2.617,
+    "steady_path_solve_p95_ms": 34.552232,
+    "steady_path_solve_max_ms": 49.981731,
+    "time_invalidation_observations": 502,
+    "displacement_invalidation_observations": 354,
+    "live_pose_snapshots_applied": 1956,
+    "stale_pose_samples": 0
+  },
+  "gazebo": {
+    "mean_rtf": 0.9945589235094193,
+    "p5_rtf": 0.9991338010233227,
+    "samples": 2240,
+    "position_age_p95_ms_max_across_uavs": 34.03717275
+  },
+  "resources": {
+    "ns3_sionna_cpu_percent_one_core_mean": 13.78699479,
+    "ns3_sionna_cpu_percent_one_core_p95": 23.67099601,
+    "ns3_sionna_gpu_memory_bytes_max": 2738880512
+  },
+  "native_wifi": {
+    "mac_tx": 2779,
+    "mac_tx_drop": 118,
+    "data_retry_events": 775,
+    "association_events": 6,
+    "deassociation_events": 1,
+    "uav1_obstruction_is_only_deassociation": true
+  },
+  "no_bypass": {
+    "duration_s": 10.5,
+    "control_or_payload_messages_received": 0,
+    "reverse_telemetry_received": 0,
+    "passed": true
+  },
+  "integrity": {
+    "primary_summary_sha256": "bef46fa0a92e9f2ee9134451696c58631f9ba26cc425af4630ffa0b9b2084c8f",
+    "focused_build_log_sha256": "73a1ed7344f6956624848a399ec3fcc246660fa5cecab667401d073882dbd6b5",
+    "focused_build_completed_target": "scratch_upstream-sionna-tap-spike"
+  },
+  "limitations": [
+    "Hardware HitL is not exercised.",
+    "The current selected Wi-Fi traces do not export per-MPDU RSSI, SNR, SINR, or BLER.",
+    "The 20 s and 10 m cache maxima define the measured operating envelope, not all mobility regimes.",
+    "One obstruction-induced Wi-Fi deassociation recovered, but this is not a jammer campaign."
+  ],
+  "exit_code": 0,
+  "pass": true
+}

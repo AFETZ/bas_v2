@@ -28,6 +28,7 @@ from network.scripts.communication_qos import (  # noqa: E402
 )
 from network.ns3.tap_packet_engine_config import ConfigError, data_rate_bps  # noqa: E402
 from network.scripts.packet_accounting import account_packets, group_accounting  # noqa: E402
+from scripts.product.gazebo_profile_metrics import profile_gazebo_rtf  # noqa: E402
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -689,6 +690,13 @@ def main() -> int:
                 * 5
                 for name in CLASSES
             ),
+            "gazebo_real_time_factor": (
+                profile_gazebo_rtf(
+                    run_dir / "logs/gazebo_stats.log", *windows[profile_name]
+                )
+                if profile_name in windows
+                else {}
+            ),
         }
         if profile_name in {"nominal", "contention", "controlled_overload"}:
             fairness[profile_name] = {
@@ -721,6 +729,9 @@ def main() -> int:
         controlled.get("admitted_policy_observed", {}).get("packets", 0) or 0
     )
     controlled_offered_bps = controlled.get("offered", {}).get("bits_per_second")
+    controlled_gazebo_mean_rtf = controlled.get("gazebo_real_time_factor", {}).get(
+        "mean"
+    )
     nominal_offered = int(
         qos_profiles.get("nominal", {}).get("offered", {}).get("packets", 0) or 0
     )
@@ -750,6 +761,11 @@ def main() -> int:
         )
         and float(controlled_lag_p95)
         <= float(controlled_config["max_scheduler_lag_p95_ms"]),
+        "controlled_overload_gazebo_mean_rtf": isinstance(
+            controlled_gazebo_mean_rtf, (int, float)
+        )
+        and float(controlled_gazebo_mean_rtf)
+        >= float(controlled_config["min_gazebo_mean_rtf"]),
         "controlled_overload_cpu_samples_present": isinstance(
             controlled_cpu_samples, int
         )
@@ -833,7 +849,14 @@ def main() -> int:
                 "scheduler_lag_max_p95_ms": float(
                     controlled_config["max_scheduler_lag_p95_ms"]
                 ),
-                "profile_rtf_status": "unmeasured",
+                "gazebo_min_mean_rtf": float(
+                    controlled_config["min_gazebo_mean_rtf"]
+                ),
+                "profile_rtf_status": (
+                    "measured"
+                    if controlled.get("gazebo_real_time_factor", {}).get("count", 0)
+                    else "unavailable"
+                ),
                 "cpu_sample_distribution_required": True,
                 "queue_delay_sample_distribution_required_for_classes": list(
                     CLASSES

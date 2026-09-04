@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import re
@@ -107,6 +108,7 @@ def native_events(path: Path) -> list[dict[str, Any]]:
 
 
 def build_topology(run_dir: Path, stats: dict[str, Any]) -> dict[str, Any]:
+    wifi = stats.get("radio_backend") == "wifi"
     nodes = {
         "cp": {
             "ipv4": ["10.71.0.1", "10.71.1.1"],
@@ -125,20 +127,29 @@ def build_topology(run_dir: Path, stats: dict[str, Any]) -> dict[str, Any]:
         "radio_nodes": 6,
         "uav_count": 5,
         "native_radio_devices": 6,
-        "half_duplex_ideal_phys": 6,
+        "half_duplex_ideal_phys": 0 if wifi else 6,
+        "spectrum_wifi_phys": 6 if wifi else 0,
+        "qos_wifi_macs": 6 if wifi else 0,
         "native_antennas": 6,
         "mobility_models": 6,
         "tap_boundaries": 6,
         "shared_multi_model_spectrum_channels": 1,
         "sionna_rt_spectrum_propagation_loss_models": 1,
-        "radio_medium": "native HalfDuplexIdealPhy/AlohaNoackNetDevice",
+        "radio_medium": (
+            "native 802.11n QoS WifiMac/SpectrumWifiPhy"
+            if wifi
+            else "native HalfDuplexIdealPhy/AlohaNoackNetDevice"
+        ),
+        "uav_tap_bridge_mode": "UseLocal" if wifi else "UseBridge",
         "tap_ingress_segment": {"type": "local_fast_csma", "radio_medium": False},
         "nodes": nodes,
-        "profile": "generic_native_spectrum_aloha_reference",
-        "technology_specific_modem": False,
-        "neighbor_discovery_mode": "preconfigured_static_neighbors",
-        "reason": "upstream_ideal_phy_arp_reentrancy_limit",
-        "packet_outcome_affected": False,
+        "profile": stats.get("profile", "generic_native_spectrum_aloha_reference"),
+        "technology_specific_modem": bool(stats.get("technology_specific_modem", False)),
+        "neighbor_discovery_mode": stats.get(
+            "neighbor_discovery_mode", "preconfigured_static_neighbors"
+        ),
+        "reason": stats.get("reason", "unrecorded"),
+        "packet_outcome_affected": bool(stats.get("packet_outcome_affected", False)),
         "native_stats": stats,
         "pcaps": pcap_names,
         "exact_pcap_count": len(pcap_names),
@@ -184,14 +195,43 @@ def build_mobility(run_dir: Path, events: list[dict[str, Any]]) -> dict[str, Any
         )
         topic_file = run_dir / f"logs/odometry_{uav}.txt"
         topic_text = topic_file.read_text(encoding="utf-8", errors="replace") if topic_file.exists() else ""
-        publisher_match = re.search(r"Node name: ([^\n]+).*?Node namespace: ([^\n]+)", topic_text, re.S)
+        publisher_count_match = re.search(r"^Publisher count:\s*(\d+)\s*$", topic_text, re.M)
+        publisher_count = int(publisher_count_match.group(1)) if publisher_count_match else 0
+        publisher_match = re.search(
+            r"^Publisher count:\s*[1-9]\d*\s*$.*?"
+            r"^Node name: ([^\n]+).*?^Node namespace: ([^\n]+)",
+            topic_text,
+            re.M | re.S,
+        )
         publisher = None
         if publisher_match:
             publisher = f"{publisher_match.group(2).rstrip('/')}/{publisher_match.group(1)}".replace("//", "/")
-        topic_details[uav] = {"topic": f"/{uav}/odometry", "publisher_node": publisher}
-        result["uavs"][uav] = {
-            "ros_topic": f"/{uav}/odometry",
+        expected_topic = f"/{uav}/odometry"
+        tracker_stream_samples = source_topics.get(expected_topic, 0)
+        stream_observed = publisher_count > 0 or tracker_stream_samples > 0
+        observation_basis = (
+            "ros2_topic_info_and_tracker_stream"
+            if publisher_count > 0 and tracker_stream_samples > 0
+            else "ros2_topic_info"
+            if publisher_count > 0
+            else "tracker_received_exact_ros_topic"
+            if tracker_stream_samples > 0
+            else "unobserved"
+        )
+        topic_details[uav] = {
+            "topic": expected_topic,
             "publisher_node": publisher,
+            "publisher_count": publisher_count,
+            "tracker_stream_samples": tracker_stream_samples,
+            "stream_observed": stream_observed,
+            "observation_basis": observation_basis,
+        }
+        result["uavs"][uav] = {
+            "ros_topic": expected_topic,
+            "publisher_node": publisher,
+            "publisher_count": publisher_count,
+            "stream_observed": stream_observed,
+            "stream_observation_basis": observation_basis,
             "sample_count": len(positions),
             "update_rate_hz": (len(positions) - 1) / elapsed if elapsed > 0 else None,
             "first_position_m": first,
@@ -203,8 +243,11 @@ def build_mobility(run_dir: Path, events: list[dict[str, Any]]) -> dict[str, Any
             "tracker_source_topics": dict(source_topics),
         }
     result["all_required_publishers_observed"] = all(
-        topic_details[uav]["publisher_node"] for uav in UAVS
+        topic_details[uav]["stream_observed"] for uav in UAVS
     )
+    result["all_required_odometry_streams_observed"] = result[
+        "all_required_publishers_observed"
+    ]
     result["all_mobility_models_updated"] = all(result["uavs"][uav]["sample_count"] > 0 for uav in UAVS)
     return result
 
@@ -368,6 +411,11 @@ def build_shared_medium(
     per_uav: dict[str, Any] = {}
     throughput: list[float] = []
     intervals: list[tuple[float, float, str, int | None]] = []
+    airtime_rate_bps = (
+        6_500_000.0
+        if str(scenario.get("profile", "")).startswith("native_wifi_")
+        else 1_000_000.0
+    )
     for uav in UAVS:
         offered_rows = [
             row
@@ -390,7 +438,14 @@ def build_shared_medium(
             rx_ok += int(any(row["event"] == "phy_rx_ok" for row in cp_rows))
             rx_error += int(any(row["event"] == "phy_rx_error" for row in cp_rows))
             start = float(transmit["time_s"])
-            intervals.append((start, start + transmit["bytes"] * 8 / 1_000_000.0, uav, transmit["packet_uid"]))
+            intervals.append(
+                (
+                    start,
+                    start + transmit["bytes"] * 8 / airtime_rate_bps,
+                    uav,
+                    transmit["packet_uid"],
+                )
+            )
         delivered_unique = len({row.get("sequence") for row in delivered})
         bits_per_second = delivered_unique * 256 * 8 / 1.0
         throughput.append(bits_per_second)
@@ -414,7 +469,11 @@ def build_shared_medium(
                 if second[3] is not None:
                     overlapping_uids.add(int(second[3]))
     return {
-        "medium": "one shared native ALOHA channel",
+        "medium": (
+            "one shared native 802.11n SpectrumWifi channel"
+            if str(scenario.get("profile", "")).startswith("native_wifi_")
+            else "one shared native ALOHA channel"
+        ),
         "predeclared_start_monotonic_ns": application.get("predeclared_start_monotonic_ns"),
         "identical_profile": {
             "packets_per_uav": application.get("packets_per_uav"),
@@ -430,7 +489,12 @@ def build_shared_medium(
         "native_trace_overlap_observations": {
             "overlapping_interval_pairs": overlaps,
             "packets_observed_in_overlap": len(overlapping_uids),
-            "basis": "native MacTx simulation timestamps and 1 Mbit/s packet airtime",
+            "basis": (
+                "native MacTx simulation timestamps and nominal HtMcs0 payload serialization; "
+                "application delivery is authoritative"
+                if airtime_rate_bps > 1_000_000.0
+                else "native MacTx simulation timestamps and 1 Mbit/s packet airtime"
+            ),
         },
     }
 
@@ -548,7 +612,12 @@ def resource_summary(path: Path) -> dict[str, Any]:
     return result
 
 
-def build_realtime(run_dir: Path, events: list[dict[str, Any]], mobility: dict[str, Any]) -> dict[str, Any]:
+def build_realtime(
+    run_dir: Path,
+    events: list[dict[str, Any]],
+    mobility: dict[str, Any],
+    stats: dict[str, Any],
+) -> dict[str, Any]:
     lag = [float(row["value"]) for row in events if row["event"] == "realtime_lag" and row["value"] is not None]
     steady_lag = [
         float(row["value"])
@@ -568,9 +637,10 @@ def build_realtime(run_dir: Path, events: list[dict[str, Any]], mobility: dict[s
     ]
     lag_stats = distribution(lag)
     steady_lag_stats = distribution(steady_lag)
+    lag_bound_ms = float(stats.get("readiness_lag_max_ms", 250.0))
     ready = bool(
         steady_lag_stats["p95"] is not None
-        and steady_lag_stats["p95"] <= 250.0
+        and steady_lag_stats["p95"] <= lag_bound_ms
         and gazebo["p5"] is not None
         and gazebo["p5"] >= 0.8
         and (not pose_ages or max(pose_ages) <= 500.0)
@@ -581,7 +651,7 @@ def build_realtime(run_dir: Path, events: list[dict[str, Any]], mobility: dict[s
         "measurement_status": "measured" if not failed else "failed",
         "realtime_readiness": classification,
         "predeclared_readiness_bounds": {
-            "steady_ns3_lag_p95_ms_max": 250.0,
+            "steady_ns3_lag_p95_ms_max": lag_bound_ms,
             "gazebo_rtf_p5_min": 0.8,
             "applied_position_age_p95_ms_max": 500.0,
         },
@@ -595,7 +665,7 @@ def build_realtime(run_dir: Path, events: list[dict[str, Any]], mobility: dict[s
     }
 
 
-UNAVAILABLE_RADIO_METRICS = {
+LEGACY_UNAVAILABLE_RADIO_METRICS = {
     "rx_power_dbm": "unavailable: HalfDuplexIdealPhy does not expose received PSD through a public trace",
     "rssi_dbm": "unavailable: no public received-PSD/RSSI trace in the selected native PHY",
     "snr_db": "unavailable: no public SNR trace in HalfDuplexIdealPhy/ShannonSpectrumErrorModel",
@@ -604,6 +674,20 @@ UNAVAILABLE_RADIO_METRICS = {
     "noise_power_dbm": "unavailable: no public noise-power trace in the selected native PHY",
     "bler": "unavailable: current HalfDuplexIdealPhy/Shannon reference does not expose a transport-block abstraction",
 }
+
+
+def radio_metric_availability(stats: dict[str, Any]) -> dict[str, str]:
+    if stats.get("radio_backend") != "wifi":
+        return LEGACY_UNAVAILABLE_RADIO_METRICS
+    return {
+        "rx_power_dbm": "unavailable: the product runtime does not enable a per-MPDU MonitorSnifferRx export",
+        "rssi_dbm": "unavailable: the product runtime does not enable a per-MPDU MonitorSnifferRx export",
+        "snr_db": "unavailable: SpectrumWifiPhy does not export decoded SNR through the selected trace set",
+        "sinr_db": "unavailable: SpectrumWifiPhy evaluates interference internally without a selected per-packet SINR trace",
+        "interference_power_dbm": "unavailable: no per-packet interference-power trace is selected",
+        "noise_power_dbm": "unavailable: no per-packet noise-power trace is selected",
+        "bler": "unavailable: NistErrorRateModel exposes packet outcomes, not a transport-block abstraction",
+    }
 
 REQUIRED_SCREENSHOTS = (
     "01_five_uav_takeoff",
@@ -615,8 +699,32 @@ REQUIRED_SCREENSHOTS = (
 )
 
 
+def sionna_path_observations(path: Path) -> list[tuple[float, int]]:
+    observations: list[tuple[float, int]] = []
+    current_time: float | None = None
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return observations
+    for line in lines:
+        match = re.match(r"\d+\s+\+([0-9.]+)s\s+(.*)", line)
+        if not match:
+            continue
+        message = match.group(2)
+        if "Building scene for antenna pair" in message:
+            current_time = float(match.group(1))
+            continue
+        count = re.search(r"Number of generated paths:\s*(\d+)", message)
+        if count and current_time is not None:
+            observations.append((current_time, int(count.group(1))))
+            current_time = None
+    return observations
+
+
 def screenshot_native_observation(
-    metadata: dict[str, Any], events: list[dict[str, Any]]
+    metadata: dict[str, Any],
+    events: list[dict[str, Any]],
+    path_observations: list[tuple[float, int]],
 ) -> dict[str, Any]:
     """Summarize native events close to a real camera-frame simulation time."""
 
@@ -628,13 +736,9 @@ def screenshot_native_observation(
         event
         for event in events
         if abs(float(event.get("time_s", -math.inf)) - float(timestamp)) <= 2.0
-        and str(event.get("phase", "")) == phase
+        and canonical_phase(str(event.get("phase", ""))) == phase
     ]
-    paths = [
-        int(event["value"])
-        for event in nearby
-        if event.get("event") == "sionna_paths" and event.get("value") is not None
-    ]
+    paths = [count for at_s, count in path_observations if abs(at_s - float(timestamp)) <= 2.0]
     return {
         "window_simulation_seconds": [float(timestamp) - 2.0, float(timestamp) + 2.0],
         "scenario_phase": phase,
@@ -643,29 +747,83 @@ def screenshot_native_observation(
         "sionna_path_count_max": max(paths) if paths else "unavailable",
         "phy_rx_ok": sum(event.get("event") == "phy_rx_ok" for event in nearby),
         "phy_rx_error": sum(event.get("event") == "phy_rx_error" for event in nearby),
-        "basis": "native events within +/- 2 simulation seconds of the unmodified Gazebo frame",
+        "basis": (
+            "native PHY events and Sionna channel rebuild log entries within +/- 2 simulation "
+            "seconds of the hash-locked raw Gazebo frame"
+        ),
     }
 
 
 def screenshot_status(run_dir: Path, events: list[dict[str, Any]]) -> dict[str, Any]:
     screenshot_dir = run_dir / "screenshots"
+    path_observations = sionna_path_observations(run_dir / "logs/ns3_sionna.log")
     records: dict[str, Any] = {}
     for stem in REQUIRED_SCREENSHOTS:
         metadata = read_json(screenshot_dir / f"{stem}.json", {})
         metadata = metadata if isinstance(metadata, dict) else {}
-        image_exists = (screenshot_dir / f"{stem}.png").is_file()
-        visible = metadata.get("visible_uavs", [])
+        image_path = screenshot_dir / f"{stem}.png"
+        raw_path = screenshot_dir / f"{stem}.raw.png"
+        image_exists = image_path.is_file()
+        raw_exists = raw_path.is_file()
+        required_projected = {"uav1"} if stem == "04_uav1_obstructed" else set(UAVS)
+        projected = set(metadata.get("projected_uavs", []))
+        positions = metadata.get("uav_positions", {})
+        spatial_state_valid = False
+        try:
+            tracker_snapshot_age_s = float(
+                metadata.get("tracker_snapshot_wall_age_s", math.inf)
+            )
+        except (TypeError, ValueError):
+            tracker_snapshot_age_s = math.inf
+        if isinstance(positions, dict) and all(name in positions for name in UAVS):
+            try:
+                if stem in {"01_five_uav_takeoff", "02_five_uav_hold"}:
+                    spatial_state_valid = all(float(positions[name][2]) >= 8.0 for name in UAVS)
+                elif stem == "03_uav1_los":
+                    spatial_state_valid = math.dist(
+                        positions["uav1"], [80.0, 0.0, 17.0]
+                    ) <= 8.0
+                elif stem == "04_uav1_obstructed":
+                    spatial_state_valid = math.dist(
+                        positions["uav1"], [80.0, 110.0, 17.0]
+                    ) <= 8.0
+                elif stem in {"05_p2mp_or_shared_medium", "06_landing"}:
+                    spatial_state_valid = all(float(positions[name][2]) <= 2.0 for name in UAVS)
+            except (IndexError, TypeError, ValueError):
+                spatial_state_valid = False
+        hashes_match = bool(
+            image_exists
+            and raw_exists
+            and metadata.get("annotated_image_sha256")
+            == hashlib.sha256(image_path.read_bytes()).hexdigest()
+            and metadata.get("raw_image_sha256")
+            == hashlib.sha256(raw_path.read_bytes()).hexdigest()
+        )
         valid = bool(
             image_exists
+            and raw_exists
+            and hashes_match
             and metadata.get("run_id") == run_dir.name
             and metadata.get("source") == "live_gazebo_runtime"
-            and sorted(visible) == list(UAVS)
+            and metadata.get("image_kind") == "annotated_live_frame"
+            and sorted(metadata.get("fresh_uavs", [])) == list(UAVS)
+            and required_projected <= projected
+            and tracker_snapshot_age_s <= 1.0
+            and spatial_state_valid
         )
         records[stem] = {
             "image_exists": image_exists,
+            "raw_image_exists": raw_exists,
+            "image_hashes_match_metadata": hashes_match,
+            "required_projected_uavs": sorted(required_projected),
+            "spatial_state_valid": spatial_state_valid,
             "metadata": metadata,
             "valid_live_capture": valid,
-            "native_observation": screenshot_native_observation(metadata, events) if valid else {},
+            "native_observation": (
+                screenshot_native_observation(metadata, events, path_observations)
+                if valid
+                else {}
+            ),
         }
     return {
         "screenshots_status": "passed" if all(item["valid_live_capture"] for item in records.values()) else "failed",
@@ -674,7 +832,7 @@ def screenshot_status(run_dir: Path, events: list[dict[str, Any]]) -> dict[str, 
 
 
 def canonical_phase(phase: str) -> str:
-    if phase.startswith("takeoff_") or phase.startswith("arm_"):
+    if phase == "takeoff_complete":
         return "takeoff"
     if phase == "hold_all":
         return "five_uav_hold"
@@ -684,7 +842,7 @@ def canonical_phase(phase: str) -> str:
         return "obstructed_observation"
     if phase == "return":
         return "return_observation"
-    if phase == "land_all":
+    if phase == "landing_complete":
         return "landing"
     if phase == "pre_no_bypass" or phase == "no_bypass_stop":
         return "no_bypass_test"
@@ -719,6 +877,9 @@ def build_radio_observability(
     run_dir: Path, events: list[dict[str, Any]], scenario: dict[str, Any]
 ) -> dict[str, Any]:
     metrics_dir = run_dir / "metrics"
+    metric_availability = radio_metric_availability(
+        read_json(metrics_dir / "native_radio_stats.json", {})
+    )
     positions: dict[str, tuple[float, float, float]] = {}
     mobility_age: dict[str, float | None] = {}
     lag_at_event: float | None = None
@@ -897,8 +1058,8 @@ def build_radio_observability(
         })
     write_json(metrics_dir / "radio_link_summary.json", {
         "source": "live native Sionna/PHY events only",
-        "metric_availability": UNAVAILABLE_RADIO_METRICS,
-        "bler": UNAVAILABLE_RADIO_METRICS["bler"],
+        "metric_availability": metric_availability,
+        "bler": metric_availability["bler"],
         "links": links,
     })
     with (metrics_dir / "link_matrix.csv").open("w", encoding="utf-8", newline="") as stream:
@@ -950,7 +1111,7 @@ def build_radio_observability(
         writer = csv.DictWriter(stream, fieldnames=list(uav_rows[0]))
         writer.writeheader()
         writer.writerows(uav_rows)
-    return {"radio_links": links, "radio_rows": len(rows), "metric_availability": UNAVAILABLE_RADIO_METRICS}
+    return {"radio_links": links, "radio_rows": len(rows), "metric_availability": metric_availability}
 
 
 def active_diagnostic_uavs(scenario: dict[str, Any]) -> tuple[str, ...]:
@@ -1168,7 +1329,9 @@ def summarize_adapter_load(run_dir: Path, scenario: dict[str, Any]) -> dict[str,
     return result
 
 
-def summarize_native_contention(run_dir: Path, events: list[dict[str, Any]]) -> dict[str, Any]:
+def summarize_native_contention(
+    run_dir: Path, events: list[dict[str, Any]], stats: dict[str, Any]
+) -> dict[str, Any]:
     metrics = run_dir / "metrics"
     queue_rows: list[dict[str, Any]] = []
     by_node: defaultdict[str, Counter[str]] = defaultdict(Counter)
@@ -1217,8 +1380,13 @@ def summarize_native_contention(run_dir: Path, events: list[dict[str, Any]]) -> 
         }
         for node in sorted(set(by_node) | set(queue_depths) | set(queue_residence_ms))
     }
+    wifi = stats.get("radio_backend") == "wifi"
     write_json(metrics / "native_queue_summary.json", {
-        "source": "public AlohaNoackNetDevice Queue attribute and public Queue traces",
+        "source": (
+            "Wi-Fi MAC queue counters are unavailable in this trace set"
+            if wifi
+            else "public AlohaNoackNetDevice Queue attribute and public Queue traces"
+        ),
         "nodes": queue_summary,
     })
     return_chain = {
@@ -1228,13 +1396,20 @@ def summarize_native_contention(run_dir: Path, events: list[dict[str, Any]]) -> 
         "cp_phy_rx_error": len(return_rx_error_uids),
         "no_cp_rx_candidate": len(return_mac_uids - return_rx_start_uids),
         "no_cp_rx_candidate_reason": (
-            "HalfDuplexIdealPhy emits RxStart only while IDLE; a signal arriving during RX/TX has no "
-            "second public RxEnd outcome"
+            "SpectrumWifiPhy MPDU trace UIDs are not identical to the pre-enqueue MSDU UID; "
+            "application ACK accounting remains authoritative"
+            if wifi
+            else "HalfDuplexIdealPhy emits RxStart only while IDLE; a signal arriving during RX/TX "
+            "has no second public RxEnd outcome"
         ),
     }
     half_duplex_result = {node: dict(values) for node, values in half_duplex.items()}
     write_json(metrics / "half_duplex_summary.json", {
-        "source": "public HalfDuplexIdealPhy TxStart/TxEnd/RxStart/RxAbort/RxEndOk/RxEndError traces",
+        "source": (
+            "public SpectrumWifiPhy PhyTxBegin/PhyTxEnd/PhyRxBegin/PhyRxEnd/PhyRxDrop traces"
+            if wifi
+            else "public HalfDuplexIdealPhy TxStart/TxEnd/RxStart/RxAbort/RxEndOk/RxEndError traces"
+        ),
         "nodes": half_duplex_result,
         "uav_to_gcs_control_return": return_chain,
     })
@@ -1262,10 +1437,11 @@ def write_latency_diagnostic_report(run_dir: Path, observer_reference: Path | No
     events = native_events(run_dir / "logs/native_radio_events.csv")
     latency = summarize_latency_operations(run_dir, scenario)
     load = summarize_adapter_load(run_dir, scenario)
-    contention = summarize_native_contention(run_dir, events)
+    stats = read_json(run_dir / "metrics/native_radio_stats.json", {})
+    contention = summarize_native_contention(run_dir, events, stats)
     observer = summarize_observer_mode(run_dir, events)
     ping = scenario.get("latency_diagnostic", {}).get("mavlink_ping", {})
-    stats = read_json(run_dir / "metrics/native_radio_stats.json", {})
+    metric_availability = radio_metric_availability(stats)
     observer_comparison: dict[str, Any] | None = None
     if observer_reference is not None:
         reference = read_json(observer_reference / "metrics/control_latency_summary.json", {})
@@ -1299,9 +1475,9 @@ def write_latency_diagnostic_report(run_dir: Path, observer_reference: Path | No
         "observer": observer,
         "observer_comparison": observer_comparison,
         "native_stats": stats,
-        "physical_metric_availability": UNAVAILABLE_RADIO_METRICS,
+        "physical_metric_availability": metric_availability,
         "control_loss_breakdown": {
-            "before_native_enqueue": "unavailable: no public GCS-side Aloha enqueue trace",
+            "before_native_enqueue": "unavailable: no public GCS-side pre-MAC enqueue trace",
             "native_queue": "observed in metrics/native_queue_summary.json; no queue drops in this run",
             "phy": contention["control_return"],
             "uav_uart_delivery": latency["uav_uart_delivery_observed"],
@@ -1356,7 +1532,7 @@ def main() -> int:
     p2p = build_p2p(scenario, agents)
     p2mp = build_p2mp(scenario, agents, events)
     shared = build_shared_medium(scenario, agents, events)
-    realtime = build_realtime(run_dir, events, mobility)
+    realtime = build_realtime(run_dir, events, mobility, stats)
     observability = build_radio_observability(run_dir, events, scenario)
     screenshots = screenshot_status(run_dir, events)
     one_uav = None
@@ -1373,7 +1549,9 @@ def main() -> int:
     )
     functional_checks = {
         "five_real_sitl_and_gazebo_lifecycle": scenario.get("status") == "passed",
-        "five_real_odometry_sources": mobility.get("all_required_publishers_observed", False),
+        "five_real_odometry_sources": mobility.get(
+            "all_required_odometry_streams_observed", False
+        ),
         "five_mobility_models_updated": mobility.get("all_mobility_models_updated", False),
         "one_shared_native_spectrum_channel": topology["shared_multi_model_spectrum_channels"] == 1,
         "six_native_phy_mac_pairs": topology["native_radio_devices"] == 6,
@@ -1395,6 +1573,7 @@ def main() -> int:
             for uav in UAVS
         ),
         "no_bypass_all_five": bool(no_bypass.get("passed")),
+        "live_gazebo_evidence": screenshots["screenshots_status"] == "passed",
         "one_uav_regression": bool(one_uav and one_uav.get("status") == "passed"),
         "exact_seven_pcaps": topology["exact_pcap_count"] == 7,
     }
@@ -1446,8 +1625,8 @@ def main() -> int:
         "functional_five_uav_native_path": functional_status,
         "functional_checks": functional_checks,
         "realtime_readiness": realtime["realtime_readiness"],
-        "profile": "generic_native_spectrum_aloha_reference",
-        "technology_specific_modem": False,
+        "profile": stats.get("profile", scenario.get("profile")),
+        "technology_specific_modem": bool(stats.get("technology_specific_modem", False)),
         "native_topology": topology,
         "mobility": mobility,
         "mavlink": mavlink,
@@ -1483,13 +1662,18 @@ def main() -> int:
         f"- Functional five-UAV native path: **{functional_status}**",
         f"- Realtime readiness: **{realtime['realtime_readiness']}** (measured independently)",
         "- Topology: one ns-3 process, six native PHY/MAC devices, one shared Spectrum channel.",
-        "- Radio: 2.4 GHz, 5 MHz, 1 Mbit/s, 0.01 W, maxDepth 1, LOS + specular.",
+        (
+            "- Radio: 2.4 GHz, 20 MHz 802.11n QoS SpectrumWifiPhy, HtMcs0, 0.01 W, "
+            "maxDepth 1, LOS + specular."
+            if stats.get("radio_backend") == "wifi"
+            else "- Radio: 2.4 GHz, 5 MHz, 1 Mbit/s, 0.01 W, maxDepth 1, LOS + specular."
+        ),
         f"- P2MP: {p2mp['root_transmissions']} application roots, {p2mp['command_post_mac_tx']} command-post MacTx.",
         f"- Simultaneous uplink Jain fairness: {shared['jain_fairness']}",
         f"- No-bypass after common native process stop: {no_bypass.get('passed')}",
         f"- One-UAV regression attached: {one_uav is not None}",
         f"- Radio-link observations: {observability['radio_rows']}; RSSI/SNR/SINR are explicitly unavailable when the selected native API does not expose them.",
-        f"- BLER: {UNAVAILABLE_RADIO_METRICS['bler']}",
+        f"- BLER: {observability['metric_availability']['bler']}",
         f"- Live Gazebo screenshots: {screenshots['screenshots_status']}.",
         "",
         "All packet and timing results above are derived from endpoint logs, native ns-3 traces, ROS tracker snapshots, Gazebo stats, and process-resource samples in this run directory.",
@@ -1507,6 +1691,9 @@ def main() -> int:
                 f"### {stem}",
                 "",
                 f"![{stem}](screenshots/{stem}.png)",
+                "",
+                f"[Hash-locked raw Gazebo frame](screenshots/{stem}.raw.png); the displayed "
+                "frame adds explicitly disclosed pinhole-projected live-odometry labels.",
                 "",
                 "Native evidence in the +/- 2 simulation-second frame window: "
                 f"Sionna path observations={observation['sionna_path_observations']}, "

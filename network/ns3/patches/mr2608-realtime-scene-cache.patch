@@ -1,5 +1,5 @@
 diff --git a/src/spectrum/model/sionna-rt-channel-model.cc b/src/spectrum/model/sionna-rt-channel-model.cc
-index 4ae6c0556..65ae5b5e0 100644
+index b112fd791..088c9ee36 100644
 --- a/src/spectrum/model/sionna-rt-channel-model.cc
 +++ b/src/spectrum/model/sionna-rt-channel-model.cc
 @@ -23,6 +23,7 @@
@@ -32,7 +32,7 @@ index 4ae6c0556..65ae5b5e0 100644
  }
  
  TypeId
-@@ -72,6 +76,13 @@ SionnaRtChannelModel::GetTypeId()
+@@ -72,6 +88,20 @@ SionnaRtChannelModel::GetTypeId()
                            TimeValue(MilliSeconds(0)),
                            MakeTimeAccessor(&SionnaRtChannelModel::m_updatePeriod),
                            MakeTimeChecker())
@@ -43,10 +43,17 @@ index 4ae6c0556..65ae5b5e0 100644
 +                          MakeDoubleAccessor(&SionnaRtChannelModel::SetUpdateDistanceThreshold,
 +                                             &SionnaRtChannelModel::GetUpdateDistanceThreshold),
 +                          MakeDoubleChecker<double>(0.0))
++            .AddAttribute("UpdateJitterFraction",
++                          "Deterministic per-pair spread below the configured maximum age and "
++                          "displacement thresholds",
++                          DoubleValue(0.0),
++                          MakeDoubleAccessor(&SionnaRtChannelModel::SetUpdateJitterFraction,
++                                             &SionnaRtChannelModel::GetUpdateJitterFraction),
++                          MakeDoubleChecker<double>(0.0, 0.9))
              .AddAttribute("OutputImageDirectory",
                            "Output directory for rendered Sionna RT images",
                            StringValue("images"),
-@@ -211,7 +222,9 @@ SionnaRtChannelModel::AntennaSetupChanged(Ptr<const PhasedArrayModel> aAntenna,
+@@ -211,24 +241,85 @@ SionnaRtChannelModel::AntennaSetupChanged(Ptr<const PhasedArrayModel> aAntenna,
  }
  
  bool
@@ -57,15 +64,30 @@ index 4ae6c0556..65ae5b5e0 100644
  {
      NS_LOG_FUNCTION(this);
  
-@@ -226,9 +239,46 @@ SionnaRtChannelModel::ChannelMatrixNeedsUpdate(Ptr<const ChannelMatrix> channelM
+     bool update = false;
++    const uint32_t aNodeId = aMob->GetObject<Node>()->GetId();
++    const uint32_t bNodeId = bMob->GetObject<Node>()->GetId();
++    const uint64_t pairKey = GetKey(aNodeId, bNodeId);
++    uint64_t mixedPair = pairKey + 0x9e3779b97f4a7c15ULL;
++    mixedPair = (mixedPair ^ (mixedPair >> 30U)) * 0xbf58476d1ce4e5b9ULL;
++    mixedPair = (mixedPair ^ (mixedPair >> 27U)) * 0x94d049bb133111ebULL;
++    mixedPair ^= mixedPair >> 31U;
++    const double pairUnit = static_cast<double>(mixedPair % 1000003ULL) / 1000002.0;
++    const double pairThresholdScale = 1.0 - m_updateJitterFraction * pairUnit;
+ 
+     // if the coherence time is over the channel has to be updated
++    const Time pairUpdatePeriod = Seconds(m_updatePeriod.GetSeconds() * pairThresholdScale);
+     if (!m_updatePeriod.IsZero() &&
+-        Simulator::Now() - channelMatrix->m_generatedTime > m_updatePeriod)
++        Simulator::Now() - channelMatrix->m_generatedTime > pairUpdatePeriod)
+     {
+         NS_LOG_DEBUG("Generation time " << channelMatrix->m_generatedTime.As(Time::NS) << " now "
+                                         << Now().As(Time::NS));
          update = true;
      }
  
 +    if (m_updateDistanceThreshold > 0.0)
 +    {
-+        const uint32_t aNodeId = aMob->GetObject<Node>()->GetId();
-+        const uint32_t bNodeId = bMob->GetObject<Node>()->GetId();
-+        const uint64_t pairKey = GetKey(aNodeId, bNodeId);
 +        const auto snapshot = m_pairPositionSnapshots.find(pairKey);
 +        if (snapshot != m_pairPositionSnapshots.end())
 +        {
@@ -76,10 +98,13 @@ index 4ae6c0556..65ae5b5e0 100644
 +                                                                    : solved.secondPosition;
 +            const double aDistance = CalculateDistance(aMob->GetPosition(), aAtSolve);
 +            const double bDistance = CalculateDistance(bMob->GetPosition(), bAtSolve);
-+            if (aDistance >= m_updateDistanceThreshold || bDistance >= m_updateDistanceThreshold)
++            const double pairDistanceThreshold =
++                m_updateDistanceThreshold * pairThresholdScale;
++            if (aDistance >= pairDistanceThreshold || bDistance >= pairDistanceThreshold)
 +            {
 +                NS_LOG_INFO("Cached channel matrix marked for update (endpoint displacement: "
 +                            << aDistance << ", " << bDistance << " m; threshold="
++                            << pairDistanceThreshold << " m; configured maximum="
 +                            << m_updateDistanceThreshold << " m)");
 +                update = true;
 +            }
@@ -101,10 +126,22 @@ index 4ae6c0556..65ae5b5e0 100644
 +    return m_updateDistanceThreshold;
 +}
 +
++void
++SionnaRtChannelModel::SetUpdateJitterFraction(double fraction)
++{
++    m_updateJitterFraction = fraction;
++}
++
++double
++SionnaRtChannelModel::GetUpdateJitterFraction() const
++{
++    return m_updateJitterFraction;
++}
++
  Ptr<const MatrixBasedChannelModel::ChannelMatrix>
  SionnaRtChannelModel::GetChannel(Ptr<const MobilityModel> aMob,
                                   Ptr<const MobilityModel> bMob,
-@@ -249,7 +299,7 @@ SionnaRtChannelModel::GetChannel(Ptr<const MobilityModel> aMob,
+@@ -249,7 +340,7 @@ SionnaRtChannelModel::GetChannel(Ptr<const MobilityModel> aMob,
          // channel matrix present in the map
          NS_LOG_DEBUG("channel matrix present in the map");
          channelMatrix = m_channelMatrixMap[channelMatrixKey];
@@ -113,7 +150,7 @@ index 4ae6c0556..65ae5b5e0 100644
          update |= AntennaSetupChanged(aAntenna, bAntenna, channelMatrix);
          if (update)
          {
-@@ -284,6 +334,12 @@ SionnaRtChannelModel::GetChannel(Ptr<const MobilityModel> aMob,
+@@ -284,6 +375,12 @@ SionnaRtChannelModel::GetChannel(Ptr<const MobilityModel> aMob,
  
          // store or replace the channel matrix in the channel map
          m_channelMatrixMap[channelMatrixKey] = channelMatrix;
@@ -126,7 +163,7 @@ index 4ae6c0556..65ae5b5e0 100644
  
          // each time a new channel is created, also compute the channel params
          auto channelParams = CalculateChannelParamsFromPaths(paths, aMob, bMob);
-@@ -539,41 +595,64 @@ SionnaRtChannelModel::CreateScene(const py::module_ rt,
+@@ -539,41 +636,64 @@ SionnaRtChannelModel::CreateScene(const py::module_ rt,
                                    Ptr<const PhasedArrayModel> uAntenna) const
  {
      NS_LOG_FUNCTION(this);
@@ -218,10 +255,10 @@ index 4ae6c0556..65ae5b5e0 100644
  
  void
 diff --git a/src/spectrum/model/sionna-rt-channel-model.h b/src/spectrum/model/sionna-rt-channel-model.h
-index e790239d4..2ae8d67a4 100644
+index e790239d4..d464c4a2b 100644
 --- a/src/spectrum/model/sionna-rt-channel-model.h
 +++ b/src/spectrum/model/sionna-rt-channel-model.h
-@@ -390,7 +390,18 @@ class SionnaRtChannelModel : public MatrixBasedChannelModel
+@@ -390,7 +390,26 @@ class SionnaRtChannelModel : public MatrixBasedChannelModel
       * @param channelMatrix The existing channel matrix to check
       * @return true if the matrix must be updated; false otherwise
       */
@@ -238,10 +275,18 @@ index e790239d4..2ae8d67a4 100644
 +    void SetUpdateDistanceThreshold(double distance);
 +
 +    double GetUpdateDistanceThreshold() const;
++
++    /**
++     * Set the deterministic per-pair spread applied below the configured
++     * maximum age and displacement thresholds.
++     */
++    void SetUpdateJitterFraction(double fraction);
++
++    double GetUpdateJitterFraction() const;
  
      /**
       * @brief Check whether antenna configuration changes require regenerating the channel matrix.
-@@ -644,6 +655,16 @@ class SionnaRtChannelModel : public MatrixBasedChannelModel
+@@ -644,6 +663,16 @@ class SionnaRtChannelModel : public MatrixBasedChannelModel
       */
      bool DoesNumberOfPathsExceedMaximum(size_t numPaths) const;
  
@@ -258,12 +303,14 @@ index e790239d4..2ae8d67a4 100644
      // Attributes
      std::unordered_map<uint64_t, Ptr<ChannelMatrix>>
          m_channelMatrixMap; //!< map containing the channel realizations per pair of
-@@ -655,6 +676,13 @@ class SionnaRtChannelModel : public MatrixBasedChannelModel
+@@ -655,6 +684,15 @@ class SionnaRtChannelModel : public MatrixBasedChannelModel
                              //!< nodes
      /** Channel update period used to decide whether to re-run path computations */
      Time m_updatePeriod;
 +    /** Positive endpoint displacement also invalidates a cached pair. */
 +    double m_updateDistanceThreshold{0.0};
++    /** Deterministically spread per-pair expiry to avoid synchronous rebuild bursts. */
++    double m_updateJitterFraction{0.0};
 +    /** Exact endpoint positions at the last solve, indexed by reciprocal pair key. */
 +    std::unordered_map<uint64_t, PairPositionSnapshot> m_pairPositionSnapshots;
 +    /** Reusable Sionna scene geometry and its live tx/rx objects. */

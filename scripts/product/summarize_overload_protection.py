@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import statistics
 import sys
@@ -19,6 +20,7 @@ if str(ROOT) not in sys.path:
 
 from network.ns3.tap_packet_engine_config import ConfigError, data_rate_bps  # noqa: E402
 from network.scripts.communication_qos import DEFAULT_PATH, load_qos  # noqa: E402
+from scripts.product.gazebo_profile_metrics import profile_gazebo_rtf  # noqa: E402
 
 
 CLASSES = ("control", "payload", "additional_data")
@@ -54,6 +56,30 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
             if isinstance(value, dict):
                 rows.append(value)
     return rows
+
+
+def file_sha256(path: Path) -> str | None:
+    digest = hashlib.sha256()
+    try:
+        stream = path.open("rb")
+    except OSError:
+        return None
+    with stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def terminal_ledger_sha256(outcomes: dict[str, dict[str, Any]]) -> str:
+    digest = hashlib.sha256()
+    for packet_id in sorted(outcomes):
+        digest.update(
+            json.dumps(
+                outcomes[packet_id], sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        )
+        digest.update(b"\n")
+    return digest.hexdigest()
 
 
 def write_json(path: Path, value: object) -> None:
@@ -267,6 +293,15 @@ def uart_fragmentation(run_dir: Path) -> dict[str, Any]:
     transports = communication.get("by_uart", {})
     if not isinstance(transports, dict):
         transports = {}
+    source_files = [source] if transports else sorted(
+        (run_dir / "metrics").glob("*_uart_uav*.json")
+    )
+    if not transports:
+        transports = {
+            path.stem: read_json(path)
+            for path in source_files
+            if path.is_file()
+        }
     records = sum(
         int(row.get("records_encoded", 0) or 0)
         for row in transports.values()
@@ -284,7 +319,15 @@ def uart_fragmentation(run_dir: Path) -> dict[str, Any]:
     )
     return {
         "source_file": str(source),
+        "source_files": [str(path) for path in source_files],
         "source_file_present": source.is_file(),
+        "source_files_present": bool(source_files)
+        and all(path.is_file() for path in source_files),
+        "source_mode": (
+            "aggregated_communication_summary"
+            if source.is_file()
+            else "direct_ten_uart_metrics"
+        ),
         "evidence_available": records > 0,
         "serial_records": records,
         "bsf1_fragments": fragments,
@@ -434,6 +477,9 @@ def runtime_context(
             "reverse_telemetry_stopped",
         )
     )
+    gazebo_rtf = profile_gazebo_rtf(
+        run_dir / "logs/gazebo_stats.log", start_ns, end_ns
+    )
     return {
         "medium_access": {
             "mode": "centralized_priority_scheduler_over_csma_channel",
@@ -442,8 +488,9 @@ def runtime_context(
             "collisions_expected": False,
             "non_preemptive_current_frame": True,
         },
-        "profile_rtf_status": "unmeasured",
-        "gazebo_rtf_scope": "unmeasured",
+        "profile_rtf_status": "measured" if gazebo_rtf["count"] else "unavailable",
+        "gazebo_rtf_scope": gazebo_rtf["scope"],
+        "gazebo_real_time_factor": gazebo_rtf,
         "configured_capacity_bps": configured_capacity_bps,
         "lower_admission_total_bps": lower_admission_total_bps,
         "actual_static_headroom_bps": actual_static_headroom_bps,
@@ -628,6 +675,19 @@ def analyze_profile(
         start_ns=start_ns,
         end_ns=end_ns,
     )
+    terminal_ledger_path = run_dir / "logs/communication_terminal_outcomes.jsonl"
+    terminal_ledger = {
+        "source_file": str(terminal_ledger_path),
+        "source_file_present": terminal_ledger_path.is_file(),
+        "source_file_sha256": file_sha256(terminal_ledger_path),
+        "accounted_rows": len(outcomes),
+        "unique_packet_ids": len(set(outcomes)),
+        "all_terminal": all(
+            bool(row.get("terminal")) and row.get("status") in TERMINAL_STATUSES
+            for row in outcomes.values()
+        ),
+        "canonical_profile_ledger_sha256": terminal_ledger_sha256(outcomes),
+    }
     delivered_ids = {
         str(row["packet_id"])
         for row in deliveries
@@ -1071,6 +1131,7 @@ def analyze_profile(
         * 8.0
         / duration_s,
         "terminal": {
+            "per_packet_ledger": terminal_ledger,
             "status_counts": dict(sorted(statuses.items())),
             "dropped_at_ingress": statuses["dropped_at_ingress"],
             "dropped_in_medium": statuses["dropped_in_medium"],
@@ -1184,6 +1245,7 @@ def controlled_acceptance_thresholds(qos_config: dict[str, Any]) -> dict[str, fl
         "control_required_pdr": float(control["required_pdr"]),
         "control_max_p95_latency_ms": float(control["max_p95_latency_ms"]),
         "scheduler_lag_max_p95_ms": float(profile["max_scheduler_lag_p95_ms"]),
+        "gazebo_min_mean_rtf": float(profile["min_gazebo_mean_rtf"]),
     }
 
 
@@ -1198,6 +1260,7 @@ def acceptance(
     lag = summary["scheduler_lag_ms"].get("p95")
     cpu_samples = summary.get("ns3_cpu_percent_one_core", {}).get("count")
     queue_distributions = summary.get("queue_delay_ms_by_class", {})
+    gazebo_mean_rtf = summary.get("gazebo_real_time_factor", {}).get("mean")
     return {
         "control_pdr_at_least_0_99": float(control["pdr_from_offered"])
         >= thresholds["control_required_pdr"],
@@ -1208,6 +1271,8 @@ def acceptance(
         <= thresholds["control_max_p95_latency_ms"],
         "scheduler_lag_p95_at_most_50_ms": isinstance(lag, (int, float))
         and float(lag) <= thresholds["scheduler_lag_max_p95_ms"],
+        "gazebo_mean_rtf_at_least_0_95": isinstance(gazebo_mean_rtf, (int, float))
+        and float(gazebo_mean_rtf) >= thresholds["gazebo_min_mean_rtf"],
         "ns3_cpu_samples_present": isinstance(cpu_samples, int)
         and cpu_samples > 0,
         "queue_delay_samples_present": all(

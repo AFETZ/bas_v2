@@ -439,8 +439,13 @@ setsid python3 "$ROOT_DIR/network/position_tracker/tracker.py" \
   > "$RUN_DIR/logs/position_tracker.log" 2>&1 &
 managed_pids+=("$!")
 
-setsid stdbuf -oL gz topic -e -t /world/map/stats \
-  > "$RUN_DIR/logs/gazebo_stats.log" 2>&1 &
+setsid bash -c '
+  set -o pipefail
+  stdbuf -oL gz topic -e -t /world/map/stats \
+    | python3 -u "$1" timestamp --output "$2"
+' _ "$ROOT_DIR/scripts/product/summarize_native_radio_product.py" \
+  "$RUN_DIR/logs/gazebo_stats.log" \
+  > "$RUN_DIR/logs/gazebo_stats_capture.log" 2>&1 &
 managed_pids+=("$!")
 
 python3 "$ROOT_DIR/scripts/product/town01_stack_health.py" \

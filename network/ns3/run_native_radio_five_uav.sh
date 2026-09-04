@@ -31,13 +31,16 @@ run_in_container() {
     -e BAS_NATIVE_FIVE_SKIP_BUILD="${BAS_NATIVE_FIVE_SKIP_BUILD:-0}" \
     -e BAS_NATIVE_FIVE_ONE_UAV_RUN="${BAS_NATIVE_FIVE_ONE_UAV_RUN:-}" \
     -e BAS_NATIVE_FIVE_GAZEBO_RTF="${BAS_NATIVE_FIVE_GAZEBO_RTF:-1.0}" \
-    -e BAS_NATIVE_CHANNEL_STATE_MAX_AGE_S="${BAS_NATIVE_CHANNEL_STATE_MAX_AGE_S:-2.0}" \
-    -e BAS_NATIVE_UPDATE_DISTANCE_THRESHOLD_M="${BAS_NATIVE_UPDATE_DISTANCE_THRESHOLD_M:-1.0}" \
+    -e BAS_NATIVE_CHANNEL_STATE_MAX_AGE_S="${BAS_NATIVE_CHANNEL_STATE_MAX_AGE_S:-}" \
+    -e BAS_NATIVE_UPDATE_DISTANCE_THRESHOLD_M="${BAS_NATIVE_UPDATE_DISTANCE_THRESHOLD_M:-}" \
     -e BAS_NATIVE_FIVE_TIMEOUT_SCALE="${BAS_NATIVE_FIVE_TIMEOUT_SCALE:-5.0}" \
     -e BAS_NATIVE_LATENCY_MODE="${BAS_NATIVE_LATENCY_MODE:-0}" \
     -e BAS_NATIVE_UAV_COUNT="${BAS_NATIVE_UAV_COUNT:-5}" \
     -e BAS_NATIVE_UART_CHANNELS="${BAS_NATIVE_UART_CHANNELS:-control,payload}" \
-    -e BAS_NATIVE_PHY_RATE_BPS="${BAS_NATIVE_PHY_RATE_BPS:-1000000}" \
+    -e BAS_NATIVE_RADIO_BACKEND="${BAS_NATIVE_RADIO_BACKEND:-}" \
+    -e BAS_NATIVE_WIFI_DATA_MODE="${BAS_NATIVE_WIFI_DATA_MODE:-}" \
+    -e BAS_NATIVE_WIFI_CHANNEL_WIDTH_MHZ="${BAS_NATIVE_WIFI_CHANNEL_WIDTH_MHZ:-}" \
+    -e BAS_NATIVE_PHY_RATE_BPS="${BAS_NATIVE_PHY_RATE_BPS:-}" \
     -e BAS_NATIVE_EVENT_LOGGING="${BAS_NATIVE_EVENT_LOGGING:-batched_trace}" \
     -e BAS_NATIVE_FIVE_HOST_UID="$(id -u)" \
     -e BAS_NATIVE_FIVE_HOST_GID="$(id -g)" \
@@ -80,9 +83,7 @@ RUN_ID="${BAS_NATIVE_FIVE_RUN_ID:-native-five-$(date -u +%Y%m%dT%H%M%SZ)}"
 LATENCY_MODE="${BAS_NATIVE_LATENCY_MODE:-0}"
 UAV_COUNT="${BAS_NATIVE_UAV_COUNT:-5}"
 ACTIVE_UART_CHANNELS="${BAS_NATIVE_UART_CHANNELS:-control,payload}"
-PHY_RATE_BPS="${BAS_NATIVE_PHY_RATE_BPS:-1000000}"
 EVENT_LOGGING="${BAS_NATIVE_EVENT_LOGGING:-batched_trace}"
-[[ "$PHY_RATE_BPS" =~ ^[1-9][0-9]*$ ]] || { printf 'Invalid native PHY rate: %s\n' "$PHY_RATE_BPS" >&2; exit 2; }
 [[ "$UAV_COUNT" == 1 || "$UAV_COUNT" == 5 ]] || { printf 'UAV count must be 1 or 5: %s\n' "$UAV_COUNT" >&2; exit 2; }
 [[ ",$ACTIVE_UART_CHANNELS," == *,control,* ]] || { printf 'Control UART must remain active.\n' >&2; exit 2; }
 [[ "$EVENT_LOGGING" == metrics_only || "$EVENT_LOGGING" == batched_trace ]] || { printf 'Invalid event logging mode.\n' >&2; exit 2; }
@@ -107,6 +108,7 @@ ONE_UAV_RUN="${BAS_NATIVE_FIVE_ONE_UAV_RUN:-}"
 UART_DIR="$RUNTIME_DIR/uart"
 WORK_DIR="$RUNTIME_DIR/work"
 NS3_DIR="$ROOT_DIR/.external/ns-3-sionna-native"
+RADIO_CONFIG="$ROOT_DIR/network/config/native_wifi_80211n_spectrum_product.yaml"
 PYTHON_DEPS="$NS3_DIR/.python-deps-py310"
 PYTHON_TOOLING="$NS3_DIR/.tooling-py310"
 PROJECT_SOURCE="$ROOT_DIR/network/ns3/scratch/upstream-sionna-tap-spike.cc"
@@ -114,13 +116,12 @@ UPSTREAM_SOURCE="$NS3_DIR/scratch/upstream-sionna-tap-spike.cc"
 BINARY="$NS3_DIR/build/scratch/ns3.48-upstream-sionna-tap-spike-default"
 PATCH_FILE="$ROOT_DIR/network/ns3/patches/mr2608-spike-compatibility.patch"
 REALTIME_CACHE_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-realtime-scene-cache.patch"
+PHASED_ARRAY_ADAPTER_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-spectrumwifi-phased-array-adapter.patch"
 SCENARIO="$ROOT_DIR/network/config/scenario_${UAV_COUNT}uav_town01_native_product.yaml"
 WORLD="$ROOT_DIR/.external/cavise_maps/Town01/gazebo/town01.sdf"
 CAMERA_FRAGMENT="$ROOT_DIR/network/ns3/runtime_live_cameras.sdf.inc"
 GAZEBO_RTF="${BAS_NATIVE_FIVE_GAZEBO_RTF:-1.0}"
 SCENARIO_TIMEOUT_SCALE="${BAS_NATIVE_FIVE_TIMEOUT_SCALE:-5.0}"
-CHANNEL_STATE_MAX_AGE_S="${BAS_NATIVE_CHANNEL_STATE_MAX_AGE_S:-2.0}"
-UPDATE_DISTANCE_THRESHOLD_M="${BAS_NATIVE_UPDATE_DISTANCE_THRESHOLD_M:-1.0}"
 LAUNCH_WORLD="$WORK_DIR/town01-native-live-cameras.sdf"
 SCENE="$ROOT_DIR/.external/cavise_maps/Town01/map/scene.xml"
 NODE_STATE="$RUN_DIR/logs/node_state.json"
@@ -143,9 +144,87 @@ else
   RADIO_CPUSET="$STACK_CPUSET"
 fi
 
-for required_file in "$PROJECT_SOURCE" "$PATCH_FILE" "$REALTIME_CACHE_PATCH" "$SCENARIO" "$WORLD" "$SCENE" "$CAMERA_FRAGMENT"; do
+for required_file in "$PROJECT_SOURCE" "$PATCH_FILE" "$REALTIME_CACHE_PATCH" \
+  "$PHASED_ARRAY_ADAPTER_PATCH" "$RADIO_CONFIG" "$SCENARIO" "$WORLD" "$SCENE" "$CAMERA_FRAGMENT"; do
   [[ -f "$required_file" ]] || { printf 'Missing input: %s\n' "$required_file" >&2; exit 2; }
 done
+mapfile -t RADIO_VALUES < <(python3 - "$RADIO_CONFIG" <<'PY'
+import sys
+import yaml
+
+value = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
+radio = value["radio"]
+sionna = value["sionna"]
+for item in (
+    radio["backend"],
+    radio["profile"],
+    str(radio["technology_specific_modem"]).lower(),
+    radio["data_mode"],
+    radio["control_mode"],
+    str(radio["channel_width_mhz"]),
+    str(radio["carrier_hz"]),
+    str(radio["tx_power_w"]),
+    str(radio["legacy_aloha_phy_rate_bps"]),
+    radio["ssid"],
+    radio["neighbor_discovery_mode"],
+    radio["reason"],
+    str(radio["packet_outcome_affected"]).lower(),
+    sionna["solver_profile"],
+    str(sionna["max_depth"]),
+    str(sionna["los"]).lower(),
+    str(sionna["specular_reflection"]).lower(),
+    str(sionna["diffuse_reflection"]).lower(),
+    str(sionna["diffraction"]).lower(),
+    str(sionna["edge_diffraction"]).lower(),
+    str(sionna["refraction"]).lower(),
+    str(sionna["synthetic_array"]).lower(),
+    str(sionna["seed"]),
+    str(sionna["max_number_of_paths"]),
+    str(sionna["cache_expiry_jitter_fraction"]),
+    str(sionna["channel_state_max_age_s"]),
+    str(sionna["endpoint_displacement_threshold_m"]),
+    str(sionna["readiness_lag_max_ms"]),
+    str(sionna["readiness_consecutive_samples"]),
+):
+    print(item)
+PY
+)
+(( ${#RADIO_VALUES[@]} == 29 )) || {
+  printf 'Invalid native product radio config: expected 29 resolved values, got %s\n' "${#RADIO_VALUES[@]}" >&2
+  exit 2
+}
+RADIO_BACKEND="${BAS_NATIVE_RADIO_BACKEND:-${RADIO_VALUES[0]}}"
+RADIO_PROFILE="${RADIO_VALUES[1]}"
+TECHNOLOGY_SPECIFIC_MODEM="${RADIO_VALUES[2]}"
+WIFI_DATA_MODE="${BAS_NATIVE_WIFI_DATA_MODE:-${RADIO_VALUES[3]}}"
+WIFI_CONTROL_MODE="${RADIO_VALUES[4]}"
+WIFI_CHANNEL_WIDTH_MHZ="${BAS_NATIVE_WIFI_CHANNEL_WIDTH_MHZ:-${RADIO_VALUES[5]}}"
+CARRIER_HZ="${RADIO_VALUES[6]}"
+TX_POWER_W="${RADIO_VALUES[7]}"
+PHY_RATE_BPS="${BAS_NATIVE_PHY_RATE_BPS:-${RADIO_VALUES[8]}}"
+WIFI_SSID="${RADIO_VALUES[9]}"
+NEIGHBOR_DISCOVERY_MODE="${RADIO_VALUES[10]}"
+RADIO_REASON="${RADIO_VALUES[11]}"
+PACKET_OUTCOME_AFFECTED="${RADIO_VALUES[12]}"
+SOLVER_PROFILE="${RADIO_VALUES[13]}"
+SIONNA_MAX_DEPTH="${RADIO_VALUES[14]}"
+SIONNA_LOS="${RADIO_VALUES[15]}"
+SIONNA_SPECULAR_REFLECTION="${RADIO_VALUES[16]}"
+SIONNA_DIFFUSE_REFLECTION="${RADIO_VALUES[17]}"
+SIONNA_DIFFRACTION="${RADIO_VALUES[18]}"
+SIONNA_EDGE_DIFFRACTION="${RADIO_VALUES[19]}"
+SIONNA_REFRACTION="${RADIO_VALUES[20]}"
+SIONNA_SYNTHETIC_ARRAY="${RADIO_VALUES[21]}"
+SIONNA_SEED="${RADIO_VALUES[22]}"
+SIONNA_MAX_NUMBER_OF_PATHS="${RADIO_VALUES[23]}"
+SIONNA_CACHE_JITTER_FRACTION="${RADIO_VALUES[24]}"
+CHANNEL_STATE_MAX_AGE_S="${BAS_NATIVE_CHANNEL_STATE_MAX_AGE_S:-${RADIO_VALUES[25]}}"
+UPDATE_DISTANCE_THRESHOLD_M="${BAS_NATIVE_UPDATE_DISTANCE_THRESHOLD_M:-${RADIO_VALUES[26]}}"
+READINESS_LAG_MAX_MS="${RADIO_VALUES[27]}"
+READINESS_CONSECUTIVE_SAMPLES="${RADIO_VALUES[28]}"
+[[ "$RADIO_BACKEND" == wifi || "$RADIO_BACKEND" == aloha ]] || { printf 'Invalid radio backend: %s\n' "$RADIO_BACKEND" >&2; exit 2; }
+[[ "$PHY_RATE_BPS" =~ ^[1-9][0-9]*$ ]] || { printf 'Invalid native PHY rate: %s\n' "$PHY_RATE_BPS" >&2; exit 2; }
+[[ "$WIFI_CHANNEL_WIDTH_MHZ" =~ ^[1-9][0-9]*$ ]] || { printf 'Invalid Wi-Fi channel width: %s\n' "$WIFI_CHANNEL_WIDTH_MHZ" >&2; exit 2; }
 [[ "$(git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" rev-parse HEAD)" == d2add90b452d600cfb4859baed8e9ea633519447 ]] || {
   printf 'Official ns-3.48 exact revision is absent.\n' >&2
   exit 2
@@ -157,6 +236,12 @@ git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply --reverse --check "$PATCH_F
 if ! git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply --reverse --check "$REALTIME_CACHE_PATCH"; then
   git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply "$REALTIME_CACHE_PATCH" || {
     printf 'Realtime scene-cache patch does not apply to the compatible upstream checkout.\n' >&2
+    exit 2
+  }
+fi
+if ! git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply --reverse --check "$PHASED_ARRAY_ADAPTER_PATCH"; then
+  git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply "$PHASED_ARRAY_ADAPTER_PATCH" || {
+    printf 'SpectrumWifiPhy phased-array adapter patch does not apply.\n' >&2
     exit 2
   }
 fi
@@ -224,16 +309,29 @@ PY
   printf 'launch_world=%s\ngazebo_requested_rtf=%s\nscenario_timeout_scale=%s\n' \
     "$LAUNCH_WORLD" "$GAZEBO_RTF" "$SCENARIO_TIMEOUT_SCALE"
   printf 'stack_cpuset=%s\nradio_cpuset=%s\n' "$STACK_CPUSET" "$RADIO_CPUSET"
-  printf 'profile=generic_native_spectrum_aloha_reference\n'
-  printf 'technology_specific_modem=false\n'
+  printf 'radio_config=%s\nradio_backend=%s\n' "$RADIO_CONFIG" "$RADIO_BACKEND"
+  printf 'profile=%s\n' "$RADIO_PROFILE"
+  printf 'technology_specific_modem=%s\n' "$TECHNOLOGY_SPECIFIC_MODEM"
   printf 'uav_count=%s\nradio_node_count=%s\nshared_spectrum_channels=1\n' "$UAV_COUNT" "$((UAV_COUNT + 1))"
-  printf 'carrier_hz=2400000000\nbandwidth_hz=5000000\nphy_rate_bps=%s\ntx_power_w=0.01\n' "$PHY_RATE_BPS"
+  printf 'carrier_hz=%s\nchannel_width_mhz=%s\nwifi_data_mode=%s\nwifi_control_mode=%s\n' \
+    "$CARRIER_HZ" "$WIFI_CHANNEL_WIDTH_MHZ" "$WIFI_DATA_MODE" "$WIFI_CONTROL_MODE"
+  printf 'phy_rate_bps=%s\ntx_power_w=%s\nwifi_ssid=%s\n' "$PHY_RATE_BPS" "$TX_POWER_W" "$WIFI_SSID"
   printf 'event_logging=%s\nactive_uart_channels=%s\nlatency_mode=%s\n' "$EVENT_LOGGING" "$ACTIVE_UART_CHANNELS" "$LATENCY_MODE"
-  printf 'solver_profile=realtime_minimal_solver_profile\n'
+  printf 'solver_profile=%s\n' "$SOLVER_PROFILE"
+  printf 'sionna_max_depth=%s\nsionna_los=%s\nsionna_specular_reflection=%s\n' \
+    "$SIONNA_MAX_DEPTH" "$SIONNA_LOS" "$SIONNA_SPECULAR_REFLECTION"
+  printf 'sionna_diffuse_reflection=%s\nsionna_diffraction=%s\nsionna_edge_diffraction=%s\n' \
+    "$SIONNA_DIFFUSE_REFLECTION" "$SIONNA_DIFFRACTION" "$SIONNA_EDGE_DIFFRACTION"
+  printf 'sionna_refraction=%s\nsionna_synthetic_array=%s\nsionna_seed=%s\n' \
+    "$SIONNA_REFRACTION" "$SIONNA_SYNTHETIC_ARRAY" "$SIONNA_SEED"
+  printf 'sionna_max_number_of_paths=%s\nsionna_cache_jitter_fraction=%s\n' \
+    "$SIONNA_MAX_NUMBER_OF_PATHS" "$SIONNA_CACHE_JITTER_FRACTION"
   printf 'cache_policy=displacement_or_time\nchannel_state_max_age_s=%s\nendpoint_displacement_threshold_m=%s\n' \
     "$CHANNEL_STATE_MAX_AGE_S" "$UPDATE_DISTANCE_THRESHOLD_M"
-  printf 'neighbor_discovery_mode=preconfigured_static_neighbors\n'
-  printf 'reason=upstream_ideal_phy_arp_reentrancy_limit\npacket_outcome_affected=false\n'
+  printf 'readiness_lag_max_ms=%s\nreadiness_consecutive_samples=%s\n' \
+    "$READINESS_LAG_MAX_MS" "$READINESS_CONSECUTIVE_SAMPLES"
+  printf 'neighbor_discovery_mode=%s\n' "$NEIGHBOR_DISCOVERY_MODE"
+  printf 'reason=%s\npacket_outcome_affected=%s\n' "$RADIO_REASON" "$PACKET_OUTCOME_AFFECTED"
 } > "$RUN_DIR/environment.txt"
 
 managed_pids=()
@@ -452,8 +550,21 @@ python3 "$ROOT_DIR/scripts/product/town01_stack_health.py" \
   --output "$RUN_DIR/metrics/health.json" --timeout-s 180 \
   > "$RUN_DIR/logs/stack_health.log" 2>&1
 for index in "${UAV_INDICES[@]}"; do
-  timeout 15 ros2 topic info --verbose "/uav$index/odometry" \
-    > "$RUN_DIR/logs/odometry_uav$index.txt" 2>&1 || true
+  topic_log="$RUN_DIR/logs/odometry_uav$index.txt"
+  publisher_observed=0
+  for _ in $(seq 1 30); do
+    timeout 5 ros2 topic info --verbose "/uav$index/odometry" \
+      > "$topic_log" 2>&1 || true
+    if grep -Eq '^Publisher count: [1-9][0-9]*$' "$topic_log"; then
+      publisher_observed=1
+      break
+    fi
+    sleep 0.2
+  done
+  ((publisher_observed == 1)) || {
+    printf 'ROS publisher discovery did not stabilize for /uav%s/odometry.\n' "$index" >&2
+    exit 1
+  }
 done
 
 for camera in overview obstacle uav_focus; do
@@ -487,17 +598,35 @@ setsid ip netns exec ams-ns3 env \
   LD_LIBRARY_PATH="$NS3_DIR/build/lib:${LD_LIBRARY_PATH:-}" \
   PATH="$NS3_DIR/build/src/tap-bridge:$PATH" \
   PYTHONPATH="$PYTHON_DEPS" MPLCONFIGDIR="$RUNTIME_DIR/matplotlib" \
+  SIONNA_MITSUBA_VARIANT=cuda_ad_mono_polarized \
   NS_LOG='SionnaRtChannelModel=level_debug|prefix_time' \
   taskset -c "$RADIO_CPUSET" stdbuf -oL -eL "$BINARY" \
-  --uavCount="$UAV_COUNT" --tapGcs=tap-gcs --tapUavs="$TAP_UAVS" \
+  --uavCount="$UAV_COUNT" --radioBackend="$RADIO_BACKEND" \
+  --radioProfile="$RADIO_PROFILE" --technologySpecificModem="$TECHNOLOGY_SPECIFIC_MODEM" \
+  --neighborDiscoveryMode="$NEIGHBOR_DISCOVERY_MODE" --radioReason="$RADIO_REASON" \
+  --packetOutcomeAffected="$PACKET_OUTCOME_AFFECTED" --solverProfile="$SOLVER_PROFILE" \
+  --wifiDataMode="$WIFI_DATA_MODE" --wifiControlMode="$WIFI_CONTROL_MODE" \
+  --wifiChannelWidthMhz="$WIFI_CHANNEL_WIDTH_MHZ" --wifiSsid="$WIFI_SSID" \
+  --carrierHz="$CARRIER_HZ" --tapGcs=tap-gcs --tapUavs="$TAP_UAVS" \
   --scene="$SCENE" --positionFile="$NODE_STATE" --phaseFile="$PHASE_FILE" \
   --radioPcap="$RUN_DIR/pcap/native_radio.pcap" \
   --eventCsv="$RUN_DIR/logs/native_radio_events.csv" \
   --statsFile="$RUN_DIR/metrics/native_radio_stats.json" \
-  --readyFile="$NS3_READY" --duration=2400 --txPowerW=0.01 \
+  --readyFile="$NS3_READY" --duration=2400 --txPowerW="$TX_POWER_W" \
   --phyRateBps="$PHY_RATE_BPS" --eventLogging="$EVENT_LOGGING" \
   --channelStateMaxAgeS="$CHANNEL_STATE_MAX_AGE_S" \
   --updateDistanceThresholdM="$UPDATE_DISTANCE_THRESHOLD_M" \
+  --sionnaMaxDepth="$SIONNA_MAX_DEPTH" --sionnaLos="$SIONNA_LOS" \
+  --sionnaSpecularReflection="$SIONNA_SPECULAR_REFLECTION" \
+  --sionnaDiffuseReflection="$SIONNA_DIFFUSE_REFLECTION" \
+  --sionnaDiffraction="$SIONNA_DIFFRACTION" \
+  --sionnaEdgeDiffraction="$SIONNA_EDGE_DIFFRACTION" \
+  --sionnaRefraction="$SIONNA_REFRACTION" \
+  --sionnaSyntheticArray="$SIONNA_SYNTHETIC_ARRAY" \
+  --sionnaSeed="$SIONNA_SEED" --sionnaMaxNumberOfPaths="$SIONNA_MAX_NUMBER_OF_PATHS" \
+  --sionnaCacheJitterFraction="$SIONNA_CACHE_JITTER_FRACTION" \
+  --readinessLagMaxMs="$READINESS_LAG_MAX_MS" \
+  --readinessConsecutiveSamples="$READINESS_CONSECUTIVE_SAMPLES" \
   > "$NS3_FIFO" 2>&1 &
 NS3_PID=$!
 for _ in $(seq 1 1800); do
@@ -514,6 +643,7 @@ ip netns exec ams-gcs python3 -u "$ROOT_DIR/scripts/product/native_radio_five_ua
   --run-dir "$RUN_DIR" --node-state "$NODE_STATE" --phase-file "$PHASE_FILE" \
   --schedule-file "$SCHEDULE_FILE" --timeout-scale "$SCENARIO_TIMEOUT_SCALE" \
   --mode="$SCENARIO_MODE" --uav-count="$UAV_COUNT" --channels="$ACTIVE_UART_CHANNELS" \
+  --radio-profile="$RADIO_PROFILE" \
   > "$RUN_DIR/logs/flight_scenario.log" 2>&1
 SCENARIO_STATUS=$?
 set -e
@@ -544,6 +674,7 @@ ip netns exec ams-gcs ss -H -tunap > "$RUN_DIR/logs/gcs_sockets_after_stop.txt" 
 if [[ "$SCENARIO_MODE" == product ]]; then
   ip netns exec ams-gcs python3 -u "$ROOT_DIR/scripts/product/native_radio_five_uav_scenario.py" no-bypass-probe \
     --run-dir "$RUN_DIR" --node-state "$NODE_STATE" --duration-s 10.5 \
+    --radio-profile="$RADIO_PROFILE" \
     --output "$RUN_DIR/metrics/no_bypass_summary.json" \
     > "$RUN_DIR/logs/no_bypass_probe.log" 2>&1
   ip netns exec ams-gcs ss -H -tunap > "$RUN_DIR/logs/gcs_sockets_after_10s.txt" 2>&1 || true

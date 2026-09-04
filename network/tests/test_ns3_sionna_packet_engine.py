@@ -514,6 +514,11 @@ class SionnaPacketEngineCompiledTests(unittest.TestCase):
                 sionna_poll_interval_ms=100,
                 sionna_max_updates_per_poll=30,
                 sionna_max_state_ttl_ms=3_000,
+                # Isolate state supersession from the newer 250 ms product
+                # control deadline.  The deliberately 1 kbit/s leading frame
+                # must remain queued long enough for the second IPC poll.
+                queue_control_deadline_ms=1_200,
+                queue_control_max_age_ms=1_200,
             )
             result = run_engine(config, events_file)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -545,7 +550,7 @@ class SionnaPacketEngineCompiledTests(unittest.TestCase):
             self.assertNotEqual(event["radio_state_sequence"], newer["state_sequence"])
             self.assertNotIn(event["packet_wire_hash"], channel_hashes)
 
-    def test_packet_held_in_device_backoff_is_revalidated_before_transmit(self) -> None:
+    def test_busy_channel_keeps_other_owner_queued_until_uplink_revalidation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state_file = root / "device-held-race.states.jsonl"
@@ -568,43 +573,34 @@ class SionnaPacketEngineCompiledTests(unittest.TestCase):
                 sionna_poll_interval_ms=100,
                 sionna_max_updates_per_poll=30,
                 sionna_max_state_ttl_ms=3_000,
+                # Exercise uplink state revalidation behind a busy shared
+                # channel, not the independent product deadline-drop mechanism.
+                queue_control_deadline_ms=1_200,
+                queue_control_max_age_ms=1_200,
             )
             result = run_engine(config, events_file)
             self.assertEqual(result.returncode, 0, result.stderr)
             events = read_events(events_file)
 
         source_state = expected[target_cell]
-        held_hashes = {
-            event["packet_wire_hash"]
-            for event in events
-            if event["event"] == "channel"
-            and (event["directed_link"], event["traffic_class"]) == target_cell
-            and event["radio_state_status"] == "superseded_before_transmit"
-        }
-        self.assertEqual(len(held_hashes), 1)
-        held_hash = next(iter(held_hashes))
-        channel = next(
-            event
-            for event in events
-            if event["event"] == "channel" and event["packet_wire_hash"] == held_hash
-        )
-        self.assertEqual(channel["radio_delivery"], "drop")
-        self.assertEqual(
-            channel["radio_state_sequence"], source_state["state_sequence"]
-        )
-        self.assertNotEqual(channel["radio_state_sequence"], newer["state_sequence"])
-        receiver_drops = [
+        queue_drops = [
             event
             for event in events
             if event["event"] == "drop"
-            and event["packet_wire_hash"] == held_hash
-            and event["drop_reason"] == "sionna_state_superseded_before_transmit"
+            and (event["directed_link"], event["traffic_class"]) == target_cell
+            and event["drop_reason"] == "sionna_state_superseded_in_queue"
         ]
-        self.assertEqual(len(receiver_drops), 1)
-        self.assertEqual(receiver_drops[0]["device_id"], "cp.radio")
+        self.assertEqual(len(queue_drops), 1)
+        dropped = queue_drops[0]
+        dropped_hash = dropped["packet_wire_hash"]
+        self.assertEqual(dropped["radio_state_status"], "superseded_in_queue")
+        self.assertEqual(dropped["radio_state_sequence"], source_state["state_sequence"])
+        self.assertNotEqual(dropped["radio_state_sequence"], newer["state_sequence"])
+        self.assertEqual(dropped["device_id"], "uav2.radio")
         self.assertFalse(
             any(
-                event["event"] == "egress" and event["packet_wire_hash"] == held_hash
+                event["event"] in {"channel", "egress", "backoff"}
+                and event["packet_wire_hash"] == dropped_hash
                 for event in events
             )
         )

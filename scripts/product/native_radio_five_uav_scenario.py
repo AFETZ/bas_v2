@@ -222,8 +222,8 @@ class NativeFiveUavHarness(FlightHarness):
         self.schedule_file = Path(args.schedule_file).resolve()
         self.summary.update(
             {
-                "profile": "generic_native_spectrum_aloha_reference",
-                "technology_specific_modem": False,
+                "profile": args.radio_profile,
+                "technology_specific_modem": args.radio_profile.startswith("native_wifi_"),
                 "predeclared_parameters": {
                     "p2p_packets_per_direction_per_uav": P2P_PACKETS,
                     "p2mp_root_transmissions": P2MP_ROOTS,
@@ -1115,7 +1115,7 @@ class NativeFiveUavHarness(FlightHarness):
         raise ScenarioError("moving UAV mission upload timed out")
 
     def wait_position(self, name: str, target: list[float], timeout_s: float) -> None:
-        self.phase(name)
+        self.phase(f"{name}_transit")
         self.wait(
             lambda: (
                 self.positions().get("uav1") is not None
@@ -1130,6 +1130,10 @@ class NativeFiveUavHarness(FlightHarness):
             "gazebo_position_m": position,
             "distance_m": math.dist(position, target),
         }
+        # Evidence consumers capture only after the frozen Gazebo position is
+        # inside the waypoint tolerance, never on entry to the transit phase.
+        self.phase(name)
+        self.observe_for(2.0)
 
     def flight(self) -> None:
         initial = self.positions()
@@ -1212,6 +1216,8 @@ class NativeFiveUavHarness(FlightHarness):
         )
         for system_id in UAV_IDS:
             self.summary["uavs"][f"uav{system_id}"]["phases"]["takeoff"] = True
+        self.phase("takeoff_complete")
+        self.observe_for(2.0)
         self.phase("hold_all")
         self.observe_for(4.0)
         hold_positions = self.positions()
@@ -1267,6 +1273,8 @@ class NativeFiveUavHarness(FlightHarness):
                 {"hold": True, "land": True, "auto_disarm": True}
             )
         self.summary["final_positions_m"] = self.positions()
+        self.phase("landing_complete")
+        self.observe_for(2.0)
 
     def run_native(self) -> dict[str, Any]:
         self.phase("stationary_communication_smoke")
@@ -1321,6 +1329,7 @@ def run_no_bypass_probe(args: argparse.Namespace) -> int:
         timeout_scale=1.0,
         phase_file=str(Path(args.run_dir).resolve() / "logs/current_phase.txt"),
         schedule_file=str(Path(args.run_dir).resolve() / "logs/additional_schedule.json"),
+        radio_profile=args.radio_profile,
     )
     harness = NativeFiveUavHarness(probe_args)
     before = sum(harness.message_counts.values())
@@ -1386,12 +1395,18 @@ def parser() -> argparse.ArgumentParser:
     scenario.add_argument("--mode", choices=("product", "latency_diagnostic"), default="product")
     scenario.add_argument("--uav-count", type=int, choices=(1, 5), default=5)
     scenario.add_argument("--channels", default="control,payload")
+    scenario.add_argument(
+        "--radio-profile", default="native_wifi_80211n_spectrum_reference_v1"
+    )
     scenario.set_defaults(function=run_scenario)
     probe = commands.add_parser("no-bypass-probe")
     probe.add_argument("--run-dir", required=True)
     probe.add_argument("--node-state", required=True)
     probe.add_argument("--duration-s", type=float, default=10.5)
     probe.add_argument("--output", required=True)
+    probe.add_argument(
+        "--radio-profile", default="native_wifi_80211n_spectrum_reference_v1"
+    )
     probe.set_defaults(function=run_no_bypass_probe)
     return root
 

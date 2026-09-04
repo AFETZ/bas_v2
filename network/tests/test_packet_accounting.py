@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 
 from network.scripts.packet_accounting import account_packets, terminal_packet_outcomes
+from scripts.product.summarize_overload_protection import terminal_ledger_sha256
 
 
 def attempt(packet_id: str, *hashes: str) -> dict[str, object]:
@@ -12,6 +13,24 @@ def attempt(packet_id: str, *hashes: str) -> dict[str, object]:
 
 
 class PacketAccountingTests(unittest.TestCase):
+    def test_terminal_ledger_digest_is_order_stable_and_status_sensitive(self) -> None:
+        first = {
+            "p2": {"packet_id": "p2", "status": "dropped_at_ingress", "terminal": True},
+            "p1": {"packet_id": "p1", "status": "delivered", "terminal": True},
+        }
+        reordered = {"p1": first["p1"], "p2": first["p2"]}
+        changed = {
+            **reordered,
+            "p2": {"packet_id": "p2", "status": "dropped_in_medium", "terminal": True},
+        }
+
+        self.assertEqual(
+            terminal_ledger_sha256(first), terminal_ledger_sha256(reordered)
+        )
+        self.assertNotEqual(
+            terminal_ledger_sha256(first), terminal_ledger_sha256(changed)
+        )
+
     def test_duplicate_delivery_is_not_a_second_delivered_packet(self) -> None:
         result = account_packets(
             [attempt("p1", "h1")],
