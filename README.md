@@ -1,126 +1,64 @@
-# BAS Five-UAV Simulation Stand
+# BAS v2 — проверяемый RC1
 
-This repository develops a working simulation stand for five ArduPilot SITL
-UAVs, one ground control station, Gazebo motion, ns-3 packet/shared-medium
-behavior, Sionna RT propagation, interference analysis, and serial/Ethernet
-hardware-in-the-loop integration.
+Пять ArduPilot SITL в Gazebo, десять MAVLink UART и один НПУ. Реальные байты
+проходят через TAP и штатные ns-3.48 SpectrumWifiPhy/802.11n PHY/MAC;
+распространение рассчитывает Sionna RT внутри ns-3. Помехи — штатные
+WaveformGenerator, а не команды потери пакетов.
 
-The product target is an exactly 10 km by 10 km scene with up to 200 m relief,
-an urban-type settlement, buildings up to 15 floors, separate MAVLink control
-and payload UARTs, an additional point-to-point/point-to-multipoint channel,
-wall-clock pacing, heatmaps, and measurable real-time performance.
+Текущий статус поставки, ограничения и аппаратный blocker:
+[DELIVERY_SCOPE](doc/DELIVERY_SCOPE.md), [VALIDATION_REPORT](doc/VALIDATION_REPORT.md).
+Native Wi-Fi — некалиброванный reference profile, не модель LoRa/NR или конкретного модема.
 
-## Architecture
+## Быстрый запуск
 
-```text
-Gazebo + ArduPilot SITL -> ROS odometry -> Position Tracker
-                                             |
-                                      Channel Model Service
-                                      /                   \
-                              Sionna RT              Simple models
-                                      \                   /
-                                  timestamped link state
-                                             |
-                                            ns-3
-                                             |
-                           UART / Ethernet / GCS / data endpoints
-```
-
-Sionna computes propagation and channel state. ns-3 owns packet forwarding,
-queues, contention, priority, shared-medium access, and MAC arbitration. Their
-update rates are independent; ns-3 continues processing packets between
-timestamped channel-state updates.
-
-See [product requirements](doc/PRODUCT_REQUIREMENTS.md) and
-[product architecture](doc/PRODUCT_ARCHITECTURE.md) for the complete contract.
-
-## Quick start
-
-Run from a sourced ROS/ArduPilot environment or the existing project container:
+На подготовленном Linux/NVIDIA/Docker стенде:
 
 ```bash
-make check-env
-make build
-make run-base
+make demo-preflight DEMO_GUI=0
+BAS_NATIVE_FIVE_RUN_ID=my-town01 BAS_NATIVE_SOURCES=network/config/native_jammers_town01.yaml make demo-town01 DEMO_GUI=0
 ```
 
-Stop product processes from another terminal:
+Runner заканчивает полёт посадкой, проверяет отсутствие обходного канала и
+останавливает процессы. Ненулевой код может означать провал инженерного
+real-time порога при успешно завершённом полёте; см. `report.md`.
 
 ```bash
-make stop
+make prepare-customer
+BAS_NATIVE_FIVE_RUN_ID=my-customer BAS_NATIVE_SOURCES=network/config/native_jammers_town01.yaml make demo-customer DEMO_GUI=0
 ```
 
-The network vertical slice is exposed separately and fails with diagnostics if
-its external dependencies are unavailable:
+Customer: исходная Town01 без масштабирования, настоящее внешнее поле/холмы
+10×10 км и отдельное синтетическое здание с 15 заданными этажами.
+Полётный маршрут остаётся в контрольном районе Town01.
+
+Для ручного управления через готовый MAVProxy, в двух терминалах:
 
 ```bash
-make run-network
+make operator DEMO_GUI=0
+make gcs
 ```
 
-Run the complete five-UAV Town01 development scenario, including Gazebo,
-ArduPilot SITL, ROS odometry, real Sionna RT, ns-3, dual UARTs, additional data,
-flight lifecycle, PCAP capture, and heatmaps:
+Остановка из другого терминала: `make stop`. Отчёт:
+`runs/native-radio-realtime/<RUN_ID>/report.md`; raw/annotated кадры, CSV и PCAP
+находятся рядом. Открыть локально: `xdg-open runs/native-radio-realtime/my-town01/report.md`.
+
+## Подготовка и отдельные проверки
+
+`make demo-preflight DEMO_GUI=0 DEMO_BOOTSTRAP=1` создаёт отсутствующее окружение
+по закреплённым версиям. Исходный CAVISE bundle нужен локально; он не скачивается
+и не публикуется автоматически. Восстановление из поставленного образа и
+dependency archive описано в [USER_GUIDE](doc/USER_GUIDE.md).
 
 ```bash
-make run-town01
+BAS_NATIVE_FIVE_RUN_ID=stationary BAS_NATIVE_LATENCY_MODE=1 make demo-town01 DEMO_GUI=0
+make native-sources
+make native-maps
+make native-cache-study
+make native-matrix
 ```
 
-The command writes its self-contained result under `runs/town01-full-*` and
-cleans up its container, namespaces, TAP devices, and child processes.
+Последние три режима — самостоятельные native исследования. Heatmaps показывают
+прогноз PSD/SINR, не измеренный PDR. Полные результаты остаются в ignored `runs/`.
 
-For the native Wi-Fi/Sionna presentation path, first run the non-mutating
-preflight. On a fresh workstation, the explicit bootstrap mode installs only
-missing ignored dependencies and refuses to overwrite an incompatible setup:
-
-```bash
-make demo-preflight
-make demo-preflight DEMO_BOOTSTRAP=1
-make demo-town01
-```
-
-The aligned rugged engineering scene is selected separately with
-`make demo-rugged`. Both demo commands enable the live GUI by default; use
-`DEMO_GUI=0` for a headless evidence run. Stop either demo from another
-terminal with `make demo-stop`. `DEMO_BOOTSTRAP=1` can also be supplied directly
-to either demo command on a new machine. Town01 remains an external licensed
-asset; set `CAVISE_MAPS_DIR` to its official bundle directory before bootstrap
-when it is not already prepared.
-
-During development:
-
-```bash
-make test-changed
-make status
-```
-
-## Current state
-
-The five-UAV Town01 development scenario has passed one integrated runtime:
-all five vehicles completed arm, takeoff, hold, movement, landing, and disarm
-while their control, payload, and additional-data traffic traversed ns-3 using
-live Sionna RT link state. This is not completion of the product target:
-Town01 measures about 3.191 km by 3.191 km rather than 10 km by 10 km, the ns-3
-medium remains the documented CSMA engineering surrogate, and live-hardware
-HitL plus scalability characterization remain unfinished.
-
-Continue from the first incomplete stage in the
-[development plan](doc/DEVELOPMENT_PLAN.md) and verify the live state in
-[network status](network/STATUS.md). Minimal checks are defined by the
-[test matrix](network/TEST_MATRIX.md).
-
-## Repository layout
-
-- `src/multiagent_simulation/`: Gazebo/ROS 2 launch, models, worlds, and UAV tools.
-- `network/`: packet path, channel service, tracking, bridge, HitL, configs, and tests.
-- `scripts/product/`: product-first environment, run, stop, and changed-test commands.
-- `doc/`: active product requirements, architecture, plan, and real-time guidance.
-- `archive/acceptance_v3/`: historical formal workflow; inactive by default.
-
-Docker locks and pinned dependencies remain part of reproducible development.
-The image is rebuilt only when its Dockerfile, lock files, or system dependency
-inputs change.
-
-The previous formal acceptance/requalification workflow is archived for
-historical analysis and is not a prerequisite for product development.
-
-Original simulation maintainer credit: Gilbert Tanner.
+[Инструкция оператора](doc/USER_GUIDE.md) · [Архитектура](doc/PRODUCT_ARCHITECTURE.md)
+· [Окружение и assets](doc/ENVIRONMENT_AND_ASSETS.md) · [Требования](doc/PRODUCT_REQUIREMENTS.md)
