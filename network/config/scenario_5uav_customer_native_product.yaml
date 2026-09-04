@@ -1,0 +1,178 @@
+# Five live ArduPilot/Gazebo UAVs on the native ns-3.48/Sionna reference radio.
+schema_version: 1
+
+scenario:
+  name: scenario_5uav_customer_native_product
+  description: Five real Town01 UAVs sharing one native SpectrumWifiPhy 802.11n radio channel.
+  map:
+    id: customer_10km
+    kind: external_cavise_scene
+    customer_survey_asset: false
+    town: Town01
+    world_file: .external/customer_10km/customer.sdf
+    scene_xml: .external/customer_10km/scene.xml
+    camera_fragment: network/ns3/runtime_live_cameras.sdf.inc
+    gazebo_models: [cavise_town01, customer_field]
+
+base_simulation:
+  launch_package: multiagent_simulation
+  launch_file: multiagent_simulation.launch.py
+  sitl_home: "46.607213,14.278461,446,10"
+  sitl_defaults: network/config/town01_sitl.parm
+  target_realtime_factor: 1.0
+  functional_evidence_realtime_factor: 0.1
+
+command_post:
+  id: cp
+  role: command_post
+  gazebo_model_name: command_post
+  position_m: [5.0, 0.0, 2.0]
+  orientation_quat_xyzw: [0.0, 0.0, 0.0, 1.0]
+  antenna: omni
+
+robots:
+  - name: uav1
+    role: uav
+    instance: 0
+    system_id: 1
+    dds_udp_port: 2019
+    master_tcp_port: 5760
+    sitl_udp_port: 5501
+    fdm_udp_port: 9002
+    mavproxy_out: 127.0.0.1:14601
+    position: [20.0, 0.0, 2.0, 0.0, 0.0, 0.0]
+    nominal_radio_position_m: [20.0, 0.0, 2.0]
+    antenna: omni
+  - name: uav2
+    role: uav
+    instance: 1
+    system_id: 2
+    dds_udp_port: 2020
+    master_tcp_port: 5770
+    sitl_udp_port: 5511
+    fdm_udp_port: 9012
+    mavproxy_out: 127.0.0.1:14602
+    position: [35.0, 0.0, 2.0, 0.0, 0.0, 0.0]
+    nominal_radio_position_m: [35.0, 0.0, 2.0]
+    antenna: omni
+  - name: uav3
+    role: uav
+    instance: 2
+    system_id: 3
+    dds_udp_port: 2021
+    master_tcp_port: 5780
+    sitl_udp_port: 5521
+    fdm_udp_port: 9022
+    mavproxy_out: 127.0.0.1:14603
+    position: [50.0, 0.0, 2.0, 0.0, 0.0, 0.0]
+    nominal_radio_position_m: [50.0, 0.0, 2.0]
+    antenna: omni
+  - name: uav4
+    role: uav
+    instance: 3
+    system_id: 4
+    dds_udp_port: 2022
+    master_tcp_port: 5790
+    sitl_udp_port: 5531
+    fdm_udp_port: 9032
+    mavproxy_out: 127.0.0.1:14604
+    position: [65.0, 0.0, 2.0, 0.0, 0.0, 0.0]
+    nominal_radio_position_m: [65.0, 0.0, 2.0]
+    antenna: omni
+  - name: uav5
+    role: uav
+    instance: 4
+    system_id: 5
+    dds_udp_port: 2023
+    master_tcp_port: 5800
+    sitl_udp_port: 5541
+    fdm_udp_port: 9042
+    mavproxy_out: 127.0.0.1:14605
+    position: [80.0, 0.0, 2.0, 0.0, 0.0, 0.0]
+    nominal_radio_position_m: [80.0, 0.0, 2.0]
+    antenna: omni
+
+radio:
+  config: network/config/native_wifi_80211n_spectrum_product.yaml
+
+flight:
+  moving_uav: uav1
+  takeoff_relative_altitude_m:
+    uav1: 15.0
+    uav2: 23.0
+    uav3: 25.0
+    uav4: 27.0
+    uav5: 29.0
+  hold_time_s: 4.0
+  route_m:
+    los: [80.0, 0.0, 17.0]
+    transit_south: [118.0, 0.0, 17.0]
+    transit_north: [118.0, 110.0, 17.0]
+    obstructed_candidate: [80.0, 110.0, 17.0]
+    return: [20.0, 0.0, 17.0]
+  missions:
+    uav1:
+      - {name: los, position_m: [80.0, 0.0, 17.0], hold_s: 4.0}
+      - {name: transit_south, position_m: [118.0, 0.0, 17.0], hold_s: 0.0}
+      - {name: transit_north, position_m: [118.0, 110.0, 17.0], hold_s: 0.0}
+      - {name: obstructed_candidate, position_m: [80.0, 110.0, 17.0], hold_s: 4.0}
+      - {name: transit_north_return, position_m: [118.0, 110.0, 17.0], hold_s: 0.0}
+      - {name: transit_south_return, position_m: [118.0, 0.0, 17.0], hold_s: 0.0}
+      - {name: return, position_m: [20.0, 0.0, 17.0], hold_s: 4.0}
+  observations:
+    - {name: los, timeout_s: 180.0, probe_packets_per_uav: 0}
+    - {name: obstructed_candidate, timeout_s: 240.0, probe_packets_per_uav: 0}
+    - {name: return, timeout_s: 240.0, probe_packets_per_uav: 0}
+
+traffic:
+  diagnostic_retry_interval_s: 20.0
+  forced_mavlink_stream_intervals: false
+  p2p_packets_per_direction_per_uav: 10
+  p2mp_root_transmissions: 20
+  simultaneous_uplink:
+    packets_per_uav: 20
+    packet_payload_bytes: 256
+    interval_ms: 50
+    duration_s: 1.0
+    retransmissions: false
+  delivery_gates:
+    p2p_min_delivered_per_direction_per_uav: 9
+    p2mp_min_delivered_per_uav: 18
+    simultaneous_min_delivered_per_uav: 1
+    simultaneous_jain_fairness_min: 0.8
+
+evidence:
+  airborne_clearance_m: 6.0
+  landed_altitude_tolerance_m: 3.0
+  realtime_gates:
+    gazebo_mean_rtf_min: 0.95
+    gazebo_p5_rtf_min: 0.8
+    applied_position_age_p95_ms_max: 500.0
+  phase_aliases:
+    takeoff_complete: takeoff
+    hold_all: five_uav_hold
+    los: los_observation
+    obstructed_candidate: obstructed_observation
+    return: return_observation
+    landing_complete: landing
+  cameras:
+    overview:
+      topic: /native_radio/overview/image
+      pose: [50.0, 55.0, 140.0, 0.0, 1.5707, 0.0]
+      horizontal_fov_rad: 1.4
+    obstacle:
+      topic: /native_radio/obstacle/image
+      pose: [80.0, 110.0, 70.0, 0.0, 1.5707, 0.0]
+      horizontal_fov_rad: 1.0
+    uav_focus:
+      topic: /native_radio/uav_focus/image
+      pose: [50.0, 0.0, 90.0, 0.0, 1.5707, 1.5708]
+      horizontal_fov_rad: 1.2
+  screenshots:
+    - {phase: latency_stationary_warmup, stem: 00_stationary_overview, camera: uav_focus, altitude_state: landed, required_projected_uavs: [uav1, uav2, uav3, uav4, uav5]}
+    - {phase: takeoff, stem: 01_five_uav_takeoff, camera: overview, altitude_state: airborne, required_projected_uavs: [uav1, uav2, uav3, uav4, uav5]}
+    - {phase: five_uav_hold, stem: 02_five_uav_hold, camera: uav_focus, altitude_state: airborne, required_projected_uavs: [uav1, uav2, uav3, uav4, uav5]}
+    - {phase: los_observation, stem: 03_uav1_los, camera: uav_focus, mission_phase: los, required_projected_uavs: [uav1]}
+    - {phase: obstructed_observation, stem: 04_uav1_obstructed, camera: obstacle, mission_phase: obstructed_candidate, required_projected_uavs: [uav1]}
+    - {phase: p2mp, stem: 05_p2mp_or_shared_medium, camera: overview, altitude_state: landed, required_projected_uavs: [uav1, uav2, uav3, uav4, uav5]}
+    - {phase: landing, stem: 06_landing, camera: uav_focus, altitude_state: landed, required_projected_uavs: [uav1, uav2, uav3, uav4, uav5]}
