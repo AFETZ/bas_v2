@@ -26,6 +26,7 @@
 #include "ns3/uniform-planar-array.h"
 #include "ns3/wifi-module.h"
 #include "ns3/wifi-net-device.h"
+#include "native-spectrum-sources.h"
 
 #include <algorithm>
 #include <chrono>
@@ -542,6 +543,18 @@ WifiPhyRxStart(uint32_t nodeIndex,
              packet->GetSize(),
              rxPowerDbm,
              details.str());
+}
+
+void
+WifiSignalArrival(uint32_t receiver, Ptr<const SpectrumSignalParameters> signal,
+                  uint32_t sender, double powerDbm, Time duration)
+{
+    std::ostringstream details;
+    details << "sender_node_id=" << sender << ";duration_s=" << std::setprecision(17)
+            << duration.GetSeconds() << ";source=SpectrumWifiPhy.SignalArrival"
+            << ";foreign_signal=" << bool(DynamicCast<WaveformGenerator>(signal->txPhy));
+    LogEvent("spectrum_signal_arrival", g_nodeNames.at(receiver), std::to_string(sender),
+             0, powerDbm, details.str());
 }
 
 void
@@ -1304,6 +1317,7 @@ main(int argc, char* argv[])
     std::string solverProfile = "realtime_minimal_solver_profile";
     std::string wifiDataMode = "HtMcs0";
     std::string wifiControlMode = "ErpOfdmRate6Mbps";
+    std::string sourceConfig;
     std::string wifiSsid = "bas-native-radio";
     uint16_t wifiChannelNumber = 1;
     uint16_t wifiChannelWidthMhz = 20;
@@ -1357,6 +1371,7 @@ main(int argc, char* argv[])
                      ignoredLegacyPacketOutcomeClaim);
     command.AddValue("solverProfile", "Sionna solver profile identifier", solverProfile);
     command.AddValue("wifiDataMode", "Constant 802.11n data mode", wifiDataMode);
+    command.AddValue("sources", "Explicit resolved WaveformGenerator source config", sourceConfig);
     command.AddValue("wifiControlMode", "Constant 802.11n control mode", wifiControlMode);
     command.AddValue("wifiSsid", "Infrastructure BSS SSID", wifiSsid);
     command.AddValue("wifiChannelNumber", "802.11 channel number", wifiChannelNumber);
@@ -1542,7 +1557,18 @@ main(int argc, char* argv[])
     solver.syntheticArray = sionnaSyntheticArray;
     solver.seed = sionnaSeed;
     sionna->SetRtPathSolverConfig(solver);
-    channel->AddPhasedArraySpectrumPropagationLossModel(sionna);
+    if (sourceConfig.empty())
+        channel->AddPhasedArraySpectrumPropagationLossModel(sionna);
+    else
+    {
+        auto router = bas::InstallSpectrumSources(sionna, channel, sourceConfig, scene,
+            solver, sionnaMaxNumberOfPaths,
+            [](const std::string& event, const std::string& id, double value,
+               const std::string& details) { LogEvent(event, id, "", 0, value, details); });
+        channel->AddPhasedArraySpectrumPropagationLossModel(router);
+        LogEvent("source_propagation_dispatch", "ns3", "", 0, router->sources.size(),
+                 "wrapper=bas::SourcePropagation;all_delegates=ns3::SionnaRtSpectrumPropagationLossModel;one_model_per_signal=true");
+    }
     g_phasedArraySpectrumPropagationModels.push_back(sionna->GetInstanceTypeId().GetName());
     LogEvent("rx_psd_model_binding",
              "ns3",
@@ -1646,6 +1672,8 @@ main(int argc, char* argv[])
             NS_ABORT_MSG_IF(!device, "expected WifiNetDevice");
             device->GetPhy()->TraceConnectWithoutContext(
                 "MonitorSnifferRx", MakeBoundCallback(&WifiMonitorRx, index));
+            device->GetPhy()->TraceConnectWithoutContext(
+                "SignalArrival", MakeBoundCallback(&WifiSignalArrival, index));
             device->GetMac()->TraceConnectWithoutContext("MacTx",
                                                          MakeBoundCallback(&MacTx, index));
             device->GetMac()->TraceConnectWithoutContext("MacTxDrop",

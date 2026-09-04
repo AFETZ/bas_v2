@@ -19,6 +19,7 @@ run_in_container() {
     -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics \
     -e BAS_SIONNA_WIFI_IN_CONTAINER=1 \
     -e BAS_SIONNA_WIFI_RUN_ID="$RUN_ID" \
+    -e BAS_NATIVE_SOURCES_CAMPAIGN="${BAS_NATIVE_SOURCES_CAMPAIGN:-0}" \
     -e BAS_SIONNA_WIFI_IMAGE_ID="$image_id" \
     -e BAS_SIONNA_WIFI_HOST_UID="$(id -u)" \
     -e BAS_SIONNA_WIFI_HOST_GID="$(id -g)" \
@@ -88,6 +89,7 @@ export LD_LIBRARY_PATH="$NS3_DIR/build/lib:${LD_LIBRARY_PATH:-}"
 export SIONNA_MITSUBA_VARIANT=cuda_ad_mono_polarized
 export MPLCONFIGDIR="$RUN_DIR/matplotlib"
 cp "$SMOKE_SOURCE" "$NS3_DIR/scratch/upstream-sionna-wifi-smoke.cc"
+cp "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" "$NS3_DIR/scratch/"
 cp "$FIVE_SOURCE" "$NS3_DIR/scratch/upstream-sionna-wifi-five-uav.cc"
 
 if [[ ! -f "$NS3_DIR/cmake-cache/CMakeCache.txt" ]]; then
@@ -104,6 +106,12 @@ fi
   printf 'Focused native Wi-Fi targets did not build.\n' >&2
   exit 1
 }
+
+if [[ "${BAS_NATIVE_SOURCES_CAMPAIGN:-0}" == 1 ]]; then
+  python3 "$ROOT_DIR/scripts/product/native_source_campaign.py" --binary "$SMOKE_BINARY" \
+    --scene "$ROOT_DIR/.external/cavise_maps/Town01/map/scene.xml" --run-dir "$RUN_DIR/campaign"
+  exit $?
+fi
 
 "$SMOKE_BINARY" --output="$RUN_DIR/metrics/smoke.json" \
   > "$RUN_DIR/logs/smoke.log" 2>&1

@@ -10,6 +10,7 @@ import json
 import math
 import re
 import statistics
+import struct
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable
@@ -490,7 +491,18 @@ def build_topology(run_dir: Path, stats: dict[str, Any]) -> dict[str, Any]:
             "mac": f"02:71:{index:02x}:00:10:10",
         }
     pcap_names = sorted(path.name for path in (run_dir / "pcap").glob("*.pcap"))
+    radio_pcaps = [run_dir / "pcap" / name for name in pcap_names if ".radiotap-" in name]
+    def valid_radio_pcap(path):
+        with path.open("rb") as stream:
+            header = stream.read(24)
+        if len(header) != 24 or path.stat().st_size <= 24:
+            return False
+        order = "<" if header[:4] == b"\xd4\xc3\xb2\xa1" else ">"
+        return struct.unpack(order+"I", header[20:24])[0] == 127
+    ethernet_names = {"native_radio.pcap", "tap_gcs.pcap", *[f"tap_uav{i}.pcap" for i in range(1,6)]}
     return {
+        "endpoint_pcaps_complete": ethernet_names <= set(pcap_names),
+        "native_radiotap_pcaps_complete": len(radio_pcaps) == radio_node_count and all(valid_radio_pcap(p) for p in radio_pcaps),
         "ns3_processes": 1,
         "radio_nodes": radio_node_count,
         "uav_count": uav_count,
@@ -1251,6 +1263,8 @@ def screenshot_status(
     screenshot_dir = run_dir / "screenshots"
     records: dict[str, Any] = {}
     for specification in scenario_config["screenshots"]:
+        if specification["phase"].startswith("latency_"):
+            continue  # Dedicated stationary diagnostic captures are not flight phases.
         stem = specification["stem"]
         metadata = read_json(screenshot_dir / f"{stem}.json", {})
         metadata = metadata if isinstance(metadata, dict) else {}
@@ -2881,7 +2895,7 @@ def main() -> int:
         ),
         "no_bypass_all_five": bool(no_bypass.get("passed")),
         "live_gazebo_evidence": screenshots["screenshots_status"] == "passed",
-        "exact_seven_pcaps": topology["exact_pcap_count"] == 7,
+        "endpoint_and_native_radiotap_pcaps": topology["endpoint_pcaps_complete"] and topology["native_radiotap_pcaps_complete"],
     }
     if causal["required"]:
         functional_checks["causal_clear_shadow_recovery"] = bool(causal["passed"])
@@ -3023,6 +3037,8 @@ def main() -> int:
             report.append(f"- Gate failures: {'; '.join(causal['failures'])}")
     report.extend(["", "## Live Gazebo frames"])
     for specification in scenario_config["screenshots"]:
+        if specification["phase"].startswith("latency_"):
+            continue  # Dedicated stationary diagnostic captures are not flight phases.
         stem = specification["stem"]
         record = screenshots["records"][stem]
         if not record["valid_live_capture"]:

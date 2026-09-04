@@ -27,6 +27,7 @@
 #include "ns3/wifi-module.h"
 #include "ns3/wifi-net-device.h"
 
+#include "native-spectrum-sources.h"
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -37,6 +38,7 @@ using namespace ns3;
 namespace
 {
 
+std::ofstream g_measurements;
 uint32_t g_monitorSamples = 0;
 double g_signalDbmMean = 0.0;
 double g_noiseDbmMean = 0.0;
@@ -49,9 +51,22 @@ MonitorSniffRx(Ptr<const Packet>,
                SignalNoiseDbm signalNoise,
                uint16_t)
 {
+    g_measurements << Simulator::Now().GetSeconds() << ",decoded_mpdu,aggregate," << signalNoise.signal << "," << signalNoise.noise << "\n";
     ++g_monitorSamples;
     g_signalDbmMean += (signalNoise.signal - g_signalDbmMean) / g_monitorSamples;
     g_noiseDbmMean += (signalNoise.noise - g_noiseDbmMean) / g_monitorSamples;
+}
+
+void SignalArrival(std::string rx, Ptr<const SpectrumSignalParameters> signal,
+                   uint32_t sender, double power, Time duration)
+{
+    g_measurements << Simulator::Now().GetSeconds() << ','
+        << (DynamicCast<WaveformGenerator>(signal->txPhy) ? "foreign_signal" : "wifi_signal")
+        << ',' << rx << ',' << power << ',' << duration.GetSeconds() << ',' << sender << '\n';
+}
+void ApplicationRx(Ptr<const Packet> packet, const Address&)
+{
+    g_measurements << Simulator::Now().GetSeconds() << ",application_rx,sta," << packet->GetSize() << '\n';
 }
 
 Ptr<UniformPlanarArray>
@@ -89,12 +104,14 @@ main(int argc, char* argv[])
 
     std::string scene = "simple_street_canyon_with_cars";
     std::string output = "sionna-wifi-smoke.json";
+    std::string sources;
     double simulationSeconds = 4.0;
     uint32_t offeredPackets = 20;
     uint32_t packetSize = 128;
     double distanceM = 20.0;
 
     CommandLine command(__FILE__);
+    command.AddValue("sources", "Resolved native waveform source JSON", sources);
     command.AddValue("scene", "Sionna RT built-in scene", scene);
     command.AddValue("output", "JSON result path", output);
     command.AddValue("simulationSeconds", "Simulation duration", simulationSeconds);
@@ -102,6 +119,8 @@ main(int argc, char* argv[])
     command.AddValue("packetSize", "UDP payload bytes", packetSize);
     command.AddValue("distanceM", "AP to STA distance", distanceM);
     command.Parse(argc, argv);
+    g_measurements.open(output + ".events.csv");
+    g_measurements << "time_s,event,receiver,value,noise_or_duration,sender\n";
 
     NS_ABORT_MSG_IF(simulationSeconds <= 2.5 || offeredPackets == 0,
                     "simulationSeconds must exceed 2.5 and offeredPackets must be positive");
@@ -112,7 +131,7 @@ main(int argc, char* argv[])
     channel->SetPropagationDelayModel(CreateObject<ConstantSpeedPropagationDelayModel>());
     Ptr<SionnaRtSpectrumPropagationLossModel> sionna =
         CreateObject<SionnaRtSpectrumPropagationLossModel>();
-    sionna->SetChannelModelAttribute("Frequency", DoubleValue(2.4e9));
+    sionna->SetChannelModelAttribute("Frequency", DoubleValue(2.412e9));
     sionna->SetChannelModelAttribute("Scenario", StringValue(scene));
     sionna->SetChannelModelAttribute("IsMergeShapeEnabled", BooleanValue(true));
     sionna->SetChannelModelAttribute("MaxNumberOfPaths", DoubleValue(90));
@@ -127,7 +146,15 @@ main(int argc, char* argv[])
     solver.syntheticArray = true;
     solver.seed = 42;
     sionna->SetRtPathSolverConfig(solver);
-    channel->AddPhasedArraySpectrumPropagationLossModel(sionna);
+    if (sources.empty())
+        channel->AddPhasedArraySpectrumPropagationLossModel(sionna);
+    else
+        channel->AddPhasedArraySpectrumPropagationLossModel(bas::InstallSpectrumSources(
+            sionna, channel, sources, scene, solver, 90,
+            [](const std::string& event, const std::string& id, double power, const std::string& detail) {
+                std::cout << Simulator::Now().GetSeconds() << ',' << event << ',' << id << ','
+                          << power << ',' << detail << std::endl;
+            }));
 
     NodeContainer apNode;
     apNode.Create(1);
@@ -136,19 +163,19 @@ main(int argc, char* argv[])
 
     Ptr<ConstantPositionMobilityModel> apMobility =
         CreateObject<ConstantPositionMobilityModel>();
-    apMobility->SetPosition(Vector(-20.0, 0.0, 1.5));
+    apMobility->SetPosition(Vector(5.0, 0.0, 2.0));
     apNode.Get(0)->AggregateObject(apMobility);
     Ptr<ConstantPositionMobilityModel> staMobility =
         CreateObject<ConstantPositionMobilityModel>();
-    staMobility->SetPosition(Vector(-20.0 + distanceM, 0.0, 1.5));
+    staMobility->SetPosition(Vector(5.0 + distanceM, 0.0, 2.0));
     staNode.Get(0)->AggregateObject(staMobility);
 
     SpectrumWifiPhyHelper phy;
     phy.SetChannel(channel);
     phy.SetErrorRateModel("ns3::NistErrorRateModel");
-    phy.Set("TxPowerStart", DoubleValue(20.0));
-    phy.Set("TxPowerEnd", DoubleValue(20.0));
-    phy.Set("ChannelSettings", StringValue("{0, 20, BAND_2_4GHZ, 0}"));
+    phy.Set("TxPowerStart", DoubleValue(10.0));
+    phy.Set("TxPowerEnd", DoubleValue(10.0));
+    phy.Set("ChannelSettings", StringValue("{1, 20, BAND_2_4GHZ, 0}"));
 
     WifiHelper wifi;
     wifi.SetStandard(WIFI_STANDARD_80211n);
@@ -156,7 +183,7 @@ main(int argc, char* argv[])
                                  "DataMode",
                                  StringValue("HtMcs0"),
                                  "ControlMode",
-                                 StringValue("HtMcs0"));
+                                 StringValue("ErpOfdmRate6Mbps"));
     WifiMacHelper mac;
     Ssid ssid("sionna-native-wifi");
     mac.SetType("ns3::StaWifiMac", "Ssid", SsidValue(ssid));
@@ -165,6 +192,10 @@ main(int argc, char* argv[])
     NetDeviceContainer apDevice = wifi.Install(phy, mac, apNode);
     AttachArray(staDevice.Get(0));
     AttachArray(apDevice.Get(0));
+    DynamicCast<WifiNetDevice>(apDevice.Get(0))->GetPhy()->TraceConnectWithoutContext(
+        "SignalArrival", MakeBoundCallback(&SignalArrival, std::string("ap")));
+    DynamicCast<WifiNetDevice>(staDevice.Get(0))->GetPhy()->TraceConnectWithoutContext(
+        "SignalArrival", MakeBoundCallback(&SignalArrival, std::string("sta")));
 
     InternetStackHelper stack;
     stack.Install(apNode);
@@ -177,6 +208,7 @@ main(int argc, char* argv[])
     constexpr uint16_t port = 9088;
     UdpServerHelper server(port);
     ApplicationContainer serverApp = server.Install(staNode.Get(0));
+    serverApp.Get(0)->TraceConnectWithoutContext("Rx", MakeCallback(&ApplicationRx));
     serverApp.Start(Seconds(0.5));
     serverApp.Stop(Seconds(simulationSeconds));
     UdpClientHelper client(staInterface.GetAddress(0), port);
@@ -188,6 +220,9 @@ main(int argc, char* argv[])
     clientApp.Start(Seconds(2.0));
     clientApp.Stop(Seconds(simulationSeconds - 0.1));
 
+    phy.SetPcapDataLinkType(WifiPhyHelper::DLT_IEEE802_11_RADIO);
+    phy.EnablePcap(output + ".radio", apDevice);
+    phy.EnablePcap(output + ".radio", staDevice);
     Config::ConnectWithoutContext("/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/Phy/MonitorSnifferRx",
                                   MakeCallback(&MonitorSniffRx));
 
@@ -223,8 +258,8 @@ main(int argc, char* argv[])
          << "  \"delivered_packets\": " << deliveredPackets << ",\n"
          << "  \"monitor_rx_samples\": " << g_monitorSamples << ",\n"
          << std::fixed << std::setprecision(3)
-         << "  \"mean_signal_dbm\": " << g_signalDbmMean << ",\n"
-         << "  \"mean_noise_dbm\": " << g_noiseDbmMean << ",\n"
+         << "  \"mean_signal_dbm\": " << (g_monitorSamples ? std::to_string(g_signalDbmMean) : "null") << ",\n"
+         << "  \"mean_noise_dbm\": " << (g_monitorSamples ? std::to_string(g_noiseDbmMean) : "null") << ",\n"
          << "  \"exit_code\": " << result;
     if (!error.empty())
     {

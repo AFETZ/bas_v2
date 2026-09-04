@@ -50,6 +50,8 @@ run_in_container() {
     -e BAS_NATIVE_FIVE_IN_CONTAINER=1 \
     -e BAS_SOURCE_HEAD="$(git -C "$ROOT_DIR" rev-parse HEAD)" \
     -e BAS_SOURCE_DIRTY="$(git -C "$ROOT_DIR" status --porcelain | wc -l)" \
+    -e BAS_NATIVE_SOURCES="${BAS_NATIVE_SOURCES:-}" \
+    -e BAS_NATIVE_EXTERNAL_CONFIG="${BAS_NATIVE_EXTERNAL_CONFIG:-}" \
     -e BAS_NATIVE_FIVE_RUN_ID="${BAS_NATIVE_FIVE_RUN_ID:-}" \
     -e BAS_NATIVE_FIVE_SCENARIO="$SCENARIO_KEY" \
     -e BAS_NATIVE_FIVE_GUI="$GUI" \
@@ -353,6 +355,17 @@ fi
 export PATH="$PYTHON_TOOLING/bin:$PATH"
 export PYTHONPATH="$PYTHON_TOOLING:$PYTHON_DEPS:${PYTHONPATH:-}"
 cp "$PROJECT_SOURCE" "$UPSTREAM_SOURCE"
+cp "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" "$NS3_DIR/scratch/"
+source_args=()
+if [[ -n "${BAS_NATIVE_SOURCES:-}" ]]; then
+  python3 "$ROOT_DIR/scripts/product/prepare_native_sources.py" \
+    --config "$ROOT_DIR/$BAS_NATIVE_SOURCES" --output "$RUN_DIR/logs/native_sources.json"
+  source_args+=(--sources="$RUN_DIR/logs/native_sources.json")
+fi
+if [[ -n "${BAS_NATIVE_EXTERNAL_CONFIG:-}" && "$SCENARIO_MODE" != latency_diagnostic ]]; then
+  printf 'External controller requires BAS_NATIVE_LATENCY_MODE=1 (safe requests only).\n' >&2
+  exit 2
+fi
 if [[ "${BAS_NATIVE_FIVE_SKIP_BUILD:-0}" == 1 ]]; then
   [[ -x "$BINARY" ]] || { printf 'Requested binary reuse but binary is absent.\n' >&2; exit 2; }
   printf 'Reused focused native target after exact project/upstream source synchronization.\n' \
@@ -567,6 +580,13 @@ for index in "${UAV_INDICES[@]}"; do
   instance=$((index - 1))
   for channel in control payload; do
     [[ ",$ACTIVE_UART_CHANNELS," == *,$channel,* ]] || continue
+    if [[ "$index" == 1 && "$channel" == control && -n "${BAS_NATIVE_EXTERNAL_CONFIG:-}" ]]; then
+      setsid ip netns exec ams-uav1 python3 -u "$ROOT_DIR/network/scripts/external_endpoint.py" \
+        --config "$ROOT_DIR/$BAS_NATIVE_EXTERNAL_CONFIG" --output "$RUN_DIR/external_endpoint" \
+        > "$RUN_DIR/logs/external_endpoint.log" 2>&1 &
+      managed_pids+=("$!")
+      continue
+    fi
     if [[ "$channel" == control ]]; then base_port=14600; else base_port=14700; fi
     setsid ip netns exec "ams-uav$index" python3 -u \
       "$ROOT_DIR/network/scripts/communication_vertical.py" uart-adapter \
@@ -592,6 +612,10 @@ done
 for index in "${UAV_INDICES[@]}"; do
   for channel in control payload; do
     [[ ",$ACTIVE_UART_CHANNELS," == *,$channel,* ]] || continue
+    if [[ "$index" == 1 && "$channel" == control && -n "${BAS_NATIVE_EXTERNAL_CONFIG:-}" ]]; then
+      wait_for_file "$RUN_DIR/external_endpoint/metrics.json" 15 "external endpoint"
+      continue
+    fi
     wait_for_file "$RUN_DIR/logs/${channel}_uart_uav$index.ready" 15 "$channel UART adapter"
   done
   wait_for_file "$RUN_DIR/logs/additional_uav$index.ready" 15 "additional endpoint"
@@ -706,6 +730,7 @@ setsid ip netns exec ams-ns3 env \
   --eventCsv="$RUN_DIR/logs/native_radio_events.csv" \
   --statsFile="$RUN_DIR/metrics/native_radio_stats.json" \
   --readyFile="$NS3_READY" --duration=2400 --txPowerW="$TX_POWER_W" \
+  "${source_args[@]}" \
   --phyRateBps="$PHY_RATE_BPS" --eventLogging="$EVENT_LOGGING" \
   --channelStateMaxAgeS="$CHANNEL_STATE_MAX_AGE_S" \
   --updateDistanceThresholdM="$UPDATE_DISTANCE_THRESHOLD_M" \
