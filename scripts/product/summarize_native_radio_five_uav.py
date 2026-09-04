@@ -2274,6 +2274,7 @@ def first_matching_command_delivery(
         and row.get("target_system") == uav_id
         and isinstance(row.get("monotonic_ns"), int)
         and int(row["monotonic_ns"]) >= sent_ns
+        and (not attempt.get("command_frame_hex") or row.get("frame_hex") == attempt["command_frame_hex"])
     ]
     return min(matches) if matches else None
 
@@ -2313,6 +2314,18 @@ def summarize_latency_operations(run_dir: Path, scenario: dict[str, Any]) -> dic
                 delivery_matched += 1
             ack_ns = attempt.get("ack_gcs_received_monotonic_ns")
             rtt_ms = attempt.get("attempt_rtt_ms")
+            # Byte identity correlates the same real ACK at UART and GCS, even
+            # when causality to a retransmission is ambiguous.
+            ack_candidates = [int(e["monotonic_ns"]) for e in adapter_events.get(uav, [])
+                if attempt.get("ack_frame_hex") and e.get("frame_hex") == attempt["ack_frame_hex"]
+                and e.get("direction") == "uart_to_ns3" and e.get("message_name") == "COMMAND_ACK"
+                and isinstance(e.get("monotonic_ns"), int) and isinstance(ack_ns, int)
+                and int(attempt["send_monotonic_ns"]) <= e["monotonic_ns"] <= ack_ns]
+            ack_uart_ns = ack_candidates[0] if len(ack_candidates) == 1 else None
+            # COMMAND_ACK cannot identify which resend caused it. Keep total
+            # operation latency; never assign the ACK to a successful retry.
+            if operation.get("attempt_count", 1) > 1:
+                rtt_ms = None
             chain_rows.append(
                 {
                     "operation_id": operation.get("operation_id"),
@@ -2332,10 +2345,11 @@ def summarize_latency_operations(run_dir: Path, scenario: dict[str, Any]) -> dic
                         "adapter did not emit a matching post-write COMMAND_LONG frame"
                         if delivery_ns is None else "native adapter post-write MAVLink frame"
                     ),
-                    "ack_uav_uart_observed_monotonic_ns": None,
-                    "ack_uav_uart_status": "unavailable",
+                    "ack_uav_uart_observed_monotonic_ns": ack_uart_ns,
+                    "ack_uav_uart_status": "observed" if ack_uart_ns is not None else "unavailable",
                     "ack_uav_uart_reason": (
-                        "COMMAND_ACK has no request confirmation; retry-safe per-attempt attribution is unavailable"
+                        "identical ACK frame bytes at UART/GCS; not proof of causality to a retry"
+                        if ack_uart_ns is not None else "no unique identical ACK frame at UART/GCS"
                     ),
                     "ack_gcs_uart_delivery_monotonic_ns": None,
                     "ack_gcs_uart_status": "unavailable",

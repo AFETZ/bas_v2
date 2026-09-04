@@ -519,6 +519,7 @@ class NativeFiveUavHarness(FlightHarness):
             attempt: dict[str, Any] = {
                 "attempt_id": attempt_id,
                 "confirmation": attempt_number - 1,
+                "command_frame_hex": bytes(message.get_msgbuf()).hex(),
                 "send_monotonic_ns": sent_ns,
                 "uav_uart_delivery_monotonic_ns": None,
                 "uav_uart_delivery_unavailable_reason": (
@@ -553,6 +554,7 @@ class NativeFiveUavHarness(FlightHarness):
                 attempt.update(
                     {
                         "ack_gcs_received_monotonic_ns": received_ns,
+                        "ack_frame_hex": bytes(ack[0].get_msgbuf()).hex(),
                         "attempt_rtt_ms": rtt_ms,
                         "outcome": "ack_received",
                     }
@@ -643,6 +645,7 @@ class NativeFiveUavHarness(FlightHarness):
                 system_id, 1, command, 0, *params
             )
             self.send("control", system_id, message)
+            attempt["command_frame_hex"] = bytes(message.get_msgbuf()).hex()
             operations.append(operation)
 
         deadline = time.monotonic() + timeout_s * self.timeout_scale
@@ -660,6 +663,7 @@ class NativeFiveUavHarness(FlightHarness):
                     attempt.update(
                         {
                             "ack_gcs_received_monotonic_ns": received_ns,
+                            "ack_frame_hex": bytes(ack[0].get_msgbuf()).hex(),
                             "attempt_rtt_ms": rtt_ms,
                             "outcome": "ack_received",
                         }

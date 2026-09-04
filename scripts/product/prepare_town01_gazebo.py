@@ -157,11 +157,17 @@ def convert_ply_to_obj(source: Path, target: Path, category: str) -> MeshResult:
     mins = [math.inf, math.inf, math.inf]
     maxs = [-math.inf, -math.inf, -math.inf]
     triangles = 0
+    colour = " ".join(CATEGORY_COLOURS[category].split()[:3])
+    target.with_suffix(".mtl").write_text(
+        f"newmtl surface\nKa {colour}\nKd {colour}\nKs 0 0 0\nd 1\nillum 1\n",
+        encoding="ascii",
+    )
     try:
         with source.open("rb") as src, temporary.open("w", encoding="ascii") as dst:
             header = read_ply_header(src, source)
             dst.write(f"# canonical_source={source.name}\n")
             dst.write("# coordinate_transform=identity\n")
+            dst.write(f"mtllib {target.with_suffix('.mtl').name}\nusemtl surface\n")
             for _ in range(header.vertex_count):
                 raw = src.read(header.vertex_struct.size)
                 if len(raw) != header.vertex_struct.size:
