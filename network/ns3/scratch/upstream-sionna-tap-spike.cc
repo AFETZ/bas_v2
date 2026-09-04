@@ -175,7 +175,7 @@ LogEvent(const std::string& event,
                              event == "phy_rx_error" || event == "phy_rx_drop" ||
                              event == "wifi_rx_power_dbm" || event == "wifi_monitor_rx" ||
                              event == "radio_queue_enqueue" || event == "radio_queue_dequeue" ||
-                             event == "radio_queue_drop";
+                             event == "radio_queue_drop" || event.rfind("wifi_mac_queue_",0)==0;
     if (g_eventLogging == "metrics_only" && packetEvent)
     {
         return;
@@ -593,6 +593,27 @@ WifiMonitorRx(uint32_t nodeIndex,
             << ";sampling=successfully_received_mpdu";
     LogEvent("wifi_monitor_rx", g_nodeNames.at(nodeIndex), peer.str(),
              packet->GetSize(), signalNoise.signal, details.str());
+}
+
+std::map<std::tuple<uint32_t, uint32_t, uint64_t>, Time> g_queueEntered;
+void WifiQueueObservation(uint32_t node, uint32_t ac, Ptr<WifiMacQueue> queue,
+                          std::string event, Ptr<const WifiMpdu> mpdu)
+{
+    const auto uid=mpdu->GetPacket()->GetUid();
+    const auto key=std::make_tuple(node,ac,uid);
+    std::ostringstream details;
+    details << "packet_uid=" << uid << ";ac=" << ac << ";queue_packets=" << queue->GetNPackets()
+            << ";queue_bytes=" << queue->GetNBytes() << ";source=WifiMacQueue." << event;
+    if (event=="enqueue") g_queueEntered[key]=Simulator::Now();
+    else {
+        auto found=g_queueEntered.find(key);
+        if (found!=g_queueEntered.end()) {
+            details << ";residence_ms=" << (Simulator::Now()-found->second).GetSeconds()*1000;
+            g_queueEntered.erase(found);
+        }
+    }
+    LogEvent("wifi_mac_queue_"+event,g_nodeNames.at(node),"",mpdu->GetPacket()->GetSize(),
+             queue->GetNPackets(),details.str());
 }
 
 void
@@ -1705,6 +1726,14 @@ main(int argc, char* argv[])
             AttachWifiAntenna(radioDevices.Get(index));
             Ptr<WifiNetDevice> device = DynamicCast<WifiNetDevice>(radioDevices.Get(index));
             NS_ABORT_MSG_IF(!device, "expected WifiNetDevice");
+            for (AcIndex ac : {AC_BE,AC_BK,AC_VI,AC_VO}) {
+                auto txop=device->GetMac()->GetQosTxop(ac);
+                if (!txop) continue;
+                auto queue=txop->GetWifiMacQueue();
+                for (const auto& trace : {std::pair{"Enqueue","enqueue"}, {"Dequeue","dequeue"}, {"Drop","drop"}})
+                    queue->TraceConnectWithoutContext(trace.first,MakeBoundCallback(&WifiQueueObservation,
+                        index,uint32_t(ac),queue,std::string(trace.second)));
+            }
             device->GetPhy()->TraceConnectWithoutContext(
                 "MonitorSnifferRx", MakeBoundCallback(&WifiMonitorRx, index));
             device->GetPhy()->TraceConnectWithoutContext(

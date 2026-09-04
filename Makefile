@@ -16,11 +16,9 @@ build:
 run-base:
 	./scripts/product/run_5uav_base.sh
 
-run-network:
-	./scripts/product/run_network.sh
+run-network: demo-town01
 
-run-town01:
-	./scripts/product/run_town01_full_stack.sh
+run-town01: demo-town01
 
 stop:
 	./scripts/product/stop_all.sh
@@ -46,3 +44,30 @@ demo-rugged:
 
 demo-stop:
 	./scripts/product/stop_all.sh
+
+.PHONY: prepare-customer demo-customer operator gcs native-sources native-maps native-cache-study native-matrix
+OPERATOR_DURATION ?= 900
+
+prepare-customer:
+	./scripts/product/prepare_customer_scene.sh
+
+demo-customer:
+	BAS_NATIVE_FIVE_SCENARIO=customer BAS_NATIVE_FIVE_GUI="$(DEMO_GUI)" ./network/ns3/run_native_radio_five_uav.sh
+
+operator:
+	BAS_NATIVE_FIVE_SCENARIO="$(DEMO_SCENARIO)" BAS_NATIVE_OPERATOR_SECONDS="$(OPERATOR_DURATION)" BAS_NATIVE_FIVE_GUI="$(DEMO_GUI)" ./network/ns3/run_native_radio_five_uav.sh
+
+gcs:
+	docker exec -it bas-v2-native-radio-five-uav ip netns exec ams-gcs /home/ubuntu/.local/bin/mavproxy.py --master=udpout:127.0.0.1:14551 --master=udpout:127.0.0.1:14552 --master=udpout:127.0.0.1:14553 --master=udpout:127.0.0.1:14554 --master=udpout:127.0.0.1:14555
+
+native-sources:
+	BAS_NATIVE_SOURCES_CAMPAIGN=1 ./network/ns3/run_sionna_wifi_five_uav.sh
+
+native-maps:
+	BAS_NATIVE_STUDY=maps ./network/ns3/run_sionna_wifi_five_uav.sh
+
+native-cache-study:
+	BAS_NATIVE_STUDY=cache ./network/ns3/run_sionna_wifi_five_uav.sh
+
+native-matrix:
+	BAS_NATIVE_STUDY=matrix ./network/ns3/run_sionna_wifi_five_uav.sh

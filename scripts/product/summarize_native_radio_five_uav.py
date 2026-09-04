@@ -2507,9 +2507,13 @@ def summarize_native_contention(
     for row in events:
         name = str(row.get("event"))
         node = str(row.get("node"))
-        if name.startswith("radio_queue_"):
+        if name.startswith(("radio_queue_", "wifi_mac_queue_")):
             by_node[node][name] += 1
             value = row.get("value")
+            if name.startswith("wifi_mac_queue_"):
+                if isinstance(value,float): queue_depths[node].append(value)
+                residence=re.search(r"residence_ms=([-+0-9.eE]+)",str(row.get("details","")))
+                if residence and name=="wifi_mac_queue_dequeue": queue_residence_ms[node].append(float(residence.group(1)))
             if name in {"radio_queue_depth", "radio_queue_enqueue"} and isinstance(value, float):
                 queue_depths[node].append(value)
             if name == "radio_queue_dequeue" and isinstance(value, float):
@@ -2552,7 +2556,7 @@ def summarize_native_contention(
     wifi = stats.get("radio_backend") == "wifi"
     write_json(metrics / "native_queue_summary.json", {
         "source": (
-            "Wi-Fi MAC queue counters are unavailable in this trace set"
+            "native WifiMacQueue Enqueue/Dequeue/Drop; depth is per-AC callback occupancy; residence includes backoff/retry until removal" if queue_rows else "unavailable: run predates native Wi-Fi queue traces"
             if wifi
             else "public AlohaNoackNetDevice Queue attribute and public Queue traces"
         ),
@@ -2863,6 +2867,7 @@ def main() -> int:
     )
     screenshots = screenshot_status(run_dir, events, scenario_config)
     native_sources = summarize_native_sources(run_dir, events)
+    summarize_native_contention(run_dir, events, stats)
     causal = summarize_causal_link_probes(run_dir, scenario, scenario_config, events)
     one_uav = None
     if args.one_uav_run:
