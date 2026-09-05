@@ -142,15 +142,30 @@ def native_maps(csv_path: Path, run_dir: Path) -> int:
                   "js_linear":j/s}
     for data in (baseline, jammer):
         data["conditional_availability"] = np.where(np.isfinite(data["sinr_db"]), data["sinr_db"]>=10, np.nan)
+        # Presentation only: retain raw powers in CSV; explicitly mask no useful path.
+        for metric in data:
+            data[metric] = np.where(s > 0, data[metric], np.nan)
     delta = {k:jammer[k]-baseline[k] for k in baseline}
     directory = run_dir/"heatmaps"
     directory.mkdir(parents=True, exist_ok=True)
     units = dict(rssi_dbm="dBm (sum S+J+N)", sinr_db="dB", js_linear="J/S linear power ratio", conditional_availability="SINR >= 10 dB; engineering criterion, not PDR")
     for phase, values in (("baseline",baseline),("jammer",jammer),("delta",delta)):
         for metric, matrix in values.items():
+            reference = np.concatenate([baseline[metric].ravel(), jammer[metric].ravel()])
+            reference = reference[np.isfinite(reference)]
+            vmin, vmax = (float(reference.min()), float(reference.max())) if reference.size else (0, 1)
+            if metric == "conditional_availability":
+                vmin, vmax = 0, 1
+            if phase == "delta":
+                finite = matrix[np.isfinite(matrix)]
+                extent = max(float(np.max(np.abs(finite))) if finite.size else 0, 1e-9)
+                vmin, vmax = -extent, extent
+            elif vmin == vmax:
+                vmax = vmin + 1
             fig, ax = plt.subplots(figsize=(7,5))
             shown = ax.imshow(np.ma.masked_invalid(matrix), origin="lower",
-                extent=(xs[0],xs[-1],ys[0],ys[-1]), aspect="equal")
+                extent=(xs[0],xs[-1],ys[0],ys[-1]), aspect="equal", vmin=vmin, vmax=vmax,
+                cmap="coolwarm" if phase == "delta" else "viridis", interpolation="nearest")
             fig.colorbar(shown, ax=ax, label=units[metric] if phase != "delta" else "change: "+units[metric].replace("dBm", "dB"))
             ax.set(xlabel="x (m)", ylabel="y (m)", title=f"{phase}: {metric}\nNative Sionna received-PSD prediction, z=2 m")
             fig.tight_layout()

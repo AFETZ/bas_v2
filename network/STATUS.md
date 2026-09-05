@@ -1,6 +1,6 @@
 # Product Status
 
-Updated: 2026-09-05. Current branch: release/bas-v2-rc1.
+Updated: 2026-09-05. RC1 reference branch: release/bas-v2-rc1; demo work: demo/bas-v2-rc1.
 Original native-radio-wifi worktree and its user edits were preserved.
 
 software_release_status=verified (local software RC, measured reference envelope)
@@ -64,3 +64,23 @@ Use doc/USER_GUIDE.md for endpoints, maps/cache/matrix and troubleshooting.
 Use doc/VALIDATION_REPORT.md and doc/DELIVERY_SCOPE.md for scopes and failed diagnostics.
 Next hardware step: connect an authorized safe FC bench and run REQUEST_MESSAGE through
 the same gateway; retain hardware_validation_status=blocked_external until actually tested.
+
+## Recorded internal demonstration
+
+Package: /home/bas/bas_v2-demo/rc1-2026-09-05; source base 263dfd5.
+Five actual scenarios recorded as MP4 plus a 13:37.120 combined film: H.264,
+1920x1080/25 FPS, five chapters, Russian captions/SRT. Continuous Gazebo and
+MAVProxy recordings, source-time mapping, R1-R10 coverage and reports stay outside Git.
+Five takeoffs/LAND/auto-disarm, 50/50 parallel ACKs, 20 multicast roots/100 deliveries;
+eight native source cases and separate native maps; serial/PTy, TCP and UDP real
+SITL UART ACKs, TCP disconnect/reconnect, native stop while SITL/Gazebo/UART remain.
+Physical FC remains absent; the three release status fields above are unchanged.
+Capture overhead is measured: flight 01 FPS 19.37, RTF .776, steady ns-3 lag
+p95/max 76.77/541.25 ms; flight 02 FPS 24.68, RTF .988, lag 71.92/382.96 ms.
+Both demo flight runs failed existing real-time gates; these are not new RC1 PASSes.
+Other recordings: FPS 24.49-24.79, RTF .982-.993; cold lag is retained separately.
+Demo geometry labels use actual geometry_summary bounds: 163.197 m external mesh
+z extent; synthetic 10x10 km field/hills and 15-storey tower are explicitly identified.
+Focused affected tests: 21 passed. All six videos decoded without errors; beginning,
+middle, end and key action/ACK/recovery frames inspected. Commands and limits are in
+doc/DEMO_GUIDE.md; CAVISE redistribution remains unresolved and this package is internal.

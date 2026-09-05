@@ -71,3 +71,18 @@ native-cache-study:
 
 native-matrix:
 	BAS_NATIVE_STUDY=matrix ./network/ns3/run_sionna_wifi_five_uav.sh
+
+.PHONY: demo-record demo-record-all demo-video
+SCENARIO ?= 01
+DEMO_OUTPUT ?= /home/bas/bas_v2-demo/rc1-2026-09-05
+
+demo-record:
+	python3 scripts/product/demo_record.py --scenario "$(SCENARIO)" --output "$(DEMO_OUTPUT)"
+
+demo-record-all:
+	python3 scripts/product/demo_record.py --scenario all --output "$(DEMO_OUTPUT)"
+
+demo-video:
+	python3 scripts/product/demo_prepare_video.py --output "$(DEMO_OUTPUT)"
+	python3 scripts/product/demo_video.py --output "$(DEMO_OUTPUT)"
+	python3 scripts/product/demo_finish_video.py --output "$(DEMO_OUTPUT)"
