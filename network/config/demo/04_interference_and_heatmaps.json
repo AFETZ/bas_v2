@@ -1,0 +1,22 @@
+{
+  "id": "04_interference_and_heatmaps",
+  "title": "Помехи, направленность, спектр и карты",
+  "world": "town01",
+  "requirements": [
+    "R3",
+    "R4",
+    "R5"
+  ],
+  "phases": [
+    "baseline",
+    "continuous",
+    "direction_front",
+    "direction_back",
+    "pulsed",
+    "sweep",
+    "multiple",
+    "nonoverlap"
+  ],
+  "capture_fps": 25,
+  "physical_fc": "blocked_external"
+}

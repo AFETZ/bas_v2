@@ -353,6 +353,11 @@ class FlightHarness:
                 key_name = (channel, system_id, message_type)
                 self.latest[key_name] = message
                 self.latest_at_ns[key_name] = now_ns
+                if os.environ.get("BAS_DEMO_RECORD") == "1" and message_type in {"HEARTBEAT", "COMMAND_ACK", "GLOBAL_POSITION_INT"}:
+                    append_jsonl(self.run_dir / "logs/demo_mavlink.jsonl", dict(
+                        monotonic_ns=now_ns, channel=channel, uav=system_id,
+                        frame_hex=bytes(message.get_msgbuf()).hex(),
+                        message=message.to_dict()))
                 if message_type == "COMMAND_ACK":
                     self.acks[(channel, system_id, int(message.command))] = (message, now_ns)
                 elif message_type == "PARAM_VALUE":

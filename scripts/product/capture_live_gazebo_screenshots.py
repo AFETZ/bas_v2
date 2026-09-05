@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import os
+import signal
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +19,7 @@ import rclpy
 import yaml
 from rclpy.node import Node
 from sensor_msgs.msg import Image
+from inject_native_radio_runtime_cameras import TOUR_CAMERAS
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -223,6 +225,9 @@ class Capture(Node):
         self.args = args
         self.config = load_capture_config(args.scenario_config)
         self.cameras = self.config["cameras"]
+        if os.environ.get("BAS_DEMO_TOUR") == "1":
+            self.cameras.update({name: {**spec, "topic": f"/native_radio/{name}/image"}
+                                 for name, spec in TOUR_CAMERAS.items()})
         self.captures = self.config["captures"]
         if args.source_state:
             for phase, stem in (("jammer_active", "07_jammer_active"), ("jammer_recovery", "08_jammer_recovery")):
@@ -232,6 +237,17 @@ class Capture(Node):
         self.done: set[str] = set()
         self.last_phase: str | None = None
         self.phase_seen_monotonic_ns = 0
+        self.video_writers = {}
+        self.video_counts = {}
+        self.video_log = None
+        self.runtime_log = None
+        if args.video_directory:
+            args.video_directory.mkdir(parents=True, exist_ok=True)
+            if os.geteuid() == 0:
+                os.chown(args.video_directory, int(os.environ.get("BAS_NATIVE_FIVE_HOST_UID", 0)),
+                         int(os.environ.get("BAS_NATIVE_FIVE_HOST_GID", 0)))
+            self.video_log = (args.video_directory / "frames.jsonl").open("w", buffering=1)
+            self.runtime_log = (args.video_directory / "runtime_snapshots.jsonl").open("w", buffering=1)
         for name, camera in self.cameras.items():
             self.create_subscription(
                 Image,
@@ -242,9 +258,54 @@ class Capture(Node):
         self.create_timer(0.2, self.poll)
 
     def frame(self, camera: str, message: Image) -> None:
-        self.frames[camera] = (message, time.monotonic_ns())
+        received = time.monotonic_ns()
+        self.frames[camera] = (message, received)
+        if self.video_log:
+            if message.encoding.lower() not in {"rgb8", "bgr8"}:
+                raise RuntimeError(f"Unsupported video encoding: {message.encoding}")
+            pixels = np.frombuffer(message.data, dtype=np.uint8).reshape(message.height, message.step)
+            pixels = pixels[:, :message.width * 3].reshape(message.height, message.width, 3)
+            if message.encoding.lower() == "rgb8":
+                pixels = cv2.cvtColor(pixels, cv2.COLOR_RGB2BGR)
+            if camera not in self.video_writers:
+                writer = cv2.VideoWriter(str(self.args.video_directory / f"{camera}.avi"),
+                                         cv2.VideoWriter_fourcc(*"MJPG"), self.args.video_fps,
+                                         (message.width, message.height))
+                if not writer.isOpened():
+                    raise RuntimeError("Cannot open continuous Gazebo video writer")
+                self.video_writers[camera] = writer
+                self.video_counts[camera] = 0
+            self.video_writers[camera].write(pixels)
+            try:
+                phase = self.args.phase_file.read_text().strip()
+            except OSError:
+                phase = "нет данных"
+            positions, _, _, tracker_time = load_positions(self.args.node_state)
+            self.video_log.write(json.dumps(dict(run_id=self.args.run_id, camera=camera,
+                frame=self.video_counts[camera], monotonic_ns=received, wall_time_s=time.time(),
+                simulation_time_s=message.header.stamp.sec + message.header.stamp.nanosec / 1e9,
+                phase=phase, positions=positions, tracker_wall_time_s=tracker_time)) + "\n")
+            self.video_counts[camera] += 1
+
+    def close_video(self):
+        for writer in self.video_writers.values():
+            writer.release()
+        if self.video_log:
+            self.video_log.close()
+        if self.runtime_log:
+            self.runtime_log.close()
 
     def poll(self) -> None:
+        if self.runtime_log:
+            run_dir = self.args.output.parent
+            heartbeat = run_dir / "logs/ns3.ready.heartbeat"
+            snapshot = dict(monotonic_ns=time.monotonic_ns(), wall_time_s=time.time(),
+                native_heartbeat_wall_age_s=time.time()-heartbeat.stat().st_mtime if heartbeat.exists() else None)
+            endpoint = run_dir / "external_endpoint/metrics.json"
+            if endpoint.exists():
+                try: snapshot['external_endpoint'] = json.loads(endpoint.read_text())
+                except (OSError, ValueError): pass
+            self.runtime_log.write(json.dumps(snapshot) + "\n")
         if self.args.stop_file.exists():
             self.destroy_node()
             rclpy.shutdown()
@@ -378,13 +439,17 @@ def main() -> int:
     parser.add_argument("--stop-file", type=Path, required=True)
     parser.add_argument("--source-state", type=Path)
     parser.add_argument("--scenario-config", type=Path, default=DEFAULT_SCENARIO_CONFIG)
+    parser.add_argument("--video-directory", type=Path)
+    parser.add_argument("--video-fps", type=int, default=25)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     rclpy.init()
     capture = Capture(args)
+    signal.signal(signal.SIGTERM, lambda *_: args.stop_file.touch())
     try:
         rclpy.spin(capture)
     finally:
+        capture.close_video()
         if rclpy.ok():
             capture.destroy_node()
             rclpy.shutdown()

@@ -4,6 +4,7 @@ Run inside ams-gcs. MAVProxy uses udpout:127.0.0.1:14551 through :14555.
 """
 import argparse
 import json
+import os
 import selectors
 import signal
 import socket
@@ -52,6 +53,8 @@ def main():
                     if i not in clients or source[0]!=endpoint_ip(i):
                         drops+=1;continue
                     for record in h.transport_receivers[('control',i)].ingest(data,time.monotonic_ns()):
+                        if os.environ.get('BAS_DEMO_RECORD') == '1':
+                            h._consume_mavlink('control', i, [record], source, time.monotonic_ns())
                         if i in peers:
                             try: clients[i].sendto(record,peers[i])
                             except BlockingIOError: drops+=1

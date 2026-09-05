@@ -1,0 +1,18 @@
+{
+  "id": "05_external_interface_and_operating_envelope",
+  "title": "Внешние интерфейсы и границы применения",
+  "world": "customer",
+  "requirements": [
+    "R6",
+    "R7",
+    "R9",
+    "R10"
+  ],
+  "phases": [
+    "serial",
+    "tcp",
+    "udp"
+  ],
+  "capture_fps": 25,
+  "physical_fc": "blocked_external"
+}

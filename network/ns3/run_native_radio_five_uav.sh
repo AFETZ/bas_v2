@@ -48,6 +48,10 @@ run_in_container() {
     "${gpu_args[@]}" \
     "${gui_args[@]}" \
     -e BAS_NATIVE_FIVE_IN_CONTAINER=1 \
+    -e BAS_DEMO_RECORD="${BAS_DEMO_RECORD:-0}" \
+    -e BAS_DEMO_TOUR="${BAS_DEMO_TOUR:-0}" \
+    -e BAS_DEMO_CHAPTER="${BAS_DEMO_CHAPTER:-}" \
+    -e BAS_DEMO_EXTERNAL="${BAS_DEMO_EXTERNAL:-}" \
     -e BAS_SOURCE_HEAD="$(git -C "$ROOT_DIR" rev-parse HEAD)" \
     -e BAS_SOURCE_DIRTY="$(git -C "$ROOT_DIR" status --porcelain | wc -l)" \
     -e BAS_NATIVE_PROPAGATION_PROFILE="${BAS_NATIVE_PROPAGATION_PROFILE:-sionna}" \
@@ -345,8 +349,11 @@ PY
 mkdir -p "$RUN_DIR"/{logs,metrics,pcap,screenshots,plots} "$UART_DIR" "$WORK_DIR"
 printf 'Starting native five-UAV demo: scenario=%s map=%s gui=%s run=%s\n' \
   "$SCENARIO_KEY" "$MAP_ID" "$GUI" "$RUN_ID"
+camera_args=()
+[[ "${BAS_DEMO_RECORD:-0}" == 1 ]] && camera_args+=(--video-fps 25)
+[[ "${BAS_DEMO_TOUR:-0}" == 1 ]] && camera_args+=(--tour)
 python3 "$ROOT_DIR/scripts/product/inject_native_radio_runtime_cameras.py" \
-  --world "$WORLD" --fragment "$CAMERA_FRAGMENT" --output "$LAUNCH_WORLD"
+  --world "$WORLD" --fragment "$CAMERA_FRAGMENT" --output "$LAUNCH_WORLD" "${camera_args[@]}"
 printf '%q ' "$0" "$@" > "$RUN_DIR/command.txt"
 printf '\n' >> "$RUN_DIR/command.txt"
 printf 'preflight\n' > "$PHASE_FILE"
@@ -586,6 +593,20 @@ done
 
 for index in "${UAV_INDICES[@]}"; do
   instance=$((index - 1))
+  if [[ "$index" == 1 && -n "${BAS_DEMO_EXTERNAL:-}" ]]; then
+    case "$BAS_DEMO_EXTERNAL" in
+      udp) endpoint_args=("UDP4-DATAGRAM:127.0.0.1:14560,bind=127.0.0.1:14561,reuseaddr") ;;
+      tcp) endpoint_args=("TCP4-LISTEN:14561,reuseaddr") ;;
+      serial) endpoint_args=() ;;
+      *) printf 'Invalid software demonstration endpoint\n' >&2; exit 2 ;;
+    esac
+    if (( ${#endpoint_args[@]} )); then
+      setsid socat -b 4096 "${endpoint_args[@]}" "FILE:$UART_DIR/control-adapter-0,b115200,raw,echo=0" \
+        > "$RUN_DIR/logs/demo_endpoint_bridge.log" 2>&1 &
+      managed_pids+=("$!")
+      printf '%s\n' "$!" > "$RUN_DIR/logs/demo_endpoint_bridge.pid"
+    fi
+  fi
   for channel in control payload; do
     [[ ",$ACTIVE_UART_CHANNELS," == *,$channel,* ]] || continue
     if [[ "$index" == 1 && "$channel" == control && -n "${BAS_NATIVE_EXTERNAL_CONFIG:-}" ]]; then
@@ -698,12 +719,15 @@ for index in "${UAV_INDICES[@]}"; do
   }
 done
 
-for camera in overview obstacle uav_focus; do
+recording_cameras=(overview obstacle uav_focus)
+[[ "${BAS_DEMO_TOUR:-0}" == 1 ]] && recording_cameras+=(customer_wide tower)
+for camera in "${recording_cameras[@]}"; do
   setsid ros2 run ros_gz_image image_bridge "/native_radio/$camera/image" \
     > "$RUN_DIR/logs/gazebo_${camera}_image_bridge.log" 2>&1 &
   managed_pids+=("$!")
 done
 capture_source_args=()
+[[ "${BAS_DEMO_RECORD:-0}" == 1 ]] && capture_source_args+=(--video-directory "$RUN_DIR/video" --video-fps 25)
 [[ -n "${BAS_NATIVE_SOURCES:-}" ]] && capture_source_args+=(--source-state "$RUN_DIR/logs/native_sources.json.state")
 setsid python3 -u "$ROOT_DIR/scripts/product/capture_live_gazebo_screenshots.py" \
   --run-id "$RUN_ID" --output "$RUN_DIR/screenshots" --node-state "$NODE_STATE" \
@@ -781,17 +805,21 @@ if [[ "${BAS_NATIVE_OPERATOR_SECONDS:-0}" != 0 ]]; then
   ip netns exec ams-gcs python3 -u "$ROOT_DIR/scripts/product/native_operator_bridge.py" \
     --run-dir "$RUN_DIR" --node-state "$NODE_STATE" --duration-s "$BAS_NATIVE_OPERATOR_SECONDS" \
     > "$RUN_DIR/logs/operator_bridge.log" 2>&1
-  exit 0
+  [[ "${BAS_DEMO_CHAPTER:-}" != 05 ]] && exit 0
 fi
 
 set +e
+if [[ "${BAS_DEMO_CHAPTER:-}" == 05 ]]; then
+SCENARIO_STATUS=0
+else
 ip netns exec ams-gcs python3 -u "$ROOT_DIR/scripts/product/native_radio_five_uav_scenario.py" run \
   --run-dir "$RUN_DIR" --node-state "$NODE_STATE" --phase-file "$PHASE_FILE" \
   --schedule-file "$SCHEDULE_FILE" --timeout-scale "$SCENARIO_TIMEOUT_SCALE" \
-  --mode="$SCENARIO_MODE" --uav-count="$UAV_COUNT" --channels="$ACTIVE_UART_CHANNELS" \
+  --mode="$SCENARIO_MODE" --demo-chapter="${BAS_DEMO_CHAPTER:-}" --uav-count="$UAV_COUNT" --channels="$ACTIVE_UART_CHANNELS" \
   --radio-profile="$RADIO_PROFILE" --scenario-config="$SCENARIO" \
   > "$RUN_DIR/logs/flight_scenario.log" 2>&1
 SCENARIO_STATUS=$?
+fi
 set -e
 if ((SCENARIO_STATUS != 0)); then
   printf 'Five-UAV scenario failed (rc=%s).\n' "$SCENARIO_STATUS" >&2
@@ -817,13 +845,15 @@ NS3_PID=""
 wait "$NS3_LOGGER_PID" || true
 NS3_LOGGER_PID=""
 ip netns exec ams-gcs ss -H -tunap > "$RUN_DIR/logs/gcs_sockets_after_stop.txt" 2>&1 || true
-if [[ "$SCENARIO_MODE" == product ]]; then
+if [[ "$SCENARIO_MODE" == product || "${BAS_DEMO_CHAPTER:-}" == 05 ]]; then
+  ps -eo pid,ppid,pgid,etimes,cmd > "$RUN_DIR/logs/processes_native_stopped.txt"
   ip netns exec ams-gcs python3 -u "$ROOT_DIR/scripts/product/native_radio_five_uav_scenario.py" no-bypass-probe \
     --run-dir "$RUN_DIR" --node-state "$NODE_STATE" --duration-s 10.5 \
     --radio-profile="$RADIO_PROFILE" --scenario-config="$SCENARIO" \
     --output "$RUN_DIR/metrics/no_bypass_summary.json" \
     > "$RUN_DIR/logs/no_bypass_probe.log" 2>&1
   ip netns exec ams-gcs ss -H -tunap > "$RUN_DIR/logs/gcs_sockets_after_10s.txt" 2>&1 || true
+  ps -eo pid,ppid,pgid,etimes,cmd > "$RUN_DIR/logs/processes_after_stop_probe.txt"
 fi
 
 for pid in "${capture_pids[@]}"; do

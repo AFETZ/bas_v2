@@ -16,13 +16,7 @@ sys.path.insert(0, str(ROOT/"scripts/product"))
 from prepare_native_sources import prepare
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--binary", type=Path, required=True)
-    parser.add_argument("--scene", type=Path, required=True)
-    parser.add_argument("--run-dir", type=Path, required=True)
-    args = parser.parse_args()
-    args.run_dir.mkdir(parents=True, exist_ok=True)
+def source_cases():
     original = yaml.safe_load((ROOT/"network/config/native_jammers_reference.yaml").read_text())
     cases = {"baseline": {"sources": []}, "continuous": copy.deepcopy(original)}
     for name in ("pulsed", "sweep", "direction_front", "direction_back", "multiple", "nonoverlap"):
@@ -41,6 +35,17 @@ def main():
         elif name == "nonoverlap":
             src["center_hz"] = 2462000000
         cases[name] = case
+    return cases
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--binary", type=Path, required=True)
+    parser.add_argument("--scene", type=Path, required=True)
+    parser.add_argument("--run-dir", type=Path, required=True)
+    args = parser.parse_args()
+    args.run_dir.mkdir(parents=True, exist_ok=True)
+    cases = source_cases()
     results = {}
     for name, case in cases.items():
         path = args.run_dir/name

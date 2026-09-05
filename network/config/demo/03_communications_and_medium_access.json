@@ -1,0 +1,20 @@
+{
+  "id": "03_communications_and_medium_access",
+  "title": "Два UART, P2P/P2MP и одновременный доступ",
+  "world": "customer",
+  "requirements": [
+    "R2",
+    "R3",
+    "R5",
+    "R9"
+  ],
+  "phases": [
+    "dual_uart",
+    "50_parallel",
+    "p2p",
+    "20_multicast_roots",
+    "simultaneous_uplink"
+  ],
+  "capture_fps": 25,
+  "physical_fc": "blocked_external"
+}

@@ -1,0 +1,19 @@
+{
+  "id": "01_fleet_and_customer_scene",
+  "title": "Пять БАС, НПУ и customer-сцена",
+  "world": "customer",
+  "requirements": [
+    "R1",
+    "R2",
+    "R8",
+    "R9",
+    "R10"
+  ],
+  "phases": [
+    "operator",
+    "flight",
+    "landing"
+  ],
+  "capture_fps": 25,
+  "physical_fc": "blocked_external"
+}

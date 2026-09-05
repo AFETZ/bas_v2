@@ -1,0 +1,17 @@
+{
+  "id": "02_propagation_and_obstruction",
+  "title": "Геометрия, экранирование и восстановление связи",
+  "world": "customer",
+  "requirements": [
+    "R3",
+    "R5",
+    "R7"
+  ],
+  "phases": [
+    "open",
+    "obstructed_candidate",
+    "return"
+  ],
+  "capture_fps": 25,
+  "physical_fc": "blocked_external"
+}

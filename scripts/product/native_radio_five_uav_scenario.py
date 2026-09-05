@@ -1636,7 +1636,23 @@ def run_scenario(args: argparse.Namespace) -> int:
     harness = NativeFiveUavHarness(args)
     output = Path(args.run_dir).resolve() / "metrics/scenario_summary.json"
     try:
-        if args.mode == "latency_diagnostic":
+        if getattr(args, "demo_chapter", "") == "03":
+            harness.phase("stationary_communication_smoke")
+            harness.wait_heartbeats()
+            harness.diagnose_dual_uart()
+            harness.phase("latency_one_shot_parallel")
+            for round_number in range(DIAGNOSTIC_OPERATIONS_PER_UAV):
+                harness.parallel_one_shot_operations(systems=UAV_IDS,
+                    command=int(harness.mavutil.mavlink.MAV_CMD_REQUEST_MESSAGE),
+                    params=[148.0, 0, 0, 0, 0, 0, 0],
+                    round_number=round_number, timeout_s=1.0)
+                harness.observe_for(1.0)
+            harness.additional_data_experiments()
+            harness.phase("communications_complete")
+            harness.observe_for(40)
+            harness.summary["status"] = "communications_complete"
+            summary = harness.summary
+        elif args.mode == "latency_diagnostic":
             channels = tuple(args.channels.split(","))
             harness.latency_diagnostics(args.uav_count, channels)
             harness.summary["status"] = "diagnostic_complete"
@@ -1736,6 +1752,7 @@ def parser() -> argparse.ArgumentParser:
     scenario.add_argument("--scenario-config", default=str(DEFAULT_SCENARIO_CONFIG))
     scenario.add_argument("--timeout-scale", type=float, default=1.0)
     scenario.add_argument("--mode", choices=("product", "latency_diagnostic"), default="product")
+    scenario.add_argument("--demo-chapter", default="")
     scenario.add_argument("--uav-count", type=int, choices=(1, 5), default=5)
     scenario.add_argument("--channels", default="control,payload")
     scenario.add_argument(
