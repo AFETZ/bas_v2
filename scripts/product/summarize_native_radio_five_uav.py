@@ -2773,6 +2773,7 @@ def export_received_energy(run_dir: Path, events: list[dict[str, Any]], stats: d
 def write_latency_diagnostic_report(run_dir: Path, observer_reference: Path | None = None) -> int:
     scenario = read_json(run_dir / "metrics/scenario_summary.json", {})
     events = native_events(run_dir / "logs/native_radio_events.csv")
+    native_sources = summarize_native_sources(run_dir, events)
     export_wifi_monitor(run_dir, events)
     latency = summarize_latency_operations(run_dir, scenario)
     load = summarize_adapter_load(run_dir, scenario)
@@ -2962,9 +2963,16 @@ def summarize_native_sources(run_dir: Path, events: list[dict[str, Any]]) -> dic
     switches=[dict(e, x=None, y=None, z=None, coordinate_reason="source switch has no mobility trace; position is configured in logs/native_sources.json") for e in events if e["event"] in {"jammer_on","jammer_off"}]
     result={"sources":switches,"configured_sources":read_json(run_dir/"logs/native_sources.json", {}),"windows":{},"measurement_scope":"native decoder/SignalArrival samples; application PDR needs distinct application offers",
         "units":{"time":"ns-3 seconds","foreign_power":"dBm, native SpectrumWifiPhy.SignalArrival","noise_interference":"dBm, native decoded MPDU sample","sinr":"dB, derived S/(I+N) on decoded samples"}}
-    if switches:
-        on=min(e["time_s"] for e in switches if e["event"]=="jammer_on")
-        off=max((e["time_s"] for e in switches if e["event"]=="jammer_off"),default=max(e["time_s"] for e in events))
+    on_times = [e["time_s"] for e in switches if e["event"] == "jammer_on"]
+    off_times = [e["time_s"] for e in switches if e["event"] == "jammer_off"]
+    complete_window = bool(on_times and off_times and max(off_times) > min(on_times))
+    result["window_availability"] = (
+        "observed_switch_boundaries" if complete_window else
+        "unavailable_incomplete_switch_boundaries" if switches else "no_switch_events"
+    )
+    if complete_window:
+        on = min(on_times)
+        off = max(off_times)
         for name,low,high in (("baseline",max(0,on-10),on),("active",on,off),("recovery",off,off+10)):
             selected=[e for e in events if low<=e["time_s"]<high]
             decoded=[e for e in selected if e["event"]=="wifi_monitor_rx"]
