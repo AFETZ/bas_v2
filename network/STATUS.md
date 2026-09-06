@@ -1,6 +1,6 @@
 # Product Status
 
-Updated: 2026-09-06. RC1: release/bas-v2-rc1; handover: feature/bas-v2-rc1-handover.
+Updated: 2026-09-06. RC1.1: feature/bas-v2-rc1-stabilization; frozen RC1: release/bas-v2-rc1.
 Original native-radio-wifi worktree and its user edits were preserved.
 
 software_release_status=limited (restored flight completed; 19/20 gates, timing failed)
@@ -118,3 +118,20 @@ C FPS/RTF/lag remain recording_performance.json values; A/B values never label C
 Video mtime/size still agree with previous complete decode; no remux/record/decode repeated.
 Checks for this handover: local document links, YAML semantic equality, git diff --check.
 Independent engineer and physical FC remain external; no people appointed or messages sent.
+
+## RC1.1 stabilization addendum
+
+Reporting fix 06b22939a6fe18ff9952b70e82da86faebf9027e obtains native_sources from the
+actual run; incomplete source windows remain unavailable. NameError reproduced on saved
+C/05. Focused report-branch tests: 17 passed; py_compile and git diff --check passed.
+Serial/TCP/UDP corrected reports live separately; original runner exit 2 and missing
+diagnostic verdict remain unchanged (corrected reporter exit 1). Old reports/raw retained.
+A/01, A/02, B lag p99: 4.380/51.124/111.075 ms; >50 ms: 1/396, 6/400, 22/395.
+Every B excess neighbours 2–7 channel computations; grouped synchronous cache updates
+are a supported hypothesis, not a proven avoidable cause. A/02/B compute totals both 538.
+Checked runtime sources/pins/load match; timeout scale differs 1/1/5; A/01 has one dirty path.
+Historical A ELF identities and producer IO/scheduler/throttling/GPU contention traces are
+missing. No confirmed runtime fix; no short diagnostics or final full reruns, no threshold edit.
+Runtime/image/physics/5 UAV/10 UART/geometry/load/cameras/sampling remain unchanged.
+Variant B: limited/pending/blocked_external/blocked_external statuses above remain in force.
+Report: doc/RC1_1_STABILIZATION.md; package: /home/bas/bas_v2-handover/rc1.1-2026-09-06/addendum.

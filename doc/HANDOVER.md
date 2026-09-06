@@ -2,7 +2,7 @@
 
 Дата: 2026-09-06. Продукт: пять БАС ArduPilot SITL/Gazebo и НПУ, native ns-3.48 Wi-Fi PHY/MAC с in-process Sionna RT. Функциональность RC1 заморожена. Release:
 `release/bas-v2-rc1`, **263dfd5b494a3471038af7e79687fd20ae482cfb**. Demo: `demo/bas-v2-rc1`, **70c51575ca45bddbfb0a94d5ec391af1f5aa462b** (предшествующий recording commit
-`b88818e`). Handover: `feature/bas-v2-rc1-handover`.
+`b88818e`). Handover: `feature/bas-v2-rc1-handover`. Дополнение [RC1.1](RC1_1_STABILIZATION.md): reporting исправлен; real-time limited сохранён.
 
 ## Что открыть и откуда получить
 
