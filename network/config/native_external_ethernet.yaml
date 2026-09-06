@@ -7,7 +7,8 @@ endpoint:
   bind: [127.0.0.1, 14560]
   peer: [127.0.0.1, 14561]
 # For TCP: kind: tcp_client; peer: [CONTROLLER_IP, PORT].
-# The external interface must be reachable from ams-uav1.
+# The external Ethernet socket uses the host network namespace; only the radio
+# socket is created in ams-uav1 by the native runner.
 radio:
   bind: [10.71.1.10, 14601]
   peer: [10.71.0.10, 14600]

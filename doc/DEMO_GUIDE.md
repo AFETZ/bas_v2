@@ -4,6 +4,13 @@
 Локальный внутренний демопакет: `/home/bas/bas_v2-demo/rc1-2026-09-05`.
 Физический FC не подключён: **software demonstration + hardware blocked**.
 
+Перед внутренней приёмкой откройте [HANDOVER](HANDOVER.md) и `viewing/INDEX.md`
+из отдельного лёгкого комплекта. Пять готовых роликов и общий фильм заморожены.
+Команды записи ниже описывают происхождение материалов; для этой передачи повторно
+их не выполнять. Метрики исходных RC1 испытаний (A), контрольного восстановления (B)
+и видеопрогонов (C) независимы. У C/01 и C/02 `real-time gate failed`; RTF/lag
+из A или B не относятся к их кадрам. 25 FPS — формат итогового файла.
+
 ## Команды
 
 Из корня checkout:
@@ -24,6 +31,12 @@ make stop
 python3 scripts/product/demo_video.py --output /absolute/demo_output --scenario 02
 python3 scripts/product/demo_finish_video.py --output /absolute/demo_output
 ```
+
+Эти команды перезаписывают выходы монтажа, а `demo_finish_video.py` повторно
+декодирует все фильмы. Применять их только в новой монтажной папке с сохранёнными
+исходниками и подтверждённым дефектом титров; исходный RC1 демопакет не использовать
+как output. Для текущей передачи перемонтаж не требуется: статусы 01/02 явно
+раскрыты в INDEX/этом руководстве, экранные capture FPS отделены от FPS файла.
 
 Нужны существующий pinned Docker runtime, подготовленные assets, NVIDIA,
 X11/GNOME Terminal для реального окна MAVProxy и host FFmpeg с libx264,
@@ -65,6 +78,18 @@ AVI использует индексную шкалу 25 FPS. Фактичес�
 capture до 19,4 FPS. Штатный performance gate не пройден; успешный полёт не
 превращает его в PASS. Полёт 02 также не прошёл performance gate: RTF 0,988,
 steady ns-3 lag p95 71,92 мс. Остальные значения находятся в INDEX и исходных reports.
+
+Проверка передачи также сохраняет исходные ненулевые коды: C/03 имеет `rc=2`,
+`functional_five_uav_native_path=failed` и failed gates lifecycle, flight/LAND,
+live Gazebo evidence и real-time. Это запись фазы связи; успешные 50 ACK/P2P/P2MP
+не закрывают gates полного полёта. У C/05 serial/TCP/UDP в `reports/*-runs.json`
+тоже `rc=2`: `logs/summary.log` фиксирует `NameError: name 'native_sources' is not defined`
+в `write_latency_diagnostic_report`. Это сохранённый дефект формирования отчёта
+диагностического режима, не исправленный в замороженном RC1; наблюдавшиеся
+ACK/reconnect/no-bypass не переименовывают run в passed.
+У C/04 восемь cases имеют `rc=0`, но полный flight gate к ним не присваивается.
+FPS/RTF/lag всех cases брать из `metrics/recording_performance.json`; он не содержит
+итогового PASS/FAIL для полного customer-run. Эти исторические результаты не меняются.
 
 UART payload — MAVLink, не видеопоток. Autonomy не доказывает доставку команд
 во время outage. LOS classification не выдумывается. Energy SINR отделён от

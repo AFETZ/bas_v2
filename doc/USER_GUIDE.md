@@ -27,14 +27,42 @@ make prepare-customer
 reference_tower.ply,reference_tower.obj,geometry_summary.json}`. Shapely устанавливается
 в отдельный pinned target. Геометрия не меняет каноническую Town01.
 
-Для offline-восстановления из локального delivery package загрузите
-исходники через `git clone --branch release/bas-v2-rc1 source.bundle bas_v2`, затем
-`runtime-image.tar` командой `docker load -i runtime-image.tar`, распакуйте
-`native-dependencies.tar.gz` и `scene-assets.tar.gz` в корень исходников, затем
-выполните preflight и `make prepare-customer`. Gazebo derivatives/customer XML
-содержат абсолютные runtime paths: после переноса их следует подготовить снова.
+Для приёмки из поставки используйте offline-путь ниже вместо клонирования GitHub.
+`software/` — полученный программный пакет, `source/` — **новый** каталог рядом с ним;
+локальные адреса стенда и отдельный просмотровый комплект описаны в [HANDOVER](HANDOVER.md).
+
+```bash
+PACKAGE=$(realpath software)
+git clone --branch release/bas-v2-rc1 "$PACKAGE/source.bundle" source
+test "$(git -C source rev-parse HEAD)" = 263dfd5b494a3471038af7e79687fd20ae482cfb
+docker load -i "$PACKAGE/runtime-image.tar"
+test "$(docker image inspect multiagent_simulation:latest --format '{{.Id}}')" = sha256:89d78eff9914b1644a1b01b793612e9ee8b19916c5a7bf5f578ba6d8bfbfafe5
+tar -xzf "$PACKAGE/native-dependencies.tar.gz" -C source
+tar -xzf "$PACKAGE/scene-assets.tar.gz" -C source
+cd source
+make demo-preflight DEMO_GUI=0 DEMO_BOOTSTRAP=1
+make prepare-customer
+```
+
+Не распаковывайте архивы поверх пользовательской установки. Gazebo derivatives/customer
+XML содержат абсолютные runtime paths: после переноса подготовьте их снова последней
+командой. Обе container mount destinations `/workspace/multiagent_simulation` и
+`/home/bas/bas_v2` получают **этот же восстановленный source**, второй — alias для
+совместимости. Старый host checkout не нужен. ROS/ArduPilot и host NVIDIA driver
+относятся к опубликованной основе image/стенда; посторонний PYTHONPATH не требуется.
 Архив dependencies сохраняет относительную ссылку `.python-deps-py310` вместе
 с её target. Runtime image по-прежнему требует NVIDIA driver на host.
+
+Контрольный полный запуск после подготовки (точный release-профиль, новый ID):
+
+```bash
+BAS_NATIVE_FIVE_RUN_ID=rc1-customer-$(date -u +%Y%m%dT%H%M%SZ) BAS_NATIVE_SOURCES=network/config/native_jammers_town01.yaml make demo-customer DEMO_GUI=0
+make stop
+```
+
+Дождитесь штатного завершения первой команды перед `make stop`. Непрерывную запись
+не включать; штатные одиночные кадры сохраняются. Человеческая приёмка —
+[HUMAN_ACCEPTANCE](HUMAN_ACCEPTANCE.md), физический FC — [FC_BENCH](FC_BENCH.md).
 
 ## Автоматический показ
 
