@@ -1,14 +1,25 @@
-# Launch-compatible five-UAV rock-obstruction scenario.
+# Launch-compatible five-UAV deterministic engineering-map scenario.
 schema_version: 1
 
 scenario:
   name: scenario_rock_demo
-  description: uav2 flies from a clear segment into radio shadow behind the shared Gazebo/Sionna blocker.
+  description: >-
+    Five-UAV obstruction scenario on a deterministic rugged engineering map;
+    Gazebo collision/visual geometry and Sionna RF geometry share the same OBJ
+    assets and ENU metre frame. This is not surveyed or customer-map terrain.
   map:
+    classification: deterministic_engineering_map
+    coordinate_frame: ENU_m
     world_file: rock_demo/rock_demo.sdf
-    size_m: [2000, 600]
-    terrain_height_variation_m: 0
-    building_height_limit_floors: 1
+    sionna_scene_xml: src/multiagent_simulation/worlds/rock_demo/sionna_scene.xml
+    bounds_m: {xmin: -5000.0, ymin: -5000.0, xmax: 5000.0, ymax: 5000.0}
+    size_m: [10000, 10000]
+    terrain_elevation_range_m: [0.0, 101.054]
+    terrain_height_variation_m: 101.054
+    gazebo_models: [engineering_terrain_visual, engineering_buildings_visual, radio_blocker]
+    building_count: 6
+    building_height_max_m: 72.0
+    customer_map_eligible: false
 
 base_simulation:
   launch_package: multiagent_simulation
@@ -24,6 +35,7 @@ base_simulation:
 command_post:
   id: cp
   role: command_post
+  gazebo_model_name: command_post
   position_m: [-500.0, -220.0, 20.0]
   orientation_quat_xyzw: [0.0, 0.0, 0.0, 1.0]
   antenna: omni
@@ -33,35 +45,40 @@ robots:
     role: uav
     instance: 0
     system_id: 1
-    position: [-400.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # Exact terrain-mesh elevation 5.077 m plus 2 m spawn clearance.
+    position: [-400.0, 0.0, 7.077440, 0.0, 0.0, 0.0]
     nominal_radio_position_m: [-400.0, 0.0, 80.0]
     antenna: omni
   - name: uav2
     role: uav
     instance: 1
     system_id: 2
-    position: [-300.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # Exact terrain-mesh elevation 7.692 m plus 2 m spawn clearance.
+    position: [-300.0, 0.0, 9.692120, 0.0, 0.0, 0.0]
     nominal_radio_position_m: [-300.0, 0.0, 80.0]
     antenna: omni
   - name: uav3
     role: uav
     instance: 2
     system_id: 3
-    position: [-300.0, 180.0, 0.0, 0.0, 0.0, 0.0]
+    # Exact terrain-mesh elevation 7.104 m plus 2 m spawn clearance.
+    position: [-300.0, 180.0, 9.104480, 0.0, 0.0, 0.0]
     nominal_radio_position_m: [-300.0, 180.0, 80.0]
     antenna: omni
   - name: uav4
     role: uav
     instance: 3
     system_id: 4
-    position: [500.0, -220.0, 0.0, 0.0, 0.0, 0.0]
+    # Exact terrain-mesh elevation 42.224 m plus 2 m spawn clearance.
+    position: [500.0, -220.0, 44.224256, 0.0, 0.0, 0.0]
     nominal_radio_position_m: [500.0, -220.0, 90.0]
     antenna: omni
   - name: uav5
     role: uav
     instance: 4
     system_id: 5
-    position: [800.0, 220.0, 0.0, 0.0, 0.0, 0.0]
+    # Exact terrain-mesh elevation 30.222 m plus 2 m spawn clearance.
+    position: [800.0, 220.0, 32.222064, 0.0, 0.0, 0.0]
     nominal_radio_position_m: [800.0, 220.0, 90.0]
     antenna: omni
 

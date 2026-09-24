@@ -1,0 +1,16 @@
+schema_version: 1
+namespace: ams-uav1
+uav_id: 1
+channel: control
+endpoint:
+  kind: udp
+  bind: [127.0.0.1, 14560]
+  peer: [127.0.0.1, 14561]
+# For TCP: kind: tcp_client; peer: [CONTROLLER_IP, PORT].
+# The external interface must be reachable from ams-uav1.
+radio:
+  bind: [10.71.1.10, 14601]
+  peer: [10.71.0.10, 14600]
+queues: {packets: 64, bytes: 65536, deadline_s: 1.0}
+watchdog_s: 2.0
+reconnect_s: 0.5

@@ -103,7 +103,12 @@ class PoseTracker:
 
     def set_jammer_enabled(self, enabled: bool) -> None:
         with self._lock:
-            self._jammer_enabled = bool(enabled)
+            normalized = bool(enabled)
+            if self._jammer_enabled != normalized:
+                self._jammer_enabled = normalized
+                # A control transition must be represented by a new immutable
+                # snapshot even inside the normal 100 ms snapshot cache window.
+                self._latest_snapshot = None
 
     def update_uav(self, node_id: str, message: Any) -> None:
         if node_id not in UAV_IDS:
@@ -198,16 +203,25 @@ class PoseTracker:
         with self._lock:
             if set(self._poses) != {*NODE_IDS, "jammer_m4"}:
                 return None
+            # DDS and Gazebo callbacks run on separate threads.  Capture the
+            # snapshot boundary only after taking their shared lock: a caller
+            # may have sampled ``now`` immediately before a callback records
+            # a pose.  A snapshot must never predate an included pose.
+            snapshot_now = max(
+                now,
+                time.monotonic_ns(),
+                *(int(item["pose_monotonic_ns"]) for item in self._poses.values()),
+            )
             if (
                 self._latest_snapshot is not None
-                and now - self._last_logged_ns < 100_000_000
+                and snapshot_now - self._last_logged_ns < 100_000_000
             ):
                 return self._latest_snapshot
             nodes = []
             raw_nodes = []
             for node_id in NODE_IDS:
                 raw_value = dict(self._poses[node_id])
-                age = now - int(raw_value["pose_monotonic_ns"])
+                age = snapshot_now - int(raw_value["pose_monotonic_ns"])
                 raw_value["freshness_age_ns"] = age
                 raw_value["stale"] = age < 0 or age > MAX_POSE_AGE_NS
                 raw_value["node_id"] = node_id
@@ -233,7 +247,7 @@ class PoseTracker:
                 )
                 nodes.append(value)
             raw_jammer = dict(self._poses["jammer_m4"])
-            jammer_age = now - int(raw_jammer["pose_monotonic_ns"])
+            jammer_age = snapshot_now - int(raw_jammer["pose_monotonic_ns"])
             raw_jammer["freshness_age_ns"] = jammer_age
             raw_jammer["stale"] = jammer_age < 0 or jammer_age > MAX_POSE_AGE_NS
             jammer = {
@@ -261,7 +275,7 @@ class PoseTracker:
             )
             snapshot = PoseSnapshot.create(
                 snapshot_sequence=self._sequence + 1,
-                snapshot_monotonic_ns=now,
+                snapshot_monotonic_ns=snapshot_now,
                 source_frame=SOURCE_FRAME,
                 transform_version=TRANSFORM_VERSION,
                 nodes=tuple(nodes),
@@ -277,7 +291,7 @@ class PoseTracker:
                         "node_state_seq": snapshot.snapshot_sequence,
                         "node_state_sha256": snapshot.snapshot_sha256,
                         "snapshot_monotonic_ns": snapshot.snapshot_monotonic_ns,
-                        "host_monotonic_ns": now,
+                        "host_monotonic_ns": snapshot_now,
                         "source_frame": SOURCE_FRAME,
                         "transform_version": TRANSFORM_VERSION,
                         "nodes": raw_nodes,
@@ -299,7 +313,7 @@ class PoseTracker:
                 )
             )
             self._log.flush()
-            self._last_logged_ns = now
+            self._last_logged_ns = snapshot_now
             return snapshot
 
 
@@ -666,13 +680,30 @@ def main() -> int:
                 break
         if initial is None:
             raise M4ValidationError("six-node/jammer ROS/Gazebo pose readiness timed out")
+        control = ControlReader(
+            args.control_dir, args.run_dir / "logs/m4_adapter_controls.jsonl"
+        )
+        fault_seed_cells: set[tuple[str, str]] = set()
+        fault_parallel_cells: set[tuple[str, str]] = set()
+        for path, command in control.poll():
+            action, detail = apply_control(
+                path,
+                command,
+                tracker,
+                None,
+                fault_seed_cells,
+                fault_parallel_cells,
+            )
+            if action == "deferred":
+                raise M4ValidationError("adapter bootstrap control is deferred")
+            control.record(path, action, detail)
+        initial = tracker.snapshot(time.monotonic_ns())
+        if initial is None:
+            raise M4ValidationError("adapter bootstrap pose snapshot is absent")
         adapter, client, injector = build_adapter(args, tracker, initial)
         tailer = PacketEventTailer(
             args.packet_events,
             max_line_bytes=int(contract["limits"]["max_packet_event_line_bytes"]),
-        )
-        control = ControlReader(
-            args.control_dir, args.run_dir / "logs/m4_adapter_controls.jsonl"
         )
         client.start()
         client_deadline = time.monotonic_ns() + 10_000_000_000
@@ -693,15 +724,12 @@ def main() -> int:
             },
         )
         deferred: dict[Path, dict[str, Any]] = {}
-        fault_seed_cells: set[tuple[str, str]] = set()
-        fault_parallel_cells: set[tuple[str, str]] = set()
         loop_period_ns = 5_000_000
         next_loop_tick_ns = time.monotonic_ns()
         while not stop.is_set() and not args.stop_file.exists():
-            started = time.monotonic_ns()
             rclpy.spin_once(node, timeout_sec=0.0)
             world_pose_source.raise_if_failed()
-            snapshot = tracker.snapshot(started)
+            snapshot = tracker.snapshot(time.monotonic_ns())
             if snapshot is not None:
                 adapter.update_poses(snapshot)
             for path, command in [*deferred.items(), *control.poll()]:

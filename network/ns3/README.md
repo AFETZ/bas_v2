@@ -7,6 +7,33 @@ The source here is project glue only. The ns-3 checkout and build products must
 remain outside source control under `.external/ns-3/` or another path supplied
 with `NS3_DIR`.
 
+## Explicit shared-medium targets
+
+`network/config/communication_qos.yaml` selects one of two independent
+targets. The default `stock_ns3_csma` builds `ams-tap-packet-engine-stock`
+against a pristine external `.external/ns-3-stock` ns-3.40 checkout. It uses
+native `CsmaNetDevice`, its bounded queue, stock backoff/retry behavior,
+TapBridge, PCAP, and Sionna-driven receive errors; it has no global scheduler
+or ingress shaping. Build it in the same runtime environment used for the
+Town01 run:
+
+```bash
+./network/ns3/build_ns3_tap_packet_engine_stock.sh
+```
+
+`centralized_priority_scheduler_over_csma_channel` remains a separate,
+explicitly custom project policy over a patched ns-3 tree. It is not a stock
+CSMA result. Both modes use the same real TAP/netns, five-SITL/ten-UART
+scenario and live Sionna RT state, but neither is a customer modem model.
+
+Each packet-engine run writes `metrics/medium_access_run.json` with the mode,
+source-tree provenance, patch/scheduler/shaping state, and the Sionna mapping
+metadata. Select a mode directly for the integrated run:
+
+```bash
+BAS_TOWN01_MEDIUM_ACCESS_MODE=stock_ns3_csma ./scripts/product/run_town01_full_stack.sh
+```
+
 ## Runtime Command
 
 ```bash

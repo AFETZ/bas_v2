@@ -1,14 +1,10 @@
-# Project-local Codex settings for the network/radio long-run workflow.
-# The VS Code extension and Codex CLI share Codex configuration, so these
-# settings apply when this trusted project is opened from either surface.
-
-project_doc_max_bytes = 65536
+project_doc_max_bytes = 16384
 
 [features]
-goals = true
-hooks = true
+goals = false
+hooks = false
 
 [agents]
-max_threads = 8
+max_threads = 1
 max_depth = 1
-job_max_runtime_seconds = 14400
+job_max_runtime_seconds = 3600

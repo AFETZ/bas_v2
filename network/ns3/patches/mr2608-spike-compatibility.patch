@@ -1,0 +1,64 @@
+diff --git a/src/spectrum/model/half-duplex-ideal-phy.cc b/src/spectrum/model/half-duplex-ideal-phy.cc
+index cfe581618..046211592 100644
+--- a/src/spectrum/model/half-duplex-ideal-phy.cc
++++ b/src/spectrum/model/half-duplex-ideal-phy.cc
+@@ -244,7 +244,7 @@ HalfDuplexIdealPhy::GetAntenna() const
+ }
+ 
+ void
+-HalfDuplexIdealPhy::SetAntenna(Ptr<AntennaModel> a)
++HalfDuplexIdealPhy::SetAntenna(Ptr<Object> a)
+ {
+     NS_LOG_FUNCTION(this << a);
+     m_antenna = a;
+@@ -279,7 +279,7 @@ HalfDuplexIdealPhy::StartTx(Ptr<Packet> p)
+         Time txTimeSeconds = m_rate.CalculateBytesTxTime(p->GetSize());
+         txParams->duration = txTimeSeconds;
+         txParams->txPhy = GetObject<SpectrumPhy>();
+-        txParams->txAntenna = m_antenna;
++        txParams->txAntenna = DynamicCast<AntennaModel>(m_antenna);
+         txParams->psd = m_txPsd;
+         txParams->data = m_txPacket;
+ 
+diff --git a/src/spectrum/model/half-duplex-ideal-phy.h b/src/spectrum/model/half-duplex-ideal-phy.h
+index c9a023371..89740d64d 100644
+--- a/src/spectrum/model/half-duplex-ideal-phy.h
++++ b/src/spectrum/model/half-duplex-ideal-phy.h
+@@ -173,7 +173,7 @@ class HalfDuplexIdealPhy : public SpectrumPhy
+      *
+      * @param a the Antenna Model
+      */
+-    void SetAntenna(Ptr<AntennaModel> a);
++    void SetAntenna(Ptr<Object> a);
+ 
+   private:
+     void DoDispose() override;
+@@ -199,7 +199,7 @@ class HalfDuplexIdealPhy : public SpectrumPhy
+     EventId m_endRxEventId; //!< End Rx event
+ 
+     Ptr<MobilityModel> m_mobility;  //!< Mobility model
+-    Ptr<AntennaModel> m_antenna;    //!< Antenna model
++    Ptr<Object> m_antenna;          //!< Antenna or phased-array model
+     Ptr<NetDevice> m_netDevice;     //!< NetDevice connected to this phy
+     Ptr<SpectrumChannel> m_channel; //!< Channel
+ 
+diff --git a/src/spectrum/model/sionna-rt-channel-model.cc b/src/spectrum/model/sionna-rt-channel-model.cc
+index 4ae6c0556..b112fd791 100644
+--- a/src/spectrum/model/sionna-rt-channel-model.cc
++++ b/src/spectrum/model/sionna-rt-channel-model.cc
+@@ -377,11 +377,11 @@ SionnaRtChannelModel::LoadScene(const py::module_ rt) const
+ 
+     if (isXmlFile)
+     {
+-        // Load from XML file using Scene constructor
++        // Load from an XML file using the public Sionna RT loader
+         NS_LOG_DEBUG("Loading scene from XML file: " << m_sceneConfigs.sceneName);
+-        py::object Scene = rt.attr("Scene");
+-        scene = Scene(py::arg("filename") = m_sceneConfigs.sceneName,
+-                      py::arg("merge_shapes") = m_sceneConfigs.mergeShapes);
++        py::object loadScene = rt.attr("load_scene");
++        scene = loadScene(m_sceneConfigs.sceneName,
++                          py::arg("merge_shapes") = m_sceneConfigs.mergeShapes);
+     }
+     else
+     {

@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Generate the deterministic, shared Gazebo/Sionna M4 scene bundle.
+"""Generate the legacy synthetic smoke-only Gazebo/Sionna M4 scene bundle.
 
 The generator intentionally uses only the Python standard library.  Every
 generated runtime byte is deterministic and the independent scene validator
-does not import this module.
+does not import this module. This fixture is excluded from the active customer
+map path and is not an implementation of the 10 km by 10 km requirement. Do
+not run or extend it for P3 product work.
 """
 
 from __future__ import annotations

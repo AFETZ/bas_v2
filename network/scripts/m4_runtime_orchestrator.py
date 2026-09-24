@@ -20,11 +20,12 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from network.radio_provider.provider import RuntimeFiles
+from network.radio_provider.provider import RuntimeFiles, build_sample_request
 from network.radio_provider.sionna_async import ProtocolIdentity, load_protocol_limits
 from network.radio_provider.sionna_async_service import (
     ExactWireLog,
     ProviderServiceConfig,
+    RealSionnaBackend,
     create_production_service,
 )
 from network.bridge.runtime_clock_beacon import beacon
@@ -86,6 +87,7 @@ ACTUAL_SITL_AUDIT_LOG_PATHS = frozenset(
         *(f"logs/actual_sitl_uav{index}.jsonl" for index in range(1, 6)),
     }
 )
+INITIAL_JAMMER_CONTROL_FILE = "000-initial-jammer-off.json"
 
 
 def canonical(value: Any) -> bytes:
@@ -114,6 +116,21 @@ def copy_exclusive(source: Path, destination: Path) -> str:
     payload = source.read_bytes()
     write_exclusive(destination, payload)
     return hashlib.sha256(payload).hexdigest()
+
+
+def write_initial_jammer_off_control(run_dir: Path) -> Path:
+    """Predeclare the off state required before any M4 control-link gate."""
+
+    path = run_dir / "raw/control/adapter" / INITIAL_JAMMER_CONTROL_FILE
+    write_exclusive(
+        path,
+        {
+            "action": "set_jammer_enabled",
+            "not_before_monotonic_ns": 0,
+            "enabled": False,
+        },
+    )
+    return path
 
 
 def identity_for_contract(contract_path: Path) -> tuple[ProtocolIdentity, str, str]:
@@ -500,6 +517,7 @@ def initialize_capacity(args: argparse.Namespace) -> int:
     contract_path = run_dir / "raw/m4_capacity_contract.json"
     write_exclusive(contract_path, contract)
     write_exclusive(run_dir / "raw/run_contract.json", contract)
+    write_initial_jammer_off_control(run_dir)
 
     # The frozen nominal workload starts exactly at the measurement boundary;
     # warm-up is reserved for the modeled-path reposition command.  Four
@@ -912,6 +930,7 @@ def initialize_causality(args: argparse.Namespace) -> int:
     }
     write_exclusive(run_dir / "raw/m4_causality_contract.json", contract)
     write_exclusive(run_dir / "raw/run_contract.json", contract)
+    write_initial_jammer_off_control(run_dir)
 
     flow_groups = {
         f"uav{index}": matrix_flow_group_identity(
@@ -1001,7 +1020,7 @@ def run_provider(args: argparse.Namespace) -> int:
     bundle = strict_json(ROOT / "network/config/m4_canonical_scene_bundle.json")
     executable = Path(__file__).resolve()
     try:
-        sionna_version = importlib.metadata.version("sionna")
+        sionna_version = importlib.metadata.version("sionna-rt")
         mitsuba_version = importlib.metadata.version("mitsuba")
     except importlib.metadata.PackageNotFoundError as exc:
         raise M4ValidationError(f"provider package identity missing: {exc}") from exc
@@ -1034,6 +1053,8 @@ def run_provider(args: argparse.Namespace) -> int:
         port=args.port,
         limits=load_protocol_limits(),
     )
+
+    _start_warmed_provider_service(service, files)
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_unused: stop.set())
     signal.signal(signal.SIGINT, lambda *_unused: stop.set())
@@ -1042,7 +1063,6 @@ def run_provider(args: argparse.Namespace) -> int:
         args=(args.clock_socket.resolve(), "sionna_worker", stop),
         daemon=True,
     )
-    service.start()
     beacon_thread.start()
     write_exclusive(
         args.ready_file,
@@ -1067,6 +1087,25 @@ def run_provider(args: argparse.Namespace) -> int:
         service.stop(timeout_s=10.0)
         beacon_thread.join(2.0)
     return 0
+
+
+def _start_warmed_provider_service(service: Any, files: RuntimeFiles) -> None:
+    """Warm the serving PathSolver before publishing provider readiness."""
+
+    backend = service.worker.backend
+    if not isinstance(backend, RealSionnaBackend):
+        raise M4ValidationError(
+            "provider factory did not retain the real Sionna backend"
+        )
+    warmup_request = build_sample_request(
+        files,
+        include_jammers=True,
+        all_uavs=False,
+        traffic_class="control",
+    )
+    warmup_request["deadline_ms"] = 30_000
+    backend.warm_up(warmup_request)
+    service.start()
 
 
 def run_beacon(args: argparse.Namespace) -> int:

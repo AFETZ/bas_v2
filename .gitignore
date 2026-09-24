@@ -11,8 +11,13 @@ terrain
 .idea
 .codex-log/
 .external/
+.external/cavise_maps/
 runs/
 artifacts/
+/metrics/*
+!/metrics/controlled_overload_summary.json
+!/metrics/meltdown_characterization.json
+!/metrics/event_profile.json
 network/swarm/.last_run
 dumpcore.sh_*.out
 dumpstack.sh_*.out

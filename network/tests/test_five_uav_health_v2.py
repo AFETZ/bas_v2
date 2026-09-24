@@ -966,6 +966,43 @@ class FiveUavHealthV2Tests(unittest.TestCase):
             write_complete_health_evidence(run_dir)
             self.assertEqual(five_uav_health_status(run_dir)["status"], "passed")
 
+    def test_raw_heartbeat_after_measurement_end_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp) / "heartbeat_after_end"
+            write_complete_health_evidence(run_dir)
+
+            def mutate(records: list[dict]) -> None:
+                completion = next(
+                    record
+                    for record in records
+                    if record.get("event") == "health_probe_complete"
+                )
+                heartbeat = next(
+                    record
+                    for record in reversed(records)
+                    if record.get("event") == "heartbeat"
+                    and record.get("system_id") == 1
+                )
+                heartbeat["monotonic_ns"] = (
+                    completion["measurement_ended_monotonic_ns"] + 1
+                )
+                heartbeat["wall_time_ns"] = max(
+                    int(heartbeat["wall_time_ns"]),
+                    int(completion["wall_time_ns"]) - 1,
+                )
+                heartbeat["wall_utc"] = datetime.fromtimestamp(
+                    heartbeat["wall_time_ns"] / 1_000_000_000, timezone.utc
+                ).isoformat()
+                records.sort(key=lambda record: int(record["monotonic_ns"]))
+                for sequence, record in enumerate(records, start=1):
+                    record["event_seq"] = sequence
+
+            rewrite_raw_and_rehash(run_dir, mutate)
+            result = five_uav_health_status(run_dir)
+
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("raw heartbeat wall age", "\n".join(result["details"]["failures"]))
+
     def test_summary_without_raw_events_cannot_pass(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             run_dir = Path(temp) / "summary_only"

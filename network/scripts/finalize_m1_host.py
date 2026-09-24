@@ -326,7 +326,7 @@ def write_fsynced(path: Path, payload: bytes) -> None:
         | os.O_EXCL
         | getattr(os, "O_NOFOLLOW", 0)
         | getattr(os, "O_CLOEXEC", 0),
-        0o400,
+        0o444,
     )
     try:
         view = memoryview(payload)
@@ -336,7 +336,7 @@ def write_fsynced(path: Path, payload: bytes) -> None:
                 raise OSError(f"short M1 publication write: {path}")
             view = view[written:]
         os.fsync(descriptor)
-        os.fchmod(descriptor, 0o400)
+        os.fchmod(descriptor, 0o444)
     finally:
         os.close(descriptor)
 
@@ -356,8 +356,11 @@ def freeze_and_fsync_tree(run_dir: Path) -> None:
     for path in sorted(run_dir.rglob("*"), reverse=True):
         if path.is_symlink():
             continue
-        path.chmod(0o400 if path.is_file() else 0o500)
-    run_dir.chmod(0o500)
+        # The final receipt is independently re-derived by the unprivileged
+        # image user.  Preserve immutability while keeping the published
+        # evidence traversable and readable through its read-only bind mount.
+        path.chmod(0o444 if path.is_file() else 0o555)
+    run_dir.chmod(0o555)
     for path in sorted(run_dir.rglob("*")):
         if not path.is_file() or path.is_symlink():
             continue
@@ -380,8 +383,10 @@ def make_tree_removable(root: Path) -> None:
         path for path in root.rglob("*") if path.is_dir() and not path.is_symlink()
     ]
     for directory in sorted(directories, key=lambda item: len(item.parts)):
-        directory.chmod(0o700)
-    root.chmod(0o700)
+        if directory.lstat().st_uid == os.geteuid():
+            directory.chmod(0o700)
+    if root.lstat().st_uid == os.geteuid():
+        root.chmod(0o700)
 
 
 def publish_durable(run_dir: Path, destination: Path, staging_root: Path, runs_root: Path) -> None:
@@ -777,7 +782,6 @@ def finalize(args: argparse.Namespace) -> dict[str, Any]:
         receipt_path,
         (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8"),
     )
-    freeze_and_fsync_tree(args.staging_run_dir)
     publish_durable(
         args.staging_run_dir,
         args.publish_run_dir,

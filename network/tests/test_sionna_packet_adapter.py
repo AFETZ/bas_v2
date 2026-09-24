@@ -1256,6 +1256,47 @@ class PacketSionnaAdapterTests(unittest.TestCase):
             any("569 < 570 successful ordinal slots" in item for item in missing_failures)
         )
 
+    def test_run_once_refreshes_deferred_control_before_uplink_backlog(self) -> None:
+        self.adapter = PacketSionnaAdapter(
+            dataclasses.replace(adapter_config(), global_query_spacing_ns=33_333_333),
+            poses(self.now),
+            self.transport,
+            self.writer,
+            Path(self.temp.name) / "audit-refresh-first.jsonl",
+            clock_ns=lambda: self.now,
+        )
+        event_path = Path(self.temp.name) / "events-refresh-first.jsonl"
+        event_path.write_text(
+            "".join(
+                json.dumps(
+                    packet_event(index, link=f"cp>uav{index}", traffic_class="control"),
+                    separators=(",", ":"),
+                )
+                + "\n"
+                for index in range(1, 6)
+            ),
+            encoding="utf-8",
+        )
+        tailer = PacketEventTailer(event_path)
+        self.adapter.run_once(tailer)
+
+        for sequence in range(6, 10):
+            self.now += 33_333_333
+            with event_path.open("a", encoding="utf-8") as stream:
+                stream.write(
+                    json.dumps(
+                        packet_event(sequence, link="uav1>cp", traffic_class="control"),
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                )
+            self.adapter.run_once(tailer)
+
+        self.assertEqual(
+            [item["directed_link_id"] for item in self.transport.submitted],
+            [f"cp-to-uav{index}-control" for index in range(1, 6)],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

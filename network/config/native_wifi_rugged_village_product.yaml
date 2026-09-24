@@ -1,0 +1,41 @@
+# Authoritative radio/Sionna parameters for the rugged-village product demo.
+schema_version: 1
+
+radio:
+  backend: wifi
+  profile: native_wifi_80211n_spectrum_rugged_village_v1
+  technology_specific_modem: false
+  standard: 802.11n
+  calibration: uncalibrated_standard_reference
+  non_unicast_mode: ErpOfdmRate6Mbps
+  antenna: isotropic_single_element_0_dbi
+  control_basic_rates: native_ns3_80211n_2_4ghz_basic_set
+  ssid: bas-native-rugged
+  channel_number: 1
+  carrier_hz: 2412000000
+  channel_width_mhz: 20
+  data_mode: HtMcs0
+  control_mode: ErpOfdmRate6Mbps
+  tx_power_w: 0.05
+  legacy_aloha_phy_rate_bps: 1000000
+  shared_spectrum_channels: 1
+  neighbor_discovery_mode: preconfigured_static_neighbors
+  reason: deterministic_external_endpoint_arp
+
+sionna:
+  solver_profile: rugged_village_los_specular_v1
+  max_depth: 1
+  los: true
+  specular_reflection: true
+  diffuse_reflection: false
+  diffraction: false
+  edge_diffraction: false
+  refraction: false
+  synthetic_array: true
+  seed: 42
+  max_number_of_paths: 90
+  cache_expiry_jitter_fraction: 0.5
+  channel_state_max_age_s: 8.0
+  endpoint_displacement_threshold_m: 5.0
+  readiness_lag_max_ms: 50.0
+  readiness_consecutive_samples: 3

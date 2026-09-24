@@ -1915,6 +1915,14 @@ class PacketSionnaAdapter:
 
         output = list(self.expire_states())
         output.extend(self.poll_results(max_results))
+        excluded = set(fault_seed_cells or ()) | set(fault_parallel_cells or ())
+        # Serve already-observed factual cells before new tailer input.  Under
+        # a global query spacing bound, continuous telemetry ingress would
+        # otherwise consume every newly-open slot and starve deferred control
+        # cells retained from a real packet burst.
+        for created in self.refresh_due_cells(excluded_cells=excluded):
+            if created.get("schema") == STATE_IPC_SCHEMA:
+                output.append(created)
         for event in tailer.poll(max_packet_events):
             link = event.get("directed_link")
             traffic_class = event.get("traffic_class")
@@ -1988,10 +1996,6 @@ class PacketSionnaAdapter:
                     raise PacketAdapterError(
                         "factual fault ingress did not create the exact pending pair"
                     )
-        excluded = set(fault_seed_cells or ()) | set(fault_parallel_cells or ())
-        for created in self.refresh_due_cells(excluded_cells=excluded):
-            if created.get("schema") == STATE_IPC_SCHEMA:
-                output.append(created)
         return tuple(output)
 
     def _build_query(

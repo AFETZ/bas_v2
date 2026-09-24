@@ -30,7 +30,10 @@ base_simulation:
 command_post:
   id: cp
   role: command_post
-  position_m: [0.0, 0.0, 20.0]
+  gazebo_model_name: command_post
+  # Interpolated from modelflughafen.dae at x=0, y=0.  This is a local ENU
+  # surface elevation, not the 446 m WGS84 altitude used by SITL home.
+  position_m: [0.0, 0.0, -0.2662]
   orientation_quat_xyzw: [0.0, 0.0, 0.0, 1.0]
   antenna: omni
 
@@ -40,6 +43,10 @@ robots:
     instance: 0
     system_id: 1
     dds_udp_port: 2019
+    master_tcp_port: 5760
+    sitl_udp_port: 5501
+    fdm_udp_port: 9002
+    mavproxy_out: 127.0.0.1:14601
     position: [0.0, -40.0, 2.0, 0.0, 0.0, 0.0]
     nominal_radio_position_m: [0.0, -40.0, 2.0]
     antenna: omni
@@ -48,6 +55,10 @@ robots:
     instance: 1
     system_id: 2
     dds_udp_port: 2020
+    master_tcp_port: 5770
+    sitl_udp_port: 5511
+    fdm_udp_port: 9012
+    mavproxy_out: 127.0.0.1:14602
     position: [20.0, -40.0, 2.0, 0.0, 0.0, 0.0]
     nominal_radio_position_m: [20.0, -40.0, 2.0]
     antenna: omni
@@ -56,6 +67,10 @@ robots:
     instance: 2
     system_id: 3
     dds_udp_port: 2021
+    master_tcp_port: 5780
+    sitl_udp_port: 5521
+    fdm_udp_port: 9022
+    mavproxy_out: 127.0.0.1:14603
     position: [40.0, -40.0, 2.0, 0.0, 0.0, 0.0]
     nominal_radio_position_m: [40.0, -40.0, 2.0]
     antenna: omni
@@ -64,6 +79,10 @@ robots:
     instance: 3
     system_id: 4
     dds_udp_port: 2022
+    master_tcp_port: 5790
+    sitl_udp_port: 5531
+    fdm_udp_port: 9032
+    mavproxy_out: 127.0.0.1:14604
     position: [60.0, -40.0, 2.0, 0.0, 0.0, 0.0]
     nominal_radio_position_m: [60.0, -40.0, 2.0]
     antenna: omni
@@ -72,6 +91,10 @@ robots:
     instance: 4
     system_id: 5
     dds_udp_port: 2023
+    master_tcp_port: 5800
+    sitl_udp_port: 5541
+    fdm_udp_port: 9042
+    mavproxy_out: 127.0.0.1:14605
     position: [80.0, -40.0, 2.0, 0.0, 0.0, 0.0]
     nominal_radio_position_m: [80.0, -40.0, 2.0]
     antenna: omni

@@ -4491,55 +4491,96 @@ def validate(
 
     for phase, epoch in (("positive", 1), ("recovery", 2)):
         for cell_id, cell in cells.items():
+            offers_by_payload_hash: dict[str, list[dict[str, Any]]] = defaultdict(list)
             for offered in offered_by_phase_cell[(phase, cell_id)]:
-                packet_events = engine_by_hash_epoch[
-                    (epoch, offered["transport_payload_sha256"])
-                ]
-                by_stage = {
-                    stage: [r for r in packet_events if r.get("event") == stage]
-                    for stage in ("ingress", "enqueue", "dequeue", "channel", "egress")
-                }
-                if any(len(by_stage[stage]) != 1 for stage in by_stage):
+                offers_by_payload_hash[offered["transport_payload_sha256"]].append(
+                    offered
+                )
+            for payload_hash, offers in offers_by_payload_hash.items():
+                packet_events_by_uid: dict[int, list[dict[str, Any]]] = defaultdict(
+                    list
+                )
+                invalid_uid_count = 0
+                for record in engine_by_hash_epoch[(epoch, payload_hash)]:
+                    packet_uid = record.get("packet_uid")
+                    if (
+                        isinstance(packet_uid, bool)
+                        or not isinstance(packet_uid, int)
+                        or packet_uid < 0
+                    ):
+                        invalid_uid_count += 1
+                        continue
+                    packet_events_by_uid[packet_uid].append(record)
+                if (
+                    invalid_uid_count
+                    or len(packet_events_by_uid) != len(offers)
+                ):
                     gate_failures["ns3_path"].append(
-                        f"{phase}/{cell_id}/{offered['sequence']} lacks exact one ns3 stage: "
-                        + str(
-                            {stage: len(values) for stage, values in by_stage.items()}
-                        )
+                        f"{phase}/{cell_id} ns3 UID occurrences differ: "
+                        f"offers={len(offers)} uids={len(packet_events_by_uid)} "
+                        f"invalid_uid_events={invalid_uid_count}"
                     )
                     continue
                 expected_link = cell["ns3_path"]["directed_link_id"]
                 expected_queue = cell["ns3_path"]["queue_id"]
-                if any(
-                    record.get("transport_payload_size")
-                    != offered["transport_payload_size"]
-                    or record.get("traffic_class") != cell["traffic_class"]
-                    or record.get("tos") != cell["ns3_path"]["dscp_tos"]
-                    or record.get("directed_link") != expected_link
-                    or record.get("queue_id") != expected_queue
-                    or record.get("source_ip") != cell["source"]["ip"]
-                    or record.get("destination_ip") != cell["destination"]["ip"]
-                    or record.get("source_udp_port") != cell["source"]["udp_port"]
-                    or record.get("destination_udp_port")
-                    != cell["destination"]["udp_port"]
-                    for record in packet_events
-                ):
-                    gate_failures["ns3_path"].append(
-                        f"{phase}/{cell_id} ns3 decoded identity mismatch"
-                    )
-                if (
-                    by_stage["ingress"][0].get("device_id")
-                    != cell["ns3_path"]["ingress_device_id"]
-                ):
-                    gate_failures["ns3_path"].append(
-                        f"{phase}/{cell_id} ingress device mismatch"
-                    )
-                if (
-                    by_stage["egress"][0].get("device_id")
-                    != cell["ns3_path"]["egress_device_id"]
-                ):
-                    gate_failures["ns3_path"].append(
-                        f"{phase}/{cell_id} egress device mismatch"
-                    )
+                expected_size = offers[0]["transport_payload_size"]
+                for packet_uid, packet_events in packet_events_by_uid.items():
+                    by_stage = {
+                        stage: [
+                            record
+                            for record in packet_events
+                            if record.get("event") == stage
+                        ]
+                        for stage in (
+                            "ingress",
+                            "enqueue",
+                            "dequeue",
+                            "channel",
+                            "egress",
+                        )
+                    }
+                    if any(len(by_stage[stage]) != 1 for stage in by_stage):
+                        gate_failures["ns3_path"].append(
+                            f"{phase}/{cell_id}/uid={packet_uid} lacks exact one "
+                            "ns3 stage: "
+                            + str(
+                                {
+                                    stage: len(values)
+                                    for stage, values in by_stage.items()
+                                }
+                            )
+                        )
+                        continue
+                    if any(
+                        record.get("transport_payload_size") != expected_size
+                        or record.get("traffic_class") != cell["traffic_class"]
+                        or record.get("tos") != cell["ns3_path"]["dscp_tos"]
+                        or record.get("directed_link") != expected_link
+                        or record.get("queue_id") != expected_queue
+                        or record.get("source_ip") != cell["source"]["ip"]
+                        or record.get("destination_ip") != cell["destination"]["ip"]
+                        or record.get("source_udp_port") != cell["source"]["udp_port"]
+                        or record.get("destination_udp_port")
+                        != cell["destination"]["udp_port"]
+                        for record in packet_events
+                    ):
+                        gate_failures["ns3_path"].append(
+                            f"{phase}/{cell_id} ns3 decoded identity mismatch"
+                        )
+                    if (
+                        by_stage["ingress"][0].get("device_id")
+                        != cell["ns3_path"]["ingress_device_id"]
+                    ):
+                        gate_failures["ns3_path"].append(
+                            f"{phase}/{cell_id} ingress device mismatch"
+                        )
+                    if (
+                        by_stage["egress"][0].get("device_id")
+                        != cell["ns3_path"]["egress_device_id"]
+                    ):
+                        gate_failures["ns3_path"].append(
+                            f"{phase}/{cell_id} egress device mismatch"
+                        )
 
     for key, offered in offered_p2mp_keys.items():
         packet_events = engine_by_hash_epoch[(1, offered["transport_payload_sha256"])]

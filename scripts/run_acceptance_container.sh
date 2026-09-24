@@ -138,6 +138,8 @@ if (($# == 3)) && [[ "$1" == "env" ]] && \
   M0_CONTROL_STAGING="$(mktemp -d "$ROOT_DIR/../.ams-m0-control-$M0_RUN_ID.XXXXXXXXXX")"
   M0_ARTIFACT_STAGING="$(cd -- "$M0_ARTIFACT_STAGING" && pwd -P)"
   M0_CONTROL_STAGING="$(cd -- "$M0_CONTROL_STAGING" && pwd -P)"
+  setfacl -m u:1000:rwx -m "d:u:$(id -u):rwx" -m d:m::rwx \
+    "$M0_ARTIFACT_STAGING"
   chmod 0700 "$M0_CONTROL_STAGING"
 fi
 if (($# == 7)) && [[ "$1" == "timeout" ]] && \
@@ -180,6 +182,8 @@ if (($# == 7)) && [[ "$1" == "timeout" ]] && \
   fi
   chmod -R a-w "$M1_SOURCE_SNAPSHOT"
   M1_ARTIFACT_STAGING="$(mktemp -d "$ROOT_DIR/runs/.m1-stage-$M1_RUN_ID.XXXXXXXXXX")"
+  setfacl -m u:1000:rwx -m "d:u:$(id -u):rwx" -m d:m::rwx \
+    "$M1_ARTIFACT_STAGING"
   M1_CONTROL_STAGING="$(mktemp -d "$ROOT_DIR/../.ams-m1-control-$M1_RUN_ID.XXXXXXXXXX")"
   chmod 0700 "$M1_CONTROL_STAGING"
   if ! network/scripts/run_status_validation.sh \
@@ -323,6 +327,12 @@ if ((COMPONENT_MODE == 1)); then
   if [[ -n "$COMPONENT_MAIN_DEVICES" ]]; then
     chmod 2770 "$COMPONENT_ARTIFACT_STAGING"
   fi
+  # The producer uses the image's unprivileged uid (or root:1000 for M4),
+  # while the host finalizer must retain access to every created artifact.
+  # Named/default ACLs preserve that boundary without making the staging tree
+  # world-writable.
+  setfacl -m u:0:rwx -m u:1000:rwx -m "d:u:$(id -u):rwx" -m d:m::rwx \
+    "$COMPONENT_ARTIFACT_STAGING"
   COMPONENT_CONTROL_STAGING="$(mktemp -d \
     "$ROOT_DIR/../.ams-component-control-$COMPONENT_RUN_ID.XXXXXXXXXX")"
   chmod 0700 "$COMPONENT_CONTROL_STAGING"
@@ -408,7 +418,9 @@ PY
     printf 'FAIL component prerequisite receipt set lacks M0\n' >&2
     exit 2
   fi
-  chmod 0400 "$COMPONENT_STATUS_VALIDATION" "$COMPONENT_PREREQUISITES"
+  # These files are direct read-only binds into an unprivileged exact-image
+  # validator/producer, so their immutable bytes must also be readable there.
+  chmod 0444 "$COMPONENT_STATUS_VALIDATION" "$COMPONENT_PREREQUISITES"
 fi
 if ! IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$IMAGE")"; then
   printf 'FAIL runtime image is unavailable: %s\n' "$IMAGE" >&2

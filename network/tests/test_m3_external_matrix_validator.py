@@ -25,6 +25,7 @@ from network.scripts import raw_packet_capture
 from network.scripts import actual_sitl_control_probe as control_probe
 from network.scripts import actual_sitl_endpoint_orchestrator as actual_orchestrator
 from network.validation import validate_m3_external_matrix as validator
+from network.validation.validate_m4_capacity import _expected_actual_control_api
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -1479,7 +1480,11 @@ class Fixture:
                     sim_counter[1 if phase == "positive" else 2] += 20
 
                     ack_sequence = response_sequence[uav]
-                    if phase == "recovery" and uav == 1 and sequence == 1:
+                    if phase == "positive" and uav == 2 and sequence == 19:
+                        # Byte-identical MAVLink ACKs can legitimately repeat
+                        # within an epoch; distinct engine UIDs identify them.
+                        ack_sequence = 9
+                    elif phase == "recovery" and uav == 1 and sequence == 1:
                         # A MAVLink sequence can wrap/repeat.  This exact ACK
                         # intentionally duplicates positive/uav1/1 bytes and
                         # must correlate by peer and transaction time.
@@ -3210,6 +3215,7 @@ class M3ExternalMatrixValidatorTests(unittest.TestCase):
     def test_complete_30_cell_external_fixture_passes(self) -> None:
         result = self.evaluate()
         self.assertTrue(result["passed"], "\n".join(result["failures"][:20]))
+        self.assertEqual(result["actual_control_api"], _expected_actual_control_api())
         capture_stats = validator.strict_json(
             self.run_dir / "logs/capture-loopback-container-root.json"
         )

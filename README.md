@@ -1,175 +1,64 @@
-# Ardupilot Multiagent Simulation
+# BAS v2 — проверяемый RC1
 
+Пять ArduPilot SITL в Gazebo, десять MAVLink UART и один НПУ. Реальные байты
+проходят через TAP и штатные ns-3.48 SpectrumWifiPhy/802.11n PHY/MAC;
+распространение рассчитывает Sionna RT внутри ns-3. Помехи — штатные
+WaveformGenerator, а не команды потери пакетов.
 
+Текущий статус поставки, ограничения и аппаратный blocker:
+[DELIVERY_SCOPE](doc/DELIVERY_SCOPE.md), [VALIDATION_REPORT](doc/VALIDATION_REPORT.md).
+Native Wi-Fi — некалиброванный reference profile, не модель LoRa/NR или конкретного модема.
 
-![Portfolio](https://img.shields.io/badge/portfolio-drone_simulation-2f6f6d?style=flat-square)
-![ArduPilot](https://img.shields.io/badge/autopilot-ArduPilot-44546a?style=flat-square)
-![ROS 2](https://img.shields.io/badge/robotics-ROS_2-3b6ea8?style=flat-square)
-![Gazebo](https://img.shields.io/badge/simulation-Gazebo-7a5c2e?style=flat-square)
-![Docker](https://img.shields.io/badge/dev-env_container-2496ed?style=flat-square)
+## Быстрый запуск
 
-Portfolio wrapper: this repository is kept as an ArduPilot/Gazebo multi-UAV simulation sandbox with ROS 2 integration, sensor configuration, custom worlds, and reproducible devcontainer setup. The original maintainer credit is preserved below.
+На подготовленном Linux/NVIDIA/Docker стенде:
 
-Simulation environment for multiagent drone systems using Ardupilot, ROS 2, and Gazebo enabling users to spawn and control multiple drones, configure sensors, and test autonomous behaviors in a reproducible and extensible setup.
-
-Maintainer: [Gilbert Tanner](mailto:gilbert.tanner@aau.at)
-
-## Table of Contents
-
-- [Prerequisites](#prerequisites)
-- [Install Ardupilot environment](#install-ardupilot-environment)
-- [Build workspace](#build-workspace)
-- [Devcontainer](#devcontainer)
-    - [Starting a Devcontainer](#starting-a-devcontainer)
-        - [From VSCode](#from-vscode)
-        - [From the Command Line](#from-the-command-line)
-    - [Running just the Dockerfile](#running-just-the-dockerfile)
-- [Run simulation](#run-simulation)
-- [Multiagent simulation](#multiagent-simulation)
-- [Drone configuration](#drone-configuration)
-- [Custom worlds](#custom-worlds)
-- [Network and radio integration plan](#network-and-radio-integration-plan)
-- [Fly the drone via position control](#fly-the-drone-via-position-control)
-- [Feeding in external odometry](#feeding-in-external-odometry)
-- [Limitations](#limitations)
-    - [Not possible to do multiagent simulation with external odometry](#not-possible-to-do-multiagent-simulation-with-external-odometry)
-    - [ap/geopose/filtered doesn't reflect global position set in Gazebo world](#apgeoposefiltered-doesnt-reflect-global-position-set-in-gazebo-world)
-- [Troubleshooting](#troubleshooting)
-    - [Drone model not spawning](#drone-model-not-spawning)
-- [Contact](#contact)
-
-## Prerequisites
-
-- ROS Dev tools: `sudo apt install ros-dev-tools`
-
-## Install Ardupilot environment
-
-- [Install ROS 2](https://ardupilot.org/dev/docs/ros2.html)
-- [ROS 2 with SITL](https://ardupilot.org/dev/docs/ros2-sitl.html)
-- [ROS 2 with SITL in Gazebo](https://ardupilot.org/dev/docs/ros2-gazebo.html)
-
-## Build workspace
-
-```
-source <path-to-ardupilot-workspace>
-rosdep install --from-paths src --ignore-src -r -y
-colcon build --symlink-install
-```
-
-## Devcontainer
-
-Using a devcontainer or Dockerfile provides a consistent development environment, isolates dependencies, and avoids conflicts with other software on the host machine. This setup ensures that the project runs the same way on any device, improving reproducibility and easing collaboration.
-
-### Starting a Devcontainer
-
-#### From VSCode
-
-1. Open the project in VSCode.
-2. Press `F1` and select `Remote-Containers: Open Folder in Container...`.
-3. Choose the folder to open in the container.
-
-#### From the Command Line
-
-1. Navigate to the project directory.
-2. Run the following command:
-    ```bash
-    code . --folder-uri vscode-remote://dev-container+<container-id>
-    ```
-
-### Running just the Dockerfile
-
-1. Build the Docker image:
-    ```bash
-    docker build -t multiagent_simulation .devcontainer
-    ```
-2. Run the Docker container:
-    ```bash
-    docker run -it --rm -v $(pwd):/workspace multiagent_simulation
-    ```
-
-## Run simulation
-
-1. Source workspace
-    ```
-    source ./install/setup.{bash|zsh}
-    ```
-2. Launch the simulation
-    ```
-    ros2 launch multiagent_simulation multiagent_simulation.launch.py
-    ```
-    Launch the simulation with a specific world file
-    ```bash
-    ros2 launch multiagent_simulation multiagent_simulation.launch.py world_file:=rubico.sdf
-    ```
-    
-![Simulation](doc/simulation.png)
-
-The [multiagent_simulation.launch.py](src/multiagent_simulation/launch/multiagent_simulation.launch.py) allows the user to spawn multiple drones in the same world. Each drone gets its own ROS namespace and MAVLink system ID.
-
-![Multiagent simulation](doc/multiagent_simulation.png)
-
-## Drone configuration
-
-The LiDAR(s) and camera(s) are defined in separate xacro files ([lidar](src/multiagent_simulation/models/lidar/model.xacro), [camera](src/multiagent_simulation/models/camera/model.xacro)), [depth_camera](src/multiagent_simulation/models/depth_camera/model.xacro) and [rgbd_camera](src/multiagent_simulation/models/rgbd_camera/model.xacro) as macros allowing for quick addition and removal of sensors for testing.
-
-Example:
-
-```xml
-<xacro:lidar_sensor name="lidar_3" pose="0.0 0.02 -0.05 0 1.57 0" horizontal_fov="0.614356" vertical_fov="0.673697" horizontal_samples="100" vertical_samples="50" update_rate="20" />
-```
-
-The xacro is then converted to SDF inside the [multiagent_simulation.launch.py](src/multiagent_simulation/launch/multiagent_simulation.launch.py).
-
-![Simulation with multiple sensors](doc/simulation_with_multiple_sensors.png)
-
-## Custom worlds
-
-For creating custom worlds please refer to the [Create custom world](doc/Create_custom_world.md) guide.
-
-## Network and radio integration plan
-
-The authoritative staged ns-3, Sionna, and packet-in-the-loop execution
-contract is [Network and radio integration plan v3](doc/network_radio_integration_plan_v3.md).
-The [v2 plan](doc/network_radio_integration_plan_v2.md) and
-[original plan](doc/network_radio_integration_plan.md) are retained as
-superseded historical context only.
-
-## Fly the drone via position control
-
-The move_drone node allows the user to set the flight mode, arm the drone, takeoff and move using position control.
-
-> Note: After starting the simulation it might take a few seconds until the drone can be armed. If arming was successful "Not ready" should change to "Ready to Fly".
-
-```
-ros2 run multiagent_simulation move_drone
-```
-
-![Drone control GUI](doc/drone_control_gui.png)
-
-## Feeding in external odometry
-
-The drone can be configured to fuse external odometry by changing the parameters described in [Cartographer SLAM with ROS 2 in SITL](https://ardupilot.org/dev/docs/ros2-cartographer-slam.html#configure-ardupilot). These parameters are already available in [gazebo-iris.parm](src/multiagent_simulation/config/gazebo-iris.parm) so in order to change from GPS navigation to external odometry navigation they only need to be uncommented and the GPS section commented out.
-
-Ardupilot then receives the external odometry via the [`/ap/tf` topic](https://ardupilot.org/dev/docs/ros2-interfaces.html#odometry). Support for feeding in external odometry for multiple drones was added in https://github.com/ArduPilot/ardupilot/pull/32510.
-
-## Limitations
-
-### ap/geopose/filtered doesn't reflect global position set in Gazebo world
-
-**Related issue:** https://github.com/ArduPilot/ardupilot_gz/issues/74
-
-## Troubleshooting
-
-### Drone model not spawning
-
-If the drone model isn't spawning into the simulation the `GZ_SIM_RESOURCE_PATH` environment variable might not be set correctly. This variable should include the [`models` folder](src/multiagent_simulation/models) and [`worlds` folder](src/multiagent_simulation/worlds) of the `multiagent_simulation` package and the [`src` folder](src) of the workspace. You can set it manually by running the following command:
 ```bash
-WORKSPACE=${PWD}
-export "GZ_SIM_RESOURCE_PATH=$GZ_SIM_RESOURCE_PATH:$WORKSPACE/src/multiagent_simulation/models:$WORKSPACE/src/multiagent_simulation/worlds:$WORKSPACE/src" >> ~/.bashrc
+make demo-preflight DEMO_GUI=0
+BAS_NATIVE_FIVE_RUN_ID=my-town01 BAS_NATIVE_SOURCES=network/config/native_jammers_town01.yaml make demo-town01 DEMO_GUI=0
 ```
 
-More information about this is available in the [Using SITL with Gazebo article](https://ardupilot.org/dev/docs/sitl-with-gazebo.html#configure-the-gazebo-environment).
+Runner заканчивает полёт посадкой, проверяет отсутствие обходного канала и
+останавливает процессы. Ненулевой код может означать провал инженерного
+real-time порога при успешно завершённом полёте; см. `report.md`.
 
-## Contact
+```bash
+make prepare-customer
+BAS_NATIVE_FIVE_RUN_ID=my-customer BAS_NATIVE_SOURCES=network/config/native_jammers_town01.yaml make demo-customer DEMO_GUI=0
+```
 
-For any inquiries, please reach out to gilberttanner.contact@gmail.com or open an issue on this repository.
+Customer: исходная Town01 без масштабирования, настоящее внешнее поле/холмы
+10×10 км и отдельное синтетическое здание с 15 заданными этажами.
+Полётный маршрут остаётся в контрольном районе Town01.
+
+Для ручного управления через готовый MAVProxy, в двух терминалах:
+
+```bash
+make operator DEMO_GUI=0
+make gcs
+```
+
+Остановка из другого терминала: `make stop`. Отчёт:
+`runs/native-radio-realtime/<RUN_ID>/report.md`; raw/annotated кадры, CSV и PCAP
+находятся рядом. Открыть локально: `xdg-open runs/native-radio-realtime/my-town01/report.md`.
+
+## Подготовка и отдельные проверки
+
+`make demo-preflight DEMO_GUI=0 DEMO_BOOTSTRAP=1` создаёт отсутствующее окружение
+по закреплённым версиям. Исходный CAVISE bundle нужен локально; он не скачивается
+и не публикуется автоматически. Восстановление из поставленного образа и
+dependency archive описано в [USER_GUIDE](doc/USER_GUIDE.md).
+
+```bash
+BAS_NATIVE_FIVE_RUN_ID=stationary BAS_NATIVE_LATENCY_MODE=1 make demo-town01 DEMO_GUI=0
+make native-sources
+make native-maps
+make native-cache-study
+make native-matrix
+```
+
+Последние три режима — самостоятельные native исследования. Heatmaps показывают
+прогноз PSD/SINR, не измеренный PDR. Полные результаты остаются в ignored `runs/`.
+
+[Инструкция оператора](doc/USER_GUIDE.md) · [Архитектура](doc/PRODUCT_ARCHITECTURE.md)
+· [Окружение и assets](doc/ENVIRONMENT_AND_ASSETS.md) · [Требования](doc/PRODUCT_REQUIREMENTS.md)

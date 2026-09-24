@@ -75,6 +75,15 @@ TOPOLOGY_PID=""
 TOPOLOGY_SEQUENCE=0
 SUCCESS=0
 
+handoff_component_artifacts() {
+  [[ -d "$RUN_DIR" ]] || return 0
+  # Root-created restrictive files inherit the host finalizer ACL with a zero
+  # mask.  Restore only its group-class mask before ownership is transferred.
+  find "$RUN_DIR" -type d -exec chmod g+rwx {} +
+  find "$RUN_DIR" -type f -exec chmod g+r {} +
+  chown -R 1000:1000 "$RUN_DIR"
+}
+
 cleanup() {
   local rc=$?
   set +e
@@ -97,7 +106,7 @@ cleanup() {
     ip netns del ams-ns3 2>/dev/null
     for index in 1 2 3 4 5; do ip link del "ams-tail$index" 2>/dev/null; done
   fi
-  [[ -d "$RUN_DIR" ]] && chown -R 1000:1000 "$RUN_DIR" 2>/dev/null
+  [[ "$SUCCESS" == 1 ]] || handoff_component_artifacts || true
   [[ "$SUCCESS" == 1 ]] && exit 0
   exit "$rc"
 }
@@ -132,10 +141,12 @@ printf '%q ' "${BUILD_COMMAND[@]}" > "$RUN_DIR/logs/m4_causal_overlay_build.comm
 printf '\n' >> "$RUN_DIR/logs/m4_causal_overlay_build.command"
 "${BUILD_COMMAND[@]}" > "$RUN_DIR/logs/m4_causal_overlay_build.log" 2>&1
 [[ -f "$OVERLAY_INSTALL/setup.bash" ]] || { printf 'FAIL M4 causal overlay build absent\n' >&2; exit 2; }
+CONTROLLED_PYTHONPATH="${PYTHONPATH:?M4 causality requires controlled PYTHONPATH}"
 # shellcheck disable=SC1090
 set +u
 source "$OVERLAY_INSTALL/setup.bash"
 set -u
+export PYTHONPATH="$CONTROLLED_PYTHONPATH"
 RESOLVED_SHARE="$(python3 -c 'from ament_index_python.packages import get_package_share_directory; print(get_package_share_directory("multiagent_simulation"))')"
 [[ "$RESOLVED_SHARE" == "$EXPECTED_SHARE" ]] || { printf 'FAIL M4 causal overlay resolution differs\n' >&2; exit 2; }
 export ROS_DOMAIN_ID GZ_PARTITION
@@ -432,6 +443,6 @@ python3 "$VALIDATOR" --run-dir "$RUN_DIR" --no-write \
 cmp "$RUN_DIR/metrics/m4_validation_results.json" "$INDEPENDENT"
 rm -f "$INDEPENDENT"
 
-chown -R 1000:1000 "$RUN_DIR"
+handoff_component_artifacts
 SUCCESS=1
 printf 'PASS M4 formal causal validation: %s\n' "$RUN_DIR"

@@ -130,6 +130,23 @@ class RealSionnaBackend:
             )
         self._provider = provider_instance
 
+    def warm_up(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Compile the owned real-Sionna path before formal wire traffic."""
+
+        if self.provider_mode != "real_sionna" or not self.acceptance_eligible:
+            raise AsyncServiceError("real Sionna warm-up requires an eligible backend")
+        response = self._provider.query(copy.deepcopy(dict(request)))
+        if not isinstance(response, Mapping) or response.get("type") != "link_state":
+            raise AsyncServiceError("real Sionna warm-up returned an invalid response")
+        links = response.get("links")
+        if (
+            not isinstance(links, list)
+            or not links
+            or any(not isinstance(link, Mapping) or link.get("stale") is not False for link in links)
+        ):
+            raise AsyncServiceError("real Sionna warm-up did not produce fresh links")
+        return response
+
     def compute(self, query: Mapping[str, Any]) -> Mapping[str, Any]:
         radio = query["radio_assumptions"]
         request = {

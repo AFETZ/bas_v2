@@ -434,7 +434,7 @@ class RealProviderWireBindingTests(unittest.TestCase):
         )
 
     def _validate(self) -> tuple[dict[str, object], list[str]]:
-        versions = {"sionna": "1.2.2", "mitsuba": "3.8.0"}
+        versions = {"sionna-rt": "1.2.2", "mitsuba": "3.8.0"}
         with (
             mock.patch(
                 "network.validation.validate_m4_capacity.decode_message",

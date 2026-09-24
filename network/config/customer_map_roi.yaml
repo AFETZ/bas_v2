@@ -1,0 +1,46 @@
+schema_version: 1
+source:
+  town: Town01
+  bundle_filename: CAVISE_SIONNA_Town01_EditorLOD0_Full_Official_20260712.zip
+  local_root_env: CAVISE_MAPS_DIR
+  scene_xml_relative: Town01/map/scene.xml
+  blend_relative: Town01/Town01_Editor_lod0_Full.blend
+  transforms_relative: Town01/map/transforms.xml
+roi:
+  xmin_m: -1577.708829814624
+  xmax_m: 1613.447172459159
+  ymin_m: -1474.8671726619064
+  ymax_m: 1716.2871790967324
+  width_m: 3191.156002273783
+  height_m: 3191.1543517586388
+  z_min_m: -273.01936977670994
+  z_max_m: 220.3868920750865
+  z_span_m: 493.40626185179644
+coordinate_frame:
+  source_frame: CAVISE Town01 scene frame in metres
+  gazebo_frame: CAVISE Town01 scene frame in metres
+  sionna_frame: CAVISE Town01 scene frame in metres
+  transform_source: Town01/map/transforms.xml and Town01/map/editor_fbx_scene.json
+  static_vertices_baked: true
+  sumo_offset_m: [0.06, 328.61]
+  dynamic_sumo_to_sionna: identity
+selection:
+  reason: >-
+    Explicit user-directed Town01 development selection using the complete
+    measured retained footprint; no synthetic padding or geometry is added.
+  building_count_or_estimate: 401
+  terrain_present: true
+  settlement_present: true
+runtime_policy:
+  sionna_loading: tiled_or_roi
+  gazebo_visual: derived_from_same_source
+  gazebo_collision: simplified_from_same_source
+  vegetation_collision: false
+  commit_large_assets: false
+compliance:
+  customer_target_width_m: 10000
+  customer_target_height_m: 10000
+  customer_10x10_requirement_met: false
+  reason: >-
+    Town01 retained geometry is 3191.156 by 3191.154 m and cannot provide a
+    continuous 10000 by 10000 m ROI without prohibited synthetic geometry.

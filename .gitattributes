@@ -6,6 +6,7 @@
 *.sh text eol=lf
 *.yaml text eol=lf
 *.svg text eol=lf
+*.patch text eol=lf whitespace=-blank-at-eol
 
 *.png binary
 *.jpg binary

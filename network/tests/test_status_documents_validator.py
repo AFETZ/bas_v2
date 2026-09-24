@@ -474,7 +474,7 @@ class LiveStatusFixture:
                 "path": artifact_path,
                 "device": 1,
                 "inode": 2,
-                "mode": 0o700,
+                "mode": 0o770,
                 "entry_count": 0,
                 "content_manifest_sha256": sha256(b"[]"),
             },

@@ -1363,6 +1363,7 @@ def _run_host_command(args: list[str], *, timeout: int) -> subprocess.CompletedP
     executable_map = {
         "docker": "/usr/bin/docker",
         "git": "/usr/bin/git",
+        "/usr/bin/setfacl": "/usr/bin/setfacl",
     }
     executable = executable_map.get(args[0], args[0])
     if executable not in executable_map.values():
@@ -2834,6 +2835,21 @@ def _run_in_fresh_exact_image(
     identity_path = Path(tempfile.mkstemp(prefix="ams-m0-reexec-id.")[1])
     container_id = ""
     try:
+        acl_result = _run_host_command(
+            [
+                "/usr/bin/setfacl",
+                "-m",
+                "u:1000:rwx",
+                "-m",
+                f"d:u:{os.getuid()}:rwx",
+                "-m",
+                "d:m::rwx",
+                os.fspath(output_root),
+            ],
+            timeout=30,
+        )
+        if acl_result.returncode != 0:
+            raise ValueError("cannot grant the fresh exact-image artifact ACL")
         create = _run_host_command(
             [
                 "docker", "create",
@@ -3680,6 +3696,7 @@ def _publish_host_receipt(
                 elif path.is_dir():
                     path.chmod(0o500)
             temporary.chmod(0o500)
+            receipt_path.chmod(0o444)
             for path in sorted(temporary.rglob("*")):
                 if path.is_file():
                     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))

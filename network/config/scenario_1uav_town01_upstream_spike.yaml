@@ -1,0 +1,35 @@
+schema_version: 1
+
+scenario:
+  name: scenario_1uav_town01_upstream_spike
+  purpose: Direct upstream Sionna RT to native ns-3 Spectrum packet proof
+  map:
+    town: Town01
+    scene_xml: .external/cavise_maps/Town01/map/scene.xml
+
+command_post:
+  id: cp
+  role: command_post
+  position_m: [5.0, 0.0, 2.0]
+  antenna: omni
+
+robots:
+  - name: uav1
+    role: uav
+    position: [80.0, 0.0, 15.0, 0.0, 0.0, 0.0]
+    nominal_radio_position_m: [80.0, 0.0, 15.0]
+    antenna: omni
+
+upstream_spike:
+  revision: 3d0643e7858edcf22da3deebb0d2e423ecfe2961
+  carrier_hz: 2400000000
+  spectrum_bandwidth_hz: 5000000
+  tx_power_w: 0.00001
+  phy_rate_bps: 1000000
+  channel_update_period_s: 2.0
+  # Chosen from Town01 geometry before packet outcomes were run. The LOS point
+  # follows the open y=0 street. The NLOS ray crosses the 6.1..99.9 m by
+  # 5.6..104.8 m building tile and ends in the y=142.6..207.9 m street gap.
+  los_position_m: [80.0, 0.0, 15.0]
+  nlos_position_m: [80.0, 160.0, 15.0]
+  expected_packet_observation: los_received_nlos_lost

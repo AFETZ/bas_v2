@@ -26,6 +26,7 @@
     "test_five_uav_health_v2.FiveUavHealthV2Tests.test_process_identity_mutation_mid_measurement_fails",
     "test_five_uav_health_v2.FiveUavHealthV2Tests.test_process_monitor_stops_without_ros_executor_work",
     "test_five_uav_health_v2.FiveUavHealthV2Tests.test_rate_uses_sample_intervals",
+    "test_five_uav_health_v2.FiveUavHealthV2Tests.test_raw_heartbeat_after_measurement_end_fails",
     "test_five_uav_health_v2.FiveUavHealthV2Tests.test_raw_odometry_quaternion_cannot_hide_behind_valid_flag",
     "test_five_uav_health_v2.FiveUavHealthV2Tests.test_raw_pose_out_of_bounds_cannot_be_hidden_by_summary",
     "test_five_uav_health_v2.FiveUavHealthV2Tests.test_raw_profile_scenario_and_phase_binding_cannot_be_forged",

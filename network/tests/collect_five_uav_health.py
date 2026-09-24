@@ -1644,6 +1644,13 @@ def main(argv: list[str] | None = None) -> int:
         interrupted = True
         event_log.emit("health_probe_interrupted")
     finally:
+        # The heartbeat and process-monitor threads are evidence producers.
+        # Quiesce both before taking the immutable end clock so no raw sample
+        # can be timestamped after the bounded measurement interval.
+        stop_event.set()
+        heartbeat_thread.join(timeout=2.0)
+        if process_thread is not None:
+            process_thread.join(timeout=6.0)
         measurement_ended_mono = time.monotonic()
         measurement_ended_wall = time.time()
         if ready:
@@ -1662,10 +1669,6 @@ def main(argv: list[str] | None = None) -> int:
             else b""
         )
         launch_log_observation_sha256 = hashlib.sha256(launch_log_prefix).hexdigest()
-        stop_event.set()
-        heartbeat_thread.join(timeout=2.0)
-        if process_thread is not None:
-            process_thread.join(timeout=6.0)
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
@@ -1718,12 +1721,15 @@ def main(argv: list[str] | None = None) -> int:
         odom_age = (
             None
             if odom.get("last_wall_s") is None
-            else measurement_ended_mono - float(odom["last_monotonic_s"])
+            # MAVLink callbacks run concurrently with the final ROS spin.
+            # A callback can stamp the final packet just after the end clock
+            # is sampled; an age is a duration and cannot be negative.
+            else max(0.0, measurement_ended_mono - float(odom["last_monotonic_s"]))
         )
         heartbeat_age = (
             None
             if heartbeat.get("last_wall_s") is None
-            else measurement_ended_mono - float(heartbeat["last_monotonic_s"])
+            else max(0.0, measurement_ended_mono - float(heartbeat["last_monotonic_s"]))
         )
         odom_start_delay = (
             None

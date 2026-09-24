@@ -1,3 +1,4 @@
+# LEGACY SYNTHETIC SMOKE FIXTURE ONLY. Not the customer 10x10 km map.
 schema_version: 1
 scenario: scenario_m4_canonical
 radio:

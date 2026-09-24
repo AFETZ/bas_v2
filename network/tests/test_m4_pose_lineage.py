@@ -7,6 +7,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from network.radio_provider.sionna_packet_adapter import PacketAdapterError
 from network.scripts.m4_adapter_runtime import PoseTracker
@@ -179,6 +180,67 @@ class M4RawPoseLineageTests(unittest.TestCase):
                     )
             finally:
                 tracker.close()
+
+    def test_snapshot_boundary_follows_all_callback_poses(self) -> None:
+        """A caller timestamp from before a callback cannot predate its pose."""
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = PoseTracker(Path(directory), self.jammer())
+            try:
+                for uav in range(1, 6):
+                    tracker.update_uav(f"uav{uav}", self.odometry(uav))
+                observations = self.world_poses()
+                future_callback_ns = time.monotonic_ns() + 1_000_000
+                for observation in observations:
+                    observation.source_callback_monotonic_ns = future_callback_ns
+                tracker.update_world(observations)
+                snapshot = tracker.snapshot(0)
+                self.assertIsNotNone(snapshot)
+                assert snapshot is not None
+                pose_times = [
+                    int(item["pose_monotonic_ns"])
+                    for item in [*snapshot.nodes, *snapshot.jammers]
+                ]
+                self.assertGreaterEqual(snapshot.snapshot_monotonic_ns, max(pose_times))
+            finally:
+                tracker.close()
+
+    def test_jammer_control_invalidates_cached_snapshot_immediately(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            jammer = self.jammer()
+            jammer["enabled"] = True
+            root = Path(directory)
+            tracker = PoseTracker(root, jammer)
+            try:
+                for uav in range(1, 6):
+                    tracker.update_uav(f"uav{uav}", self.odometry(uav))
+                tracker.update_world(self.world_poses())
+                first = tracker.snapshot(time.monotonic_ns())
+                self.assertIsNotNone(first)
+                assert first is not None
+                self.assertTrue(first.jammers[0]["enabled"])
+
+                immediate = first.snapshot_monotonic_ns + 1
+                with mock.patch(
+                    "network.scripts.m4_adapter_runtime.time.monotonic_ns",
+                    return_value=immediate,
+                ):
+                    tracker.set_jammer_enabled(False)
+                    second = tracker.snapshot(immediate)
+                self.assertIsNotNone(second)
+                assert second is not None
+                self.assertFalse(second.jammers[0]["enabled"])
+                self.assertEqual(second.snapshot_sequence, first.snapshot_sequence + 1)
+                self.assertNotEqual(second.snapshot_sha256, first.snapshot_sha256)
+            finally:
+                tracker.close()
+
+            records = [
+                json.loads(line)
+                for line in (root / "logs/m4_pose_snapshots.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertEqual([record["jammers"][0]["enabled"] for record in records], [True, False])
 
 
 if __name__ == "__main__":

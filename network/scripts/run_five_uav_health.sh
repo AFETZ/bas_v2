@@ -48,6 +48,8 @@ ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-$((20 + $(printf '%s' "$RUN_ID" | cksum | awk '{
 GZ_PARTITION="${GZ_PARTITION:-ams_${RUN_ID//[^a-zA-Z0-9_]/_}}"
 export GZ_IP=127.0.0.1
 
+umask 007
+
 if [[ -e "$RUN_DIR" ]]; then
   printf 'FAIL immutable M1 run directory already exists: %s\n' "$RUN_DIR" >&2
   exit 1
