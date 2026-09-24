@@ -1,6 +1,6 @@
 # Product Status
 
-Updated: 2026-09-24. Local checkout: main at 1960947, with workstation setup changes.
+Updated: 2026-09-24. Local checkout: main at 1960947, with workstation setup and simulator coupling changes.
 
 ## Current development workstation
 
@@ -32,6 +32,45 @@ local_integrated_gpu_runtime_status=blocked_wsl_optix
   This newly built image is not the historical RC1 image; apt packages have moved on.
 - Local command logs are under runs/setup/ (ignored), including preflight-final.log,
   ns3-build-resume.log, runtime-smoke.log and sionna-windows-gpu.log.
+
+## Simulator coupling: 2026-09-24
+
+coupling_implementation_status=implemented_component_tested
+integrated_realtime_gpu_status=not_verified_wsl_optix_blocked
+
+The selected policy is real time: bounded state/packet age and stop on overload.
+The six simulator pairs, state ownership and unsupported updates are specified
+in [PRODUCT_ARCHITECTURE](../doc/PRODUCT_ARCHITECTURE.md).
+
+- Gazebo Odometry/Clock retain source time and a bounded 32-sample history;
+  body-frame velocity is rotated to ENU. ns-3 consumes measured XYZ, velocity
+  and full attitude with causal sample selection, 500 ms age/drift and 100 ms skew limits.
+- After readiness, native HardLimit stops scheduler lag above 250 ms. Healthy
+  monotonic heartbeat runs every 50 ms; both gateways close after 300 ms silence.
+  The five-UAV runner supervises radio process death and cleans up the whole run.
+- Both product RT caches now use 0.5 s/0.5 m maxima; velocity changes >=0.5 m/s
+  and rotations >=5 degrees invalidate a pair. Solver depth is never silently reduced.
+  This profile needs new performance measurements; old RC results do not validate it.
+- UART queues are bounded and nonblocking, preserve original ingress deadlines,
+  validate both peer IP/port, and count expiry/overflow. External UDP no longer
+  truncates 8192-byte datagrams. Lost records cannot consume the next record's deadline.
+- No-bypass probes resume retained BSF1 sequence numbers and check actual UART
+  byte deltas as well as GCS silence. The revised full RF probe has not run here.
+- 38 focused Python cases passed across affected tests, including real UDP/PTY;
+  C++ state/mobility tests cover causal selection, velocity, attitude, stale state,
+  tracker reset and clock drift. Native target builds; all three patches apply
+  to pristine pinned ns-3 and match the installed source. Shell/port checks passed.
+- Real one-UAV Gazebo/ArduPilot -> ROS -> tracker -> ns-3 MobilityModel smoke passed:
+  moved body, changed height/velocity/attitude, froze the bridge and rejected stale input.
+  This is a component test with a Gazebo pose stimulus, not an armed flight or RF run.
+- Real Windows CUDA Sionna solves changed Doppler with velocity, power with height,
+  and polarization response with roll. Linux in-process GPU integration remains blocked.
+  Logs/results: runs/coupling/ (ignored). Temporary probe containers were removed.
+
+Two prior audit defects remain: the shared-uplink gate accepts 95% packet loss
+when fairness is equal, and delayed same-command MAVLink ACK can be attributed
+to a new operation. Their fixes are outside this coupling change. The earlier
+counterexamples remain in runs/audit-2026-09-24/; current PASS flags are not full readiness.
 
 ## Historical software RC verification
 
@@ -70,8 +109,9 @@ Focused tests: 40 passed; latest reporting tests: 21 passed.
 
 - No physical FC or ttyUSB/ttyACM/serial-by-id device. PTY is software validation,
   not hardware or flight-HIL. Needed: FC, serial/COM or Ethernet access and safe bench.
-- Cache 20 s/10 m delayed path disappearance by 1 s and missed a 1 s recovery;
-  four no-path mismatches remain visible. Do not infer accuracy from low scheduler lag.
+- Historical cache 20 s/10 m delayed disappearance and missed a 1 s recovery.
+  The new 0.5 s/0.5 m profile has not been profiled in a full five-UAV GPU run.
+  Moving blockers/material edits are not synchronized live; scene changes require restart.
 - 16 STA test is radio-only; its 11.63 wall s / 8 sim s does not establish 16-SITL real time.
 - At 10 dBm, 500/1000/2000 m native reference links delivered 0/100; no power retuning.
 - RSSI/J/S energy sums use native arrivals plus configured thermal floor. Decoder S/N

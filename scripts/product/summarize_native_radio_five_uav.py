@@ -542,7 +542,7 @@ def build_mobility(run_dir: Path, events: list[dict[str, Any]]) -> dict[str, Any
     topic_details: dict[str, Any] = {}
     result: dict[str, Any] = {
         "atomic_pose_snapshots": True,
-        "fail_closed_timeout_s": 1.5,
+        "fail_closed_timeout_s": read_json(run_dir / "metrics/native_radio_stats.json", {}).get("state_max_age_s"),
         "uavs": {},
     }
     for uav in UAVS:

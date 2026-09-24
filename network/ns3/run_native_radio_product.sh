@@ -145,6 +145,7 @@ raise SystemExit(0 if parts >= (3, 25) else 1)
 PY
 
 cp "$PROJECT_SOURCE" "$UPSTREAM_SOURCE"
+cp "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" "$ROOT_DIR/network/ns3/scratch/native-live-state.h" "$NS3_DIR/scratch/"
 if [[ "${BAS_NATIVE_PRODUCT_SKIP_BUILD:-0}" == 1 ]]; then
   [[ -x "$BINARY" ]] || { printf 'Requested build reuse but binary is absent.\n' >&2; exit 2; }
   printf 'Reused the exact container-built binary; project C++ and upstream scratch copy match.\n' \
@@ -286,7 +287,7 @@ setsid python3 "$ROOT_DIR/network/position_tracker/tracker.py" \
   --scenario "$SCENARIO" \
   --jammers-config "$ROOT_DIR/network/config/jammers_rock_demo.yaml" \
   --output-json "$NODE_STATE" --output-jsonl "$NODE_EVENTS" \
-  --rate-hz 10 --stale-after-s 1.0 \
+  --rate-hz 10 --stale-after-s 0.5 \
   > "$RUN_DIR/logs/position_tracker.log" 2>&1 &
 managed_pids+=("$!")
 setsid stdbuf -oL gz topic -e -t /world/map/stats > "$RUN_DIR/logs/gazebo_stats.log" 2>&1 &
@@ -351,12 +352,14 @@ SCENARIO_PID=$!
 setsid ip netns exec ams-uav1 python3 -u "$ROOT_DIR/network/scripts/communication_vertical.py" uart-adapter \
   --channel control --tty "$control_adapter" --bind 10.71.1.10:14601 --peer 10.71.0.10:14600 \
   --event-log "$RUN_DIR/logs/control_uart.jsonl" --ready-file "$RUN_DIR/logs/control_uart.ready" \
+  --radio-watchdog-file "$NS3_READY.heartbeat" --watchdog-s 0.3 \
   --metrics-output "$RUN_DIR/metrics/control_uart.json" --framed \
   > "$RUN_DIR/logs/control_uart.log" 2>&1 &
 managed_pids+=("$!")
 setsid ip netns exec ams-uav1 python3 -u "$ROOT_DIR/network/scripts/communication_vertical.py" uart-adapter \
   --channel payload --tty "$payload_adapter" --bind 10.71.1.10:14701 --peer 10.71.0.10:14700 \
   --event-log "$RUN_DIR/logs/payload_uart.jsonl" --ready-file "$RUN_DIR/logs/payload_uart.ready" \
+  --radio-watchdog-file "$NS3_READY.heartbeat" --watchdog-s 0.3 \
   --metrics-output "$RUN_DIR/metrics/payload_uart.json" --framed \
   > "$RUN_DIR/logs/payload_uart.log" 2>&1 &
 managed_pids+=("$!")

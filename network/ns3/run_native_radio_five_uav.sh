@@ -160,11 +160,11 @@ fi
 GAZEBO_RTF="${BAS_NATIVE_FIVE_GAZEBO_RTF:-1.0}"
 SCENARIO_TIMEOUT_SCALE="${BAS_NATIVE_FIVE_TIMEOUT_SCALE:-5.0}"
 LAUNCH_WORLD="$WORK_DIR/${SCENARIO_KEY}-native-live-cameras.sdf"
-NODE_STATE="$RUN_DIR/logs/node_state.json"
+NODE_STATE="$RUNTIME_DIR/node_state.json"
 NODE_EVENTS="$RUN_DIR/logs/node_state.jsonl"
 PHASE_FILE="$RUN_DIR/logs/current_phase.txt"
 SCHEDULE_FILE="$RUN_DIR/logs/additional_schedule.json"
-NS3_READY="$RUN_DIR/logs/ns3.ready"
+NS3_READY="$RUNTIME_DIR/ns3.ready"
 MONITOR_STOP="$RUN_DIR/logs/runtime_monitor.stop"
 ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-$((100 + $(printf '%s' "$RUN_ID" | cksum | awk '{print $1}') % 100))}"
 GZ_PARTITION="${GZ_PARTITION:-native_five_${RUN_ID//[^a-zA-Z0-9_]/_}}"
@@ -227,6 +227,7 @@ import yaml
 value = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
 radio = value["radio"]
 sionna = value["sionna"]
+coupling = value.get("coupling", {})
 for item in (
     radio["backend"],
     radio["profile"],
@@ -257,12 +258,14 @@ for item in (
     str(sionna["endpoint_displacement_threshold_m"]),
     str(sionna["readiness_lag_max_ms"]),
     str(sionna["readiness_consecutive_samples"]),
+    str(coupling.get("state_max_age_s", 0.5)),
+    str(coupling.get("runtime_lag_max_ms", 250.0)),
 ):
     print(item)
 PY
 )
-(( ${#RADIO_VALUES[@]} == 29 )) || {
-  printf 'Invalid native product radio config: expected 29 resolved values, got %s\n' "${#RADIO_VALUES[@]}" >&2
+(( ${#RADIO_VALUES[@]} == 31 )) || {
+  printf 'Invalid native product radio config: expected 31 resolved values, got %s\n' "${#RADIO_VALUES[@]}" >&2
   exit 2
 }
 RADIO_BACKEND="${RADIO_VALUES[0]}"
@@ -294,6 +297,8 @@ CHANNEL_STATE_MAX_AGE_S="${RADIO_VALUES[25]}"
 UPDATE_DISTANCE_THRESHOLD_M="${RADIO_VALUES[26]}"
 READINESS_LAG_MAX_MS="${RADIO_VALUES[27]}"
 READINESS_CONSECUTIVE_SAMPLES="${RADIO_VALUES[28]}"
+STATE_MAX_AGE_S="${RADIO_VALUES[29]}"
+RUNTIME_LAG_MAX_MS="${RADIO_VALUES[30]}"
 reject_product_override() {
   local name="$1" requested="$2" configured="$3"
   [[ -z "$requested" || "$requested" == "$configured" ]] || {
@@ -359,7 +364,7 @@ fi
 export PATH="$PYTHON_TOOLING/bin:$PATH"
 export PYTHONPATH="$PYTHON_TOOLING:$PYTHON_DEPS:${PYTHONPATH:-}"
 cp "$PROJECT_SOURCE" "$UPSTREAM_SOURCE"
-cp "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" "$NS3_DIR/scratch/"
+cp "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" "$ROOT_DIR/network/ns3/scratch/native-live-state.h" "$NS3_DIR/scratch/"
 source_args=()
 if [[ -n "${BAS_NATIVE_SOURCES:-}" ]]; then
   python3 "$ROOT_DIR/scripts/product/prepare_native_sources.py" \
@@ -372,7 +377,7 @@ if [[ -n "${BAS_NATIVE_EXTERNAL_CONFIG:-}" && "$SCENARIO_MODE" != latency_diagno
 fi
 if [[ "${BAS_NATIVE_FIVE_SKIP_BUILD:-0}" == 1 ]]; then
   [[ -x "$BINARY" ]] || { printf 'Requested binary reuse but binary is absent.\n' >&2; exit 2; }
-  [[ "$BINARY" -nt "$PROJECT_SOURCE" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" ]] || {
+  [[ "$BINARY" -nt "$PROJECT_SOURCE" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-live-state.h" && "$BINARY" -nt "$REALTIME_CACHE_PATCH" ]] || {
     printf 'Binary predates native source/header; rerun without BAS_NATIVE_FIVE_SKIP_BUILD.\n' >&2; exit 2;
   }
   printf 'Reused focused native target after exact project/upstream source synchronization.\n' \
@@ -432,7 +437,7 @@ PY
     "$SIONNA_REFRACTION" "$SIONNA_SYNTHETIC_ARRAY" "$SIONNA_SEED"
   printf 'sionna_max_number_of_paths=%s\nsionna_cache_jitter_fraction=%s\n' \
     "$SIONNA_MAX_NUMBER_OF_PATHS" "$SIONNA_CACHE_JITTER_FRACTION"
-  printf 'cache_policy=displacement_or_time\nchannel_state_max_age_s=%s\nendpoint_displacement_threshold_m=%s\n' \
+  printf 'cache_policy=displacement_velocity_orientation_or_time\nchannel_state_max_age_s=%s\nendpoint_displacement_threshold_m=%s\n' \
     "$CHANNEL_STATE_MAX_AGE_S" "$UPDATE_DISTANCE_THRESHOLD_M"
   printf 'readiness_lag_max_ms=%s\nreadiness_consecutive_samples=%s\n' \
     "$READINESS_LAG_MAX_MS" "$READINESS_CONSECUTIVE_SAMPLES"
@@ -482,6 +487,8 @@ cleanup() {
   for namespace in "${created_namespaces[@]}"; do
     ip netns del "$namespace" 2>/dev/null || true
   done
+  [[ -f "$NODE_STATE" ]] && cp "$NODE_STATE" "$RUN_DIR/logs/node_state.json"
+  [[ -f "$NS3_READY" ]] && cp "$NS3_READY" "$RUN_DIR/logs/ns3.ready"
   if [[ -d "$RUN_DIR" ]]; then
     chown -R "${BAS_NATIVE_FIVE_HOST_UID:-0}:${BAS_NATIVE_FIVE_HOST_GID:-0}" "$RUN_DIR" 2>/dev/null || true
   fi
@@ -489,6 +496,22 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT INT TERM HUP
+
+run_with_native_watchdog() {
+  # Supervise liveness even when radio exits before wait() sees the child.
+  setsid "$@" &
+  local client_pid=$!
+  managed_pids+=("$client_pid")
+  while kill -0 "$client_pid" 2>/dev/null; do
+    if ! kill -0 "$NS3_PID" 2>/dev/null; then
+      printf 'Native radio exited during the active scenario; stopping the run.\n' >&2
+      return 1
+    fi
+    sleep 0.1
+  done
+  kill -0 "$NS3_PID" 2>/dev/null || return 1
+  wait "$client_pid"
+}
 
 wait_for_file() {
   local path="$1"
@@ -593,6 +616,7 @@ for index in "${UAV_INDICES[@]}"; do
 import sys,yaml
 config=yaml.safe_load(open(sys.argv[1]))
 config['radio_watchdog_file']=sys.argv[3]
+config['watchdog_s']=0.3
 config['radio_namespace']=config.pop('namespace','ams-uav1')
 with open(sys.argv[2],'w') as f: yaml.safe_dump(config,f)
 PYCFG
@@ -606,6 +630,7 @@ PYCFG
     setsid ip netns exec "ams-uav$index" python3 -u \
       "$ROOT_DIR/network/scripts/communication_vertical.py" uart-adapter \
       --channel "$channel" --uav-id "$index" --framed --baud-rate 115200 \
+      --radio-watchdog-file "$NS3_READY.heartbeat" --watchdog-s 0.3 \
       --tty "$UART_DIR/$channel-adapter-$instance" \
       --bind "10.71.$index.10:$((base_port + index))" --peer "10.71.0.10:$base_port" \
       --event-log "$RUN_DIR/logs/${channel}_uart_uav$index.jsonl" \
@@ -656,7 +681,7 @@ managed_pids+=("$!")
 cd "$ROOT_DIR"
 setsid taskset -c "$STACK_CPUSET" python3 "$ROOT_DIR/network/position_tracker/tracker.py" \
   --scenario "$SCENARIO" --output-json "$NODE_STATE" --output-jsonl "$NODE_EVENTS" \
-  --rate-hz 10 --stale-after-s 1.0 \
+  --rate-hz 10 --stale-after-s "$STATE_MAX_AGE_S" \
   > "$RUN_DIR/logs/position_tracker.log" 2>&1 &
 managed_pids+=("$!")
 setsid stdbuf -oL gz topic -e -t /world/map/stats > "$RUN_DIR/logs/gazebo_stats.log" 2>&1 &
@@ -751,6 +776,7 @@ setsid ip netns exec ams-ns3 env \
   --readyFile="$NS3_READY" --duration=2400 --txPowerW="$TX_POWER_W" \
   "${source_args[@]}" \
   --phyRateBps="$PHY_RATE_BPS" --eventLogging="$EVENT_LOGGING" \
+  --stateMaxAgeS="$STATE_MAX_AGE_S" --runtimeLagMaxMs="$RUNTIME_LAG_MAX_MS" \
   --channelStateMaxAgeS="$CHANNEL_STATE_MAX_AGE_S" \
   --updateDistanceThresholdM="$UPDATE_DISTANCE_THRESHOLD_M" \
   --sionnaMaxDepth="$SIONNA_MAX_DEPTH" --sionnaLos="$SIONNA_LOS" \
@@ -778,14 +804,14 @@ ps -eo pid,ppid,pgid,etimes,cmd > "$RUN_DIR/logs/process_snapshot.txt"
 if [[ "${BAS_NATIVE_OPERATOR_SECONDS:-0}" != 0 ]]; then
   printf 'latency_stationary_warmup\n' > "$PHASE_FILE"
   printf 'MAVProxy bridge ready in ams-gcs: udpout:127.0.0.1:14551 .. 14555\n'
-  ip netns exec ams-gcs python3 -u "$ROOT_DIR/scripts/product/native_operator_bridge.py" \
+  run_with_native_watchdog ip netns exec ams-gcs python3 -u "$ROOT_DIR/scripts/product/native_operator_bridge.py" \
     --run-dir "$RUN_DIR" --node-state "$NODE_STATE" --duration-s "$BAS_NATIVE_OPERATOR_SECONDS" \
     > "$RUN_DIR/logs/operator_bridge.log" 2>&1
   exit 0
 fi
 
 set +e
-ip netns exec ams-gcs python3 -u "$ROOT_DIR/scripts/product/native_radio_five_uav_scenario.py" run \
+run_with_native_watchdog ip netns exec ams-gcs python3 -u "$ROOT_DIR/scripts/product/native_radio_five_uav_scenario.py" run \
   --run-dir "$RUN_DIR" --node-state "$NODE_STATE" --phase-file "$PHASE_FILE" \
   --schedule-file "$SCHEDULE_FILE" --timeout-scale "$SCENARIO_TIMEOUT_SCALE" \
   --mode="$SCENARIO_MODE" --uav-count="$UAV_COUNT" --channels="$ACTIVE_UART_CHANNELS" \

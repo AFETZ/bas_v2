@@ -35,8 +35,8 @@ def test_product_radio_configuration_is_single_source() -> None:
     assert radio["channel_width_mhz"] == 20
     assert radio["tx_power_w"] == 0.01
     assert 0 < sionna["cache_expiry_jitter_fraction"] <= 0.9
-    assert sionna["channel_state_max_age_s"] == 20.0
-    assert sionna["endpoint_displacement_threshold_m"] == 10.0
+    assert sionna["channel_state_max_age_s"] == 0.5
+    assert sionna["endpoint_displacement_threshold_m"] == 0.5
 
     runner = (ROOT / "network/ns3/run_native_radio_five_uav.sh").read_text(
         encoding="utf-8"

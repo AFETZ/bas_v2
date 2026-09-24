@@ -266,6 +266,7 @@ class FlightHarness:
                         direction="uart_to_gcs",
                         timeout_ms=int(serial_config["reassembly_timeout_ms"]),
                         counters=counters,
+                        max_age_ms=float(self.qos["classes"][channel]["deadline_ms"]),
                     )
                     self.transport_input_frames[key] = MavlinkStreamCounter()
                     self.transport_output_frames[key] = MavlinkStreamCounter()
@@ -294,6 +295,10 @@ class FlightHarness:
 
     def close(self) -> None:
         self.summary["gcs_serial_transport"] = self.transport_summary()
+        write_json(self.events_path.parent / "transport_sequences.json", {
+            f"{channel}:uav{system_id}": encoder.sequence
+            for (channel, system_id), encoder in self.transport_encoders.items()
+        })
         self.flight_handle.close()
         self.selector.close()
         for sock in self.sockets.values():
@@ -414,7 +419,7 @@ class FlightHarness:
                 self.transport_malformed_datagrams += 1
                 continue
             system_id = int(chunk.uav_id)
-            if system_id not in UAV_IDS or source[0] != endpoint_ip(system_id):
+            if system_id not in UAV_IDS or source != (endpoint_ip(system_id), (14600 if channel == "control" else 14700)+system_id):
                 self.transport_malformed_datagrams += 1
                 continue
             records = self.transport_receivers[(channel, system_id)].ingest(data, now_ns)

@@ -1,16 +1,38 @@
 diff --git a/src/spectrum/model/sionna-rt-channel-model.cc b/src/spectrum/model/sionna-rt-channel-model.cc
-index b112fd791..088c9ee36 100644
 --- a/src/spectrum/model/sionna-rt-channel-model.cc
 +++ b/src/spectrum/model/sionna-rt-channel-model.cc
-@@ -23,6 +23,7 @@
+@@ -23,6 +23,9 @@
  #include "ns3/uniform-planar-array.h"
  
  #include <filesystem>
 +#include <sstream>
++#include <stdexcept>
++#include <cmath>
  namespace py = pybind11;
  
  namespace ns3
-@@ -51,6 +52,21 @@ SionnaRtChannelModel::DoDispose()
+@@ -35,6 +38,20 @@
+ /// Conversion factor: degrees to radians
+ static constexpr double DEG2RAD = M_PI / 180.0;
+ 
++namespace {
++Vector BodyOrientation(Ptr<const MobilityModel> mobility) {
++    VectorValue value;
++    return mobility->GetAttributeFailSafe("Orientation", value) ? value.Get() : Vector();
++}
++bool BodyChanged(const Vector& previous, const Vector& current) {
++    // Declared cache thresholds: 5 degrees rotation, 0.5 m/s velocity below.
++    const double limit=5*M_PI/180;
++    return std::abs(std::remainder(current.x-previous.x,2*M_PI))>=limit ||
++           std::abs(std::remainder(current.y-previous.y,2*M_PI))>=limit ||
++           std::abs(std::remainder(current.z-previous.z,2*M_PI))>=limit;
++}
++}
++
+ SionnaRtChannelModel::SionnaRtChannelModel()
+ {
+     NS_LOG_FUNCTION(this);
+@@ -51,6 +68,21 @@
      NS_LOG_FUNCTION(this);
      m_channelMatrixMap.clear();
      m_channelParamsMap.clear();
@@ -32,7 +54,7 @@ index b112fd791..088c9ee36 100644
  }
  
  TypeId
-@@ -72,6 +88,20 @@ SionnaRtChannelModel::GetTypeId()
+@@ -72,6 +104,20 @@
                            TimeValue(MilliSeconds(0)),
                            MakeTimeAccessor(&SionnaRtChannelModel::m_updatePeriod),
                            MakeTimeChecker())
@@ -53,7 +75,7 @@ index b112fd791..088c9ee36 100644
              .AddAttribute("OutputImageDirectory",
                            "Output directory for rendered Sionna RT images",
                            StringValue("images"),
-@@ -211,24 +241,85 @@ SionnaRtChannelModel::AntennaSetupChanged(Ptr<const PhasedArrayModel> aAntenna,
+@@ -211,22 +257,88 @@
  }
  
  bool
@@ -92,6 +114,11 @@ index b112fd791..088c9ee36 100644
 +        if (snapshot != m_pairPositionSnapshots.end())
 +        {
 +            const PairPositionSnapshot& solved = snapshot->second;
++            const bool forward=solved.firstNodeId==aNodeId;
++            update |= CalculateDistance(aMob->GetVelocity(), forward ? solved.firstVelocity : solved.secondVelocity)>=0.5;
++            update |= CalculateDistance(bMob->GetVelocity(), forward ? solved.secondVelocity : solved.firstVelocity)>=0.5;
++            update |= BodyChanged(forward ? solved.firstOrientation : solved.secondOrientation, BodyOrientation(aMob));
++            update |= BodyChanged(forward ? solved.secondOrientation : solved.firstOrientation, BodyOrientation(bMob));
 +            const Vector aAtSolve = solved.firstNodeId == aNodeId ? solved.firstPosition
 +                                                                    : solved.secondPosition;
 +            const Vector bAtSolve = solved.firstNodeId == bNodeId ? solved.firstPosition
@@ -112,8 +139,8 @@ index b112fd791..088c9ee36 100644
 +    }
 +
      return update;
- }
- 
++}
++
 +void
 +SionnaRtChannelModel::SetUpdateDistanceThreshold(double distance)
 +{
@@ -136,12 +163,10 @@ index b112fd791..088c9ee36 100644
 +SionnaRtChannelModel::GetUpdateJitterFraction() const
 +{
 +    return m_updateJitterFraction;
-+}
-+
+ }
+ 
  Ptr<const MatrixBasedChannelModel::ChannelMatrix>
- SionnaRtChannelModel::GetChannel(Ptr<const MobilityModel> aMob,
-                                  Ptr<const MobilityModel> bMob,
-@@ -249,7 +340,7 @@ SionnaRtChannelModel::GetChannel(Ptr<const MobilityModel> aMob,
+@@ -249,7 +361,7 @@
          // channel matrix present in the map
          NS_LOG_DEBUG("channel matrix present in the map");
          channelMatrix = m_channelMatrixMap[channelMatrixKey];
@@ -150,7 +175,7 @@ index b112fd791..088c9ee36 100644
          update |= AntennaSetupChanged(aAntenna, bAntenna, channelMatrix);
          if (update)
          {
-@@ -284,6 +375,12 @@ SionnaRtChannelModel::GetChannel(Ptr<const MobilityModel> aMob,
+@@ -284,6 +396,13 @@
  
          // store or replace the channel matrix in the channel map
          m_channelMatrixMap[channelMatrixKey] = channelMatrix;
@@ -159,11 +184,12 @@ index b112fd791..088c9ee36 100644
 +        m_pairPositionSnapshots[mobilityPairKey] = {aMob->GetObject<Node>()->GetId(),
 +                                                     aMob->GetPosition(),
 +                                                     bMob->GetObject<Node>()->GetId(),
-+                                                     bMob->GetPosition()};
++                                                     bMob->GetPosition(), aMob->GetVelocity(), bMob->GetVelocity(),
++                                                     BodyOrientation(aMob), BodyOrientation(bMob)};
  
          // each time a new channel is created, also compute the channel params
          auto channelParams = CalculateChannelParamsFromPaths(paths, aMob, bMob);
-@@ -539,41 +636,64 @@ SionnaRtChannelModel::CreateScene(const py::module_ rt,
+@@ -539,41 +658,70 @@
                                    Ptr<const PhasedArrayModel> uAntenna) const
  {
      NS_LOG_FUNCTION(this);
@@ -224,10 +250,16 @@ index b112fd791..088c9ee36 100644
 +    py::object tx = m_cachedScene.attr("get")("tx");
 +    py::object rx = m_cachedScene.attr("get")("rx");
 +    tx.attr("position") = py::make_tuple(pos.x, pos.y, pos.z);
-+    tx.attr("orientation") = py::make_tuple(upa->GetAlpha(), upa->GetBeta(), 0.0);
++    VectorValue txOrientation;
++    const Vector txAngles = sMob->GetAttributeFailSafe("Orientation", txOrientation)
++        ? txOrientation.Get() : Vector(upa->GetAlpha(), upa->GetBeta(), 0.0);
++    tx.attr("orientation") = py::make_tuple(txAngles.x, txAngles.y, txAngles.z);
 +    tx.attr("velocity") = py::make_tuple(v.x, v.y, v.z);
 +    rx.attr("position") = py::make_tuple(posRx.x, posRx.y, posRx.z);
-+    rx.attr("orientation") = py::make_tuple(upau->GetAlpha(), upau->GetBeta(), 0.0);
++    VectorValue rxOrientation;
++    const Vector rxAngles = uMob->GetAttributeFailSafe("Orientation", rxOrientation)
++        ? rxOrientation.Get() : Vector(upau->GetAlpha(), upau->GetBeta(), 0.0);
++    rx.attr("orientation") = py::make_tuple(rxAngles.x, rxAngles.y, rxAngles.z);
 +    rx.attr("velocity") = py::make_tuple(vRx.x, vRx.y, vRx.z);
 +    m_cachedScene.attr("frequency") = m_sceneConfigs.frequency;
      NS_LOG_INFO("Scene created: frequency=" << m_sceneConfigs.frequency << " tx@" << pos << " rx@"
@@ -254,11 +286,26 @@ index b112fd791..088c9ee36 100644
  }
  
  void
+@@ -640,14 +788,7 @@
+     NS_LOG_INFO("Number of generated paths: " << num_paths);
+     if (DoesNumberOfPathsExceedMaximum(num_paths))
+     {
+-        NS_LOG_WARN("Number of generated paths (" << num_paths
+-                                                  << ") exceeds the configured maximum number of "
+-                                                     "paths ("
+-                                                  << m_maxNumberOfPaths
+-                                                  << "). The excess paths will be ignored.");
+-
+-        m_RtPathSolverConfig.maxDepth -= 1;
+-        paths = CalculatePaths(rt, scene);
++        throw std::runtime_error("Sionna path limit exceeded; refusing automatic solver-depth reduction");
+     }
+ 
+     if (m_isImageRendered && num_paths > 0)
 diff --git a/src/spectrum/model/sionna-rt-channel-model.h b/src/spectrum/model/sionna-rt-channel-model.h
-index e790239d4..d464c4a2b 100644
 --- a/src/spectrum/model/sionna-rt-channel-model.h
 +++ b/src/spectrum/model/sionna-rt-channel-model.h
-@@ -390,7 +390,26 @@ class SionnaRtChannelModel : public MatrixBasedChannelModel
+@@ -390,7 +390,26 @@
       * @param channelMatrix The existing channel matrix to check
       * @return true if the matrix must be updated; false otherwise
       */
@@ -286,10 +333,11 @@ index e790239d4..d464c4a2b 100644
  
      /**
       * @brief Check whether antenna configuration changes require regenerating the channel matrix.
-@@ -644,6 +663,16 @@ class SionnaRtChannelModel : public MatrixBasedChannelModel
+@@ -643,6 +662,18 @@
+      * @return true if numPaths > m_maxNumberOfPaths; false otherwise
       */
      bool DoesNumberOfPathsExceedMaximum(size_t numPaths) const;
- 
++
 +    std::string AntennaSceneFingerprint(Ptr<const PhasedArrayModel> antenna) const;
 +
 +    struct PairPositionSnapshot
@@ -298,12 +346,13 @@ index e790239d4..d464c4a2b 100644
 +        Vector firstPosition;
 +        uint32_t secondNodeId;
 +        Vector secondPosition;
++        Vector firstVelocity, secondVelocity;
++        Vector firstOrientation, secondOrientation;
 +    };
-+
+ 
      // Attributes
      std::unordered_map<uint64_t, Ptr<ChannelMatrix>>
-         m_channelMatrixMap; //!< map containing the channel realizations per pair of
-@@ -655,6 +684,15 @@ class SionnaRtChannelModel : public MatrixBasedChannelModel
+@@ -655,6 +686,15 @@
                              //!< nodes
      /** Channel update period used to decide whether to re-run path computations */
      Time m_updatePeriod;

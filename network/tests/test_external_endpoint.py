@@ -62,7 +62,7 @@ def test_real_bidirectional_endpoints(tmp_path, kind):
         endpoint = dict(kind=kind, peer=list(listener.getsockname()))
     config = dict(uav_id=1, channel="control", endpoint=endpoint,
         radio=dict(bind=["127.0.0.1", bind_port], peer=list(radio.getsockname())),
-        queues=dict(packets=4, bytes=4096, deadline_s=.5), watchdog_s=.3, reconnect_s=.1)
+        queues=dict(packets=128, bytes=65536, deadline_s=.5), watchdog_s=.3, reconnect_s=.1)
     path = tmp_path/"config.yaml"
     path.write_text(yaml.safe_dump(config))
     process = subprocess.Popen([sys.executable, str(ROOT/"network/scripts/external_endpoint.py"),
@@ -78,15 +78,20 @@ def test_real_bidirectional_endpoints(tmp_path, kind):
             external, _ = listener.accept()
             external.settimeout(4)
         outgoing = b"opaque external controller bytes\x00\xff"
+        if kind == "udp":
+            outgoing = bytes(range(256))*32  # 8192 bytes must survive intact.
         if kind == "serial":
             os.write(master, outgoing)
         elif kind == "udp":
             external.sendto(outgoing, tuple(endpoint["bind"]))
         else:
             external.sendall(outgoing)
-        datagram, source = radio.recvfrom(65535)
         decoder = Reassembler(channel="control", uav_id=1, direction="uart_to_gcs")
-        assert decoder.ingest(datagram) == [outgoing]
+        recovered = []
+        while not recovered:
+            datagram, source = radio.recvfrom(65535)
+            recovered.extend(decoder.ingest(datagram))
+        assert recovered == [outgoing]
         incoming = b"safe opaque return bytes\xff\x00"
         encoder = Encoder(channel="control", uav_id=1, direction="gcs_to_uart")
         for fragment in encoder.encode(incoming):
@@ -107,7 +112,7 @@ def test_real_bidirectional_endpoints(tmp_path, kind):
         metrics = json.loads(ready.read_text())
         assert metrics["endpoint_silent"] and metrics["radio_silent"]
         assert metrics["radio_to_endpoint_bytes"] == len(incoming)
-        assert metrics["peak_queue_bytes"] <= 4096
+        assert metrics["peak_queue_bytes"] <= 65536
         if kind == "tcp_client":
             assert metrics["reconnects"] >= 2
         if kind == "serial":
@@ -151,10 +156,10 @@ def test_native_heartbeat_and_old_radio_bytes_fail_closed(tmp_path):
         for frame in encoder.encode(b'blocked-no-live-native-runtime'):radio.sendto(frame,tuple(config['radio']['bind']))
         with pytest.raises(socket.timeout):device.recvfrom(4096)
         old=encoder.encode(b'old-command')
-        time.sleep(.2);heartbeat.write_text('native simulation tick')
+        time.sleep(.2);heartbeat.write_text(json.dumps(dict(healthy=True,monotonic_ns=time.monotonic_ns())))
         for frame in old:radio.sendto(frame,tuple(config['radio']['bind']))
         with pytest.raises(socket.timeout):device.recvfrom(4096)
-        heartbeat.touch()
+        heartbeat.write_text(json.dumps(dict(healthy=True,monotonic_ns=time.monotonic_ns())))
         for frame in encoder.encode(b'fresh-command'):radio.sendto(frame,tuple(config['radio']['bind']))
         assert device.recvfrom(4096)[0]==b'fresh-command'
         time.sleep(.3)

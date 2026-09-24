@@ -12,6 +12,8 @@ import dataclasses
 import struct
 import time
 from collections import deque
+from pathlib import Path
+import json
 from typing import Iterable
 
 
@@ -77,6 +79,7 @@ class TransportCounters:
     reassembly_failures: int = 0
     malformed_chunks: int = 0
     crc_failures: int = 0
+    deadline_drops: int = 0
     maximum_ingress_queue_age_ms: float = 0.0
     ingress_queue_age_total_ms: float = 0.0
     ingress_queue_age_samples: int = 0
@@ -248,6 +251,12 @@ class Reassembler:
         self._complete: dict[int, tuple[bytes, int, int]] = {}
         self._recent_delivered: deque[int] = deque(maxlen=4096)
         self._recent_set: set[int] = set()
+        self.released_sent_ns: list[int] = []
+        if max_age_ms is not None:
+            if not 0 < max_age_ms < float('inf'):
+                raise ValueError('max_age_ms must be finite and positive')
+            # A lost record must not hold later records beyond their whole deadline.
+            self.timeout_ns = min(self.timeout_ns, max(1, int(max_age_ms*500_000)))
 
     def ingest(self, datagram: bytes, now_ns: int | None = None) -> list[bytes]:
         observed_ns = time.monotonic_ns() if now_ns is None else now_ns
@@ -326,10 +335,11 @@ class Reassembler:
                     record.sent_monotonic_ns,
                     record.first_seen_ns,
                 )
-        return self._drain(observed_ns) + self.expire(observed_ns)
+        return self.expire(observed_ns)
 
     def expire(self, now_ns: int | None = None, *, force: bool = False) -> list[bytes]:
         observed_ns = time.monotonic_ns() if now_ns is None else now_ns
+        self.released_sent_ns = []
         output: list[bytes] = []
         while True:
             output.extend(self._drain(observed_ns))
@@ -396,9 +406,10 @@ class Reassembler:
         result: list[bytes] = []
         while self.expected_sequence in self._complete:
             payload, sent_ns, _first_seen = self._complete.pop(self.expected_sequence)
-            age_ms = max(0.0, (now_ns - sent_ns) / 1e6)
-            if self.max_age_ms is not None and age_ms > self.max_age_ms:
+            age_ms = (now_ns - sent_ns) / 1e6
+            if self.max_age_ms is not None and (age_ms < 0 or age_ms > self.max_age_ms):
                 self.counters.discarded_frames += 1
+                self.counters.deadline_drops += 1
                 self._advance_expected()
                 continue
             self.counters.records_reassembled += 1
@@ -408,6 +419,7 @@ class Reassembler:
             self.counters.ingress_queue_age_total_ms += age_ms
             self.counters.ingress_queue_age_samples += 1
             result.append(payload)
+            self.released_sent_ns.append(sent_ns)
             self._advance_expected()
         return result
 
@@ -418,6 +430,66 @@ class Reassembler:
         self._recent_delivered.append(sequence)
         self._recent_set.add(sequence)
         self.expected_sequence = (sequence + 1) & 0xFFFFFFFF
+
+
+class BoundedQueue:
+    """FIFO with byte/record bounds and an original-ingress deadline.
+
+    put() takes the original host-monotonic ingress time, including any time
+    already spent in reassembly or the modeled network. Partial writes retain it.
+    """
+    def __init__(self, packets: int, byte_limit: int, deadline_s: float):
+        if packets <= 0 or byte_limit <= 0 or deadline_s <= 0:
+            raise ValueError('queue bounds and deadline must be positive')
+        self.items = deque()
+        self.limit, self.byte_limit, self.deadline_s = packets, byte_limit, deadline_s
+        self.bytes = self.dropped = self.expired = self.peak = 0
+
+    def put(self, data: bytes, now: float) -> bool:
+        if len(self.items) >= self.limit or self.bytes+len(data) > self.byte_limit:
+            self.dropped += 1
+            return False
+        self.items.append([bytes(data), now])
+        self.bytes += len(data)
+        self.peak = max(self.peak, self.bytes)
+        return True
+
+    def clear(self):
+        self.dropped += len(self.items)
+        self.items.clear()
+        self.bytes = 0
+
+    def expire(self, now: float):
+        # Source times normally increase, but reject clock-future records too.
+        kept = deque()
+        for data, stamp in self.items:
+            if stamp > now or now-stamp > self.deadline_s:
+                self.bytes -= len(data)
+                self.expired += 1
+            else:
+                kept.append([data, stamp])
+        self.items = kept
+
+    def sent(self, count: int):
+        data, timestamp = self.items[0]
+        if not 0 <= count <= len(data):
+            raise ValueError('invalid partial write count')
+        self.bytes -= count
+        if count == len(data):
+            self.items.popleft()
+        else:
+            self.items[0] = [data[count:], timestamp]
+
+
+def radio_is_live(path: str | None, watchdog_s: float) -> bool:
+    if not path:
+        return True
+    try:
+        state = json.loads(Path(path).read_text())
+        age = (time.monotonic_ns()-int(state['monotonic_ns']))/1e9
+        return state['healthy'] is True and 0 <= age <= watchdog_s
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
 
 
 class MavlinkStreamCounter:

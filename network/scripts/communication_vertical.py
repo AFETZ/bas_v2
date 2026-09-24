@@ -20,7 +20,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from serial_transport import Encoder, MavlinkStreamCounter, Reassembler, TransportCounters
+from serial_transport import (Encoder, MavlinkStreamCounter, Reassembler, TransportCounters,
+                              BoundedQueue, radio_is_live)
 
 
 DATA_HEADER = struct.Struct("!4sBBIQ")
@@ -36,7 +37,9 @@ def endpoint(value: str) -> tuple[str, int]:
 def write_json(path: str | Path, value: Any) -> None:
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+    temporary = output.with_suffix(output.suffix + ".tmp")
+    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+    os.replace(temporary, output)
 
 
 def append_jsonl(handle: Any, value: dict[str, Any]) -> None:
@@ -95,6 +98,10 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     counters = TransportCounters()
+    deadline_ms = args.deadline_ms or (250 if args.channel == 'control' else 1000)
+    to_uart = BoundedQueue(args.queue_packets, args.queue_bytes, deadline_ms/1000)
+    to_radio = BoundedQueue(args.queue_packets, args.queue_bytes, deadline_ms/1000)
+    unexpected_peers = stale_radio_drops = 0
     encoder = (
         Encoder(
             channel=args.channel,
@@ -112,6 +119,9 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
             direction="gcs_to_uart",
             timeout_ms=args.reassembly_timeout_ms,
             counters=counters,
+            max_age_ms=deadline_ms,
+            max_buffer_records=args.queue_packets,
+            max_buffer_bytes=args.queue_bytes,
         )
         if args.framed
         else None
@@ -156,6 +166,14 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
                 "transport_framing": ready["transport_framing"],
                 "mavlink_input": input_snapshot,
                 "mavlink_output": output_snapshot,
+                "unexpected_peer": unexpected_peers,
+                "stale_radio_drops": stale_radio_drops,
+                "queue_drops": to_uart.dropped + to_radio.dropped,
+                "queue_deadline_drops": to_uart.expired + to_radio.expired,
+                "uart_queue_bytes": to_uart.bytes,
+                "radio_queue_bytes": to_radio.bytes,
+                "queue_peak_bytes": max(to_uart.peak, to_radio.peak),
+                "deadline_ms": deadline_ms,
             }
         )
         values["frames"] = input_snapshot["frames"] + output_snapshot["frames"]
@@ -208,22 +226,21 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
         try:
             while running:
                 now_ns = time.monotonic_ns()
+                live = radio_is_live(args.radio_watchdog_file, args.watchdog_s)
+                to_uart.expire(now_ns/1e9)
+                to_radio.expire(now_ns/1e9)
+                if not live:
+                    to_uart.clear()
+                    to_radio.clear()
                 if reassembler is not None:
-                    for record in reassembler.expire(now_ns):
-                        output_frames.feed(record)
-                        view = memoryview(record)
-                        while view and running:
-                            try:
-                                written = os.write(uart, view)
-                                counters.uart_output_bytes += written
-                                view = view[written:]
-                            except BlockingIOError:
-                                select_write = selectors.DefaultSelector()
-                                select_write.register(uart, selectors.EVENT_WRITE)
-                                select_write.select(0.25)
-                                select_write.close()
+                    records = reassembler.expire(now_ns)
+                    for record, sent_ns in zip(records, reassembler.released_sent_ns):
+                        if live:
+                            to_uart.put(record, sent_ns/1e9)
+                        else:
+                            stale_radio_drops += 1
                 publish_metrics(now_ns)
-                for key, _mask in selector.select(0.25):
+                for key, _mask in selector.select(0.01 if to_uart.items or to_radio.items else 0.05):
                     if key.data == "uart":
                         try:
                             data = os.read(uart, 4096)
@@ -240,11 +257,14 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
                             counters.records_encoded += 1
                             counters.chunks_encoded += len(datagrams)
                         for fragment_index, datagram in enumerate(datagrams):
-                            udp.sendto(datagram, peer_address)
-                            counters.ns3_input_bytes += len(datagram)
+                            if not live:
+                                stale_radio_drops += 1
+                                continue
+                            if not to_radio.put(datagram, observed_ns/1e9):
+                                continue
                             emit_event(
                                 {
-                                    "event": "serial_chunk_tx" if encoder else "serial_tx",
+                                    "event": "serial_chunk_queued" if encoder else "serial_queued",
                                     "channel": args.channel,
                                     "uav_id": args.uav_id,
                                     "direction": "uart_to_ns3" if encoder else "uart_to_udp",
@@ -262,27 +282,19 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
                             data, source = udp.recvfrom(65535)
                         except BlockingIOError:
                             continue
+                        if source != peer_address:
+                            unexpected_peers += 1
+                            continue
                         observed_ns = time.monotonic_ns()
                         records = reassembler.ingest(data, observed_ns) if reassembler else [data]
+                        sent_times = reassembler.released_sent_ns if reassembler else [observed_ns]
                         if not reassembler:
                             counters.ns3_output_bytes += len(data)
-                        for record in records:
-                            output_frames.feed(record)
-                            view = memoryview(record)
-                            while view and running:
-                                try:
-                                    written = os.write(uart, view)
-                                    counters.uart_output_bytes += written
-                                    view = view[written:]
-                                except BlockingIOError:
-                                    select_write = selectors.DefaultSelector()
-                                    select_write.register(uart, selectors.EVENT_WRITE)
-                                    select_write.select(0.25)
-                                    select_write.close()
-                            if not view:
-                                # This is the receiver-side UART hand-off after the
-                                # whole MAVLink record has reached the real PTY.
-                                emit_mavlink_frames("ns3_to_uart", output_parser, record, time.monotonic_ns())
+                        for record, sent_ns in zip(records, sent_times):
+                            if live:
+                                to_uart.put(record, sent_ns/1e9)
+                            else:
+                                stale_radio_drops += 1
                         emit_event(
                             {
                                 "event": "serial_chunk_rx" if reassembler else "serial_rx",
@@ -291,13 +303,35 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
                                 "direction": "ns3_to_uart" if reassembler else "udp_to_uart",
                                 "bytes": len(data),
                                 "network_bytes": len(data),
-                                "uart_records_released": len(records),
-                                "uart_bytes_released": sum(len(record) for record in records),
+                                "reassembled_records": len(records),
+                                "reassembled_bytes": sum(len(record) for record in records),
                                 "sha256": sha256(data),
                                 "source": f"{source[0]}:{source[1]}",
                                 "monotonic_ns": observed_ns,
                             },
                         )
+                # At most one nonblocking write per queue per iteration: a full
+                # PTY cannot prevent ingress, expiry, metrics or stop processing.
+                live = radio_is_live(args.radio_watchdog_file, args.watchdog_s)
+                to_uart.expire(time.monotonic())
+                to_radio.expire(time.monotonic())
+                if live and to_uart.items:
+                    try:
+                        data = to_uart.items[0][0]
+                        written = os.write(uart, data)
+                        counters.uart_output_bytes += written
+                        output_frames.feed(data[:written])
+                        emit_mavlink_frames('ns3_to_uart', output_parser, data[:written], time.monotonic_ns())
+                        to_uart.sent(written)
+                    except BlockingIOError:
+                        pass
+                if live and to_radio.items:
+                    try:
+                        written = udp.sendto(to_radio.items[0][0], peer_address)
+                        counters.ns3_input_bytes += written
+                        to_radio.sent(written)
+                    except BlockingIOError:
+                        pass
         finally:
             if reassembler is not None:
                 reassembler.expire(time.monotonic_ns(), force=True)
@@ -881,6 +915,11 @@ def parser() -> argparse.ArgumentParser:
     adapter.add_argument("--tos", type=int)
     adapter.add_argument("--uav-id", type=int, default=1)
     adapter.add_argument("--baud-rate", type=int, default=115200)
+    adapter.add_argument("--deadline-ms", type=int)
+    adapter.add_argument("--queue-packets", type=int, default=128)
+    adapter.add_argument("--queue-bytes", type=int, default=65536)
+    adapter.add_argument("--radio-watchdog-file")
+    adapter.add_argument("--watchdog-s", type=float, default=.3)
     adapter.add_argument("--framed", action="store_true")
     adapter.add_argument("--chunk-payload-bytes", type=int, default=192)
     adapter.add_argument("--reassembly-timeout-ms", type=int, default=500)

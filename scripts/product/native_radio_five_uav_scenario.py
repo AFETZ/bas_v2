@@ -1673,6 +1673,28 @@ def run_no_bypass_probe(args: argparse.Namespace) -> int:
         scenario_config=args.scenario_config,
     )
     harness = NativeFiveUavHarness(probe_args)
+    # Continue the same BSF1 streams: retained UART receivers reject sequence zero.
+    run_dir = Path(args.run_dir).resolve()
+    sequences = json.loads((run_dir / "logs/transport_sequences.json").read_text())
+    for (channel, system_id), encoder in harness.transport_encoders.items():
+        encoder.sequence = int(sequences[f"{channel}:uav{system_id}"])
+
+    def delivered_bytes():
+        values = {}
+        for system_id in UAV_IDS:
+            for channel in ("control", "payload"):
+                path = run_dir / f"metrics/{channel}_uart_uav{system_id}.json"
+                counter = "uart_output_bytes"
+                if system_id == 1 and channel == "control" and not path.exists():
+                    path = run_dir / "external_endpoint/metrics.json"
+                    counter = "radio_to_endpoint_bytes"
+                try:
+                    values[f"{channel}:uav{system_id}"] = int(json.loads(path.read_text())[counter])
+                except (OSError, ValueError, KeyError):
+                    return None
+        return values
+
+    uart_before = delivered_bytes()
     before = sum(harness.message_counts.values())
     request = int(harness.mavutil.mavlink.MAV_CMD_REQUEST_MESSAGE)
     for system_id in UAV_IDS:
@@ -1713,6 +1735,12 @@ def run_no_bypass_probe(args: argparse.Namespace) -> int:
         "additional_data_absent": not harness.additional_received,
         "passed": messages == 0 and not harness.additional_received,
     }
+    uart_after = delivered_bytes()
+    metrics_complete = uart_before is not None and uart_after is not None
+    deltas = {key: uart_after[key]-value for key,value in uart_before.items()} if metrics_complete else {}
+    result.update(transport_sequences_resumed=True, uart_metrics_complete=metrics_complete,
+                  uart_delivered_bytes_delta=deltas,
+                  passed=result['passed'] and metrics_complete and all(v == 0 for v in deltas.values()))
     harness.close()
     write_json(Path(args.output), result)
     return 0 if result["passed"] else 1

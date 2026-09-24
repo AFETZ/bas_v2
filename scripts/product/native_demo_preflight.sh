@@ -566,7 +566,10 @@ else
 fi
 
 if [[ -x "$NATIVE_BINARY" && -f "$NATIVE_COPY" ]] \
-  && cmp -s "$NATIVE_SOURCE" "$NATIVE_COPY"; then
+  && cmp -s "$NATIVE_SOURCE" "$NATIVE_COPY" \
+  && cmp -s "$ROOT_DIR/network/ns3/scratch/native-live-state.h" "$NS3_DIR/scratch/native-live-state.h" \
+  && [[ "$NATIVE_BINARY" -nt "$NATIVE_SOURCE" && "$NATIVE_BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-live-state.h" \
+        && "$NATIVE_BINARY" -nt "$ROOT_DIR/network/ns3/patches/mr2608-realtime-scene-cache.patch" ]]; then
   pass "ns3:target" "focused native target is built and source-synchronized"
 else
   warn "ns3:target" "the demo runner will rebuild the focused target"

@@ -35,7 +35,12 @@ sionna:
   seed: 42
   max_number_of_paths: 90
   cache_expiry_jitter_fraction: 0.5
-  channel_state_max_age_s: 8.0
-  endpoint_displacement_threshold_m: 5.0
+  channel_state_max_age_s: 0.5
+  endpoint_displacement_threshold_m: 0.5
   readiness_lag_max_ms: 50.0
   readiness_consecutive_samples: 3
+
+# Host-monotonic deadlines; abort a live run when state/time loses validity.
+coupling:
+  state_max_age_s: 0.5
+  runtime_lag_max_ms: 250.0

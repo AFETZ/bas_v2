@@ -3,7 +3,6 @@
 from __future__ import annotations
 import argparse
 import ctypes
-from collections import deque
 import json
 import os
 from pathlib import Path
@@ -11,45 +10,7 @@ import signal
 import socket
 import time
 import yaml
-from serial_transport import Encoder, Reassembler, TransportCounters, decode_chunk
-
-
-class BoundedQueue:
-    def __init__(self, packets, byte_limit, deadline_s):
-        if packets <= 0 or byte_limit <= 0 or deadline_s <= 0:
-            raise ValueError("queue bounds and deadline must be positive")
-        self.items = deque()
-        self.limit = packets
-        self.byte_limit = byte_limit
-        self.deadline_s = deadline_s
-        self.bytes = self.dropped = self.expired = self.peak = 0
-
-    def put(self, data, now):
-        if len(self.items) >= self.limit or self.bytes+len(data) > self.byte_limit:
-            self.dropped += 1
-            return False
-        self.items.append([bytes(data), now])
-        self.bytes += len(data)
-        self.peak = max(self.peak, self.bytes)
-        return True
-
-    def clear(self):
-        self.dropped += len(self.items)
-        self.items.clear()
-        self.bytes = 0
-
-    def expire(self, now):
-        while self.items and now-self.items[0][1] > self.deadline_s:
-            self.bytes -= len(self.items.popleft()[0])
-            self.expired += 1
-
-    def sent(self, count):
-        self.bytes -= count
-        data, timestamp = self.items[0]
-        if count == len(data):
-            self.items.popleft()
-        else:
-            self.items[0] = [data[count:], timestamp]
+from serial_transport import Encoder, Reassembler, TransportCounters, decode_chunk, BoundedQueue, radio_is_live
 
 
 def run(config, output, duration=None):
@@ -149,7 +110,7 @@ def run(config, output, duration=None):
             # Optional heartbeat is written by the live native runtime. Stale
             # radio state prevents queued commands from being replayed on recovery.
             state_file = config.get("radio_watchdog_file")
-            radio_live = not state_file or (Path(state_file).is_file() and time.time()-Path(state_file).stat().st_mtime < watchdog)
+            radio_live = radio_is_live(state_file, watchdog)
             if not radio_live:
                 to_radio.clear()
                 to_device.clear()
@@ -160,7 +121,7 @@ def run(config, output, duration=None):
                         if kind == "serial":
                             data = device.read(4096)
                         elif kind == "udp":
-                            data, source = device.recvfrom(4096)
+                            data, source = device.recvfrom(65535)
                             if source != tuple(endpoint["peer"]):
                                 metrics["unexpected_peer"] += 1
                                 data = b""
@@ -192,15 +153,17 @@ def run(config, output, duration=None):
                             continue
                         records = reassembler.ingest(data)
                         if device is not None and radio_live:
-                            for record in records:
-                                to_device.put(record, now)
+                            for record, sent_ns in zip(records, reassembler.released_sent_ns):
+                                to_device.put(record, sent_ns/1e9)
                     else:
                         metrics["unexpected_peer"] += 1
                 except BlockingIOError:
                     pass
-                for record in reassembler.expire():
+                records = reassembler.expire()
+                for record, sent_ns in zip(records, reassembler.released_sent_ns):
                     if device is not None and radio_live:
-                        to_device.put(record, now)
+                        to_device.put(record, sent_ns/1e9)
+                to_device.expire(time.monotonic())
                 if to_radio.items and radio_live:
                     try:
                         count = udp.sendto(to_radio.items[0][0], peer)
