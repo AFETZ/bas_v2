@@ -19,6 +19,11 @@ run_in_container() {
     -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics \
     -e BAS_SIONNA_WIFI_IN_CONTAINER=1 \
     -e BAS_SIONNA_WIFI_RUN_ID="$RUN_ID" \
+    -e BAS_SOURCE_HEAD="$(git -C "$ROOT_DIR" rev-parse HEAD)" \
+    -e BAS_NATIVE_MAP_SOURCES="${BAS_NATIVE_MAP_SOURCES:-network/config/native_jammers_reference.yaml}" \
+    -e BAS_NATIVE_MAP_TIME_S="${BAS_NATIVE_MAP_TIME_S:-4}" \
+    -e BAS_NATIVE_STUDY="${BAS_NATIVE_STUDY:-}" \
+    -e BAS_NATIVE_SOURCES_CAMPAIGN="${BAS_NATIVE_SOURCES_CAMPAIGN:-0}" \
     -e BAS_SIONNA_WIFI_IMAGE_ID="$image_id" \
     -e BAS_SIONNA_WIFI_HOST_UID="$(id -u)" \
     -e BAS_SIONNA_WIFI_HOST_GID="$(id -g)" \
@@ -88,6 +93,7 @@ export LD_LIBRARY_PATH="$NS3_DIR/build/lib:${LD_LIBRARY_PATH:-}"
 export SIONNA_MITSUBA_VARIANT=cuda_ad_mono_polarized
 export MPLCONFIGDIR="$RUN_DIR/matplotlib"
 cp "$SMOKE_SOURCE" "$NS3_DIR/scratch/upstream-sionna-wifi-smoke.cc"
+cp "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" "$ROOT_DIR/network/ns3/scratch/native-radio-map.h" "$ROOT_DIR/network/ns3/scratch/native-cache-study.h" "$NS3_DIR/scratch/"
 cp "$FIVE_SOURCE" "$NS3_DIR/scratch/upstream-sionna-wifi-five-uav.cc"
 
 if [[ ! -f "$NS3_DIR/cmake-cache/CMakeCache.txt" ]]; then
@@ -105,19 +111,10 @@ fi
   exit 1
 }
 
-"$SMOKE_BINARY" --output="$RUN_DIR/metrics/smoke.json" \
-  > "$RUN_DIR/logs/smoke.log" 2>&1
-"$FIVE_BINARY" --output="$RUN_DIR/metrics/summary.json" \
-  > "$RUN_DIR/logs/five_uav.log" 2>&1
-
-python3 "$ROOT_DIR/scripts/product/validate_native_wifi_sionna.py" \
-  "$RUN_DIR/metrics/summary.json" \
-  > "$RUN_DIR/logs/validation.log"
-
 {
   printf 'run_id=%s\n' "$RUN_ID"
-  printf 'completed_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  printf 'git_head=%s\n' "$(git -C "$ROOT_DIR" rev-parse HEAD)"
+  printf 'prepared_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf 'git_head=%s\n' "${BAS_SOURCE_HEAD:-unknown}"
   printf 'container_image=%s\n' "$IMAGE"
   printf 'container_image_id=%s\n' "${BAS_SIONNA_WIFI_IMAGE_ID:-unknown}"
   printf 'ns3_exact_sha=%s\n' "$(git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" rev-parse HEAD)"
@@ -128,6 +125,39 @@ for name in ("sionna", "sionna-rt", "mitsuba", "drjit", "pybind11"):
     print(f"{name}={version(name)}")
 PY
 } > "$RUN_DIR/environment.txt"
+
+case "${BAS_NATIVE_STUDY:-}" in
+  maps)
+    python3 "$ROOT_DIR/scripts/product/prepare_native_sources.py" --config "$ROOT_DIR/${BAS_NATIVE_MAP_SOURCES:-network/config/native_jammers_reference.yaml}" --output "$RUN_DIR/sources.json"
+    "$SMOKE_BINARY" --scene="$ROOT_DIR/.external/cavise_maps/Town01/map/scene.xml" --sources="$RUN_DIR/sources.json" --heatmapCsv="$RUN_DIR/native_psd_grid.csv" --heatmapTimeS="${BAS_NATIVE_MAP_TIME_S:-4}" --output="$RUN_DIR/map_context.json" > "$RUN_DIR/logs/map.log" 2>&1
+    python3 "$ROOT_DIR/scripts/product/town01_heatmaps.py" --run-dir "$RUN_DIR" --native-csv "$RUN_DIR/native_psd_grid.csv"
+    exit 0 ;;
+  cache)
+    "$SMOKE_BINARY" --scene="$ROOT_DIR/.external/cavise_maps/Town01/map/scene.xml" --cacheStudyCsv="$RUN_DIR/cache_samples.csv" --output="$RUN_DIR/cache_context.json" > "$RUN_DIR/logs/cache.log" 2>&1
+    exit 0 ;;
+  matrix)
+    python3 "$ROOT_DIR/scripts/product/native_reference_campaign.py" --run-dir "$RUN_DIR/matrix"
+    exit $? ;;
+  "") ;;
+  *) printf 'Unknown BAS_NATIVE_STUDY\n' >&2; exit 2 ;;
+esac
+
+if [[ "${BAS_NATIVE_SOURCES_CAMPAIGN:-0}" == 1 ]]; then
+  python3 "$ROOT_DIR/scripts/product/native_source_campaign.py" --binary "$SMOKE_BINARY" \
+    --scene "$ROOT_DIR/.external/cavise_maps/Town01/map/scene.xml" --run-dir "$RUN_DIR/campaign"
+  exit $?
+fi
+
+"$SMOKE_BINARY" --output="$RUN_DIR/metrics/smoke.json" \
+  > "$RUN_DIR/logs/smoke.log" 2>&1
+"$FIVE_BINARY" --output="$RUN_DIR/metrics/summary.json" \
+  > "$RUN_DIR/logs/five_uav.log" 2>&1
+
+python3 "$ROOT_DIR/scripts/product/validate_native_wifi_sionna.py" \
+  "$RUN_DIR/metrics/summary.json" \
+  > "$RUN_DIR/logs/validation.log"
+
+
 
 printf 'Native Wi-Fi/Sionna five-UAV reference passed: %s\n' "$RUN_DIR"
 python3 - "$RUN_DIR/metrics/summary.json" <<'PY'

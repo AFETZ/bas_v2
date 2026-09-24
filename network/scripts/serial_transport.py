@@ -225,6 +225,9 @@ class Reassembler:
         timeout_ms: int = 500,
         initial_sequence: int = 0,
         counters: TransportCounters | None = None,
+        max_buffer_records: int = 256,
+        max_buffer_bytes: int = 1048576,
+        max_age_ms: float | None = None,
     ) -> None:
         if channel not in CHANNEL_IDS or direction not in DIRECTION_IDS:
             raise ValueError("unknown serial channel or direction")
@@ -234,6 +237,11 @@ class Reassembler:
         self.uav_id = uav_id
         self.direction_id = DIRECTION_IDS[direction]
         self.timeout_ns = timeout_ms * 1_000_000
+        if max_buffer_records < 1 or max_buffer_bytes < 1 or (max_age_ms is not None and max_age_ms <= 0):
+            raise ValueError("reassembly bounds must be positive")
+        self.max_buffer_records = max_buffer_records
+        self.max_buffer_bytes = max_buffer_bytes
+        self.max_age_ms = max_age_ms
         self.expected_sequence = initial_sequence & 0xFFFFFFFF
         self.counters = counters or TransportCounters()
         self._records: dict[int, _Record] = {}
@@ -259,6 +267,13 @@ class Reassembler:
             self.counters.malformed_chunks += 1
             return self.expire(observed_ns)
         self.counters.chunks_received += 1
+        buffered_bytes = sum(len(p) for r in self._records.values() for p in r.fragments.values())
+        buffered_bytes += sum(len(p) for p, _, _ in self._complete.values())
+        new_record = chunk.sequence not in self._records and chunk.sequence not in self._complete
+        if (chunk.total_length > self.max_buffer_bytes or buffered_bytes + len(chunk.payload) > self.max_buffer_bytes
+                or (new_record and len(self._records)+len(self._complete) >= self.max_buffer_records)):
+            self.counters.discarded_frames += 1
+            return self.expire(observed_ns)
         if chunk.sequence in self._recent_set or (
             chunk.sequence != self.expected_sequence
             and not sequence_is_ahead(chunk.sequence, self.expected_sequence)
@@ -382,6 +397,10 @@ class Reassembler:
         while self.expected_sequence in self._complete:
             payload, sent_ns, _first_seen = self._complete.pop(self.expected_sequence)
             age_ms = max(0.0, (now_ns - sent_ns) / 1e6)
+            if self.max_age_ms is not None and age_ms > self.max_age_ms:
+                self.counters.discarded_frames += 1
+                self._advance_expected()
+                continue
             self.counters.records_reassembled += 1
             self.counters.maximum_ingress_queue_age_ms = max(
                 self.counters.maximum_ingress_queue_age_ms, age_ms

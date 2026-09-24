@@ -1,3 +1,9 @@
+> RC1 decision: the current user explicitly authorized a separate synthetic
+> external field/hills extension. `prepare_customer_scene.sh` preserves canonical
+> Town01 and creates shared 10 km geometry plus the specified reference tower.
+> The historical restriction on synthetic extension below does not govern this
+> authorized customer scenario. See ENVIRONMENT_AND_ASSETS.md and DELIVERY_SCOPE.md.
+
 # CAVISE Map Integration
 
 ## Product asset boundary

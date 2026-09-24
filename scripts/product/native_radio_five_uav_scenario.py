@@ -16,6 +16,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -39,22 +41,159 @@ GCS_IP = "10.71.0.10"
 P2P_PORT = 14800
 MULTICAST_GROUP = "239.71.0.1"
 MULTICAST_PORT = 14900
-P2P_PACKETS = 10
-P2MP_ROOTS = 20
-SIMULTANEOUS_PACKETS = 20
-SIMULTANEOUS_INTERVAL_NS = 50_000_000
-SIMULTANEOUS_PAYLOAD_BYTES = 256
-DIAGNOSTIC_RETRY_INTERVAL_S = 20.0
 RETRY_CHARACTERIZATION_CANDIDATES_S = (0.5, 1.0, 3.0)
 DIAGNOSTIC_OPERATIONS_PER_UAV = 10
-TAKEOFF_ALTITUDES = {1: 15.0, 2: 23.0, 3: 25.0, 4: 27.0, 5: 29.0}
-ROUTE = {
-    "los": [80.0, 0.0, 17.0],
-    "transit_south": [118.0, 0.0, 17.0],
-    "transit_north": [118.0, 110.0, 17.0],
-    "obstructed_candidate": [80.0, 110.0, 17.0],
-    "return": [20.0, 0.0, 17.0],
-}
+DEFAULT_SCENARIO_CONFIG = ROOT / "network/config/scenario_5uav_town01_native_product.yaml"
+
+
+def load_flight_plan(path: Path) -> dict[str, Any]:
+    """Load and validate the product mission from the selected scenario YAML."""
+
+    value = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(value, dict):
+        raise ScenarioError(f"scenario config must contain a mapping: {path}")
+    flight = value.get("flight") or {}
+    if not isinstance(flight, dict):
+        raise ScenarioError(f"flight config must contain a mapping: {path}")
+
+    takeoff: dict[int, float] = {}
+    for name, altitude in (flight.get("takeoff_relative_altitude_m") or {}).items():
+        text = str(name)
+        if not text.startswith("uav") or not text[3:].isdigit():
+            raise ScenarioError(f"invalid takeoff UAV key: {name!r}")
+        system_id = int(text[3:])
+        takeoff[system_id] = float(altitude)
+    if takeoff and set(takeoff) != set(UAV_IDS):
+        raise ScenarioError("takeoff_relative_altitude_m must define all five UAVs")
+
+    missions: dict[int, list[dict[str, Any]]] = {}
+    phase_names: set[str] = set()
+    for name, entries in (flight.get("missions") or {}).items():
+        text = str(name)
+        if not text.startswith("uav") or not text[3:].isdigit():
+            raise ScenarioError(f"invalid mission UAV key: {name!r}")
+        system_id = int(text[3:])
+        if system_id not in UAV_IDS or not isinstance(entries, list) or not entries:
+            raise ScenarioError(f"invalid mission for {name}")
+        normalized: list[dict[str, Any]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ScenarioError(f"mission item for {name} must be a mapping")
+            phase = str(entry.get("name", "")).strip()
+            position = entry.get("position_m")
+            if not phase or not isinstance(position, list) or len(position) != 3:
+                raise ScenarioError(f"mission item for {name} needs name and position_m[3]")
+            point = [float(component) for component in position]
+            if not all(math.isfinite(component) for component in point):
+                raise ScenarioError(f"mission point for {name}/{phase} is not finite")
+            hold_s = float(entry.get("hold_s", 0.0))
+            if hold_s < 0.0:
+                raise ScenarioError(f"mission hold for {name}/{phase} must be non-negative")
+            normalized.append({"name": phase, "position_m": point, "hold_s": hold_s})
+            phase_names.add(phase)
+        missions[system_id] = normalized
+
+    observations: list[dict[str, Any]] = []
+    for entry in flight.get("observations") or []:
+        if not isinstance(entry, dict):
+            raise ScenarioError("flight observation must be a mapping")
+        name = str(entry.get("name", "")).strip()
+        if not name or name not in phase_names:
+            raise ScenarioError(f"observation {name!r} has no matching mission point")
+        targets = {
+            system_id: next(
+                item["position_m"] for item in items if item["name"] == name
+            )
+            for system_id, items in missions.items()
+            if any(item["name"] == name for item in items)
+        }
+        if not targets:
+            raise ScenarioError(f"observation {name!r} has no UAV targets")
+        observations.append(
+            {
+                "name": name,
+                "timeout_s": float(entry.get("timeout_s", 240.0)),
+                "probe_packets_per_uav": int(entry.get("probe_packets_per_uav", 0)),
+                "targets": targets,
+            }
+        )
+
+    traffic = value.get("traffic") or {}
+    simultaneous = traffic.get("simultaneous_uplink") if isinstance(traffic, dict) else None
+    delivery_gates = traffic.get("delivery_gates") if isinstance(traffic, dict) else None
+    if not isinstance(traffic, dict) or not isinstance(simultaneous, dict):
+        raise ScenarioError(f"traffic and traffic.simultaneous_uplink must be mappings: {path}")
+    if not isinstance(delivery_gates, dict):
+        raise ScenarioError(f"traffic.delivery_gates must be a mapping: {path}")
+    normalized_traffic = {
+        "diagnostic_retry_interval_s": float(traffic["diagnostic_retry_interval_s"]),
+        "forced_mavlink_stream_intervals": traffic["forced_mavlink_stream_intervals"],
+        "p2p_packets_per_direction_per_uav": int(
+            traffic["p2p_packets_per_direction_per_uav"]
+        ),
+        "p2mp_root_transmissions": int(traffic["p2mp_root_transmissions"]),
+        "simultaneous_uplink": {
+            "packets_per_uav": int(simultaneous["packets_per_uav"]),
+            "packet_payload_bytes": int(simultaneous["packet_payload_bytes"]),
+            "interval_ms": float(simultaneous["interval_ms"]),
+            "duration_s": float(simultaneous["duration_s"]),
+            "retransmissions": simultaneous["retransmissions"],
+        },
+        "delivery_gates": {
+            "p2p_min_delivered_per_direction_per_uav": int(
+                delivery_gates["p2p_min_delivered_per_direction_per_uav"]
+            ),
+            "p2mp_min_delivered_per_uav": int(
+                delivery_gates["p2mp_min_delivered_per_uav"]
+            ),
+            "simultaneous_min_delivered_per_uav": int(
+                delivery_gates["simultaneous_min_delivered_per_uav"]
+            ),
+            "simultaneous_jain_fairness_min": float(
+                delivery_gates["simultaneous_jain_fairness_min"]
+            ),
+        },
+    }
+    positive_integer_fields = (
+        "p2p_packets_per_direction_per_uav",
+        "p2mp_root_transmissions",
+    )
+    if any(normalized_traffic[name] <= 0 for name in positive_integer_fields):
+        raise ScenarioError(f"traffic packet counts must be positive: {path}")
+    simultaneous_runtime = normalized_traffic["simultaneous_uplink"]
+    if (
+        normalized_traffic["diagnostic_retry_interval_s"] <= 0.0
+        or normalized_traffic["forced_mavlink_stream_intervals"] is not False
+        or simultaneous_runtime["packets_per_uav"] <= 0
+        or simultaneous_runtime["packet_payload_bytes"] <= 0
+        or simultaneous_runtime["interval_ms"] <= 0.0
+        or simultaneous_runtime["duration_s"] <= 0.0
+        or simultaneous_runtime["retransmissions"] is not False
+    ):
+        raise ScenarioError(f"invalid traffic product contract: {path}")
+    gates = normalized_traffic["delivery_gates"]
+    if (
+        not 0 <= gates["p2p_min_delivered_per_direction_per_uav"]
+        <= normalized_traffic["p2p_packets_per_direction_per_uav"]
+        or not 0 <= gates["p2mp_min_delivered_per_uav"]
+        <= normalized_traffic["p2mp_root_transmissions"]
+        or not 0 <= gates["simultaneous_min_delivered_per_uav"]
+        <= simultaneous_runtime["packets_per_uav"]
+        or not 0.0 <= gates["simultaneous_jain_fairness_min"] <= 1.0
+    ):
+        raise ScenarioError(f"invalid traffic delivery gates: {path}")
+
+    return {
+        "scenario_name": str((value.get("scenario") or {}).get("name", path.stem)),
+        "map": dict((value.get("scenario") or {}).get("map") or {}),
+        "takeoff": takeoff,
+        "missions": missions,
+        "observations": observations,
+        "position_tolerance_m": float(flight.get("mission_position_tolerance_m", 8.0)),
+        "causal_expectation": dict(flight.get("causal_expectation") or {}),
+        "hold_time_s": float(flight.get("hold_time_s", 0.0)),
+        "traffic": normalized_traffic,
+    }
 
 
 def append_jsonl(path: Path, value: dict[str, Any]) -> None:
@@ -67,6 +206,12 @@ def run_additional_agent(args: argparse.Namespace) -> int:
     """Endpoint-only traffic source/sink; there is no ns-3 echo or retry logic."""
 
     index = int(args.index)
+    traffic = load_flight_plan(Path(args.scenario_config).resolve())["traffic"]
+    p2p_packets = traffic["p2p_packets_per_direction_per_uav"]
+    simultaneous = traffic["simultaneous_uplink"]
+    simultaneous_packets = simultaneous["packets_per_uav"]
+    simultaneous_interval_ns = int(round(simultaneous["interval_ms"] * 1e6))
+    simultaneous_payload_bytes = simultaneous["packet_payload_bytes"]
     local_ip = endpoint_ip(index)
     schedule_file = Path(args.schedule_file)
     event_log = Path(args.event_log)
@@ -137,6 +282,35 @@ def run_additional_agent(args: argparse.Namespace) -> int:
                         "source": f"{source[0]}:{source[1]}",
                     },
                 )
+                if (
+                    key.data == "p2p"
+                    and message.kind == "p2p_downlink"
+                    and message.sender_id == 0
+                    and message.receiver_id == index
+                ):
+                    # A single endpoint ACK makes delivery observable at the
+                    # application boundary.  It is deliberately un-retried and
+                    # crosses the same native Wi-Fi/Sionna medium on the return
+                    # path; ns-3 never synthesizes application success.
+                    response = encode_data(
+                        "p2p_downlink_ack",
+                        sender_id=index,
+                        receiver_id=0,
+                        sequence=message.sequence,
+                        payload=f"{message.checksum:08x}".encode(),
+                    )
+                    p2p.sendto(response, (GCS_IP, P2P_PORT))
+                    append_jsonl(
+                        event_log,
+                        {
+                            "event": "transmit",
+                            "kind": "p2p_downlink_ack",
+                            "uav": index,
+                            "sequence": message.sequence,
+                            "bytes": len(response),
+                            "monotonic_ns": time.monotonic_ns(),
+                        },
+                    )
 
             try:
                 schedule = json.loads(schedule_file.read_text(encoding="utf-8"))
@@ -145,7 +319,7 @@ def run_additional_agent(args: argparse.Namespace) -> int:
             now_ns = time.monotonic_ns()
             p2p_start_ns = int(schedule.get("p2p_uplink_start_monotonic_ns", 0) or 0)
             if p2p_start_ns and not p2p_sent and now_ns >= p2p_start_ns:
-                for sequence in range(P2P_PACKETS):
+                for sequence in range(p2p_packets):
                     target_ns = p2p_start_ns + (index - 1) * 25_000_000 + sequence * 100_000_000
                     while time.monotonic_ns() < target_ns and not stop:
                         time.sleep(0.001)
@@ -176,12 +350,12 @@ def run_additional_agent(args: argparse.Namespace) -> int:
 
             simultaneous_start_ns = int(schedule.get("simultaneous_start_monotonic_ns", 0) or 0)
             if simultaneous_start_ns and not simultaneous_sent and now_ns >= simultaneous_start_ns:
-                for sequence in range(SIMULTANEOUS_PACKETS):
-                    target_ns = simultaneous_start_ns + sequence * SIMULTANEOUS_INTERVAL_NS
+                for sequence in range(simultaneous_packets):
+                    target_ns = simultaneous_start_ns + sequence * simultaneous_interval_ns
                     while time.monotonic_ns() < target_ns and not stop:
                         time.sleep(0.001)
                     payload = f"native-five-simultaneous-uplink-uav{index}-{sequence}".encode()
-                    payload = payload.ljust(SIMULTANEOUS_PAYLOAD_BYTES, b".")
+                    payload = payload.ljust(simultaneous_payload_bytes, b".")
                     datagram = encode_data(
                         "simultaneous_uplink",
                         sender_id=index,
@@ -220,20 +394,60 @@ class NativeFiveUavHarness(FlightHarness):
         super().__init__(Path(args.run_dir).resolve(), Path(args.node_state).resolve(), args.timeout_scale)
         self.phase_file = Path(args.phase_file).resolve()
         self.schedule_file = Path(args.schedule_file).resolve()
+        self.scenario_config = Path(
+            getattr(args, "scenario_config", None) or DEFAULT_SCENARIO_CONFIG
+        ).resolve()
+        self.flight_plan = load_flight_plan(self.scenario_config)
+        self.traffic: dict[str, Any] = self.flight_plan["traffic"]
+        self.simultaneous: dict[str, Any] = self.traffic["simultaneous_uplink"]
+        self.diagnostic_retry_interval_s = self.traffic["diagnostic_retry_interval_s"]
+        self.p2p_packets = self.traffic["p2p_packets_per_direction_per_uav"]
+        self.p2mp_roots = self.traffic["p2mp_root_transmissions"]
+        self.simultaneous_packets = self.simultaneous["packets_per_uav"]
+        self.simultaneous_interval_ns = int(round(self.simultaneous["interval_ms"] * 1e6))
+        self.simultaneous_payload_bytes = self.simultaneous["packet_payload_bytes"]
+        self.takeoff_altitudes: dict[int, float] = self.flight_plan["takeoff"]
+        self.flight_missions: dict[int, list[dict[str, Any]]] = self.flight_plan["missions"]
+        self.flight_observations: list[dict[str, Any]] = self.flight_plan["observations"]
+        reported_missions = {
+            f"uav{system_id}": waypoints
+            for system_id, waypoints in self.flight_missions.items()
+        }
+        reported_observations = [
+            {
+                **observation,
+                "targets": {
+                    f"uav{system_id}": target
+                    for system_id, target in observation["targets"].items()
+                },
+            }
+            for observation in self.flight_observations
+        ]
         self.summary.update(
             {
                 "profile": args.radio_profile,
                 "technology_specific_modem": args.radio_profile.startswith("native_wifi_"),
+                "scenario_config": str(self.scenario_config),
+                "scenario_name": self.flight_plan["scenario_name"],
+                "map": self.flight_plan["map"],
                 "predeclared_parameters": {
-                    "p2p_packets_per_direction_per_uav": P2P_PACKETS,
-                    "p2mp_root_transmissions": P2MP_ROOTS,
-                    "simultaneous_packets_per_uav": SIMULTANEOUS_PACKETS,
-                    "simultaneous_interval_ms": SIMULTANEOUS_INTERVAL_NS / 1e6,
-                    "simultaneous_payload_bytes": SIMULTANEOUS_PAYLOAD_BYTES,
-                    "diagnostic_retry_interval_s": DIAGNOSTIC_RETRY_INTERVAL_S,
+                    "p2p_packets_per_direction_per_uav": self.p2p_packets,
+                    "p2mp_root_transmissions": self.p2mp_roots,
+                    "simultaneous_packets_per_uav": self.simultaneous_packets,
+                    "simultaneous_interval_ms": self.simultaneous["interval_ms"],
+                    "simultaneous_payload_bytes": self.simultaneous_payload_bytes,
+                    "diagnostic_retry_interval_s": self.diagnostic_retry_interval_s,
+                    "hold_time_s": self.flight_plan["hold_time_s"],
+                    "delivery_gates": self.traffic["delivery_gates"],
+                    "traffic": self.traffic,
                     "forced_mavlink_stream_intervals": False,
-                    "flight_route_m": ROUTE,
-                    "takeoff_relative_altitudes_m": TAKEOFF_ALTITUDES,
+                    "flight_missions": reported_missions,
+                    "flight_observations": reported_observations,
+                    "takeoff_relative_altitudes_m": {
+                        f"uav{system_id}": altitude
+                        for system_id, altitude in self.takeoff_altitudes.items()
+                    },
+                    "causal_expectation": self.flight_plan["causal_expectation"],
                 },
             }
         )
@@ -305,6 +519,7 @@ class NativeFiveUavHarness(FlightHarness):
             attempt: dict[str, Any] = {
                 "attempt_id": attempt_id,
                 "confirmation": attempt_number - 1,
+                "command_frame_hex": bytes(message.get_msgbuf()).hex(),
                 "send_monotonic_ns": sent_ns,
                 "uav_uart_delivery_monotonic_ns": None,
                 "uav_uart_delivery_unavailable_reason": (
@@ -339,6 +554,7 @@ class NativeFiveUavHarness(FlightHarness):
                 attempt.update(
                     {
                         "ack_gcs_received_monotonic_ns": received_ns,
+                        "ack_frame_hex": bytes(ack[0].get_msgbuf()).hex(),
                         "attempt_rtt_ms": rtt_ms,
                         "outcome": "ack_received",
                     }
@@ -429,6 +645,7 @@ class NativeFiveUavHarness(FlightHarness):
                 system_id, 1, command, 0, *params
             )
             self.send("control", system_id, message)
+            attempt["command_frame_hex"] = bytes(message.get_msgbuf()).hex()
             operations.append(operation)
 
         deadline = time.monotonic() + timeout_s * self.timeout_scale
@@ -446,6 +663,7 @@ class NativeFiveUavHarness(FlightHarness):
                     attempt.update(
                         {
                             "ack_gcs_received_monotonic_ns": received_ns,
+                            "ack_frame_hex": bytes(ack[0].get_msgbuf()).hex(),
                             "attempt_rtt_ms": rtt_ms,
                             "outcome": "ack_received",
                         }
@@ -596,7 +814,7 @@ class NativeFiveUavHarness(FlightHarness):
                     system_id, 1, command, 0, *params
                 )
                 self.send(channel, system_id, message)
-                next_send = time.monotonic() + DIAGNOSTIC_RETRY_INTERVAL_S
+                next_send = time.monotonic() + self.diagnostic_retry_interval_s
             self.pump(0.2)
             ack = self.acks.get((channel, system_id, command))
             if ack is None or ack[1] < sent_at_ns or int(ack[0].result) not in accepted:
@@ -707,7 +925,7 @@ class NativeFiveUavHarness(FlightHarness):
                     )
                     self.send("control", system_id, message)
                     sent_at.setdefault(system_id, time.monotonic_ns())
-                next_send = time.monotonic() + DIAGNOSTIC_RETRY_INTERVAL_S
+                next_send = time.monotonic() + self.diagnostic_retry_interval_s
             self.pump(0.2)
             for system_id in tuple(pending):
                 ack = self.acks.get(("control", system_id, request))
@@ -738,7 +956,7 @@ class NativeFiveUavHarness(FlightHarness):
         )
         self.phase("p2p")
         downlink_sends: list[dict[str, Any]] = []
-        for sequence in range(P2P_PACKETS):
+        for sequence in range(self.p2p_packets):
             for system_id in UAV_IDS:
                 datagram = encode_data(
                     "p2p_downlink",
@@ -778,7 +996,7 @@ class NativeFiveUavHarness(FlightHarness):
             "retransmissions": False,
             "ns3_echo": False,
             "gcs_originated_packets": len(downlink_sends),
-            "uav_originated_packets": P2P_PACKETS * len(UAV_IDS),
+            "uav_originated_packets": self.p2p_packets * len(UAV_IDS),
             "downlink_sends": downlink_sends,
             "uplink_deliveries": p2p_received,
         }
@@ -788,7 +1006,7 @@ class NativeFiveUavHarness(FlightHarness):
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(GCS_IP))
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 8)
         root_sends: list[dict[str, Any]] = []
-        for sequence in range(P2MP_ROOTS):
+        for sequence in range(self.p2mp_roots):
             payload = f"native-five-p2mp-root-{sequence}".encode().ljust(192, b".")
             datagram = encode_data(
                 "p2mp_downlink",
@@ -811,7 +1029,7 @@ class NativeFiveUavHarness(FlightHarness):
             self.observe_for(0.25)
         self.observe_for(8.0)
         self.summary["p2mp"] = {
-            "root_transmissions": P2MP_ROOTS,
+            "root_transmissions": self.p2mp_roots,
             "application_sends": root_sends,
             "application_unicast_copies": 0,
             "ack_required": False,
@@ -825,9 +1043,9 @@ class NativeFiveUavHarness(FlightHarness):
             {
                 "p2p_uplink_start_monotonic_ns": p2p_start_ns,
                 "simultaneous_start_monotonic_ns": simultaneous_start_ns,
-                "packets_per_uav": SIMULTANEOUS_PACKETS,
-                "interval_ns": SIMULTANEOUS_INTERVAL_NS,
-                "payload_bytes": SIMULTANEOUS_PAYLOAD_BYTES,
+                "packets_per_uav": self.simultaneous_packets,
+                "interval_ns": self.simultaneous_interval_ns,
+                "payload_bytes": self.simultaneous_payload_bytes,
             },
         )
         self.observe_for(10.0)
@@ -845,11 +1063,11 @@ class NativeFiveUavHarness(FlightHarness):
         ]
         self.summary["simultaneous_uplink"] = {
             "predeclared_start_monotonic_ns": simultaneous_start_ns,
-            "offered_packets": SIMULTANEOUS_PACKETS * len(UAV_IDS),
-            "packets_per_uav": SIMULTANEOUS_PACKETS,
-            "packet_payload_bytes": SIMULTANEOUS_PAYLOAD_BYTES,
-            "interval_ms": SIMULTANEOUS_INTERVAL_NS / 1e6,
-            "duration_s": 1.0,
+            "offered_packets": self.simultaneous_packets * len(UAV_IDS),
+            "packets_per_uav": self.simultaneous_packets,
+            "packet_payload_bytes": self.simultaneous_payload_bytes,
+            "interval_ms": self.simultaneous["interval_ms"],
+            "duration_s": self.simultaneous["duration_s"],
             "retransmissions": False,
             "custom_scheduler": False,
             "shaping": False,
@@ -885,7 +1103,7 @@ class NativeFiveUavHarness(FlightHarness):
                     system_id, 1, command, 0, *params
                 )
                 self.send("control", system_id, message)
-                next_send = time.monotonic() + DIAGNOSTIC_RETRY_INTERVAL_S
+                next_send = time.monotonic() + self.diagnostic_retry_interval_s
             self.pump(0.2)
             ack = self.acks.get(("control", system_id, command))
             if ack and ack[1] >= started_ns and int(ack[0].result) in accepted:
@@ -903,9 +1121,15 @@ class NativeFiveUavHarness(FlightHarness):
                 return latency
         raise ScenarioError(f"{label} was not accepted by uav{system_id}")
 
-    def set_mode_all(self, custom_mode: int, label: str, timeout_s: float = 30.0) -> None:
+    def set_mode_all(
+        self,
+        custom_mode: int,
+        label: str,
+        timeout_s: float = 30.0,
+        systems: tuple[int, ...] = UAV_IDS,
+    ) -> None:
         flag = int(self.mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED)
-        pending = set(UAV_IDS)
+        pending = set(systems)
         deadline = time.monotonic() + timeout_s * self.timeout_scale
         next_send = 0.0
         while pending and time.monotonic() < deadline:
@@ -918,7 +1142,7 @@ class NativeFiveUavHarness(FlightHarness):
                             system_id, flag, custom_mode
                         ),
                     )
-                next_send = time.monotonic() + DIAGNOSTIC_RETRY_INTERVAL_S
+                next_send = time.monotonic() + self.diagnostic_retry_interval_s
             self.pump(0.2)
             for system_id in tuple(pending):
                 heartbeat = self.latest.get(("control", system_id, "HEARTBEAT"))
@@ -936,7 +1160,7 @@ class NativeFiveUavHarness(FlightHarness):
             command,
             [float(self.mavutil.mavlink.MAVLINK_MSG_ID_GLOBAL_POSITION_INT), 0, 0, 0, 0, 0, 0],
             20,
-            "moving_uav_global_position",
+            f"uav{system_id}_global_position",
         )
         deadline = time.monotonic() + 15 * self.timeout_scale
         while time.monotonic() < deadline:
@@ -949,35 +1173,63 @@ class NativeFiveUavHarness(FlightHarness):
                 # yields a usable coordinate.  Never upload an origin-zero mission:
                 # MAV_MISSION_INVALID_PARAM5_X is a valid flight-controller rejection.
                 if 1.0 <= abs(lat) <= 90.0 and 1.0 <= abs(lon) <= 180.0:
-                    self.summary["moving_uav_global_position"] = {"latitude_deg": lat, "longitude_deg": lon}
+                    self.summary.setdefault("uav_global_positions", {})[f"uav{system_id}"] = {
+                        "latitude_deg": lat,
+                        "longitude_deg": lon,
+                    }
                     return lat, lon
             self.pump(0.2)
-        raise ScenarioError("moving UAV GLOBAL_POSITION_INT did not contain a valid GPS coordinate")
+        raise ScenarioError(
+            f"uav{system_id} GLOBAL_POSITION_INT did not contain a valid GPS coordinate"
+        )
 
-    def upload_moving_uav_mission(self) -> None:
-        system_id = 1
-        initial = self.positions().get("uav1")
+    def upload_uav_mission(self, system_id: int, waypoints: list[dict[str, Any]]) -> None:
+        uav = f"uav{system_id}"
+        initial = self.positions().get(uav)
         if initial is None:
-            raise ScenarioError("moving UAV tracker position missing before mission upload")
+            raise ScenarioError(f"{uav} tracker position missing before mission upload")
         lat, lon = self.request_global_position(system_id)
-        coordinates = {
-            name: self.offset_global(lat, lon, point[0] - initial[0], point[1] - initial[1])
-            for name, point in ROUTE.items()
-        }
-        self.summary["moving_uav_mission_coordinates_int"] = coordinates
+        mission_points: list[dict[str, Any]] = []
+        for waypoint in waypoints:
+            position = waypoint["position_m"]
+            coordinate = self.offset_global(
+                lat, lon, position[0] - initial[0], position[1] - initial[1]
+            )
+            relative_altitude_m = position[2] - initial[2]
+            if relative_altitude_m <= 2.0:
+                raise ScenarioError(
+                    f"{uav}/{waypoint['name']} relative altitude must exceed 2 m"
+                )
+            mission_points.append(
+                {
+                    **waypoint,
+                    "coordinate_int": coordinate,
+                    "relative_altitude_m": relative_altitude_m,
+                }
+            )
+        self.summary.setdefault("mission_coordinates_int", {})[uav] = mission_points
         mav = self.mavutil.mavlink
-        definitions = [
-            (mav.MAV_CMD_NAV_WAYPOINT, 0.0, coordinates["los"]),
-            (mav.MAV_CMD_NAV_LOITER_TIME, 4.0, coordinates["los"]),
-            (mav.MAV_CMD_NAV_WAYPOINT, 0.0, coordinates["transit_south"]),
-            (mav.MAV_CMD_NAV_WAYPOINT, 0.0, coordinates["transit_north"]),
-            (mav.MAV_CMD_NAV_WAYPOINT, 0.0, coordinates["obstructed_candidate"]),
-            (mav.MAV_CMD_NAV_LOITER_TIME, 4.0, coordinates["obstructed_candidate"]),
-            (mav.MAV_CMD_NAV_WAYPOINT, 0.0, coordinates["transit_north"]),
-            (mav.MAV_CMD_NAV_WAYPOINT, 0.0, coordinates["transit_south"]),
-            (mav.MAV_CMD_NAV_WAYPOINT, 0.0, coordinates["return"]),
-            (mav.MAV_CMD_NAV_LOITER_TIME, 4.0, coordinates["return"]),
-        ]
+        definitions: list[tuple[int, float, tuple[int, int], float, str]] = []
+        for point in mission_points:
+            definitions.append(
+                (
+                    int(mav.MAV_CMD_NAV_WAYPOINT),
+                    0.0,
+                    point["coordinate_int"],
+                    point["relative_altitude_m"],
+                    point["name"],
+                )
+            )
+            if point["hold_s"] > 0.0:
+                definitions.append(
+                    (
+                        int(mav.MAV_CMD_NAV_LOITER_TIME),
+                        point["hold_s"],
+                        point["coordinate_int"],
+                        point["relative_altitude_m"],
+                        point["name"],
+                    )
+                )
         items = [
             self.transmitters[("control", system_id)].mission_item_int_encode(
                 system_id,
@@ -993,10 +1245,12 @@ class NativeFiveUavHarness(FlightHarness):
                 0.0,
                 coordinate[0],
                 coordinate[1],
-                15.0,
+                relative_altitude_m,
                 int(mav.MAV_MISSION_TYPE_MISSION),
             )
-            for sequence, (command, hold, coordinate) in enumerate(definitions)
+            for sequence, (command, hold, coordinate, relative_altitude_m, _name) in enumerate(
+                definitions
+            )
         ]
         started_ns = time.monotonic_ns()
         handled_at_ns = 0
@@ -1006,11 +1260,12 @@ class NativeFiveUavHarness(FlightHarness):
         request_history: list[dict[str, Any]] = []
         deferred_repeat_sequence: int | None = None
         deferred_repeat_deadline = 0.0
-        self.summary["mission_upload"] = {
+        mission_upload = {
             "item_count": len(items),
             "request_history": request_history,
             "mission_count_packets_sent": count_packets_sent,
         }
+        self.summary.setdefault("mission_uploads", {})[uav] = mission_upload
         deadline = time.monotonic() + 60 * self.timeout_scale
         requested: set[int] = set()
         while time.monotonic() < deadline:
@@ -1027,7 +1282,7 @@ class NativeFiveUavHarness(FlightHarness):
                     ),
                 )
                 count_packets_sent += 1
-                self.summary["mission_upload"]["mission_count_packets_sent"] = count_packets_sent
+                mission_upload["mission_count_packets_sent"] = count_packets_sent
             if (
                 deferred_repeat_sequence is not None
                 and time.monotonic() >= deferred_repeat_deadline
@@ -1093,7 +1348,7 @@ class NativeFiveUavHarness(FlightHarness):
             ack_at_ns = self.latest_at_ns.get(("control", system_id, "MISSION_ACK"), 0)
             if ack_at_ns >= started_ns:
                 result = int(self.latest[("control", system_id, "MISSION_ACK")].type)
-                self.summary["mission_upload"].update(
+                mission_upload.update(
                     {
                         "ack_result": result,
                         "last_requested_sequence": last_requested_sequence,
@@ -1101,46 +1356,139 @@ class NativeFiveUavHarness(FlightHarness):
                     }
                 )
                 if result != int(mav.MAV_MISSION_ACCEPTED):
-                    raise ScenarioError(f"moving UAV mission rejected: {result}")
-                self.summary["mission"] = {
-                    "moving_uav": "uav1",
+                    raise ScenarioError(f"{uav} mission rejected: {result}")
+                self.summary.setdefault("missions", {})[uav] = {
                     "item_count": len(items),
                     "requested_items": sorted(requested),
                     "mission_count_packets_sent": count_packets_sent,
                     "ignored_stale_requests": ignored_stale_requests,
-                    "route_m": ROUTE,
+                    "route_m": waypoints,
                     "upload_ack": result,
                 }
                 return
-        raise ScenarioError("moving UAV mission upload timed out")
+        raise ScenarioError(f"{uav} mission upload timed out")
 
-    def wait_position(self, name: str, target: list[float], timeout_s: float) -> None:
+    def probe_link_phase(self, name: str, packets_per_uav: int) -> None:
+        """Offer identical, un-retried endpoint traffic to every UAV in a frozen phase."""
+
+        if packets_per_uav <= 0:
+            return
+        sock = self.sockets["additional_data"]
+        phase_index = len(self.summary.setdefault("causal_link_probes", [])) + 1
+        sequence_base = phase_index * 100_000
+        first_received_index = len(self.additional_received)
+        sends: dict[tuple[int, int], dict[str, Any]] = {}
+        for local_sequence in range(packets_per_uav):
+            for system_id in UAV_IDS:
+                sequence = sequence_base + local_sequence
+                payload = f"native-sionna-causal-{system_id}-{local_sequence}".encode().ljust(
+                    256, b"."
+                )
+                datagram = encode_data(
+                    "p2p_downlink",
+                    sender_id=0,
+                    receiver_id=system_id,
+                    sequence=sequence,
+                    payload=payload,
+                )
+                sent_ns = time.monotonic_ns()
+                sock.sendto(datagram, (endpoint_ip(system_id), P2P_PORT + system_id))
+                sends[(system_id, sequence)] = {
+                    "uav": f"uav{system_id}",
+                    "sequence": local_sequence,
+                    "wire_sequence": sequence,
+                    "sent_monotonic_ns": sent_ns,
+                    "bytes": len(datagram),
+                }
+                self.observe_for(0.01)
+        self.observe_for(6.0)
+
+        deliveries: dict[tuple[int, int], dict[str, Any]] = {}
+        for message, _source, received_ns in self.additional_received[first_received_index:]:
+            key = (int(message.sender_id), int(message.sequence))
+            sent = sends.get(key)
+            if message.kind != "p2p_downlink_ack" or sent is None or key in deliveries:
+                continue
+            deliveries[key] = {
+                "uav": sent["uav"],
+                "sequence": sent["sequence"],
+                "wire_sequence": sent["wire_sequence"],
+                "received_monotonic_ns": received_ns,
+                "latency_ms": (received_ns - sent["sent_monotonic_ns"]) / 1e6,
+            }
+
+        by_uav: dict[str, dict[str, Any]] = {}
+        for system_id in UAV_IDS:
+            offered = [record for (uav_id, _sequence), record in sends.items() if uav_id == system_id]
+            delivered = [
+                record
+                for (uav_id, _sequence), record in deliveries.items()
+                if uav_id == system_id
+            ]
+            latencies = sorted(record["latency_ms"] for record in delivered)
+            by_uav[f"uav{system_id}"] = {
+                "offered_packets": len(offered),
+                "delivered_packets": len(delivered),
+                "pdr": len(delivered) / len(offered),
+                "latency_ms": latencies,
+                "position_m": self.positions().get(f"uav{system_id}"),
+            }
+        self.summary["causal_link_probes"].append(
+            {
+                "phase": name,
+                "application_retransmissions": False,
+                "packet_payload_bytes": 256,
+                "inter_packet_interval_ms": 10.0,
+                "offered_packets": len(sends),
+                "delivered_packets": len(deliveries),
+                "per_uav": by_uav,
+                "sends": list(sends.values()),
+                "deliveries": list(deliveries.values()),
+            }
+        )
+        self.event(
+            "causal_link_probe_complete",
+            phase=name,
+            offered=len(sends),
+            delivered=len(deliveries),
+        )
+
+    def wait_observation(self, observation: dict[str, Any]) -> None:
+        name = observation["name"]
+        targets: dict[int, list[float]] = observation["targets"]
+        tolerance = self.flight_plan["position_tolerance_m"]
         self.phase(f"{name}_transit")
         self.wait(
-            lambda: (
-                self.positions().get("uav1") is not None
-                and math.dist(self.positions()["uav1"], target) <= 8.0
+            lambda: all(
+                self.positions().get(f"uav{system_id}") is not None
+                and math.dist(self.positions()[f"uav{system_id}"], target) <= tolerance
+                for system_id, target in targets.items()
             ),
-            timeout_s,
-            f"uav1 at frozen {name} point",
+            observation["timeout_s"],
+            f"mission UAVs at frozen {name} points",
         )
-        position = self.positions()["uav1"]
+        positions = self.positions()
         self.summary.setdefault("flight_points", {})[name] = {
-            "target_m": target,
-            "gazebo_position_m": position,
-            "distance_m": math.dist(position, target),
+            f"uav{system_id}": {
+                "target_m": target,
+                "gazebo_position_m": positions[f"uav{system_id}"],
+                "distance_m": math.dist(positions[f"uav{system_id}"], target),
+            }
+            for system_id, target in targets.items()
         }
-        # Evidence consumers capture only after the frozen Gazebo position is
-        # inside the waypoint tolerance, never on entry to the transit phase.
         self.phase(name)
         self.observe_for(2.0)
+        self.probe_link_phase(name, observation["probe_packets_per_uav"])
 
     def flight(self) -> None:
         initial = self.positions()
         if set(initial) < {f"uav{index}" for index in UAV_IDS}:
             raise ScenarioError("fresh five-UAV tracker snapshot unavailable before flight")
+        if not self.flight_missions or not self.flight_observations:
+            raise ScenarioError("selected product scenario has no configured missions/observations")
         self.summary["initial_positions_m"] = initial
-        self.upload_moving_uav_mission()
+        for system_id, waypoints in sorted(self.flight_missions.items()):
+            self.upload_uav_mission(system_id, waypoints)
         self.set_guided()
         arm_command = int(self.mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM)
         takeoff_command = int(self.mavutil.mavlink.MAV_CMD_NAV_TAKEOFF)
@@ -1170,7 +1518,7 @@ class NativeFiveUavHarness(FlightHarness):
                 self.command_until_accepted(
                     system_id,
                     takeoff_command,
-                    [0, 0, 0, 0, 0, 0, TAKEOFF_ALTITUDES[system_id]],
+                    [0, 0, 0, 0, 0, 0, self.takeoff_altitudes[system_id]],
                     "staggered_takeoff",
                     12,
                 )
@@ -1199,7 +1547,7 @@ class NativeFiveUavHarness(FlightHarness):
                 self.command_until_accepted(
                     system_id,
                     takeoff_command,
-                    [0, 0, 0, 0, 0, 0, TAKEOFF_ALTITUDES[system_id]],
+                    [0, 0, 0, 0, 0, 0, self.takeoff_altitudes[system_id]],
                     "staggered_takeoff_recovery",
                     20,
                 )
@@ -1208,7 +1556,7 @@ class NativeFiveUavHarness(FlightHarness):
         self.wait(
             lambda: all(
                 self.positions().get(f"uav{system_id}", [0, 0, -1e9])[2]
-                >= initial[f"uav{system_id}"][2] + TAKEOFF_ALTITUDES[system_id] - 7.0
+                >= initial[f"uav{system_id}"][2] + self.takeoff_altitudes[system_id] - 7.0
                 for system_id in UAV_IDS
             ),
             120,
@@ -1219,35 +1567,27 @@ class NativeFiveUavHarness(FlightHarness):
         self.phase("takeoff_complete")
         self.observe_for(2.0)
         self.phase("hold_all")
-        self.observe_for(4.0)
+        self.observe_for(self.flight_plan["hold_time_s"])
         hold_positions = self.positions()
         self.summary["hold_positions_m"] = hold_positions
 
-        flag = int(self.mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED)
-        deadline = time.monotonic() + 45 * self.timeout_scale
-        next_send = 0.0
-        while time.monotonic() < deadline:
-            if time.monotonic() >= next_send:
-                self.send(
-                    "control",
-                    1,
-                    self.transmitters[("control", 1)].set_mode_encode(1, flag, 3),
-                )
-                next_send = time.monotonic() + DIAGNOSTIC_RETRY_INTERVAL_S
-            self.pump(0.5)
-            if int(self.latest[("control", 1, "HEARTBEAT")].custom_mode) == 3:
-                break
-        else:
-            raise ScenarioError("AUTO mode not observed on moving uav1")
-        self.wait_position("los", ROUTE["los"], 180)
-        self.wait_position("obstructed_candidate", ROUTE["obstructed_candidate"], 240)
-        self.wait_position("return", ROUTE["return"], 240)
+        mission_systems = tuple(sorted(self.flight_missions))
+        self.set_mode_all(3, "auto_mode_mission_uavs", 45, systems=mission_systems)
+        for observation in self.flight_observations:
+            self.wait_observation(observation)
         final_hold = self.positions()
         self.summary["holding_uav_displacement_m"] = {
             f"uav{system_id}": math.dist(
                 hold_positions[f"uav{system_id}"], final_hold[f"uav{system_id}"]
             )
-            for system_id in range(2, 6)
+            for system_id in UAV_IDS
+            if system_id not in self.flight_missions
+        }
+        self.summary["mission_uav_displacement_m"] = {
+            f"uav{system_id}": math.dist(
+                hold_positions[f"uav{system_id}"], final_hold[f"uav{system_id}"]
+            )
+            for system_id in mission_systems
         }
 
         self.phase("land_all")
@@ -1330,6 +1670,7 @@ def run_no_bypass_probe(args: argparse.Namespace) -> int:
         phase_file=str(Path(args.run_dir).resolve() / "logs/current_phase.txt"),
         schedule_file=str(Path(args.run_dir).resolve() / "logs/additional_schedule.json"),
         radio_profile=args.radio_profile,
+        scenario_config=args.scenario_config,
     )
     harness = NativeFiveUavHarness(probe_args)
     before = sum(harness.message_counts.values())
@@ -1385,12 +1726,14 @@ def parser() -> argparse.ArgumentParser:
     agent.add_argument("--schedule-file", required=True)
     agent.add_argument("--event-log", required=True)
     agent.add_argument("--ready-file", required=True)
+    agent.add_argument("--scenario-config", default=str(DEFAULT_SCENARIO_CONFIG))
     agent.set_defaults(function=run_additional_agent)
     scenario = commands.add_parser("run")
     scenario.add_argument("--run-dir", required=True)
     scenario.add_argument("--node-state", required=True)
     scenario.add_argument("--phase-file", required=True)
     scenario.add_argument("--schedule-file", required=True)
+    scenario.add_argument("--scenario-config", default=str(DEFAULT_SCENARIO_CONFIG))
     scenario.add_argument("--timeout-scale", type=float, default=1.0)
     scenario.add_argument("--mode", choices=("product", "latency_diagnostic"), default="product")
     scenario.add_argument("--uav-count", type=int, choices=(1, 5), default=5)
@@ -1402,6 +1745,7 @@ def parser() -> argparse.ArgumentParser:
     probe = commands.add_parser("no-bypass-probe")
     probe.add_argument("--run-dir", required=True)
     probe.add_argument("--node-state", required=True)
+    probe.add_argument("--scenario-config", default=str(DEFAULT_SCENARIO_CONFIG))
     probe.add_argument("--duration-s", type=float, default=10.5)
     probe.add_argument("--output", required=True)
     probe.add_argument(

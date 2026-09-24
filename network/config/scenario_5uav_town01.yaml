@@ -8,6 +8,7 @@ scenario:
     town: Town01
     world_file: .external/cavise_maps/Town01/gazebo/town01.sdf
     scene_xml: .external/cavise_maps/Town01/map/scene.xml
+    gazebo_models: [cavise_town01]
     bounds_m:
       xmin: -1577.708829814624
       ymin: -1474.8671726619064

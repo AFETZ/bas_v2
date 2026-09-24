@@ -28,7 +28,7 @@
         <sensor name="obstacle" type="camera">
           <always_on>true</always_on><update_rate>2</update_rate><visualize>false</visualize>
           <topic>/native_radio/obstacle/image</topic>
-          <camera><horizontal_fov>1.0</horizontal_fov><image><width>960</width><height>540</height><format>R8G8B8</format></image><clip><near>0.1</near><far>250</far></clip></camera>
+          <camera><horizontal_fov>1.0</horizontal_fov><image><width>2560</width><height>1440</height><format>R8G8B8</format></image><clip><near>0.1</near><far>250</far></clip></camera>
         </sensor>
       </link>
     </model>
@@ -40,7 +40,7 @@
         <sensor name="uav_focus" type="camera">
           <always_on>true</always_on><update_rate>2</update_rate><visualize>false</visualize>
           <topic>/native_radio/uav_focus/image</topic>
-          <camera><horizontal_fov>1.2</horizontal_fov><image><width>960</width><height>540</height><format>R8G8B8</format></image><clip><near>0.1</near><far>200</far></clip></camera>
+          <camera><horizontal_fov>1.2</horizontal_fov><image><width>2560</width><height>1440</height><format>R8G8B8</format></image><clip><near>0.1</near><far>200</far></clip></camera>
         </sensor>
       </link>
     </model>

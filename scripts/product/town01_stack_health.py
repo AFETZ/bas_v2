@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the live Town01 Gazebo/SITL/ROS baseline before network flight."""
+"""Check a configured live Gazebo/SITL/ROS baseline before network flight."""
 
 from __future__ import annotations
 
@@ -86,6 +86,13 @@ def main() -> int:
     args = parser.parse_args()
     scenario = yaml.safe_load(args.scenario.read_text(encoding="utf-8"))
     names = [str(robot["name"]) for robot in scenario["robots"]]
+    scene_map = scenario.get("scenario", {}).get("map", {})
+    expected_world_models = [str(name) for name in scene_map.get("gazebo_models", [])]
+    if not expected_world_models:
+        raise SystemExit("scenario.map.gazebo_models must declare the expected live map models")
+    command_post_model = str(
+        scenario.get("command_post", {}).get("gazebo_model_name", "command_post")
+    )
     expected_system_ids = [int(robot["system_id"]) for robot in scenario["robots"]]
     expected_instances = [int(robot["instance"]) for robot in scenario["robots"]]
     started = time.monotonic()
@@ -118,8 +125,8 @@ def main() -> int:
                 [item["system_id"] for item in sitl] == expected_system_ids,
                 [item["instance"] for item in sitl] == expected_instances,
                 all(name in models for name in names),
-                "cavise_town01" in models,
-                "command_post" in models,
+                all(name in models for name in expected_world_models),
+                command_post_model in models,
                 tracker_ready,
                 all(samples[name] >= 5 for name in names),
             )
@@ -140,14 +147,15 @@ def main() -> int:
             }
             for name in names
         },
-        "world_model": "cavise_town01",
+        "world_models": expected_world_models,
+        "command_post_model": command_post_model,
         "command_post": nodes.get("cp"),
-        "errors": [] if ready else ["Town01 baseline did not become healthy before timeout"],
+        "errors": [] if ready else ["Configured Gazebo/SITL/ROS baseline did not become healthy before timeout"],
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(
-        f"TOWN01 HEALTH {summary['status']}: sitl={len(sitl)} "
+        f"STACK HEALTH {summary['status']}: sitl={len(sitl)} "
         f"models={sum(name in models for name in names)}/5 "
         f"odometry={sum(samples[name] >= 5 for name in names)}/5",
         flush=True,
