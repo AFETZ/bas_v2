@@ -9,6 +9,10 @@ matplotlib==3.10.9
 MAVProxy==1.8.74
 mitsuba==3.8.0
 numpy==1.26.4
+# Newer OpenCV wheels require NumPy 2, incompatible with this ROS runtime.
+opencv-python==4.11.0.86
+# ArduPilot's installer otherwise pulls 0.7.0, which also requires NumPy 2.
+quantized-mesh-tile==0.6.1
 pexpect==4.8.0
 pymavlink==2.4.49
 PyNaCl==1.5.0

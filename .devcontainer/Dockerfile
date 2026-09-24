@@ -60,9 +60,6 @@ RUN git clone https://github.com/ArduPilot/ardupilot.git && \
 COPY ardupilot_ros2_exact.repos /workspace/ardupilot_ros2_exact.repos
 COPY ardupilot_gz_exact.repos /workspace/ardupilot_gz_exact.repos
 COPY 00-gazebo.list /workspace/00-gazebo.list
-COPY requirements-radio.in /workspace/requirements-radio.in
-COPY requirements-radio.lock /workspace/requirements-radio.lock
-COPY mpl_toolkits/__init__.py /workspace/mpl_toolkits/__init__.py
 
 # Create Ardupilot workspace
 RUN mkdir -p /workspace/ardu_ws/src && \
@@ -116,7 +113,7 @@ RUN sudo apt install curl lsb-release gnupg wget -y && \
     sudo install -m 0644 /tmp/gazebo.gpg /usr/share/keyrings/pkgs-osrf-archive-keyring.gpg && \
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/pkgs-osrf-archive-keyring.gpg] https://packages.osrfoundation.org/gazebo/ubuntu-stable $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/gazebo-stable.list > /dev/null && \
     sudo apt update && \
-    sudo apt install gz-harmonic -y
+    sudo apt -o Acquire::Retries=3 install gz-harmonic -y
 
 # Add Gazebo Harmonic Ardupilot packages
 RUN cd /workspace/ardu_ws && \
@@ -149,11 +146,15 @@ RUN sudo apt-get update && \
       iputils-ping && \
     sudo rm -rf /var/lib/apt/lists/*
 
+COPY requirements-radio.in /workspace/requirements-radio.in
+COPY requirements-radio.lock /workspace/requirements-radio.lock
+COPY mpl_toolkits/__init__.py /workspace/mpl_toolkits/__init__.py
+
 RUN printf '%s  %s\n' \
-      7c0bf57854a1c1abd4ddd14f1c9e7559b21b3e5f7bc4ffbae7be4a3124907e84 \
+      48ac05524c756067c8c7800aa5a48833cc7f3ad0c0766e88aea8af151d2f566c \
       /workspace/requirements-radio.in | sha256sum -c - && \
     printf '%s  %s\n' \
-      15204b43c4077ed1371d411480630749a15165a7ee82c92377201af6783e619a \
+      1287f6cdb5dc2969426eb92a3b3a58af863604478aba3128fd516be7d8f7bddd \
       /workspace/requirements-radio.lock | sha256sum -c - && \
     python3 -m pip install --user --no-cache-dir --force-reinstall \
       --require-hashes -r /workspace/requirements-radio.lock && \

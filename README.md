@@ -9,6 +9,8 @@ WaveformGenerator, а не команды потери пакетов.
 [DELIVERY_SCOPE](doc/DELIVERY_SCOPE.md), [VALIDATION_REPORT](doc/VALIDATION_REPORT.md).
 Native Wi-Fi — некалиброванный reference profile, не модель LoRa/NR или конкретного модема.
 
+Для настройки нового рабочего места: [Windows / WSL / Linux](doc/LOCAL_DEVELOPMENT.md).
+
 ## Быстрый запуск
 
 На подготовленном Linux/NVIDIA/Docker стенде:

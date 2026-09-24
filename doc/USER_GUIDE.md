@@ -10,7 +10,7 @@ NVIDIA driver и доступ к privileged containers/netns/TAP. Провере
 ```bash
 git clone https://github.com/AFETZ/bas_v2.git
 cd bas_v2
-git checkout release/bas-v2-rc1
+git checkout main
 make demo-preflight DEMO_GUI=0 DEMO_BOOTSTRAP=1
 ```
 

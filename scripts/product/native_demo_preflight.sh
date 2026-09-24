@@ -529,6 +529,26 @@ fi
 
 if [[ -n "$runtime_image_id" ]] && python_deps_ok; then
   pass "python:pins" "Sionna 1.2.0, Sionna RT 1.2.0, pybind11 2.11.1, cppyy 3.5.0"
+  if optix_output="$(docker run --rm -i --gpus all \
+    -e NVIDIA_DRIVER_CAPABILITIES=graphics,utility,compute \
+    -e "PYTHONPATH=$(container_path "$PYTHON_DEPS")" \
+    -v "$ROOT_DIR:/workspace/multiagent_simulation" \
+    "$runtime_image_id" python3 - 2>&1 <<'PY'
+import drjit as dr
+import mitsuba as mi
+
+mi.set_variant("cuda_ad_mono_polarized")
+scene = mi.load_dict({"type": "scene", "shape": {"type": "sphere"}})
+hit = scene.ray_intersect(mi.Ray3f(o=[0, 0, -3], d=[0, 0, 1]))
+dr.eval(hit.t)
+assert bool(dr.all(hit.is_valid())), "CUDA/OptiX ray intersection failed"
+PY
+  )"; then
+    pass "gpu:optix" "Mitsuba CUDA/OptiX ray intersection executed"
+  else
+    fail "gpu:optix" "CUDA/OptiX execution failed; nvidia-smi alone is insufficient. On WSL, use native Linux for the integrated runtime."
+    printf '%s\n' "$optix_output" >&2
+  fi
 else
   fail "python:pins" "pinned target is absent or invalid; rerun with --bootstrap"
 fi

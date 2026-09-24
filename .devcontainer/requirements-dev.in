@@ -1,0 +1,10 @@
+# Lightweight editing, geometry preparation, and focused software tests.
+# ROS/Gazebo/SITL/ns-3/Sionna remain in the existing Linux runtime.
+pytest==8.4.2
+PyYAML==6.0.2
+numpy==1.26.4
+matplotlib==3.10.9
+pymavlink==2.4.49
+pyserial==3.5
+shapely==2.1.1
+tomli==2.2.1

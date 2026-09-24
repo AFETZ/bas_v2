@@ -1,6 +1,11 @@
 * text=auto
 
+.devcontainer/** text eol=lf
+Makefile text eol=lf
+*.ps1 text eol=lf
+
 .gitattributes text eol=lf
+.gitignore text eol=lf
 *.md text eol=lf
 *.py text eol=lf
 *.sh text eol=lf

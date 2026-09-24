@@ -1,0 +1,12 @@
+# Standalone Sionna RT development, including native Windows CUDA/OptiX.
+# Match the integrated ns-3 Python target; no TensorFlow PHY is needed here.
+sionna-rt==1.2.0
+mitsuba==3.7.1
+drjit==1.2.0
+numpy==1.26.4
+scipy==1.15.3
+matplotlib==3.10.9
+importlib-resources==7.1.0
+ipywidgets==8.1.9
+pythreejs==2.4.2
+typing-extensions==4.16.0

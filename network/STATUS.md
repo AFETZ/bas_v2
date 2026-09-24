@@ -1,6 +1,42 @@
 # Product Status
 
-Updated: 2026-09-05. Current branch: release/bas-v2-rc1.
+Updated: 2026-09-24. Local checkout: main at 1960947, with workstation setup changes.
+
+## Current development workstation
+
+development_environment_status=ready
+local_integrated_gpu_runtime_status=blocked_wsl_optix
+
+- Checkout: C:\bas, Windows / Ubuntu 22.04 WSL2; i5-12500H, 32 GB RAM,
+  RTX 4060 Laptop 8 GB. Docker access from Ubuntu was restored.
+- Isolated Python 3.10 environments are installed for Windows and Linux development,
+  plus native Windows Sionna RT. Setup commands and portable locks are provided
+  in this working tree; see [LOCAL_DEVELOPMENT](../doc/LOCAL_DEVELOPMENT.md).
+- Runtime image multiagent_simulation:latest was built from source:
+  sha256:8ec5fb705651dfb993084063c354f6c3ee20d66eeff5e3f710eb94d8aff1fa43.
+  ROS 2 Humble, Gazebo Harmonic 8.15.0, pinned ArduPilot and the project ROS workspace
+  are built. Native ns-3.48 with all three existing patches is built; --PrintHelp exits 0.
+- Image pip check, ROS dependency installation and Dev Container setup passed.
+  Gazebo completed five headless steps on empty.sdf; ArduCopter --help exits 0.
+- Focused tests: 14 Windows tests and 30 Linux tests passed; one Town01 input-reference
+  test failed because the external Town01 world is absent. No full regression was run.
+- Native Windows Sionna RT 1.2.0 / Mitsuba 3.7.1 / Dr.Jit 1.2.0 executed a real
+  rock_demo PathSolver calculation on CUDA: two path coefficients, finite positive total power.
+- Final rock_demo preflight: 1 failure, 0 warnings. CUDA is visible, but Linux/WSL
+  libnvoptix.so.1 cannot initialize. Preflight now executes a CUDA/OptiX ray intersection
+  and reports this failure before simulation. No propagation fallback was introduced.
+- Full five-UAV flight was not run here. Use native Linux/NVIDIA for the integrated GPU
+  runtime; provide the original CAVISE assets for Town01. Built-in rock_demo is present.
+- OpenCV 4.11.0.86 and quantized-mesh-tile 0.6.1 fix reproduced NumPy 2 conflicts in
+  fresh upstream prerequisite installs. Other existing runtime lock versions are retained.
+  This newly built image is not the historical RC1 image; apt packages have moved on.
+- Local command logs are under runs/setup/ (ignored), including preflight-final.log,
+  ns3-build-resume.log, runtime-smoke.log and sionna-windows-gpu.log.
+
+## Historical software RC verification
+
+The results below were reported on 2026-09-05 for release/bas-v2-rc1 on the previous
+Linux stand. They are not measurements from this Windows/WSL workstation.
 Original native-radio-wifi worktree and its user edits were preserved.
 
 software_release_status=verified (local software RC, measured reference envelope)

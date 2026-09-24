@@ -1,18 +1,22 @@
 {
-  "name": "Ardupilot multiagent simulation",
-  "dockerFile": "Dockerfile",
+  "name": "BAS v2 (ROS 2 / Gazebo / ArduPilot)",
+  "image": "multiagent_simulation:latest",
   "runArgs": [
-    "--name=multiagent-simulation",
     "--privileged",
     "--network=host",
-    "-e", "DISPLAY=${env:DISPLAY}", 
-    "-v", "/tmp/.X11-unix:/tmp/.X11-unix",
-    "--user=${localEnv:UID}:${localEnv:GID}"
+    "--gpus=all",
+    "-e", "NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics"
   ],
-  "workspaceMount": "source=${localWorkspaceFolder},target=/${localWorkspaceFolderBasename},type=bind",
-  "workspaceFolder": "/${localWorkspaceFolderBasename}",
-  "mounts": [
-    "source=${localEnv:HOME}${localEnv:USERPROFILE}/.bash_history,target=/home/vscode/.bash_history,type=bind"
-  ],
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace/multiagent_simulation,type=bind",
+  "workspaceFolder": "/workspace/multiagent_simulation",
+  "remoteUser": "ubuntu",
+  "updateRemoteUserUID": false,
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/bin/python3"
+      }
+    }
+  },
   "postCreateCommand": "bash /workspace/setup.sh"
 }
