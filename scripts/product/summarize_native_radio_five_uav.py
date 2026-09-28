@@ -1129,6 +1129,22 @@ def build_realtime(
         for value in [mobility["uavs"][uav]["applied_position_age_ms"].get("p95")]
         if value is not None
     ]
+    if stats.get("simulation_mode", "realtime") == "lockstep":
+        step_ms = stats.get("coupling_step_ms", 0)
+        aligned = (stats.get("completed_lockstep_steps", 0) > 0
+                   and stats.get("stale_pose_samples") == 0
+                   and len(pose_ages) == len(UAVS)
+                   and max(pose_ages) <= float(stats.get("state_max_age_s", 0))*1000
+                   and stats.get("stop_reason") in ("duration", "sionna_ns3_process_stopped"))
+        return {
+            "simulation_mode": "lockstep", "realtime_readiness": "not_applicable",
+            "measurement_status": "model_time", "lockstep_coupling_passed": aligned,
+            "timestamp_domain": "simulation", "coupling_step_ms": step_ms,
+            "completed_steps": stats.get("completed_lockstep_steps"),
+            "sionna": sionna, "gazebo_rtf": gazebo, "resources": resources,
+            "applied_position_age_p95_ms_max_across_uavs": max(pose_ages) if pose_ages else None,
+            "limits": "Sampled software co-simulation; OS I/O is quantized at macrostep boundaries. Not HIL latency or bitwise replay.",
+        }
     lag_stats = distribution(lag)
     steady_lag_stats = distribution(steady_lag)
     lag_bound_ms = float(stats.get("readiness_lag_max_ms", 250.0))
@@ -2452,6 +2468,7 @@ def summarize_latency_operations(run_dir: Path, scenario: dict[str, Any]) -> dic
     } if isinstance(transport, dict) else {}
     result = {
         "operation_count": len(operations),
+        "timestamp_domain": "simulation" if scenario.get("simulation_mode") == "lockstep" else "host_monotonic",
         "attempt_count": len(chain_rows),
         "uav_uart_delivery_observed": delivery_matched,
         "per_label": labels,
@@ -2785,6 +2802,8 @@ def write_latency_diagnostic_report(run_dir: Path, observer_reference: Path | No
     observer_comparison: dict[str, Any] | None = None
     if observer_reference is not None:
         reference = read_json(observer_reference / "metrics/control_latency_summary.json", {})
+        if reference.get("simulation_mode", "realtime") != stats.get("simulation_mode", "realtime"):
+            raise ValueError("observer comparison requires matching simulation clock domains")
         reference_observer = reference.get("observer", {}) if isinstance(reference, dict) else {}
         reference_latency = reference.get("mavlink_latency", {}) if isinstance(reference, dict) else {}
         observer_comparison = {
@@ -2806,6 +2825,8 @@ def write_latency_diagnostic_report(run_dir: Path, observer_reference: Path | No
     result = {
         "run_id": run_dir.name,
         "status": scenario.get("status"),
+        "simulation_mode": stats.get("simulation_mode", "realtime"),
+        "timestamp_domain": latency["timestamp_domain"],
         "uav_count": scenario.get("latency_diagnostic", {}).get("uav_count"),
         "profile": scenario.get("profile"),
         "mavlink_latency": latency,
@@ -2831,6 +2852,7 @@ def write_latency_diagnostic_report(run_dir: Path, observer_reference: Path | No
         f"# Native control-latency diagnostic: {run_dir.name}",
         "",
         f"- Status: **{scenario.get('status', 'missing')}**; UAVs: {result['uav_count']}",
+        f"- Timing domain: **{latency['timestamp_domain']}**; model-time results do not measure real-time controller latency.",
         f"- Command attempts: {latency['attempt_count']}; post-write UAV UART deliveries observed: {latency['uav_uart_delivery_observed']}.",
         f"- First-attempt RTT p95: {latency['first_attempt_rtt_ms']['p95']} ms.",
         f"- Successful-attempt RTT p95: {latency['successful_attempt_rtt_ms']['p95']} ms.",
@@ -3101,6 +3123,9 @@ def main() -> int:
         "live_gazebo_evidence": screenshots["screenshots_status"] == "passed",
         "endpoint_and_native_radiotap_pcaps": topology["endpoint_pcaps_complete"] and topology["native_radiotap_pcaps_complete"],
     }
+    if stats.get("simulation_mode") == "lockstep":
+        functional_checks.pop("realtime_scheduler_gazebo_and_pose_gates")
+        functional_checks["lockstep_simulator_and_pose_barriers"] = realtime["lockstep_coupling_passed"]
     if causal["required"]:
         functional_checks["causal_clear_shadow_recovery"] = bool(causal["passed"])
     add_optional_one_uav_regression_check(
@@ -3115,6 +3140,8 @@ def main() -> int:
     status = "functional_native_path" if functional_status == "passed" else "realtime_failed"
     if functional_status == "passed":
         status = "realtime_ready" if realtime["realtime_readiness"] == "ready" else "realtime_limited"
+    if stats.get("simulation_mode") == "lockstep":
+        status = "model_time_functional" if functional_status == "passed" else "model_time_failed"
     runtime_tx_power_w = recorded_tx_power_w(stats, scenario)
     tx_power_w = recorded_tx_power_w(stats, scenario, scenario_config)
     tx_power_basis = (
@@ -3155,6 +3182,8 @@ def main() -> int:
         "scenario_config_lineage": scenario_config_lineage,
         "functional_five_uav_native_path": functional_status,
         "functional_checks": functional_checks,
+        "simulation_mode": stats.get("simulation_mode", "realtime"),
+        "timestamp_domain": "simulation" if stats.get("simulation_mode") == "lockstep" else "host_monotonic",
         "realtime_readiness": realtime["realtime_readiness"],
         "profile": stats.get("profile", scenario.get("profile")),
         "technology_specific_modem": bool(stats.get("technology_specific_modem", False)),

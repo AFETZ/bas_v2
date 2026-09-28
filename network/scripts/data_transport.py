@@ -7,6 +7,10 @@ import binascii
 import dataclasses
 import struct
 import time
+try:
+    from . import simulation_clock as clock
+except ImportError:  # direct script entrypoints
+    import simulation_clock as clock
 
 
 MAGIC = b"BDP1"
@@ -60,11 +64,11 @@ def encode(
     body = bytes(payload)
     if len(body) > 65535:
         raise DataProtocolError("data payload is too large")
-    sent_ns = time.monotonic_ns() if sent_monotonic_ns is None else sent_monotonic_ns
+    sent_ns = clock.monotonic_ns() if sent_monotonic_ns is None else sent_monotonic_ns
     checksum = binascii.crc32(body) & 0xFFFFFFFF
     return HEADER.pack(
         MAGIC,
-        VERSION,
+        clock.wire_version(),
         KINDS[kind],
         sender_id,
         receiver_id,
@@ -82,7 +86,7 @@ def decode(datagram: bytes) -> DataMessage:
         HEADER.unpack_from(datagram)
     )
     payload = datagram[HEADER.size:]
-    if magic != MAGIC or version != VERSION or kind_id not in KIND_NAMES:
+    if magic != MAGIC or version != clock.wire_version() or kind_id not in KIND_NAMES:
         raise DataProtocolError("data magic/version/kind mismatch")
     if len(payload) != length:
         raise DataProtocolError("data payload length mismatch")

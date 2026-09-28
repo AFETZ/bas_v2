@@ -154,7 +154,8 @@ def rotate_vector(q: list[float], vector: list[float]) -> list[float]:
 
 class LiveState:
     """Bounded measured history; clocks reset by restarting the whole run."""
-    def __init__(self, scenario: dict[str, Any], stale_after_s: float = .5):
+    def __init__(self, scenario: dict[str, Any], stale_after_s: float = .5, simulation_mode: str = "realtime"):
+        self.simulation_mode = simulation_mode
         self.scenario = scenario
         self.stale_ns = int(stale_after_s*1e9)
         self.session = uuid.uuid4().hex
@@ -185,7 +186,7 @@ class LiveState:
         if (not valid_frames or not all(math.isfinite(x) for x in [stamp,*q,*p,*v,*omega])
                 or not 1e-12 <= sum(x*x for x in q) < float("inf") or self.clock_s is None
                 or abs(stamp-self.clock_s) > self.stale_ns/1e9
-                or now_ns-self.clock_rx_ns > self.stale_ns
+                or (self.simulation_mode == "realtime" and now_ns-self.clock_rx_ns > self.stale_ns)
                 or (history and stamp <= history[-1]['source_sim_time_s'])):
             self.rejected += 1
             return False
@@ -209,14 +210,15 @@ class LiveState:
                 missing.append(name)
                 continue
             node = dict(history[-1])
-            node['sample_age_ms'] = (now_ns-node['sample_monotonic_ns'])/1e6
-            node['stale'] = now_ns-node['sample_monotonic_ns'] > self.stale_ns
+            node['sample_age_ms'] = ((self.clock_s-node['source_sim_time_s'])*1000
+                if self.simulation_mode == 'lockstep' else (now_ns-node['sample_monotonic_ns'])/1e6)
+            node['stale'] = node['sample_age_ms'] > self.stale_ns/1e6
             if node['stale']:
                 stale.append(name)
             node['history'] = list(history)
             nodes.append(node)
         return dict(type='node_state', schema_version=2, session_id=self.session,
-            coordinate_frame='ENU', source='ros_odometry', time_s=time.time(),
+            simulation_mode=self.simulation_mode, coordinate_frame='ENU', source='ros_odometry', time_s=time.time(),
             published_monotonic_ns=now_ns, source_sim_time_s=self.clock_s,
             clock_received_monotonic_ns=self.clock_rx_ns, fault=self.fault,
             nodes=nodes, missing_nodes=missing, stale_nodes=stale, rejected_samples=self.rejected)
@@ -252,9 +254,11 @@ def run_ros_tracker(args: argparse.Namespace) -> int:
     class RadioPositionTracker(Node):
         def __init__(self) -> None:
             super().__init__("network_radio_position_tracker")
-            self.state = LiveState(scenario, stale_after_s)
+            self.state = LiveState(scenario, stale_after_s, os.environ.get("BAS_SIMULATION_MODE", "realtime"))
             self.robot_names = [robot["name"] for robot in scenario.get("robots", [])]
-            qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT,
+            lockstep = self.state.simulation_mode == 'lockstep'
+            qos = QoSProfile(depth=32 if lockstep else 1,
+                             reliability=ReliabilityPolicy.RELIABLE if lockstep else ReliabilityPolicy.BEST_EFFORT,
                              history=HistoryPolicy.KEEP_LAST)
             self.create_subscription(Clock, f'/{self.robot_names[0]}/clock',
                 lambda msg: self.state.clock(msg.clock.sec+msg.clock.nanosec/1e9, time.monotonic_ns()), qos)

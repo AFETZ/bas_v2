@@ -28,6 +28,7 @@ from network.scripts.data_transport import (  # noqa: E402
     decode as decode_data,
     encode as encode_data,
 )
+from network.scripts import simulation_clock as clock
 from scripts.product.town01_full_stack_scenario import (  # noqa: E402
     FlightHarness,
     ScenarioError,
@@ -250,12 +251,15 @@ def run_additional_agent(args: argparse.Namespace) -> int:
     )
     p2p_sent = False
     simultaneous_sent = False
-    append_jsonl(event_log, {"event": "start", "uav": index, "monotonic_ns": time.monotonic_ns()})
+    append_jsonl(event_log, {"event": "start", "uav": index, "monotonic_ns": clock.monotonic_ns()})
     try:
         while not stop:
+            if clock.mode() == "lockstep" and clock.snapshot()["phase"] not in ("exchange", "stopped"):
+                time.sleep(.002)
+                continue
             for key, _mask in selector.select(0.01):
                 datagram, source = key.fileobj.recvfrom(65535)
-                now_ns = time.monotonic_ns()
+                now_ns = clock.monotonic_ns()
                 try:
                     message = decode_data(datagram)
                 except DataProtocolError as error:
@@ -308,7 +312,7 @@ def run_additional_agent(args: argparse.Namespace) -> int:
                             "uav": index,
                             "sequence": message.sequence,
                             "bytes": len(response),
-                            "monotonic_ns": time.monotonic_ns(),
+                            "monotonic_ns": clock.monotonic_ns(),
                         },
                     )
 
@@ -316,12 +320,12 @@ def run_additional_agent(args: argparse.Namespace) -> int:
                 schedule = json.loads(schedule_file.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 schedule = {}
-            now_ns = time.monotonic_ns()
+            now_ns = clock.monotonic_ns()
             p2p_start_ns = int(schedule.get("p2p_uplink_start_monotonic_ns", 0) or 0)
             if p2p_start_ns and not p2p_sent and now_ns >= p2p_start_ns:
                 for sequence in range(p2p_packets):
                     target_ns = p2p_start_ns + (index - 1) * 25_000_000 + sequence * 100_000_000
-                    while time.monotonic_ns() < target_ns and not stop:
+                    while clock.monotonic_ns() < target_ns and not stop:
                         time.sleep(0.001)
                     datagram = encode_data(
                         "p2p_uplink",
@@ -343,7 +347,7 @@ def run_additional_agent(args: argparse.Namespace) -> int:
                             "payload_length": len(message.payload),
                             "bytes": len(datagram),
                             "checksum": message.checksum,
-                            "monotonic_ns": time.monotonic_ns(),
+                            "monotonic_ns": clock.monotonic_ns(),
                         },
                     )
                 p2p_sent = True
@@ -352,7 +356,7 @@ def run_additional_agent(args: argparse.Namespace) -> int:
             if simultaneous_start_ns and not simultaneous_sent and now_ns >= simultaneous_start_ns:
                 for sequence in range(simultaneous_packets):
                     target_ns = simultaneous_start_ns + sequence * simultaneous_interval_ns
-                    while time.monotonic_ns() < target_ns and not stop:
+                    while clock.monotonic_ns() < target_ns and not stop:
                         time.sleep(0.001)
                     payload = f"native-five-simultaneous-uplink-uav{index}-{sequence}".encode()
                     payload = payload.ljust(simultaneous_payload_bytes, b".")
@@ -377,12 +381,12 @@ def run_additional_agent(args: argparse.Namespace) -> int:
                             "bytes": len(datagram),
                             "checksum": message.checksum,
                             "scheduled_monotonic_ns": target_ns,
-                            "monotonic_ns": time.monotonic_ns(),
+                            "monotonic_ns": clock.monotonic_ns(),
                         },
                     )
                 simultaneous_sent = True
     finally:
-        append_jsonl(event_log, {"event": "stop", "uav": index, "monotonic_ns": time.monotonic_ns()})
+        append_jsonl(event_log, {"event": "stop", "uav": index, "monotonic_ns": clock.monotonic_ns()})
         selector.close()
         p2p.close()
         multicast.close()
@@ -458,10 +462,11 @@ class NativeFiveUavHarness(FlightHarness):
         os.replace(temporary, self.phase_file)
         self.event("phase", detail=name)
 
-    def observe_for(self, duration_s: float) -> None:
-        deadline = time.monotonic() + duration_s
-        while time.monotonic() < deadline:
-            self.pump(min(0.2, deadline - time.monotonic()))
+    def observe_for(self, duration_s: float, *, wall_time: bool = False) -> None:
+        now = time.monotonic if wall_time else clock.monotonic
+        deadline = now() + duration_s
+        while now() < deadline:
+            self.pump(min(0.2, deadline - now()))
 
     def command_operation(
         self,
@@ -508,10 +513,10 @@ class NativeFiveUavHarness(FlightHarness):
             int(self.mavutil.mavlink.MAV_RESULT_ACCEPTED),
             int(self.mavutil.mavlink.MAV_RESULT_IN_PROGRESS),
         }
-        started_ns = time.monotonic_ns()
+        started_ns = clock.monotonic_ns()
         for attempt_number in range(1, maximum_attempts + 1):
             attempt_id = f"{operation_id}-a{attempt_number}"
-            sent_ns = time.monotonic_ns()
+            sent_ns = clock.monotonic_ns()
             message = self.transmitters[(channel, system_id)].command_long_encode(
                 system_id, 1, command, attempt_number - 1, *params
             )
@@ -540,8 +545,8 @@ class NativeFiveUavHarness(FlightHarness):
             }
             operation["attempts"].append(attempt)
             operation["attempt_count"] = attempt_number
-            deadline = time.monotonic() + timeout_s * self.timeout_scale
-            while time.monotonic() < deadline:
+            deadline = clock.monotonic() + timeout_s * self.timeout_scale
+            while clock.monotonic() < deadline:
                 self.pump(0.1)
                 ack = self.acks.get((channel, system_id, command))
                 if ack is None or ack[1] < sent_ns:
@@ -598,7 +603,7 @@ class NativeFiveUavHarness(FlightHarness):
         operations: list[dict[str, Any]] = []
         for system_id in systems:
             operation_id = f"op-{len(self.summary.setdefault('command_operations', [])) + 1:05d}"
-            sent_ns = time.monotonic_ns()
+            sent_ns = clock.monotonic_ns()
             attempt = {
                 "attempt_id": f"{operation_id}-a1",
                 "confirmation": 0,
@@ -648,10 +653,10 @@ class NativeFiveUavHarness(FlightHarness):
             attempt["command_frame_hex"] = bytes(message.get_msgbuf()).hex()
             operations.append(operation)
 
-        deadline = time.monotonic() + timeout_s * self.timeout_scale
+        deadline = clock.monotonic() + timeout_s * self.timeout_scale
         pending = {int(operation["uav"].removeprefix("uav")): operation for operation in operations}
-        while pending and time.monotonic() < deadline:
-            self.pump(min(0.1, deadline - time.monotonic()))
+        while pending and clock.monotonic() < deadline:
+            self.pump(min(0.1, deadline - clock.monotonic()))
             for system_id, operation in tuple(pending.items()):
                 attempt = operation["attempts"][0]
                 ack = self.acks.get(("control", system_id, command))
@@ -689,7 +694,7 @@ class NativeFiveUavHarness(FlightHarness):
 
         operations: list[dict[str, Any]] = []
         def send_one(system_id: int, sequence: int) -> None:
-            sent_ns = time.monotonic_ns()
+            sent_ns = clock.monotonic_ns()
             time_usec = sent_ns // 1_000
             message = self.transmitters[("control", system_id)].ping_encode(
                 time_usec, system_id * 100 + sequence, system_id, 1
@@ -704,9 +709,9 @@ class NativeFiveUavHarness(FlightHarness):
                 "rtt_ms": None,
                 "outcome": "timeout",
             }
-            deadline = time.monotonic() + self.timeout_scale
-            while time.monotonic() < deadline:
-                self.pump(min(0.1, deadline - time.monotonic()))
+            deadline = clock.monotonic() + self.timeout_scale
+            while clock.monotonic() < deadline:
+                self.pump(min(0.1, deadline - clock.monotonic()))
                 reply = self.latest.get(("control", system_id, "PING"))
                 reply_ns = self.latest_at_ns.get(("control", system_id, "PING"), 0)
                 if reply is None or reply_ns < sent_ns:
@@ -805,16 +810,16 @@ class NativeFiveUavHarness(FlightHarness):
             int(self.mavutil.mavlink.MAV_RESULT_ACCEPTED),
             int(self.mavutil.mavlink.MAV_RESULT_IN_PROGRESS),
         }
-        sent_at_ns = time.monotonic_ns()
+        sent_at_ns = clock.monotonic_ns()
         next_send = 0.0
-        deadline = time.monotonic() + timeout_s * self.timeout_scale
-        while time.monotonic() < deadline:
-            if time.monotonic() >= next_send:
+        deadline = clock.monotonic() + timeout_s * self.timeout_scale
+        while clock.monotonic() < deadline:
+            if clock.monotonic() >= next_send:
                 message = self.transmitters[(channel, system_id)].command_long_encode(
                     system_id, 1, command, 0, *params
                 )
                 self.send(channel, system_id, message)
-                next_send = time.monotonic() + self.diagnostic_retry_interval_s
+                next_send = clock.monotonic() + self.diagnostic_retry_interval_s
             self.pump(0.2)
             ack = self.acks.get((channel, system_id, command))
             if ack is None or ack[1] < sent_at_ns or int(ack[0].result) not in accepted:
@@ -916,16 +921,16 @@ class NativeFiveUavHarness(FlightHarness):
         sent_at: dict[int, int] = {}
         latency: dict[int, float] = {}
         next_send = 0.0
-        deadline = time.monotonic() + 120 * self.timeout_scale
-        while pending and time.monotonic() < deadline:
-            if time.monotonic() >= next_send:
+        deadline = clock.monotonic() + 120 * self.timeout_scale
+        while pending and clock.monotonic() < deadline:
+            if clock.monotonic() >= next_send:
                 for system_id in pending:
                     message = self.transmitters[("control", system_id)].command_long_encode(
                         system_id, 1, request, 0, float(version_id), 0, 0, 0, 0, 0, 0
                     )
                     self.send("control", system_id, message)
-                    sent_at.setdefault(system_id, time.monotonic_ns())
-                next_send = time.monotonic() + self.diagnostic_retry_interval_s
+                    sent_at.setdefault(system_id, clock.monotonic_ns())
+                next_send = clock.monotonic() + self.diagnostic_retry_interval_s
             self.pump(0.2)
             for system_id in tuple(pending):
                 ack = self.acks.get(("control", system_id, request))
@@ -946,7 +951,7 @@ class NativeFiveUavHarness(FlightHarness):
     def additional_data_experiments(self) -> None:
         sock = self.sockets["additional_data"]
         self.additional_received = []
-        p2p_start_ns = time.monotonic_ns() + 1_500_000_000
+        p2p_start_ns = clock.monotonic_ns() + 1_500_000_000
         write_json(
             self.schedule_file,
             {
@@ -1036,7 +1041,7 @@ class NativeFiveUavHarness(FlightHarness):
         }
 
         self.additional_received = []
-        simultaneous_start_ns = time.monotonic_ns() + 2_000_000_000
+        simultaneous_start_ns = clock.monotonic_ns() + 2_000_000_000
         self.phase("simultaneous_uplink")
         write_json(
             self.schedule_file,
@@ -1094,16 +1099,16 @@ class NativeFiveUavHarness(FlightHarness):
             int(self.mavutil.mavlink.MAV_RESULT_ACCEPTED),
             int(self.mavutil.mavlink.MAV_RESULT_IN_PROGRESS),
         }
-        started_ns = time.monotonic_ns()
-        deadline = time.monotonic() + timeout_s * self.timeout_scale
+        started_ns = clock.monotonic_ns()
+        deadline = clock.monotonic() + timeout_s * self.timeout_scale
         next_send = 0.0
-        while time.monotonic() < deadline:
-            if time.monotonic() >= next_send:
+        while clock.monotonic() < deadline:
+            if clock.monotonic() >= next_send:
                 message = self.transmitters[("control", system_id)].command_long_encode(
                     system_id, 1, command, 0, *params
                 )
                 self.send("control", system_id, message)
-                next_send = time.monotonic() + self.diagnostic_retry_interval_s
+                next_send = clock.monotonic() + self.diagnostic_retry_interval_s
             self.pump(0.2)
             ack = self.acks.get(("control", system_id, command))
             if ack and ack[1] >= started_ns and int(ack[0].result) in accepted:
@@ -1130,10 +1135,10 @@ class NativeFiveUavHarness(FlightHarness):
     ) -> None:
         flag = int(self.mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED)
         pending = set(systems)
-        deadline = time.monotonic() + timeout_s * self.timeout_scale
+        deadline = clock.monotonic() + timeout_s * self.timeout_scale
         next_send = 0.0
-        while pending and time.monotonic() < deadline:
-            if time.monotonic() >= next_send:
+        while pending and clock.monotonic() < deadline:
+            if clock.monotonic() >= next_send:
                 for system_id in pending:
                     self.send(
                         "control",
@@ -1142,7 +1147,7 @@ class NativeFiveUavHarness(FlightHarness):
                             system_id, flag, custom_mode
                         ),
                     )
-                next_send = time.monotonic() + self.diagnostic_retry_interval_s
+                next_send = clock.monotonic() + self.diagnostic_retry_interval_s
             self.pump(0.2)
             for system_id in tuple(pending):
                 heartbeat = self.latest.get(("control", system_id, "HEARTBEAT"))
@@ -1162,8 +1167,8 @@ class NativeFiveUavHarness(FlightHarness):
             20,
             f"uav{system_id}_global_position",
         )
-        deadline = time.monotonic() + 15 * self.timeout_scale
-        while time.monotonic() < deadline:
+        deadline = clock.monotonic() + 15 * self.timeout_scale
+        while clock.monotonic() < deadline:
             received_ns = self.latest_at_ns.get(("control", system_id, "GLOBAL_POSITION_INT"), 0)
             message = self.latest.get(("control", system_id, "GLOBAL_POSITION_INT"))
             if received_ns >= sent_ns and message is not None:
@@ -1252,7 +1257,7 @@ class NativeFiveUavHarness(FlightHarness):
                 definitions
             )
         ]
-        started_ns = time.monotonic_ns()
+        started_ns = clock.monotonic_ns()
         handled_at_ns = 0
         last_requested_sequence = -1
         count_packets_sent = 0
@@ -1266,9 +1271,9 @@ class NativeFiveUavHarness(FlightHarness):
             "mission_count_packets_sent": count_packets_sent,
         }
         self.summary.setdefault("mission_uploads", {})[uav] = mission_upload
-        deadline = time.monotonic() + 60 * self.timeout_scale
+        deadline = clock.monotonic() + 60 * self.timeout_scale
         requested: set[int] = set()
-        while time.monotonic() < deadline:
+        while clock.monotonic() < deadline:
             # The ALOHA medium can delay an earlier MISSION_COUNT until the item
             # exchange is in progress.  A second count restarts that exchange in
             # ArduPilot, so send this protocol opener exactly once.  Item repeats
@@ -1285,7 +1290,7 @@ class NativeFiveUavHarness(FlightHarness):
                 mission_upload["mission_count_packets_sent"] = count_packets_sent
             if (
                 deferred_repeat_sequence is not None
-                and time.monotonic() >= deferred_repeat_deadline
+                and clock.monotonic() >= deferred_repeat_deadline
             ):
                 self.send("control", system_id, items[deferred_repeat_sequence])
                 request_history.append(
@@ -1324,7 +1329,7 @@ class NativeFiveUavHarness(FlightHarness):
                         # an already-accepted item and make ArduPilot reject the plan.
                         if deferred_repeat_sequence is None:
                             deferred_repeat_sequence = sequence
-                            deferred_repeat_deadline = time.monotonic() + 1.0
+                            deferred_repeat_deadline = clock.monotonic() + 1.0
                             action = "deferred_repeat"
                         else:
                             action = "duplicate_repeat_pending"
@@ -1391,7 +1396,7 @@ class NativeFiveUavHarness(FlightHarness):
                     sequence=sequence,
                     payload=payload,
                 )
-                sent_ns = time.monotonic_ns()
+                sent_ns = clock.monotonic_ns()
                 sock.sendto(datagram, (endpoint_ip(system_id), P2P_PORT + system_id))
                 sends[(system_id, sequence)] = {
                     "uav": f"uav{system_id}",
@@ -1624,7 +1629,7 @@ class NativeFiveUavHarness(FlightHarness):
         self.flight()
         self.phase("pre_no_bypass")
         self.summary["status"] = "passed"
-        self.summary["duration_s"] = round(time.monotonic() - self.started, 3)
+        self.summary["duration_s"] = round(clock.monotonic() - self.started, 3)
         self.summary["message_counts"] = {
             f"{channel}:uav{system_id}:{message_type}": count
             for (channel, system_id, message_type), count in sorted(self.message_counts.items())
@@ -1640,7 +1645,7 @@ def run_scenario(args: argparse.Namespace) -> int:
             channels = tuple(args.channels.split(","))
             harness.latency_diagnostics(args.uav_count, channels)
             harness.summary["status"] = "diagnostic_complete"
-            harness.summary["duration_s"] = round(time.monotonic() - harness.started, 3)
+            harness.summary["duration_s"] = round(clock.monotonic() - harness.started, 3)
             summary = harness.summary
         else:
             summary = harness.run_native()
@@ -1649,7 +1654,7 @@ def run_scenario(args: argparse.Namespace) -> int:
             {
                 "status": "failed",
                 "error": str(error),
-                "duration_s": round(time.monotonic() - harness.started, 3),
+                "duration_s": round(clock.monotonic() - harness.started, 3),
             }
         )
         write_json(output, harness.summary)
@@ -1716,13 +1721,13 @@ def run_no_bypass_probe(args: argparse.Namespace) -> int:
         harness.sockets["additional_data"].sendto(
             datagram, (endpoint_ip(system_id), P2P_PORT + system_id)
         )
-    started_ns = time.monotonic_ns()
-    harness.observe_for(float(args.duration_s))
+    started_ns = clock.monotonic_ns()
+    harness.observe_for(float(args.duration_s), wall_time=True)
     messages = sum(harness.message_counts.values()) - before
     result = {
         "duration_s": float(args.duration_s),
         "started_monotonic_ns": started_ns,
-        "ended_monotonic_ns": time.monotonic_ns(),
+        "ended_monotonic_ns": clock.monotonic_ns(),
         "control_or_payload_messages_received": messages,
         "additional_packets_received": len(harness.additional_received),
         "control_ack_absent_all_five": not any(

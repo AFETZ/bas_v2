@@ -1,6 +1,7 @@
 // CPU-only behavioral test of the real state reader and ns-3 MobilityModel.
 #include "ns3/core-module.h"
 #include "native-live-state.h"
+#include "native-lockstep.h"
 #include <filesystem>
 #include <chrono>
 #include <iostream>
@@ -10,11 +11,38 @@ int main(int argc, char** argv) {
     namespace py=pybind11;
     auto json=py::module_::import("json");
     auto pathlib=py::module_::import("pathlib");
+    if (argc==4 && std::string(argv[1])=="--lockstep") {
+        bas::Lockstep barrier(argv[2],10,20000000);
+        bas::LiveStateReader reader;
+        auto mobility=ns3::CreateObject<bas::MeasuredMobility>();
+        for (int i=0;i<25;++i) {
+            barrier.Begin(ns3::Simulator::Now().GetNanoSeconds(),true);
+            auto apply=[&](){
+                const auto now=bas::Lockstep::WallNs();
+                auto states=reader.Read(argv[3],{"cp","uav1"},now,0,500000000,
+                                       barrier.SourceTime(ns3::Simulator::Now().GetSeconds()),10000000000LL);
+                mobility->Apply(states.at(1));
+            };
+            ns3::Simulator::ScheduleNow(apply);
+            // Deliberate wall stall tests the barrier, not a synthetic RF result.
+            if(i==5) ns3::Simulator::Schedule(ns3::MilliSeconds(10),[](){
+                std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+            });
+            ns3::Simulator::Stop(ns3::MilliSeconds(20));
+            ns3::Simulator::Run();
+            barrier.Physics(ns3::Simulator::Now().GetNanoSeconds(),true);
+        }
+        barrier.Clock(ns3::Simulator::Now().GetNanoSeconds(),"stopped",false);
+        std::cout << "PASS: stock ns-3 and real Gazebo/ROS advanced 25 barriers / 0.5 model seconds with 1.2s host stall; z="
+                  << mobility->GetPosition().z << "\n";
+        ns3::Simulator::Destroy();
+        return 0;
+    }
     if (argc==2) {
         bas::LiveStateReader reader;
         const auto now=std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
-        auto states=reader.Read(argv[1],{"cp","uav1"},now,now,500000000);
+        auto states=reader.Read(argv[1],{"cp","uav1"},now,0,500000000);
         auto mobility=ns3::CreateObject<bas::MeasuredMobility>();
         mobility->Apply(states.at(1));
         const auto p=mobility->GetPosition(),v=mobility->GetVelocity();
@@ -49,6 +77,17 @@ int main(int argc, char** argv) {
     mobility->Apply(changed.at(1));
     check(mobility->GetPosition().z==99,"height change not applied");
     check(mobility->GetVelocity().z==0,"velocity change not applied");
+    root["simulation_mode"]="lockstep";
+    root["published_monotonic_ns"]=60000000000LL;save();
+    auto paused=reader.Read(path,{"cp","uav1"},60000000000LL,60000000000LL,500000000,10.05);
+    check(paused.at(1).position.z==30,"model-time reader used a future pose during host stall");
+    auto delayed=reader.Read(path,{"cp","uav1"},62000000000LL,62000000000LL,500000000,10.05,10000000000LL);
+    check(delayed.at(1).position.z==30,"host publication delay consumed model-time source deadline");
+    bool tooOld=false;
+    try {reader.Read(path,{"cp","uav1"},60000000000LL,60000000000LL,500000000,11.);}
+    catch(const std::exception&){tooOld=true;}
+    check(tooOld,"model-time reader accepted stale source pose");
+    root["published_monotonic_ns"]=2000000000LL;save();
     bool rejected=false;
     try {reader.Read(path,{"cp","uav1"},2600000000,2600000000,500000000);}
     catch (const std::exception&) {rejected=true;}

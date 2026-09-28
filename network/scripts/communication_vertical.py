@@ -20,6 +20,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import simulation_clock as clock
+
 from serial_transport import (Encoder, MavlinkStreamCounter, Reassembler, TransportCounters,
                               BoundedQueue, radio_is_live)
 
@@ -134,6 +136,8 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
     output_parser.robust_parsing = True
     ready = {
         "status": "ready",
+        "simulation_mode": clock.mode(),
+        "timestamp_domain": clock.mode(),
         "pid": os.getpid(),
         "channel": args.channel,
         "uav_id": args.uav_id,
@@ -144,7 +148,7 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
         "bind": args.bind,
         "peer": args.peer,
         "tos": tos,
-        "transport_framing": "serial_chunk_v1" if args.framed else "raw_datagram",
+        "transport_framing": f"serial_chunk_v{clock.wire_version()}" if args.framed else "raw_datagram",
     }
     write_json(args.ready_file, ready)
     last_metrics_ns = 0
@@ -225,116 +229,120 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
                 )
         try:
             while running:
-                now_ns = time.monotonic_ns()
-                live = radio_is_live(args.radio_watchdog_file, args.watchdog_s)
-                to_uart.expire(now_ns/1e9)
-                to_radio.expire(now_ns/1e9)
-                if not live:
-                    to_uart.clear()
-                    to_radio.clear()
-                if reassembler is not None:
-                    records = reassembler.expire(now_ns)
-                    for record, sent_ns in zip(records, reassembler.released_sent_ns):
-                        if live:
-                            to_uart.put(record, sent_ns/1e9)
-                        else:
-                            stale_radio_drops += 1
-                publish_metrics(now_ns)
-                for key, _mask in selector.select(0.01 if to_uart.items or to_radio.items else 0.05):
-                    if key.data == "uart":
-                        try:
-                            data = os.read(uart, 4096)
-                        except BlockingIOError:
-                            continue
-                        if not data:
-                            continue
-                        observed_ns = time.monotonic_ns()
-                        counters.uart_input_bytes += len(data)
-                        input_frames.feed(data)
-                        emit_mavlink_frames("uart_to_ns3", input_parser, data, observed_ns)
-                        datagrams = encoder.encode(data, observed_ns) if encoder else [data]
-                        if encoder:
-                            counters.records_encoded += 1
-                            counters.chunks_encoded += len(datagrams)
-                        for fragment_index, datagram in enumerate(datagrams):
-                            if not live:
-                                stale_radio_drops += 1
-                                continue
-                            if not to_radio.put(datagram, observed_ns/1e9):
-                                continue
-                            emit_event(
-                                {
-                                    "event": "serial_chunk_queued" if encoder else "serial_queued",
-                                    "channel": args.channel,
-                                    "uav_id": args.uav_id,
-                                    "direction": "uart_to_ns3" if encoder else "uart_to_udp",
-                                    "bytes": len(datagram),
-                                    "uart_record_bytes": len(data),
-                                    "network_bytes": len(datagram),
-                                    "fragment_index": fragment_index,
-                                    "fragment_count": len(datagrams),
-                                    "sha256": sha256(datagram),
-                                    "monotonic_ns": observed_ns,
-                                },
-                            )
-                    else:
-                        try:
-                            data, source = udp.recvfrom(65535)
-                        except BlockingIOError:
-                            continue
-                        if source != peer_address:
-                            unexpected_peers += 1
-                            continue
-                        observed_ns = time.monotonic_ns()
-                        records = reassembler.ingest(data, observed_ns) if reassembler else [data]
-                        sent_times = reassembler.released_sent_ns if reassembler else [observed_ns]
-                        if not reassembler:
-                            counters.ns3_output_bytes += len(data)
-                        for record, sent_ns in zip(records, sent_times):
+                with clock.io_window() as allowed:
+                    if not allowed:
+                        time.sleep(.002)
+                        continue
+                    now_ns = clock.monotonic_ns()
+                    live = radio_is_live(args.radio_watchdog_file, args.watchdog_s)
+                    to_uart.expire(now_ns/1e9)
+                    to_radio.expire(now_ns/1e9)
+                    if not live:
+                        to_uart.clear()
+                        to_radio.clear()
+                    if reassembler is not None:
+                        records = reassembler.expire(now_ns)
+                        for record, sent_ns in zip(records, reassembler.released_sent_ns):
                             if live:
                                 to_uart.put(record, sent_ns/1e9)
                             else:
                                 stale_radio_drops += 1
-                        emit_event(
-                            {
-                                "event": "serial_chunk_rx" if reassembler else "serial_rx",
-                                "channel": args.channel,
-                                "uav_id": args.uav_id,
-                                "direction": "ns3_to_uart" if reassembler else "udp_to_uart",
-                                "bytes": len(data),
-                                "network_bytes": len(data),
-                                "reassembled_records": len(records),
-                                "reassembled_bytes": sum(len(record) for record in records),
-                                "sha256": sha256(data),
-                                "source": f"{source[0]}:{source[1]}",
-                                "monotonic_ns": observed_ns,
-                            },
-                        )
-                # At most one nonblocking write per queue per iteration: a full
-                # PTY cannot prevent ingress, expiry, metrics or stop processing.
-                live = radio_is_live(args.radio_watchdog_file, args.watchdog_s)
-                to_uart.expire(time.monotonic())
-                to_radio.expire(time.monotonic())
-                if live and to_uart.items:
-                    try:
-                        data = to_uart.items[0][0]
-                        written = os.write(uart, data)
-                        counters.uart_output_bytes += written
-                        output_frames.feed(data[:written])
-                        emit_mavlink_frames('ns3_to_uart', output_parser, data[:written], time.monotonic_ns())
-                        to_uart.sent(written)
-                    except BlockingIOError:
-                        pass
-                if live and to_radio.items:
-                    try:
-                        written = udp.sendto(to_radio.items[0][0], peer_address)
-                        counters.ns3_input_bytes += written
-                        to_radio.sent(written)
-                    except BlockingIOError:
-                        pass
+                    publish_metrics(time.monotonic_ns())
+                    for key, _mask in selector.select(0.01 if to_uart.items or to_radio.items else 0.05):
+                        if key.data == "uart":
+                            try:
+                                data = os.read(uart, 4096)
+                            except BlockingIOError:
+                                continue
+                            if not data:
+                                continue
+                            observed_ns = clock.monotonic_ns()
+                            counters.uart_input_bytes += len(data)
+                            input_frames.feed(data)
+                            emit_mavlink_frames("uart_to_ns3", input_parser, data, observed_ns)
+                            datagrams = encoder.encode(data, observed_ns) if encoder else [data]
+                            if encoder:
+                                counters.records_encoded += 1
+                                counters.chunks_encoded += len(datagrams)
+                            for fragment_index, datagram in enumerate(datagrams):
+                                if not live:
+                                    stale_radio_drops += 1
+                                    continue
+                                if not to_radio.put(datagram, observed_ns/1e9):
+                                    continue
+                                emit_event(
+                                    {
+                                        "event": "serial_chunk_queued" if encoder else "serial_queued",
+                                        "channel": args.channel,
+                                        "uav_id": args.uav_id,
+                                        "direction": "uart_to_ns3" if encoder else "uart_to_udp",
+                                        "bytes": len(datagram),
+                                        "uart_record_bytes": len(data),
+                                        "network_bytes": len(datagram),
+                                        "fragment_index": fragment_index,
+                                        "fragment_count": len(datagrams),
+                                        "sha256": sha256(datagram),
+                                        "monotonic_ns": observed_ns,
+                                    },
+                                )
+                        else:
+                            try:
+                                data, source = udp.recvfrom(65535)
+                            except BlockingIOError:
+                                continue
+                            if source != peer_address:
+                                unexpected_peers += 1
+                                continue
+                            observed_ns = clock.monotonic_ns()
+                            records = reassembler.ingest(data, observed_ns) if reassembler else [data]
+                            sent_times = reassembler.released_sent_ns if reassembler else [observed_ns]
+                            if not reassembler:
+                                counters.ns3_output_bytes += len(data)
+                            for record, sent_ns in zip(records, sent_times):
+                                if live:
+                                    to_uart.put(record, sent_ns/1e9)
+                                else:
+                                    stale_radio_drops += 1
+                            emit_event(
+                                {
+                                    "event": "serial_chunk_rx" if reassembler else "serial_rx",
+                                    "channel": args.channel,
+                                    "uav_id": args.uav_id,
+                                    "direction": "ns3_to_uart" if reassembler else "udp_to_uart",
+                                    "bytes": len(data),
+                                    "network_bytes": len(data),
+                                    "reassembled_records": len(records),
+                                    "reassembled_bytes": sum(len(record) for record in records),
+                                    "sha256": sha256(data),
+                                    "source": f"{source[0]}:{source[1]}",
+                                    "monotonic_ns": observed_ns,
+                                },
+                            )
+                    # At most one nonblocking write per queue per iteration: a full
+                    # PTY cannot prevent ingress, expiry, metrics or stop processing.
+                    live = radio_is_live(args.radio_watchdog_file, args.watchdog_s)
+                    to_uart.expire(clock.monotonic())
+                    to_radio.expire(clock.monotonic())
+                    if live and to_uart.items:
+                        try:
+                            data = to_uart.items[0][0]
+                            written = os.write(uart, data)
+                            counters.uart_output_bytes += written
+                            output_frames.feed(data[:written])
+                            emit_mavlink_frames('ns3_to_uart', output_parser, data[:written], clock.monotonic_ns())
+                            to_uart.sent(written)
+                        except BlockingIOError:
+                            pass
+                    if live and to_radio.items:
+                        try:
+                            written = udp.sendto(to_radio.items[0][0], peer_address)
+                            counters.ns3_input_bytes += written
+                            to_radio.sent(written)
+                        except BlockingIOError:
+                            pass
         finally:
             if reassembler is not None:
-                reassembler.expire(time.monotonic_ns(), force=True)
+                reassembler.expire(clock.monotonic_ns(), force=True)
             publish_metrics(time.monotonic_ns(), force=True)
             selector.close()
             udp.close()

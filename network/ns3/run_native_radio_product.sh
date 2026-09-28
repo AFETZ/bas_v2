@@ -145,7 +145,7 @@ raise SystemExit(0 if parts >= (3, 25) else 1)
 PY
 
 cp "$PROJECT_SOURCE" "$UPSTREAM_SOURCE"
-cp "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" "$ROOT_DIR/network/ns3/scratch/native-live-state.h" "$NS3_DIR/scratch/"
+cp "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" "$ROOT_DIR/network/ns3/scratch/native-live-state.h" "$ROOT_DIR/network/ns3/scratch/native-lockstep.h" "$NS3_DIR/scratch/"
 if [[ "${BAS_NATIVE_PRODUCT_SKIP_BUILD:-0}" == 1 ]]; then
   [[ -x "$BINARY" ]] || { printf 'Requested build reuse but binary is absent.\n' >&2; exit 2; }
   printf 'Reused the exact container-built binary; project C++ and upstream scratch copy match.\n' \

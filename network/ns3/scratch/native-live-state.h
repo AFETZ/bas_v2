@@ -6,6 +6,7 @@
 #include "ns3/vector.h"
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <fstream>
 #include <map>
 #include <stdexcept>
@@ -86,22 +87,33 @@ class LiveStateReader {
 public:
     // Retain session identity: a tracker/clock reset requires a whole-run restart.
     std::vector<MeasuredState> Read(const std::string& path, const std::vector<std::string>& names,
-                                   int64_t eventNs, int64_t wallNs, int64_t maxAgeNs) {
+                                   int64_t eventNs, int64_t wallNs, int64_t maxAgeNs,
+                                   double sourceEventS = -1, int64_t publicationMaxAgeNs = 0) {
+        const bool lockstep = sourceEventS >= 0;
         std::ifstream stream(path, std::ios::binary | std::ios::ate);
         const auto size=stream.tellg();
         if (size<=0 || size>1024*1024) throw std::runtime_error("missing/oversized state snapshot");
         stream.seekg(0);
         std::string json((std::istreambuf_iterator<char>(stream)),{});
         if (json.empty() || json.size()>1024*1024) throw std::runtime_error("missing/oversized state snapshot");
+        // Runtime callers sample receipt AFTER reading: the atomic publisher can
+        // otherwise replace the file between a caller's clock sample and open().
+        // A nonzero wallNs is reserved for controlled clock fixtures.
+        if (wallNs==0) wallNs=std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
         auto root=py::module_::import("json").attr("loads")(json).cast<py::dict>();
         if (root["schema_version"].cast<int>()!=2 || root["source"].cast<std::string>()!="ros_odometry"
             || root["coordinate_frame"].cast<std::string>()!="ENU" || !root["fault"].is_none())
             throw std::runtime_error("invalid state contract or source clock reset");
+        if (lockstep && (!root.contains("simulation_mode") || root["simulation_mode"].cast<std::string>()!="lockstep"))
+            throw std::runtime_error("tracker is using a different clock domain");
         const auto session=root["session_id"].cast<std::string>();
         if (!m_session.empty() && m_session!=session) throw std::runtime_error("tracker restarted");
         for (auto field:{"published_monotonic_ns","clock_received_monotonic_ns"}) {
+            if (lockstep && std::string(field)=="clock_received_monotonic_ns") continue;
             auto stamp=root[field].cast<int64_t>();
-            if (stamp>wallNs || wallNs-stamp>maxAgeNs) throw std::runtime_error(std::string("stale clock: ")+field);
+            const auto hostBudget=lockstep && publicationMaxAgeNs>0 ? publicationMaxAgeNs : maxAgeNs;
+            if (stamp>wallNs || wallNs-stamp>hostBudget) throw std::runtime_error(std::string("stale clock: ")+field);
         }
         std::map<std::string,py::dict> nodes;
         for (auto item:root["nodes"]) {
@@ -122,13 +134,18 @@ public:
             if (history.size()>32) throw std::runtime_error("unbounded pose history");
             py::dict selected;
             int64_t selectedNs=-1;
+            double selectedSource=-1;
             for (auto sample:history) {
                 auto stamp=sample["sample_monotonic_ns"].cast<int64_t>();
-                if (stamp<=eventNs && stamp>selectedNs) {
+                auto source=sample["source_sim_time_s"].cast<double>();
+                if (lockstep ? (source<=sourceEventS+1e-9 && source>selectedSource)
+                             : (stamp<=eventNs && stamp>selectedNs)) {
                     selected=py::reinterpret_borrow<py::dict>(sample); selectedNs=stamp;
+                    selectedSource=source;
                 }
             }
-            if (selectedNs<0 || wallNs-selectedNs>maxAgeNs)
+            if (selectedNs<0 || (lockstep ? (sourceEventS-selectedSource)*1e9>maxAgeNs
+                                         : wallNs-selectedNs>maxAgeNs))
                 throw std::runtime_error("no timely causal pose for "+name);
             auto state=DecodeState(selected);
             state.sampleNs=selectedNs; state.sourceTime=selected["source_sim_time_s"].cast<double>();

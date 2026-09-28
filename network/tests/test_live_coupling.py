@@ -104,7 +104,7 @@ def test_uart_filters_sender_age_and_remains_responsive_under_backpressure(tmp_p
         '--metrics-output',str(tmp_path/'metrics'),'--metrics-period-ms','50'],stderr=subprocess.PIPE)
     encoder=Encoder(channel='control',uav_id=1,direction='gcs_to_uart')
     try:
-        until=time.monotonic()+5
+        until=time.monotonic()+15
         while not (tmp_path/'ready').exists() and time.monotonic()<until:
             assert proc.poll() is None
             time.sleep(.02)
@@ -162,7 +162,7 @@ def test_no_bypass_checks_uart_delivery_even_when_gcs_is_silent(tmp_path,monkeyp
             self.sockets={'additional_data':NS(sendto=lambda *args:None)}
         def send(self,channel,uav,message):
             assert self.transport_encoders[channel,uav].sequence==42
-        def observe_for(self,duration):
+        def observe_for(self,duration,**kwargs):
             path=tmp_path/'metrics/control_uart_uav1.json'
             if missing:path.unlink()
             else:path.write_text(json.dumps({'uart_output_bytes':100+delivery}))

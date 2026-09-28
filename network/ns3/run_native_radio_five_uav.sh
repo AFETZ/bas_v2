@@ -6,6 +6,20 @@ IMAGE="${BAS_CONTAINER_IMAGE:-multiagent_simulation:latest}"
 CONTAINER_NAME="${BAS_NATIVE_FIVE_CONTAINER_NAME:-bas-v2-native-radio-five-uav}"
 SCENARIO_KEY="${BAS_NATIVE_FIVE_SCENARIO:-town01}"
 GUI="${BAS_NATIVE_FIVE_GUI:-0}"
+export BAS_SIMULATION_MODE="${BAS_SIMULATION_MODE:-realtime}"
+export BAS_LOCKSTEP_STEP_MS="${BAS_LOCKSTEP_STEP_MS:-20}"
+export BAS_LOCKSTEP_TIMEOUT_S="${BAS_LOCKSTEP_TIMEOUT_S:-60}"
+[[ "$BAS_SIMULATION_MODE" == realtime || "$BAS_SIMULATION_MODE" == lockstep ]] || {
+  printf 'BAS_SIMULATION_MODE must be realtime or lockstep.\n' >&2; exit 2;
+}
+if [[ "$BAS_SIMULATION_MODE" == lockstep && -n "${BAS_NATIVE_EXTERNAL_CONFIG:-}" ]]; then
+  printf 'External controllers require realtime: physical hardware cannot pause with model time.\n' >&2; exit 2
+fi
+python3 - "$BAS_LOCKSTEP_STEP_MS" "$BAS_LOCKSTEP_TIMEOUT_S" <<'PYMODE'
+import math, sys
+step, timeout = int(sys.argv[1]), float(sys.argv[2])
+assert 1 <= step <= 50 and math.isfinite(timeout) and timeout > 0, 'Invalid lockstep step/timeout'
+PYMODE
 
 [[ "$SCENARIO_KEY" == town01 || "$SCENARIO_KEY" == rock_demo || "$SCENARIO_KEY" == customer ]] || {
   printf 'Scenario must be town01, rock_demo or customer: %s\n' "$SCENARIO_KEY" >&2
@@ -47,6 +61,7 @@ run_in_container() {
     --privileged --network=host --user 0:0 \
     "${gpu_args[@]}" \
     "${gui_args[@]}" \
+    -e BAS_SIMULATION_MODE -e BAS_LOCKSTEP_STEP_MS -e BAS_LOCKSTEP_TIMEOUT_S \
     -e BAS_NATIVE_FIVE_IN_CONTAINER=1 \
     -e BAS_SOURCE_HEAD="$(git -C "$ROOT_DIR" rev-parse HEAD)" \
     -e BAS_SOURCE_DIRTY="$(git -C "$ROOT_DIR" status --porcelain | wc -l)" \
@@ -135,7 +150,7 @@ for index in "${UAV_INDICES[@]}"; do
   TAP_UAVS+="${TAP_UAVS:+,}tap-uav$index"
   TAP_ENDPOINTS+=("uav$index")
 done
-RUN_DIR="$ROOT_DIR/runs/native-radio-realtime/$RUN_ID"
+RUN_DIR="$ROOT_DIR/runs/native-radio-$BAS_SIMULATION_MODE/$RUN_ID"
 [[ ! -e "$RUN_DIR" ]] || { printf 'Run directory exists: %s\n' "$RUN_DIR" >&2; exit 2; }
 RUNTIME_DIR="/tmp/bas-native-five-$RUN_ID"
 ONE_UAV_RUN="${BAS_NATIVE_FIVE_ONE_UAV_RUN:-}"
@@ -165,6 +180,8 @@ NODE_EVENTS="$RUN_DIR/logs/node_state.jsonl"
 PHASE_FILE="$RUN_DIR/logs/current_phase.txt"
 SCHEDULE_FILE="$RUN_DIR/logs/additional_schedule.json"
 NS3_READY="$RUNTIME_DIR/ns3.ready"
+export BAS_SIM_CLOCK="$RUNTIME_DIR/simulation_clock.json"
+LOCKSTEP_PID=""
 MONITOR_STOP="$RUN_DIR/logs/runtime_monitor.stop"
 ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-$((100 + $(printf '%s' "$RUN_ID" | cksum | awk '{print $1}') % 100))}"
 GZ_PARTITION="${GZ_PARTITION:-native_five_${RUN_ID//[^a-zA-Z0-9_]/_}}"
@@ -348,6 +365,9 @@ PY
 [[ -x "$PYTHON_TOOLING/bin/cmake" ]] || { printf 'Pinned CMake tooling is absent.\n' >&2; exit 2; }
 
 mkdir -p "$RUN_DIR"/{logs,metrics,pcap,screenshots,plots} "$UART_DIR" "$WORK_DIR"
+if [[ "$BAS_SIMULATION_MODE" == lockstep ]]; then
+  PYTHONPATH="$ROOT_DIR:${PYTHONPATH:-}" python3 -c 'from pathlib import Path; import os; from network.scripts.simulation_clock import initial; initial(Path(os.environ["BAS_SIM_CLOCK"]))'
+fi
 printf 'Starting native five-UAV demo: scenario=%s map=%s gui=%s run=%s\n' \
   "$SCENARIO_KEY" "$MAP_ID" "$GUI" "$RUN_ID"
 python3 "$ROOT_DIR/scripts/product/inject_native_radio_runtime_cameras.py" \
@@ -364,7 +384,7 @@ fi
 export PATH="$PYTHON_TOOLING/bin:$PATH"
 export PYTHONPATH="$PYTHON_TOOLING:$PYTHON_DEPS:${PYTHONPATH:-}"
 cp "$PROJECT_SOURCE" "$UPSTREAM_SOURCE"
-cp "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" "$ROOT_DIR/network/ns3/scratch/native-live-state.h" "$NS3_DIR/scratch/"
+cp "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" "$ROOT_DIR/network/ns3/scratch/native-live-state.h" "$ROOT_DIR/network/ns3/scratch/native-lockstep.h" "$NS3_DIR/scratch/"
 source_args=()
 if [[ -n "${BAS_NATIVE_SOURCES:-}" ]]; then
   python3 "$ROOT_DIR/scripts/product/prepare_native_sources.py" \
@@ -377,7 +397,7 @@ if [[ -n "${BAS_NATIVE_EXTERNAL_CONFIG:-}" && "$SCENARIO_MODE" != latency_diagno
 fi
 if [[ "${BAS_NATIVE_FIVE_SKIP_BUILD:-0}" == 1 ]]; then
   [[ -x "$BINARY" ]] || { printf 'Requested binary reuse but binary is absent.\n' >&2; exit 2; }
-  [[ "$BINARY" -nt "$PROJECT_SOURCE" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-live-state.h" && "$BINARY" -nt "$REALTIME_CACHE_PATCH" ]] || {
+  [[ "$BINARY" -nt "$PROJECT_SOURCE" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-live-state.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-lockstep.h" && "$BINARY" -nt "$REALTIME_CACHE_PATCH" ]] || {
     printf 'Binary predates native source/header; rerun without BAS_NATIVE_FIVE_SKIP_BUILD.\n' >&2; exit 2;
   }
   printf 'Reused focused native target after exact project/upstream source synchronization.\n' \
@@ -404,6 +424,7 @@ PY
   printf 'started_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf 'git_head=%s\n' "${BAS_SOURCE_HEAD:-$(git -C "$ROOT_DIR" rev-parse HEAD)}"
   printf 'source_dirty_paths=%s\n' "${BAS_SOURCE_DIRTY:-unknown}"
+  printf 'simulation_mode=%s\nlockstep_step_ms=%s\nlockstep_wall_timeout_s=%s\n' "$BAS_SIMULATION_MODE" "$BAS_LOCKSTEP_STEP_MS" "$BAS_LOCKSTEP_TIMEOUT_S"
   printf 'ns3_version=3.48\n'
   printf 'ns3_exact_sha=%s\n' "$(git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" rev-parse HEAD)"
   printf 'ns3_compatibility_patch=true\n'
@@ -489,6 +510,7 @@ cleanup() {
   done
   [[ -f "$NODE_STATE" ]] && cp "$NODE_STATE" "$RUN_DIR/logs/node_state.json"
   [[ -f "$NS3_READY" ]] && cp "$NS3_READY" "$RUN_DIR/logs/ns3.ready"
+  [[ -f "$BAS_SIM_CLOCK" ]] && cp "$BAS_SIM_CLOCK" "$RUN_DIR/logs/simulation_clock.json"
   if [[ -d "$RUN_DIR" ]]; then
     chown -R "${BAS_NATIVE_FIVE_HOST_UID:-0}:${BAS_NATIVE_FIVE_HOST_GID:-0}" "$RUN_DIR" 2>/dev/null || true
   fi
@@ -503,7 +525,7 @@ run_with_native_watchdog() {
   local client_pid=$!
   managed_pids+=("$client_pid")
   while kill -0 "$client_pid" 2>/dev/null; do
-    if ! kill -0 "$NS3_PID" 2>/dev/null; then
+    if ! kill -0 "$NS3_PID" 2>/dev/null || { [[ -n "$LOCKSTEP_PID" ]] && ! kill -0 "$LOCKSTEP_PID" 2>/dev/null; }; then
       printf 'Native radio exited during the active scenario; stopping the run.\n' >&2
       return 1
     fi
@@ -744,6 +766,16 @@ for endpoint in "${TAP_ENDPOINTS[@]}"; do
   capture_pids+=("$!")
 done
 
+if [[ "$BAS_SIMULATION_MODE" == lockstep ]]; then
+  # Gazebo discovery stays in the host namespace; ns-3 keeps isolated TAP routing.
+  setsid env PYTHONPATH=/home/ubuntu/.local/lib/python3.10/site-packages \
+    python3 -u "$ROOT_DIR/network/position_tracker/lockstep.py" \
+    --world "$LAUNCH_WORLD" --node-state "$NODE_STATE" --clock "$BAS_SIM_CLOCK" \
+    --timeout-s "$BAS_LOCKSTEP_TIMEOUT_S" > "$RUN_DIR/logs/lockstep.log" 2>&1 &
+  LOCKSTEP_PID=$!
+  managed_pids+=("$LOCKSTEP_PID")
+fi
+
 NS3_FIFO="$RUNTIME_DIR/ns3-log.fifo"
 mkfifo "$NS3_FIFO"
 python3 -u "$ROOT_DIR/scripts/product/summarize_native_radio_product.py" timestamp \
@@ -773,6 +805,8 @@ setsid ip netns exec ams-ns3 env \
   --radioPcap="$RUN_DIR/pcap/native_radio.pcap" \
   --eventCsv="$RUN_DIR/logs/native_radio_events.csv" \
   --statsFile="$RUN_DIR/metrics/native_radio_stats.json" \
+  --executionMode="$BAS_SIMULATION_MODE" --clockFile="$BAS_SIM_CLOCK" \
+  --couplingStepMs="$BAS_LOCKSTEP_STEP_MS" --stepTimeoutS="$BAS_LOCKSTEP_TIMEOUT_S" \
   --readyFile="$NS3_READY" --duration=2400 --txPowerW="$TX_POWER_W" \
   "${source_args[@]}" \
   --phyRateBps="$PHY_RATE_BPS" --eventLogging="$EVENT_LOGGING" \
@@ -794,6 +828,9 @@ setsid ip netns exec ams-ns3 env \
 NS3_PID=$!
 for _ in $(seq 1 1800); do
   [[ -s "$NS3_READY" ]] && break
+  if [[ -n "$LOCKSTEP_PID" ]] && ! kill -0 "$LOCKSTEP_PID" 2>/dev/null; then
+    printf 'Gazebo lockstep controller stopped before readiness.\n' >&2; exit 1;
+  fi
   kill -0 "$NS3_PID" 2>/dev/null || { printf 'Native ns-3/Sionna stopped before readiness.\n' >&2; exit 1; }
   sleep 0.1
 done

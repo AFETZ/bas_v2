@@ -11,6 +11,10 @@ import binascii
 import dataclasses
 import struct
 import time
+try:
+    from . import simulation_clock as clock
+except ImportError:  # direct script entrypoints
+    import simulation_clock as clock
 from collections import deque
 from pathlib import Path
 import json
@@ -125,7 +129,7 @@ class Encoder:
             return []
         if len(payload) > MAX_RECORD_BYTES:
             raise ValueError(f"serial record exceeds {MAX_RECORD_BYTES} bytes")
-        sent_ns = time.monotonic_ns() if sent_monotonic_ns is None else sent_monotonic_ns
+        sent_ns = clock.monotonic_ns() if sent_monotonic_ns is None else sent_monotonic_ns
         count = (len(payload) + self.max_payload - 1) // self.max_payload
         if count > MAX_FRAGMENTS:
             raise ValueError("serial record requires too many fragments")
@@ -139,7 +143,7 @@ class Encoder:
             result.append(
                 HEADER.pack(
                     MAGIC,
-                    VERSION,
+                    clock.wire_version(),
                     self.channel_id,
                     self.uav_id,
                     self.direction_id,
@@ -176,7 +180,7 @@ def decode_chunk(data: bytes) -> Chunk:
         fragment_crc,
     ) = HEADER.unpack_from(data)
     payload = data[HEADER.size:]
-    if magic != MAGIC or version != VERSION:
+    if magic != MAGIC or version != clock.wire_version():
         raise FramingError("transport magic/version mismatch")
     if channel_id not in CHANNEL_IDS.values() or direction_id not in DIRECTION_IDS.values():
         raise FramingError("unknown channel or direction")
@@ -259,7 +263,7 @@ class Reassembler:
             self.timeout_ns = min(self.timeout_ns, max(1, int(max_age_ms*500_000)))
 
     def ingest(self, datagram: bytes, now_ns: int | None = None) -> list[bytes]:
-        observed_ns = time.monotonic_ns() if now_ns is None else now_ns
+        observed_ns = clock.monotonic_ns() if now_ns is None else now_ns
         self.counters.ns3_output_bytes += len(datagram)
         try:
             chunk = decode_chunk(datagram)
@@ -338,7 +342,7 @@ class Reassembler:
         return self.expire(observed_ns)
 
     def expire(self, now_ns: int | None = None, *, force: bool = False) -> list[bytes]:
-        observed_ns = time.monotonic_ns() if now_ns is None else now_ns
+        observed_ns = clock.monotonic_ns() if now_ns is None else now_ns
         self.released_sent_ns = []
         output: list[bytes] = []
         while True:
@@ -435,7 +439,7 @@ class Reassembler:
 class BoundedQueue:
     """FIFO with byte/record bounds and an original-ingress deadline.
 
-    put() takes the original host-monotonic ingress time, including any time
+    put() takes the original ingress time in the run clock domain, including any time
     already spent in reassembly or the modeled network. Partial writes retain it.
     """
     def __init__(self, packets: int, byte_limit: int, deadline_s: float):
@@ -482,6 +486,8 @@ class BoundedQueue:
 
 
 def radio_is_live(path: str | None, watchdog_s: float) -> bool:
+    if clock.mode() == "lockstep":
+        return clock.live()
     if not path:
         return True
     try:

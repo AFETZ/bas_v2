@@ -13,6 +13,7 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT))
 from scripts.product.town01_full_stack_scenario import FlightHarness, endpoint_ip
+from network.scripts import simulation_clock as clock
 from network.scripts.serial_transport import decode_chunk
 
 
@@ -33,9 +34,12 @@ def main():
         s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
         s.bind(('127.0.0.1',14550+i));s.setblocking(False)
         clients[i]=s;h.selector.register(s,selectors.EVENT_READ,i)
-    deadline=time.monotonic()+a.duration_s
+    deadline=clock.monotonic()+a.duration_s
     try:
-        while running and time.monotonic()<deadline:
+        while running and clock.monotonic()<deadline:
+            if clock.mode()=="lockstep" and clock.snapshot()["phase"] not in ("exchange", "stopped"):
+                time.sleep(.002)
+                continue
             for key,_ in h.selector.select(.05):
                 data,source=key.fileobj.recvfrom(65535)
                 if isinstance(key.data,int):
@@ -51,14 +55,14 @@ def main():
                     i=chunk.uav_id
                     if i not in clients or source[0]!=endpoint_ip(i):
                         drops+=1;continue
-                    for record in h.transport_receivers[('control',i)].ingest(data,time.monotonic_ns()):
+                    for record in h.transport_receivers[('control',i)].ingest(data,clock.monotonic_ns()):
                         if i in peers:
                             try: clients[i].sendto(record,peers[i])
                             except BlockingIOError: drops+=1
                             received[i]+=len(record)
             for i in clients:
                 # Expired gaps release only genuine assembled records.
-                for record in h.transport_receivers[('control',i)].expire(time.monotonic_ns()):
+                for record in h.transport_receivers[('control',i)].expire(clock.monotonic_ns()):
                     if i in peers:
                         try: clients[i].sendto(record,peers[i])
                         except BlockingIOError: drops+=1
@@ -67,6 +71,7 @@ def main():
         for s in clients.values():s.close()
         h.close()
         (a.run_dir/'metrics/operator_bridge.json').write_text(json.dumps(dict(
+            simulation_mode=clock.mode(), timestamp_domain=clock.mode(),
             gcs='existing MAVProxy',transport='BSF1 over native Wi-Fi/Sionna',
             received_raw_bytes=received,sent_raw_bytes=sent,nonblocking_drops=drops,
             application_queue='none; bounded kernel UDP buffers; no replay'),indent=2)+'\n')

@@ -1,6 +1,6 @@
 # Product Status
 
-Updated: 2026-09-24. Local checkout: main at 1960947, with workstation setup and simulator coupling changes.
+Updated: 2026-09-28. Workstation setup, realtime coupling and optional model-time mode are implemented.
 
 ## Current development workstation
 
@@ -8,37 +8,45 @@ development_environment_status=ready
 local_integrated_gpu_runtime_status=blocked_wsl_optix
 
 - Checkout: C:\bas, Windows / Ubuntu 22.04 WSL2; i5-12500H, 32 GB RAM,
-  RTX 4060 Laptop 8 GB. Docker access from Ubuntu was restored.
-- Isolated Python 3.10 environments are installed for Windows and Linux development,
-  plus native Windows Sionna RT. Setup commands and portable locks are provided
-  in this working tree; see [LOCAL_DEVELOPMENT](../doc/LOCAL_DEVELOPMENT.md).
-- Runtime image multiagent_simulation:latest was built from source:
+  RTX 4060 Laptop 8 GB. Docker integration is restored.
+- Isolated Windows/Linux Python 3.10 environments and native Windows Sionna RT
+  are installed; portable setup: [LOCAL_DEVELOPMENT](../doc/LOCAL_DEVELOPMENT.md).
+- Source-built image multiagent_simulation:latest:
   sha256:8ec5fb705651dfb993084063c354f6c3ee20d66eeff5e3f710eb94d8aff1fa43.
-  ROS 2 Humble, Gazebo Harmonic 8.15.0, pinned ArduPilot and the project ROS workspace
-  are built. Native ns-3.48 with all three existing patches is built; --PrintHelp exits 0.
-- Image pip check, ROS dependency installation and Dev Container setup passed.
-  Gazebo completed five headless steps on empty.sdf; ArduCopter --help exits 0.
-- Focused tests: 14 Windows tests and 30 Linux tests passed; one Town01 input-reference
-  test failed because the external Town01 world is absent. No full regression was run.
-- Native Windows Sionna RT 1.2.0 / Mitsuba 3.7.1 / Dr.Jit 1.2.0 executed a real
-  rock_demo PathSolver calculation on CUDA: two path coefficients, finite positive total power.
-- Final rock_demo preflight: 1 failure, 0 warnings. CUDA is visible, but Linux/WSL
-  libnvoptix.so.1 cannot initialize. Preflight now executes a CUDA/OptiX ray intersection
-  and reports this failure before simulation. No propagation fallback was introduced.
-- Full five-UAV flight was not run here. Use native Linux/NVIDIA for the integrated GPU
-  runtime; provide the original CAVISE assets for Town01. Built-in rock_demo is present.
-- OpenCV 4.11.0.86 and quantized-mesh-tile 0.6.1 fix reproduced NumPy 2 conflicts in
-  fresh upstream prerequisite installs. Other existing runtime lock versions are retained.
-  This newly built image is not the historical RC1 image; apt packages have moved on.
-- Local command logs are under runs/setup/ (ignored), including preflight-final.log,
-  ns3-build-resume.log, runtime-smoke.log and sionna-windows-gpu.log.
+  ROS 2 Humble, Gazebo Harmonic 8.15, pinned ArduPilot and ns-3.48 are built.
+- Windows CUDA Sionna RT 1.2.0 / Mitsuba 3.7.1 / Dr.Jit 1.2.0 ran real rock_demo solves.
+  Linux/WSL CUDA is visible, but libnvoptix cannot initialize; preflight detects this.
+  Full five-UAV GPU flight remains unverified here. Use native Linux/NVIDIA.
+- Built-in rock_demo is present; Town01 requires the original external CAVISE assets.
+  This image is distinct from historical RC1. Setup logs: runs/setup/ (ignored).
+
+## Optional model time: 2026-09-28
+
+- Choose per launch: `make demo-rugged DEMO_GUI=0 SIMULATION_MODE=lockstep`.
+  Use `SIMULATION_MODE=realtime` for the original default. The same switch works
+  with demo-town01, demo-customer and operator; changing clocks requires a new run.
+- Lockstep uses stock DefaultSimulatorImpl, Gazebo WorldControl multi_step and
+  ArduPilot's existing physics clock. Default step: 20 ms (`LOCKSTEP_STEP_MS`, 1..50).
+  Radio advances with held measured state; physics catches up before UART exchange.
+  Poses retain the configured 0.5 model-second age bound; no extrapolated motion.
+- Shared I/O barrier, bounded queues and model-time deadlines cover UART, GCS and
+  data traffic. BSF/BDP version 2 rejects mixed clock domains. No-bypass waits on host time.
+  Host liveness timeout: `LOCKSTEP_TIMEOUT_S=60`; real external endpoints are rejected.
+- Reports distinguish model-time results from realtime readiness. This sampled
+  software coupling is neither physical HIL nor bitwise deterministic replay.
+- 43 focused Python cases passed, including actual UDP/PTY pause/resume/expiry;
+  native C++ state/clock tests, target builds, shell/port and process-watchdog checks passed.
+  Actual Gazebo/ArduPilot/ROS + stock ns-3: 25 barriers with a 1.2 s host stall;
+  final native Wi-Fi/TAP/Friis baseline: 100 barriers, 3/3 ping replies, no stale poses.
+  No synthetic RF/ACK outcomes. Full Sionna integration remains blocked by WSL OptiX.
+  Logs/PCAP: runs/lockstep/ (ignored); temporary test containers were removed.
 
 ## Simulator coupling: 2026-09-24
 
 coupling_implementation_status=implemented_component_tested
 integrated_realtime_gpu_status=not_verified_wsl_optix_blocked
 
-The selected policy is real time: bounded state/packet age and stop on overload.
+The default policy is real time: bounded state/packet age and stop on overload.
 The six simulator pairs, state ownership and unsupported updates are specified
 in [PRODUCT_ARCHITECTURE](../doc/PRODUCT_ARCHITECTURE.md).
 

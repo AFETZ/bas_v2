@@ -6,6 +6,12 @@ SHELL := /usr/bin/env bash
 DEMO_SCENARIO ?= town01
 DEMO_GUI ?= 1
 DEMO_BOOTSTRAP ?= 0
+SIMULATION_MODE ?= realtime
+LOCKSTEP_STEP_MS ?= 20
+LOCKSTEP_TIMEOUT_S ?= 60
+export BAS_SIMULATION_MODE := $(SIMULATION_MODE)
+export BAS_LOCKSTEP_STEP_MS := $(LOCKSTEP_STEP_MS)
+export BAS_LOCKSTEP_TIMEOUT_S := $(LOCKSTEP_TIMEOUT_S)
 
 check-env:
 	./scripts/product/check_env.sh

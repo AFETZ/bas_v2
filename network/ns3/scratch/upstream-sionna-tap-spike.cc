@@ -28,6 +28,8 @@
 #include "ns3/wifi-net-device.h"
 #include "native-spectrum-sources.h"
 #include "native-live-state.h"
+#include "native-lockstep.h"
+#include <memory>
 
 #include <algorithm>
 #include <chrono>
@@ -90,6 +92,11 @@ Ptr<PcapFileWrapper> g_radioPcap;
 std::ofstream g_events;
 volatile std::sig_atomic_t g_stopRequested = 0;
 std::string g_stopReason = "duration";
+std::string g_executionMode = "realtime";
+std::unique_ptr<bas::Lockstep> g_lockstep;
+uint32_t g_couplingStepMs = 20;
+uint64_t g_completedSteps = 0;
+double g_stepTimeoutS = 60;
 std::string g_phaseFile;
 std::string g_eventLogging{"batched_trace"};
 uint32_t g_flushEveryEvents{256};
@@ -738,18 +745,23 @@ class LivePositionSource
             ? g_radioEpochNs + Simulator::Now().GetNanoSeconds() : nowNs;
         try
         {
-            if (g_runtimeOperational && (nowNs-eventNs)/1e6 > g_runtimeLagMaxMs)
+            if (!g_lockstep && g_runtimeOperational && (nowNs-eventNs)/1e6 > g_runtimeLagMaxMs)
                 throw std::runtime_error("native scheduler exceeded live coupling deadline");
-            auto snapshot = m_reader.Read(m_path, g_nodeNames, eventNs, nowNs,
-                                          static_cast<int64_t>(g_stateMaxAgeS*1e9));
-            if (g_runtimeOperational && snapshot.size()>1)
+            auto snapshot = m_reader.Read(m_path, g_nodeNames, eventNs, 0,
+                                          static_cast<int64_t>(g_stateMaxAgeS*1e9),
+                                          g_lockstep ? g_lockstep->SourceTime(Simulator::Now().GetSeconds()) : -1,
+                                          static_cast<int64_t>(g_stepTimeoutS*1e9));
+            if (!g_lockstep && g_runtimeOperational && snapshot.size()>1)
                 m_clockAlignment.Check(snapshot[1].sourceTime, Simulator::Now().GetSeconds(), g_stateMaxAgeS);
             // Commit only after every node and the source clock have been checked.
             for (std::size_t i=0; i<snapshot.size(); ++i)
             {
                 DynamicCast<bas::MeasuredMobility>(m_mobility[i])->Apply(snapshot[i]);
                 g_positions[i]=snapshot[i].position;
-                LogEvent("live_pose", g_nodeNames[i], "", 0, (nowNs-snapshot[i].sampleNs)/1e6,
+                const double ageMs = g_lockstep ? (i==0 ? 0 :
+                    (g_lockstep->SourceTime(Simulator::Now().GetSeconds())-snapshot[i].sourceTime)*1000)
+                    : (nowNs-snapshot[i].sampleNs)/1e6;
+                LogEvent("live_pose", g_nodeNames[i], "", 0, ageMs,
                     "measured_pose_age_ms;source_sim_s="+std::to_string(snapshot[i].sourceTime));
             }
             ++g_poseSnapshots;
@@ -760,7 +772,7 @@ class LivePositionSource
             g_liveStateValid=false;
             LogEvent("position_snapshot_rejected", "tracker", "", 0,
                      std::numeric_limits<double>::quiet_NaN(), error.what());
-            if (g_runtimeOperational)
+            if (g_runtimeOperational || g_lockstep)
             {
                 ++g_stalePoseSamples;
                 g_stopReason="state_coupling_deadline";
@@ -793,6 +805,7 @@ class NativeRuntimeSampler
 
     void PollLag()
     {
+        if (g_lockstep) return;
         Ptr<RealtimeSimulatorImpl> realtime =
             DynamicCast<RealtimeSimulatorImpl>(Simulator::GetImplementation());
         if (realtime)
@@ -967,8 +980,10 @@ void
 WriteReady(const std::string& path)
 {
     auto realtime=DynamicCast<RealtimeSimulatorImpl>(Simulator::GetImplementation());
-    realtime->SetHardLimit(MilliSeconds(g_runtimeLagMaxMs));
-    realtime->SetSynchronizationMode(RealtimeSimulatorImpl::SYNC_HARD_LIMIT);
+    if (realtime) {
+        realtime->SetHardLimit(MilliSeconds(g_runtimeLagMaxMs));
+        realtime->SetSynchronizationMode(RealtimeSimulatorImpl::SYNC_HARD_LIMIT);
+    }
     g_runtimeOperational = true;
     std::ofstream output(path, std::ios::out | std::ios::trunc);
     output << "ready\n";
@@ -985,7 +1000,7 @@ WriteReadyWhenWifiAssociated(const std::string& path)
                                         });
     const bool realtimeReady = g_realtimeLagSamples > 1 &&
                                g_healthyLagSamples >= g_readinessConsecutiveSamples;
-    if (associated && realtimeReady && g_liveStateValid)
+    if (associated && (g_lockstep ? g_completedSteps>0 : realtimeReady) && g_liveStateValid)
     {
         std::ostringstream details;
         details << "all_stations_associated;lag_ms=" << g_latestRealtimeLagMs
@@ -1132,6 +1147,9 @@ WriteStats(const std::string& path)
            << "  \"wifi_ssid\": \"" << g_wifiSsid << "\",\n"
            << "  \"tap_ingress_segment\": {\"type\": \"local_fast_csma\", \"radio_medium\": false},\n"
            << "  \"cache_policy\": \"displacement_velocity_orientation_or_time\",\n"
+           << "  \"simulation_mode\": \"" << g_executionMode << "\",\n"
+           << "  \"coupling_step_ms\": " << g_couplingStepMs << ",\n"
+           << "  \"completed_lockstep_steps\": " << g_completedSteps << ",\n"
            << "  \"state_max_age_s\": " << g_stateMaxAgeS << ",\n"
            << "  \"runtime_lag_max_ms\": " << g_runtimeLagMaxMs << ",\n"
            << "  \"velocity_refresh_threshold_mps\": 0.5,\n"
@@ -1244,7 +1262,6 @@ WriteStats(const std::string& path)
 int
 main(int argc, char* argv[])
 {
-    GlobalValue::Bind("SimulatorImplementationType", StringValue("ns3::RealtimeSimulatorImpl"));
     GlobalValue::Bind("ChecksumEnabled", BooleanValue(true));
     py::scoped_interpreter python{};
 
@@ -1274,6 +1291,7 @@ main(int argc, char* argv[])
     std::string readyFile;
     std::string phaseFile;
     double duration = 120.0;
+    std::string clockFile;
     double txPowerW = 0.00001;
     uint64_t phyRateBps = 1000000;
     double channelStateMaxAgeS = 0.5;
@@ -1329,7 +1347,11 @@ main(int argc, char* argv[])
     command.AddValue("readyFile", "Readiness file", readyFile);
     command.AddValue("propagationProfile", "Explicit sionna, friis or hybrid", g_propagationProfile);
     command.AddValue("phaseFile", "Current product flight phase file", phaseFile);
-    command.AddValue("duration", "Maximum wall-clock run duration", duration);
+    command.AddValue("duration", "Maximum ns-3 simulation duration in seconds", duration);
+    command.AddValue("executionMode", "realtime or lockstep", g_executionMode);
+    command.AddValue("clockFile", "Lockstep shared clock and Gazebo barrier files", clockFile);
+    command.AddValue("couplingStepMs", "Lockstep macrostep in simulation milliseconds", g_couplingStepMs);
+    command.AddValue("stepTimeoutS", "Lockstep host wall timeout", g_stepTimeoutS);
     command.AddValue("txPowerW", "Spectrum transmitter power in watts", txPowerW);
     command.AddValue("phyRateBps", "Configured native PHY bit rate", phyRateBps);
     command.AddValue("stateMaxAgeS", "Maximum measured pose/clock host age", g_stateMaxAgeS);
@@ -1369,6 +1391,15 @@ main(int argc, char* argv[])
                      "Deterministic per-pair cache threshold spread",
                      sionnaCacheJitterFraction);
     command.Parse(argc, argv);
+    NS_ABORT_MSG_IF(g_executionMode != "realtime" && g_executionMode != "lockstep", "invalid execution mode");
+    NS_ABORT_MSG_IF(g_couplingStepMs<1 || g_couplingStepMs>50 || !std::isfinite(g_stepTimeoutS) || g_stepTimeoutS<=0,
+                    "lockstep needs 1..50 ms steps and a positive finite wall timeout");
+    GlobalValue::Bind("SimulatorImplementationType", StringValue(g_executionMode=="lockstep"
+        ? "ns3::DefaultSimulatorImpl" : "ns3::RealtimeSimulatorImpl"));
+    if (g_executionMode=="lockstep") {
+        NS_ABORT_MSG_IF(clockFile.empty(), "lockstep requires clockFile");
+        g_lockstep=std::make_unique<bas::Lockstep>(clockFile, g_stepTimeoutS, g_couplingStepMs*1000000LL);
+    }
     g_txPowerW = txPowerW;
     g_carrierHz = carrierHz;
     g_wifiChannelNumber = wifiChannelNumber;
@@ -1754,14 +1785,23 @@ main(int argc, char* argv[])
     {
         Simulator::Schedule(MilliSeconds(250), &WriteReady, readyFile);
     }
-    Simulator::Stop(Seconds(duration));
+    if (!g_lockstep) Simulator::Stop(Seconds(duration));
 
     int result = 0;
     try
     {
         g_radioEpochNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
-        Simulator::Run();
+        if (g_lockstep) {
+            while (!g_stopRequested && g_stopReason=="duration" && Simulator::Now()<Seconds(duration)) {
+                g_lockstep->Begin(Simulator::Now().GetNanoSeconds(), g_runtimeOperational);
+                Simulator::Stop(MilliSeconds(g_couplingStepMs));
+                Simulator::Run();
+                if (g_stopRequested || g_stopReason!="duration") break;
+                g_lockstep->Physics(Simulator::Now().GetNanoSeconds(), g_runtimeOperational);
+                ++g_completedSteps;
+            }
+        } else Simulator::Run();
     }
     catch (const py::error_already_set& error)
     {
@@ -1774,6 +1814,10 @@ main(int argc, char* argv[])
         g_stopReason = "runtime_error";
         std::cerr << error.what() << std::endl;
         result = 4;
+    }
+    if (g_lockstep) {
+        g_lockstep->Clock(Simulator::Now().GetNanoSeconds(), "stopped", false);
+        g_lockstep.reset();
     }
     std::filesystem::remove(g_runtimeHeartbeat);
     Simulator::Destroy();
