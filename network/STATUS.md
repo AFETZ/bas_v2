@@ -24,11 +24,13 @@ Updated: 2026-10-21. Canonical test baseline consolidated on `main`.
 
 - Inspected all 12 remote branches and all four PRs; there were no open PRs or Actions runs.
 - Removed 11 obsolete branches: seven already reachable from `main`; four divergent tips
-  preserved as annotated remote tags under `archive/2026-10-21/` before deletion.
-- Archived branches: `agent/publish-network-radio-milestones`, `demo/bas-v2-rc1`,
-  `feature/bas-v2-rc1-handover`, `feature/bas-v2-rc1-stabilization`.
-  Demo-recording and old delivery/qualification work remain available in those tags.
-- Historical milestone tags are retained. GitHub now deletes merged PR branches automatically.
+  were archived before deletion, then their tags were checked for redundancy.
+- Three remote tags remain: the test baseline plus `archive/2026-10-21/` tags for
+  `agent/publish-network-radio-milestones` and `feature/bas-v2-rc1-stabilization`.
+- Removed five old milestone tags whose commits are in `main`, and the demo/handover tags
+  whose tips are ancestors of the retained stabilization archive. No GitHub releases used them.
+  All unique commit history remains reachable; old tag annotations were saved locally.
+- GitHub deletes merged PR branches automatically. The test-baseline tag remains unchanged.
 - README documents the pinned baseline, separate software/runtime setup, focused tests,
   realtime/lockstep commands and result paths. Existing dirty local review copies were preserved.
 
