@@ -396,40 +396,49 @@ class FlightHarness:
         if clock.mode() == "lockstep" and clock.snapshot()["phase"] not in ("exchange", "stopped"):
             time.sleep(max(0., min(.01, timeout_s)))
             return
-        now_ns = clock.monotonic_ns()
-        for (channel, system_id), receiver in self.transport_receivers.items():
-            records = receiver.expire(now_ns)
-            if records:
-                self._consume_mavlink(
-                    channel,
-                    system_id,
-                    records,
-                    (endpoint_ip(system_id), (14600 if channel == "control" else 14700) + system_id),
-                    now_ns,
-                )
-        for key, _mask in self.selector.select(timeout_s):
-            channel = str(key.data)
-            data, source = key.fileobj.recvfrom(65535)
-            if channel == "additional_data":
-                try:
-                    message = decode_data(data)
-                except DataProtocolError:
-                    self.additional_malformed += 1
-                    continue
-                self.additional_received.append((message, source, clock.monotonic_ns()))
-                continue
+        with clock.io_window() as allowed:
+            if not allowed:
+                return
             now_ns = clock.monotonic_ns()
-            try:
-                chunk = decode_chunk(data)
-            except ValueError:
-                self.transport_malformed_datagrams += 1
-                continue
-            system_id = int(chunk.uav_id)
-            if system_id not in UAV_IDS or source != (endpoint_ip(system_id), (14600 if channel == "control" else 14700)+system_id):
-                self.transport_malformed_datagrams += 1
-                continue
-            records = self.transport_receivers[(channel, system_id)].ingest(data, now_ns)
-            self._consume_mavlink(channel, system_id, records, source, now_ns)
+            for (channel, system_id), receiver in self.transport_receivers.items():
+                records = receiver.expire(now_ns)
+                if records:
+                    self._consume_mavlink(
+                        channel,
+                        system_id,
+                        records,
+                        (endpoint_ip(system_id), (14600 if channel == "control" else 14700) + system_id),
+                        now_ns,
+                    )
+        ready = self.selector.select(timeout_s)
+        # Recheck the phase after waiting, and hold the shared barrier through
+        # reception and timestamping. Never hold it while selecting.
+        with clock.io_window() as allowed:
+            if not allowed:
+                return
+            for key, _mask in ready:
+                channel = str(key.data)
+                data, source = key.fileobj.recvfrom(65535)
+                if channel == "additional_data":
+                    try:
+                        message = decode_data(data)
+                    except DataProtocolError:
+                        self.additional_malformed += 1
+                        continue
+                    self.additional_received.append((message, source, clock.monotonic_ns()))
+                    continue
+                now_ns = clock.monotonic_ns()
+                try:
+                    chunk = decode_chunk(data)
+                except ValueError:
+                    self.transport_malformed_datagrams += 1
+                    continue
+                system_id = int(chunk.uav_id)
+                if system_id not in UAV_IDS or source != (endpoint_ip(system_id), (14600 if channel == "control" else 14700)+system_id):
+                    self.transport_malformed_datagrams += 1
+                    continue
+                records = self.transport_receivers[(channel, system_id)].ingest(data, now_ns)
+                self._consume_mavlink(channel, system_id, records, source, now_ns)
 
     def wait(self, predicate: Callable[[], bool], timeout_s: float, description: str) -> None:
         deadline = clock.monotonic() + timeout_s * self.timeout_scale
@@ -442,6 +451,10 @@ class FlightHarness:
     def send(self, channel: str, system_id: int, message: Any) -> int:
         key = (channel, system_id)
         frame = message.pack(self.transmitters[key], force_mavlink1=False)
+        if message.get_type() == "COMMAND_LONG":
+            # Model time can stay fixed across commands; only a newly received
+            # ACK may complete this send, including each diagnostic retry.
+            self.acks.pop((channel, system_id, int(message.command)), None)
         port = (14600 if channel == "control" else 14700) + system_id
         counters = self.transport_counters[key]
         counters.uart_input_bytes += len(frame)
