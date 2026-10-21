@@ -85,8 +85,9 @@ Keep active documents short:
 
 ## Current delivery
 
-Complete `release/bas-v2-rc1` against `doc/DELIVERY_SCOPE.md`; record actual
-results and remaining blockers in `network/STATUS.md`. Preserve user edits.
+Use `main` as the canonical development branch and immutable `test-baseline-*`
+tags for repeatable tests. Historical RC1 scope is in `doc/DELIVERY_SCOPE.md`;
+record actual results and remaining blockers in `network/STATUS.md`. Preserve user edits.
 Keep native ns-3.48 Wi-Fi PHY/MAC with in-process Sionna RT as the default.
 No custom PER/ACK/MAC, direct SITL bypass, or silent propagation fallback.
 Dependencies remain pinned; use upstream APIs and thin adapters. Full traces

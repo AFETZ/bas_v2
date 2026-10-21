@@ -1,84 +1,51 @@
 # Product Status
 
-Updated: 2026-10-21. Fixed cached ACK reuse and GCS reception outside lockstep exchange.
-30 focused tests passed; 4 Linux flock/PTY cases skipped. Compile, port and diff checks passed.
-Windows phase-transition tests use a barrier fixture; Gazebo/ns-3 was not run: WSL virtual disk missing.
+Updated: 2026-10-21. Canonical test baseline consolidated on `main`.
 
-## Current development workstation
+## Current test baseline
 
-development_environment_status=ready
-local_integrated_gpu_runtime_status=blocked_wsl_optix
+- `main` is the only permanent remote branch; fixed test revision:
+  `test-baseline-2026-10-21`. This is a component-tested source baseline, not a new full-stack certification.
+- Clean Windows checkout prepared through `scripts/setup_dev.ps1` using CPython 3.10.22
+  and the unchanged development lock file; all 25 installed dependencies pass `uv pip check`.
+- 61 focused tests passed, 4 Linux PTY/flock tests skipped. Files: `test_gcs_lockstep.py`,
+  `test_simulation_clock.py`, `test_serial_transport.py`, `test_data_transport.py`,
+  `test_native_latency_report.py`, `test_native_wifi_five_uav_product.py` under `network/tests/`.
+- Compile, local Markdown references, diff and five-UAV port checks passed.
+- ACK caches are invalidated for each command send. GCS reassembly and reception hold the
+  I/O barrier; socket selection waits outside it. Windows phase-transition tests use a barrier fixture.
+- Recovered the diagnostic source-report fix from `06b2293`: no undefined `native_sources`,
+  incomplete switch windows stay unavailable, and failed/limited run verdicts are preserved.
+- Product config path assertions now use POSIX paths consistently on Windows and Linux.
+- Full Gazebo/SITL/ns-3/Sionna and physical controller tests were not run in this cleanup.
+  Local WSL cannot start because its virtual disk is missing; Linux lock/PTY coverage remains unverified here.
 
-- Checkout: C:\bas, Windows / Ubuntu 22.04 WSL2; i5-12500H, 32 GB RAM,
-  RTX 4060 Laptop 8 GB. Docker integration is restored.
-- Isolated Windows/Linux Python 3.10 environments and native Windows Sionna RT
-  are installed; portable setup: [LOCAL_DEVELOPMENT](../doc/LOCAL_DEVELOPMENT.md).
-- Source-built image multiagent_simulation:latest:
-  sha256:8ec5fb705651dfb993084063c354f6c3ee20d66eeff5e3f710eb94d8aff1fa43.
-  ROS 2 Humble, Gazebo Harmonic 8.15, pinned ArduPilot and ns-3.48 are built.
-- Windows CUDA Sionna RT 1.2.0 / Mitsuba 3.7.1 / Dr.Jit 1.2.0 ran real rock_demo solves.
-  Linux/WSL CUDA is visible, but libnvoptix cannot initialize; preflight detects this.
-  Full five-UAV GPU flight remains unverified here. Use native Linux/NVIDIA.
-- Built-in rock_demo is present; Town01 requires the original external CAVISE assets.
-  This image is distinct from historical RC1. Setup logs: runs/setup/ (ignored).
+## Repository cleanup
 
-## Optional model time: 2026-09-28
+- Inspected all 12 remote branches and all four PRs; there were no open PRs or Actions runs.
+- Removed 11 obsolete branches: seven already reachable from `main`; four divergent tips
+  preserved as annotated remote tags under `archive/2026-10-21/` before deletion.
+- Archived branches: `agent/publish-network-radio-milestones`, `demo/bas-v2-rc1`,
+  `feature/bas-v2-rc1-handover`, `feature/bas-v2-rc1-stabilization`.
+  Demo-recording and old delivery/qualification work remain available in those tags.
+- Historical milestone tags are retained. GitHub now deletes merged PR branches automatically.
+- README documents the pinned baseline, separate software/runtime setup, focused tests,
+  realtime/lockstep commands and result paths. Existing dirty local review copies were preserved.
 
-- Choose per launch: `make demo-rugged DEMO_GUI=0 SIMULATION_MODE=lockstep`.
-  Use `SIMULATION_MODE=realtime` for the original default. The same switch works
-  with demo-town01, demo-customer and operator; changing clocks requires a new run.
-- Lockstep uses stock DefaultSimulatorImpl, Gazebo WorldControl multi_step and
-  ArduPilot's existing physics clock. Default step: 20 ms (`LOCKSTEP_STEP_MS`, 1..50).
-  Radio advances with held measured state; physics catches up before UART exchange.
-  Poses retain the configured 0.5 model-second age bound; no extrapolated motion.
-- Shared I/O barrier, bounded queues and model-time deadlines cover UART, GCS and data traffic.
-  BSF/BDP v2 rejects mixed clocks; no-bypass waits on host time. `LOCKSTEP_TIMEOUT_S=60`;
-  real external endpoints are rejected.
-- Reports distinguish model-time results from realtime readiness. This sampled
-  software coupling is neither physical HIL nor bitwise deterministic replay.
-- 43 focused Python cases passed, including actual UDP/PTY pause/resume/expiry;
-  native C++ state/clock tests, target builds, shell/port and process-watchdog checks passed.
-  Actual Gazebo/ArduPilot/ROS + stock ns-3: 25 barriers with a 1.2 s host stall;
-  final native Wi-Fi/TAP/Friis baseline: 100 barriers, 3/3 ping replies, no stale poses.
-  No synthetic RF/ACK outcomes; full Sionna remains blocked by WSL OptiX. Logs/PCAP: runs/lockstep/; test containers removed.
+## Runtime evidence and remaining defects
 
-## Simulator coupling: 2026-09-24
-
-coupling_implementation_status=implemented_component_tested
-integrated_realtime_gpu_status=not_verified_wsl_optix_blocked
-
-The default policy is real time: bounded state/packet age and stop on overload.
-The six simulator pairs, state ownership and unsupported updates are specified
-in [PRODUCT_ARCHITECTURE](../doc/PRODUCT_ARCHITECTURE.md).
-
-- Gazebo Odometry/Clock retain source time and a bounded 32-sample history;
-  body-frame velocity is rotated to ENU. ns-3 consumes measured XYZ, velocity
-  and full attitude with causal sample selection, 500 ms age/drift and 100 ms skew limits.
-- After readiness, native HardLimit stops scheduler lag above 250 ms. Healthy
-  monotonic heartbeat runs every 50 ms; both gateways close after 300 ms silence.
-  The five-UAV runner supervises radio process death and cleans up the whole run.
-- Both product RT caches now use 0.5 s/0.5 m maxima; velocity changes >=0.5 m/s
-  and rotations >=5 degrees invalidate a pair. Solver depth is never silently reduced.
-  This profile needs new performance measurements; old RC results do not validate it.
-- UART queues are bounded and nonblocking, preserve original ingress deadlines,
-  validate both peer IP/port, and count expiry/overflow. External UDP no longer
-  truncates 8192-byte datagrams. Lost records cannot consume the next record's deadline.
-- No-bypass probes resume retained BSF1 sequence numbers and check actual UART
-  byte deltas as well as GCS silence. The revised full RF probe has not run here.
-- 38 focused Python cases passed across affected tests, including real UDP/PTY;
-  C++ state/mobility tests cover causal selection, velocity, attitude, stale state,
-  tracker reset and clock drift. Native target builds; all three patches apply
-  to pristine pinned ns-3 and match the installed source. Shell/port checks passed.
-- Real one-UAV Gazebo/ArduPilot -> ROS -> tracker -> ns-3 MobilityModel smoke passed:
-  moved body, changed height/velocity/attitude, froze the bridge and rejected stale input.
-  This is a component test with a Gazebo pose stimulus, not an armed flight or RF run.
-- Real Windows CUDA Sionna solves changed Doppler with velocity, power with height,
-  and polarization response with roll. Linux in-process GPU integration remains blocked.
-  Logs/results: runs/coupling/ (ignored). Temporary probe containers were removed.
-
-Prior audit defects remain: equal fairness can pass 95% shared-uplink loss, and a newly
-received delayed MAVLink ACK can match a later same-command operation (distinct from cached reuse).
-See runs/audit-2026-09-24/; these fixes and full readiness remain outside this GCS review.
+- Earlier workstation results (September 2026): Windows CUDA Sionna RT 1.2.0 / Mitsuba 3.7.1 /
+  Dr.Jit 1.2.0 solved rock_demo; Linux/WSL OptiX failed initialization. These are historical results.
+- The previous coupling work reported 43 model-time and 38 realtime focused Python cases,
+  native state/clock tests and target builds, shell/port and watchdog checks.
+  Gazebo/ArduPilot/ROS + stock ns-3 completed 25 barriers with a 1.2 s host stall;
+  a native Wi-Fi/TAP/Friis baseline completed 100 barriers and 3/3 pings, without stale poses.
+  Full Sionna lockstep integration was not demonstrated; old logs: `runs/lockstep/`, `runs/coupling/`.
+- The shared-uplink gate can accept 95% loss when fairness is equal. A newly received delayed
+  same-command MAVLink ACK can still match a later operation; cached ACK reuse is fixed separately.
+  Counterexamples: `runs/audit-2026-09-24/`. These are still open product defects.
+- Current radio caches use 0.5 s/0.5 m bounds; new full five-UAV GPU performance measurements are needed.
+  Sionna remains the default; no silent propagation fallback or fabricated RF/ACK outcomes.
 
 ## Historical software RC verification
 
@@ -135,7 +102,7 @@ Package: /home/bas/bas_v2-delivery/rc1-2026-09-05-final
 Archive readability and source bundle verification passed. A separate checkout restored
 source/dependencies/scenes, built its ROS workspace, and passed bootstrap with 0 errors/warnings.
 Source bundle is refreshed to the final delivery commit; runtime image remains pinned.
-Publishing target: release/bas-v2-rc1 → native-radio-wifi, draft review; no main merge.
+Historical publishing path: release/bas-v2-rc1 → native-radio-wifi; current baseline is on `main`.
 
 make demo-preflight DEMO_GUI=0 DEMO_BOOTSTRAP=1
 make prepare-customer

@@ -1,66 +1,219 @@
-# BAS v2 — проверяемый RC1
+# BAS v2
 
-Пять ArduPilot SITL в Gazebo, десять MAVLink UART и один НПУ. Реальные байты
-проходят через TAP и штатные ns-3.48 SpectrumWifiPhy/802.11n PHY/MAC;
-распространение рассчитывает Sionna RT внутри ns-3. Помехи — штатные
-WaveformGenerator, а не команды потери пакетов.
+Стенд для моделирования пяти БАС: ArduPilot SITL управляет полётом в Gazebo,
+ns-3 моделирует радиосеть, Sionna RT рассчитывает распространение сигнала.
+Один наземный пункт управления обменивается с пятью аппаратами реальными
+MAVLink-байтами через десять UART-каналов, TAP и штатный Wi-Fi PHY/MAC ns-3.48.
 
-Текущий статус поставки, ограничения и аппаратный blocker:
-[DELIVERY_SCOPE](doc/DELIVERY_SCOPE.md), [VALIDATION_REPORT](doc/VALIDATION_REPORT.md).
-Native Wi-Fi — некалиброванный reference profile, не модель LoRa/NR или конкретного модема.
+[Быстрый старт](#быстрый-старт) · [Тесты](#тесты) · [Запуск стенда](#запуск-стенда)
+· [Результаты](#результаты) · [Документация](#документация)
 
-Для настройки нового рабочего места: [Windows / WSL / Linux](doc/LOCAL_DEVELOPMENT.md).
+## Версия для тестов
 
-## Быстрый запуск
+**`main` — единственная постоянная рабочая ветка.** Воспроизводимая версия
+для тестов закреплена тегом **`test-baseline-2026-10-21`**. В неё входят исправления
+свежести ACK, барьера приёма GCS и генерации диагностического отчёта.
 
-На подготовленном Linux/NVIDIA/Docker стенде:
+Тег фиксирует исходники и зависимости. Полный запуск Gazebo/SITL/ns-3/Sionna
+нужно проверять на целевой машине: успешные компонентные тесты не подтверждают
+готовность GPU-стенда, физического контроллера или работу в реальном времени.
+Фактические результаты и ограничения записаны в [network/STATUS.md](network/STATUS.md).
 
-```bash
-make demo-preflight DEMO_GUI=0
-BAS_NATIVE_FIVE_RUN_ID=my-town01 BAS_NATIVE_SOURCES=network/config/native_jammers_town01.yaml make demo-town01 DEMO_GUI=0
+Завершённые ветки удалены после проверки истории. Уникальные работы по старому
+процессу разработки, демозаписи и передаче RC1 сохранены тегами
+`archive/2026-10-21/*`. Они доступны для восстановления, но не являются текущей
+версией для тестов. Исторические milestone-теги также сохранены.
+
+## Что моделируется
+
+| Компонент | Ответственность |
+| --- | --- |
+| Gazebo + ArduPilot SITL | Физика, датчики, управление и автономная миссия каждого БАС |
+| ns-3.48 | Штатные 802.11n SpectrumWifiPhy/MAC, очереди, конкуренция за эфир, доставка и потери |
+| Sionna RT | Распространение, отражения и состояние радиоканала внутри процесса ns-3 |
+| MAVLink и UART-адаптеры | Два канала на аппарат: `control` и `payload`; передача исходных байтов |
+| Дополнительный трафик | P2P, multicast P2MP и одновременная передача через ту же радиосеть |
+| Источники помех | Штатные ns-3 WaveformGenerator с заданными мощностью, частотой и расписанием |
+
+```text
+Сценарий / MAVProxy ↔ GCS TAP ↔ ns-3 Wi-Fi + Sionna RT ↔ UAV TAP ↔ UART ↔ ArduPilot
+                                                                             ↕
+                                                                           Gazebo
 ```
 
-Runner заканчивает полёт посадкой, проверяет отсутствие обходного канала и
-останавливает процессы. Ненулевой код может означать провал инженерного
-real-time порога при успешно завершённом полёте; см. `report.md`.
+Профиль Wi-Fi является некалиброванной инженерной моделью. Payload UART несёт
+MAVLink-трафик. Прямой обход радиосети и незаявленная замена Sionna запрещены;
+подробности — в [архитектуре](doc/PRODUCT_ARCHITECTURE.md).
+
+## Требования
+
+| Задача | Окружение |
+| --- | --- |
+| Редактирование и компонентные Python-тесты | Windows или Linux; Git и Python 3.10; зависимости из lock-файла |
+| Linux-проверки UART и барьеров | Linux с PTY и `flock` |
+| Полный стенд | Ubuntu 22.04, Docker Engine с NVIDIA Container Toolkit, совместимые NVIDIA GPU/драйвер и рабочий CUDA/OptiX |
+| Town01 и customer-сцена | Оригинальные внешние CAVISE assets; встроенный `rock_demo` их не требует |
+
+В Windows setup-скрипт использует [uv](https://docs.astral.sh/uv/getting-started/installation/).
+Полный runtime работает в Linux. WSL2 требует отдельной проверки OptiX:
+успешный `nvidia-smi` подтверждает доступ к GPU, но не работу трассировки лучей.
+Пошаговая подготовка хоста: [LOCAL_DEVELOPMENT.md](doc/LOCAL_DEVELOPMENT.md).
+
+## Быстрый старт
+
+Получите фиксированную версию для тестов:
 
 ```bash
-make prepare-customer
-BAS_NATIVE_FIVE_RUN_ID=my-customer BAS_NATIVE_SOURCES=network/config/native_jammers_town01.yaml make demo-customer DEMO_GUI=0
+git clone https://github.com/AFETZ/bas_v2.git
+cd bas_v2
+git switch --detach test-baseline-2026-10-21
 ```
 
-Customer: исходная Town01 без масштабирования, настоящее внешнее поле/холмы
-10×10 км и отдельное синтетическое здание с 15 заданными этажами.
-Полётный маршрут остаётся в контрольном районе Town01.
+Для работы с текущим кодом используйте `git switch main`. Не переносите готовые
+виртуальные окружения между Windows и Linux — создайте их на целевой системе.
 
-Для ручного управления через готовый MAVProxy, в двух терминалах:
+### Linux: окружение разработки
+
+При установленных Python 3.10 и модуле `venv`:
 
 ```bash
-make operator DEMO_GUI=0
-make gcs
+bash scripts/setup_dev.sh
+source .external/dev-venv/bin/activate
 ```
 
-Остановка из другого терминала: `make stop`. Отчёт:
-`runs/native-radio-realtime/<RUN_ID>/report.md`; raw/annotated кадры, CSV и PCAP
-находятся рядом. Открыть локально: `xdg-open runs/native-radio-realtime/my-town01/report.md`.
+### Windows: окружение разработки
 
-## Подготовка и отдельные проверки
+В PowerShell из корня репозитория:
 
-`make demo-preflight DEMO_GUI=0 DEMO_BOOTSTRAP=1` создаёт отсутствующее окружение
-по закреплённым версиям. Исходный CAVISE bundle нужен локально; он не скачивается
-и не публикуется автоматически. Восстановление из поставленного образа и
-dependency archive описано в [USER_GUIDE](doc/USER_GUIDE.md).
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_dev.ps1
+.\.venv\Scripts\python.exe -m pytest -q network/tests/test_gcs_lockstep.py network/tests/test_native_latency_report.py
+```
+
+Оба setup-скрипта используют [.devcontainer/requirements-dev.lock](.devcontainer/requirements-dev.lock).
+Окружение разработки не устанавливает Gazebo, SITL или ns-3.
+
+## Тесты
+
+Базовый набор для транспортного пути, модельного времени и отчётов
+запускается без симуляторов. В Linux после активации окружения:
 
 ```bash
-BAS_NATIVE_FIVE_RUN_ID=stationary BAS_NATIVE_LATENCY_MODE=1 make demo-town01 DEMO_GUI=0
-make native-sources
-make native-maps
-make native-cache-study
-make native-matrix
+python -m pytest -q \
+  network/tests/test_gcs_lockstep.py \
+  network/tests/test_simulation_clock.py \
+  network/tests/test_serial_transport.py \
+  network/tests/test_data_transport.py \
+  network/tests/test_native_latency_report.py \
+  network/tests/test_native_wifi_five_uav_product.py
 ```
 
-Последние три режима — самостоятельные native исследования. Heatmaps показывают
-прогноз PSD/SINR, не измеренный PDR. Полные результаты остаются в ignored `runs/`.
+В Windows можно передать те же файлы `.\.venv\Scripts\python.exe -m pytest`.
+Тесты, которым нужны Linux PTY/`flock`, будут пропущены; этот результат нужно
+учитывать отдельно от успешных проверок.
 
-[Инструкция оператора](doc/USER_GUIDE.md) · [Архитектура](doc/PRODUCT_ARCHITECTURE.md)
-· [Окружение и assets](doc/ENVIRONMENT_AND_ASSETS.md) · [Требования](doc/PRODUCT_REQUIREMENTS.md)
+Для собственных изменений выбирайте ближайшие тесты по
+[TEST_MATRIX.md](network/TEST_MATRIX.md). Проверки синтаксиса, ссылок и diff:
+
+```bash
+make test-changed
+bash network/tests/check_five_uav_micro_ros_ports.sh
+```
+
+`make test-changed` проверяет изменения относительно `HEAD` и не заменяет pytest.
+Для уже созданного коммита задайте базу: `BASE_REF=HEAD~1 make test-changed`.
+
+## Запуск стенда
+
+Команды этого раздела выполняются на подготовленном **Linux-хосте с Docker**.
+Начните со встроенной сцены `rock_demo`, чтобы не зависеть от внешних карт.
+
+```bash
+make demo-preflight DEMO_SCENARIO=rock_demo DEMO_GUI=0 DEMO_BOOTSTRAP=1
+BAS_NATIVE_FIVE_RUN_ID=baseline-rock make demo-rugged DEMO_GUI=0
+```
+
+Bootstrap создаёт отсутствующие зависимости и собирает окружение по закреплённым
+версиям; первая подготовка может занять значительное время. Preflight проверяет
+в том числе CUDA/OptiX. При ошибке сначала устраните её причину.
+
+### Режим времени
+
+По умолчанию используется `SIMULATION_MODE=realtime`: контролируются сроки
+выполнения и возраст состояния. Для пошагового обмена модельным временем:
+
+```bash
+BAS_NATIVE_FIVE_RUN_ID=baseline-lockstep make demo-rugged \
+  DEMO_GUI=0 SIMULATION_MODE=lockstep LOCKSTEP_STEP_MS=20
+```
+
+В `lockstep` RTT и таймауты относятся к модельному времени. Такой запуск не
+подтверждает работу в реальном времени; внешние физические контроллеры в нём
+не поддерживаются. При смене режима начинайте новый запуск.
+
+### Town01, диагностика и управление
+
+После подготовки оригинальных CAVISE assets по инструкции окружения:
+
+```bash
+export CAVISE_MAPS_DIR=/absolute/path/to/bundles
+make demo-preflight DEMO_SCENARIO=town01 DEMO_GUI=0 DEMO_BOOTSTRAP=1
+BAS_NATIVE_FIVE_RUN_ID=baseline-town01 make demo-town01 DEMO_GUI=0
+```
+
+Диагностика задержек без полётного сценария:
+
+```bash
+BAS_NATIVE_FIVE_RUN_ID=latency BAS_NATIVE_LATENCY_MODE=1 make demo-town01 DEMO_GUI=0
+```
+
+Для ручного управления запустите `make operator DEMO_SCENARIO=rock_demo DEMO_GUI=0`,
+затем во втором терминале — `make gcs`. Остановка из другого терминала: `make stop`.
+Customer-сцена, источники помех, карты и режимы исследования описаны в
+[руководстве оператора](doc/USER_GUIDE.md).
+
+## Результаты
+
+Каждому запуску задавайте отдельный `BAS_NATIVE_FIVE_RUN_ID`. Каталог результатов:
+
+```text
+runs/native-radio-realtime/<RUN_ID>/
+runs/native-radio-lockstep/<RUN_ID>/
+```
+
+Внутри находятся `report.md`, метрики в `metrics/`, журналы в `logs/`, PCAP,
+графики и кадры Gazebo. Точный набор зависит от режима запуска.
+Проверяйте код завершения, итоговый отчёт и ограничения измерений: завершённый
+полёт сам по себе не означает соблюдения порогов задержки.
+
+Полные трассы, сцены, образы Docker и зависимости хранятся вне Git. Старые RC1
+измерения относятся к прежнему стенду; их нельзя переносить на новую машину
+без повторного запуска. Аппаратная проверка внешнего контроллера остаётся
+отдельным этапом.
+
+## Документация
+
+| Документ | Содержание |
+| --- | --- |
+| [Текущий статус](network/STATUS.md) | Выполненные проверки, известные дефекты и ограничения |
+| [Настройка рабочего места](doc/LOCAL_DEVELOPMENT.md) | Windows, WSL, Linux, окружения и перенос |
+| [Руководство оператора](doc/USER_GUIDE.md) | Сценарии, НПУ, карты, источники и результаты |
+| [Архитектура](doc/PRODUCT_ARCHITECTURE.md) | Владение состоянием, радиопуть и ограничения моделей |
+| [Окружение и ресурсы сцен](doc/ENVIRONMENT_AND_ASSETS.md) | Зависимости, assets и пути |
+| [Требования](doc/PRODUCT_REQUIREMENTS.md) | Назначение и функциональные требования стенда |
+| [Матрица проверок](network/TEST_MATRIX.md) | Минимальные проверки для изменяемого компонента |
+| [Область поставки RC1](doc/DELIVERY_SCOPE.md) | Историческая поставка и границы её верификации |
+
+## Работа с изменениями
+
+Создавайте короткую ветку от `main` под конкретную задачу, добавляйте проверку
+исправляемого поведения и отправляйте PR. После слияния рабочая ветка удаляется.
+Теги `test-baseline-*` сохраняйте неизменными; для нового эталона создавайте новый
+тег и записывайте реально выполненные проверки в `network/STATUS.md`.
+Сообщения об ошибках: [GitHub Issues](https://github.com/AFETZ/bas_v2/issues) — укажите
+коммит/тег, платформу, команду запуска и относящийся к ошибке фрагмент журнала.
+
+## Лицензия
+
+Исходный код распространяется под [GNU GPL v3](LICENSE). Внешние сцены и зависимости
+имеют собственные лицензии и не включаются в поставку автоматически.
