@@ -46,7 +46,7 @@ def test_product_radio_configuration_is_single_source() -> None:
             encoding="utf-8"
         )
     )
-    assert town_scenario["radio"]["config"] == str(config_path.relative_to(ROOT))
+    assert town_scenario["radio"]["config"] == config_path.relative_to(ROOT).as_posix()
     assert 'RADIO_CONFIG="${SCENARIO_VALUES[3]}"' in runner
     assert '--txPowerW="$TX_POWER_W"' in runner
     assert '--sionnaCacheJitterFraction="$SIONNA_CACHE_JITTER_FRACTION"' in runner
