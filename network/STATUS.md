@@ -1,6 +1,8 @@
 # Product Status
 
-Updated: 2026-09-28. Workstation setup, realtime coupling and optional model-time mode are implemented.
+Updated: 2026-10-21. Fixed cached ACK reuse and GCS reception outside lockstep exchange.
+30 focused tests passed; 4 Linux flock/PTY cases skipped. Compile, port and diff checks passed.
+Windows phase-transition tests use a barrier fixture; Gazebo/ns-3 was not run: WSL virtual disk missing.
 
 ## Current development workstation
 
@@ -29,17 +31,16 @@ local_integrated_gpu_runtime_status=blocked_wsl_optix
   ArduPilot's existing physics clock. Default step: 20 ms (`LOCKSTEP_STEP_MS`, 1..50).
   Radio advances with held measured state; physics catches up before UART exchange.
   Poses retain the configured 0.5 model-second age bound; no extrapolated motion.
-- Shared I/O barrier, bounded queues and model-time deadlines cover UART, GCS and
-  data traffic. BSF/BDP version 2 rejects mixed clock domains. No-bypass waits on host time.
-  Host liveness timeout: `LOCKSTEP_TIMEOUT_S=60`; real external endpoints are rejected.
+- Shared I/O barrier, bounded queues and model-time deadlines cover UART, GCS and data traffic.
+  BSF/BDP v2 rejects mixed clocks; no-bypass waits on host time. `LOCKSTEP_TIMEOUT_S=60`;
+  real external endpoints are rejected.
 - Reports distinguish model-time results from realtime readiness. This sampled
   software coupling is neither physical HIL nor bitwise deterministic replay.
 - 43 focused Python cases passed, including actual UDP/PTY pause/resume/expiry;
   native C++ state/clock tests, target builds, shell/port and process-watchdog checks passed.
   Actual Gazebo/ArduPilot/ROS + stock ns-3: 25 barriers with a 1.2 s host stall;
   final native Wi-Fi/TAP/Friis baseline: 100 barriers, 3/3 ping replies, no stale poses.
-  No synthetic RF/ACK outcomes. Full Sionna integration remains blocked by WSL OptiX.
-  Logs/PCAP: runs/lockstep/ (ignored); temporary test containers were removed.
+  No synthetic RF/ACK outcomes; full Sionna remains blocked by WSL OptiX. Logs/PCAP: runs/lockstep/; test containers removed.
 
 ## Simulator coupling: 2026-09-24
 
@@ -75,10 +76,9 @@ in [PRODUCT_ARCHITECTURE](../doc/PRODUCT_ARCHITECTURE.md).
   and polarization response with roll. Linux in-process GPU integration remains blocked.
   Logs/results: runs/coupling/ (ignored). Temporary probe containers were removed.
 
-Two prior audit defects remain: the shared-uplink gate accepts 95% packet loss
-when fairness is equal, and delayed same-command MAVLink ACK can be attributed
-to a new operation. Their fixes are outside this coupling change. The earlier
-counterexamples remain in runs/audit-2026-09-24/; current PASS flags are not full readiness.
+Prior audit defects remain: equal fairness can pass 95% shared-uplink loss, and a newly
+received delayed MAVLink ACK can match a later same-command operation (distinct from cached reuse).
+See runs/audit-2026-09-24/; these fixes and full readiness remain outside this GCS review.
 
 ## Historical software RC verification
 
