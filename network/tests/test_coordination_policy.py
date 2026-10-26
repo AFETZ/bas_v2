@@ -171,6 +171,32 @@ class CoordinationPolicyTests(unittest.TestCase):
             pass
         self.assertEqual(b"".join(written), command.payload)
 
+    def test_admission_timestamp_is_actual_gate_check_not_later_log_time(self):
+        grant = self.grant()
+        events = []
+        uart = UARTAdmission(self.gate, lambda raw: len(raw),
+                             emit=lambda event, **fields: events.append((event, fields)))
+        uart.enqueue(self.command(grant), sender_id=1)
+        uart.drain_one()
+        self.assertEqual(events[0][0], "uart_admitted")
+        row = events[0][1]
+        self.assertTrue(grant.valid_from_ns <= row["uart_write_started_host_monotonic_ns"]
+                        <= row["uart_write_end_host_monotonic_ns"]
+                        <= row["admission_checked_host_monotonic_ns"] < grant.valid_until_ns)
+
+    def test_expiry_during_write_is_explicit_invalidated_run_not_success(self):
+        grant = self.grant()
+        events = []
+        def write(raw):
+            self.now = grant.valid_until_ns
+            return len(raw)
+        uart = UARTAdmission(self.gate, write,
+                             emit=lambda event, **fields: events.append(event))
+        uart.enqueue(self.command(grant), sender_id=1)
+        with self.assertRaisesRegex(RuntimeError, "final lease check"):
+            uart.drain_one()
+        self.assertEqual(events, ["uart_write_invalidated"])
+
     def test_expiry_requests_hold_once_and_never_appoints_a_new_leader(self):
         grant = self.grant()
         self.gate.tick()

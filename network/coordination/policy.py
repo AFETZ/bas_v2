@@ -235,7 +235,7 @@ class AdmissionGate:
             return None
         return max(active, key=lambda g: (g.epoch, g.grant_sequence))
 
-    def check_authority(self, command: Command) -> None:
+    def check_authority(self, command: Command) -> int:
         """Validate authority for relay forwarding without claiming local admission."""
         now = self.now_ns()
         if command.run_id != self.run_id:
@@ -250,10 +250,14 @@ class AdmissionGate:
             raise ProtocolError("command altered grant interval")
         if not command.valid_from_ns <= now < command.valid_until_ns or command.created_ns > now:
             raise ProtocolError("command not currently valid")
+        checked_ns = self.now_ns()
+        if not command.valid_from_ns <= checked_ns < command.valid_until_ns:
+            raise ProtocolError("command expired during authority check")
+        return checked_ns
 
-    def check(self, command: Command, *, sender_id: int, reserve: bool = False) -> None:
+    def check(self, command: Command, *, sender_id: int, reserve: bool = False) -> int:
         """Call before EVERY write, including a partial-write continuation."""
-        self.check_authority(command)
+        checked_ns = self.check_authority(command)
         if command.destination_id != self.uav_id:
             raise ProtocolError("foreign destination")
         if sender_id != command.leader_id:
@@ -264,6 +268,7 @@ class AdmissionGate:
             self.last_sequence[command.epoch] = command.sequence
             self.ever_active = True
             self.hold_required = True
+        return checked_ns
 
     def tick(self) -> None:
         """Request native HOLD on expiry; the caller must observe actual behavior."""
@@ -311,19 +316,22 @@ class UARTAdmission:
             raise ProtocolError("duplicate pending command")
         if len(self.queue) >= self.max_pending:
             raise ProtocolError("UART command queue full")
-        self.queue.append([command, sender_id, 0])
+        self.queue.append([command, sender_id, 0, None])
         self.pending_ids.add(command.command_id)
 
     def drain_one(self) -> bool:
         if not self.queue:
             return False
-        command, sender, offset = self.queue[0]
+        command, sender, offset, first_checked_ns = self.queue[0]
         try:
-            self.gate.check(command, sender_id=sender)
+            before_write_ns = self.gate.check(command, sender_id=sender)
         except ProtocolError:
             self.queue.popleft()
             self.pending_ids.discard(command.command_id)
             if offset:
+                self.emit("uart_write_invalidated", command=command, bytes=offset,
+                          uart_write_started_host_monotonic_ns=first_checked_ns,
+                          reason="partially_written_command_expired_or_changed_epoch")
                 raise RuntimeError("lease/epoch invalidated a partially written UART command")
             self.emit("command_rejected", command=command, reason="expired_or_stale_at_uart")
             return True
@@ -331,15 +339,28 @@ class UARTAdmission:
             written = self.write(command.payload[offset:])
         except BlockingIOError:
             return False
+        write_end_ns = self.gate.now_ns()
         if type(written) is not int or written <= 0 or written > len(command.payload) - offset:
             raise RuntimeError("invalid UART write result")
         offset += written
+        if first_checked_ns is None:
+            first_checked_ns = before_write_ns
         if offset < len(command.payload):
             self.queue[0][2] = offset
+            self.queue[0][3] = first_checked_ns
             return True
         # The final fragment was checked immediately before this synchronous write.
-        self.gate.check(command, sender_id=sender, reserve=True)
+        try:
+            checked_ns = self.gate.check(command, sender_id=sender, reserve=True)
+        except ProtocolError as exc:
+            self.emit("uart_write_invalidated", command=command, bytes=offset,
+                      uart_write_started_host_monotonic_ns=first_checked_ns,
+                      uart_write_end_host_monotonic_ns=write_end_ns, reason=str(exc))
+            raise RuntimeError("UART write completed after its final lease check became invalid") from exc
         self.queue.popleft()
         self.pending_ids.discard(command.command_id)
-        self.emit("uart_admitted", command=command, bytes=offset)
+        self.emit("uart_admitted", command=command, bytes=offset,
+                  admission_checked_host_monotonic_ns=checked_ns,
+                  uart_write_started_host_monotonic_ns=first_checked_ns,
+                  uart_write_end_host_monotonic_ns=write_end_ns)
         return True
