@@ -23,8 +23,8 @@ def fixture(tmp_path, condition="selective", missing_uav=None):
         measurement_duration_wall_s=180, measurement_duration_source_s=180)
     (run / "metrics/relay_experiment_config.json").write_text(json.dumps(config))
     (run / "metrics/relay_experiment_summary.json").write_text(json.dumps(summary))
-    events = [dict(event="grant_issued", host_monotonic_ns=10 * NS, leader_id=1, epoch=1,
-                   grant_sequence=1, valid_from_ns=10 * NS, valid_until_ns=56 * NS, reason="selection"),
+    events = [dict(event="grant_issued", host_monotonic_ns=NS, leader_id=1, epoch=1,
+                   grant_sequence=1, valid_from_ns=NS, valid_until_ns=56 * NS, reason="selection"),
               dict(event="grant_issued", host_monotonic_ns=56 * NS, leader_id=2, epoch=2,
                    grant_sequence=2, valid_from_ns=56 * NS, valid_until_ns=65 * NS, reason="selection")]
     offers = []
@@ -41,7 +41,16 @@ def fixture(tmp_path, condition="selective", missing_uav=None):
                 continue
             events.append(dict(body, event=name, stage=name, node_id=actor,
                 host_monotonic_ns=created + offset * 10_000_000,
-                admission_checked_host_monotonic_ns=created + offset * 10_000_000 - 10))
+                admission_checked_host_monotonic_ns=created + offset * 10_000_000 - 10,
+                uart_write_started_host_monotonic_ns=created + offset * 10_000_000 - 30,
+                uart_write_end_host_monotonic_ns=created + offset * 10_000_000 - 20))
+        # Additional observed input establishes the pre-fault active target,
+        # independently of the last completed goal and refresh offer fixtures.
+        events.append(dict(body, event="uart_admitted", epoch=1, leader_id=1, grant_sequence=1,
+            command_id=f"1:{i}:initial", node_id=i, target_position_m=[i, 0, 10],
+            command_created_host_monotonic_ns=53 * NS, valid_from_ns=NS, valid_until_ns=56 * NS,
+            host_monotonic_ns=54 * NS, admission_checked_host_monotonic_ns=54 * NS - 10,
+            uart_write_started_host_monotonic_ns=54 * NS - 30, uart_write_end_host_monotonic_ns=54 * NS - 20))
         offers.append(dict(request_id=f"sent-{i}", uav_id=i, host_monotonic_ns=created, command_id=body["command_id"]))
         offers.append(dict(request_id=f"unavailable-{i}", uav_id=i, host_monotonic_ns=59 * NS, command_id=""))
         events.append(dict(event="action_completed", uav_id=i, host_monotonic_ns=50 * NS,
@@ -110,7 +119,7 @@ def test_log_emit_after_expiry_is_not_stale_if_exact_write_check_was_valid(tmp_p
     admitted["admission_checked_host_monotonic_ns"] = 65 * NS - 10
     (run / "logs/coordination_events.jsonl").write_text("".join(json.dumps(row) + "\n" for row in events))
     result = analyze(run, tmp_path)
-    assert result["admission_audit"]["valid"] == 5
+    assert result["admission_audit"]["valid"] == 10
     assert result["admission_audit"].get("expired_or_not_yet_valid", 0) == 0
 
 
@@ -121,5 +130,39 @@ def test_missing_exact_boundary_is_unverifiable_not_a_claim_of_zero_stale(tmp_pa
             row.pop("admission_checked_host_monotonic_ns")
     (run / "logs/coordination_events.jsonl").write_text("".join(json.dumps(row) + "\n" for row in events))
     result = analyze(run, tmp_path)
-    assert result["unverifiable_admissions"] == 5
+    assert result["unverifiable_admissions"] == 10
     assert result["control_recovery"]["all_five"]["recovered"] is False
+
+
+def test_active_prefault_target_not_last_completed_target_defines_a_new_maneuver(tmp_path):
+    run, events = fixture(tmp_path)
+    for row in events:
+        if row.get("uav_id") != 3:
+            continue
+        if row.get("command_id") == "1:3:initial":
+            row["target_position_m"] = [3, 0, 14]
+        elif row.get("command_id") == "2:3:3":
+            row["target_position_m"] = [3, 0, 10]
+    (run / "logs/coordination_events.jsonl").write_text("".join(json.dumps(row) + "\n" for row in events))
+    result = analyze(run, tmp_path)
+    assert result["goal_recovery_per_uav"]["3"]["recovered"] is True
+    assert result["completion_gap_s_per_uav"]["3"] == 11
+
+
+def test_interval_and_actual_write_end_are_independently_audited(tmp_path):
+    run, events = fixture(tmp_path)
+    admitted = next(row for row in events if row.get("event") == "uart_admitted" and row["epoch"] == 2)
+    admitted["uart_write_end_host_monotonic_ns"] = 65 * NS + 1
+    admitted["admission_checked_host_monotonic_ns"] = 65 * NS - 1
+    (run / "logs/coordination_events.jsonl").write_text("".join(json.dumps(row) + "\n" for row in events))
+    result = analyze(run, tmp_path)
+    assert result["admission_audit"]["write_outside_lease"] == 1
+    assert result["control_recovery_per_uav"]["1"]["recovered"] is False
+
+
+def test_missing_relay_stage_cannot_be_a_timely_success(tmp_path):
+    run, events = fixture(tmp_path)
+    events = [row for row in events if not (row.get("uav_id") == 1 and row.get("event") == "master_forward")]
+    (run / "logs/coordination_events.jsonl").write_text("".join(json.dumps(row) + "\n" for row in events))
+    result = analyze(run, tmp_path)
+    assert result["rates"]["uav1"]["timely"] == 0

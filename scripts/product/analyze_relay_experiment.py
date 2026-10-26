@@ -186,11 +186,18 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
             audit["duplicate_admissions"] += 1
         seen.add(key)
         checked = finite(row.get("admission_checked_host_monotonic_ns"))
+        write_start = finite(row.get("uart_write_started_host_monotonic_ns"))
+        write_end = finite(row.get("uart_write_end_host_monotonic_ns"))
+        created = finite(row.get("command_created_host_monotonic_ns"))
         low = finite(row.get("valid_from_ns", row.get("command_valid_from_ns")))
         high = finite(row.get("valid_until_ns", row.get("command_valid_until_ns")))
         status = "unverifiable_missing_boundary_or_interval"
-        if checked is not None and low is not None and high is not None:
+        if all(value is not None for value in (checked, write_start, write_end, created, low, high)):
             status = "valid" if low <= checked < high else "expired_or_not_yet_valid"
+            if not low <= write_start <= write_end < high:
+                status = "write_outside_lease"
+            elif not created <= write_start <= write_end <= checked:
+                status = "invalid_write_chronology"
             issued = grants.get(str(row.get("grant_sequence")))
             if issued is None:
                 status = "unverifiable_missing_issued_grant"
@@ -212,8 +219,12 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
     commands = []
     for sent in sends:
         records = by_command[str(sent["command_id"])]
-        admitted = next((row for row in records if stage(row) == "uart_admitted" and inside(stamp(row))), None)
-        latency = (stamp(admitted) - stamp(sent)) / 1e6 if admitted is not None and stamp(sent) is not None else None
+        admitted = next((row for row in records if stage(row) == "uart_admitted"
+                         and inside(finite(row.get("uart_write_end_host_monotonic_ns")))), None)
+        write_end = finite(admitted.get("uart_write_end_host_monotonic_ns")) if admitted else None
+        created = finite(sent.get("command_created_host_monotonic_ns"))
+        latency = (write_end - created) / 1e6 if write_end is not None and created is not None else None
+        send_latency = (write_end - stamp(sent)) / 1e6 if write_end is not None and stamp(sent) is not None else None
         required = {"gcs_send", "master_receive", "follower_receive", "uart_admitted"}
         uav, leader = identifier(sent.get("uav_id")), identifier(sent.get("leader_id"))
         if uav != leader:
@@ -230,14 +241,15 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
         chain = all(any(stage(row) == name and row.get("node_id") == actor_for[name] for row in records)
                     for name in required)
         commands.append(dict(command_id=sent["command_id"], uav_id=uav, leader_id=leader,
-            epoch=sent.get("epoch"), created_ns=finite(sent.get("command_created_host_monotonic_ns")),
-            sent_ns=stamp(sent), admitted_ns=stamp(admitted) if admitted else None,
+            epoch=sent.get("epoch"), created_ns=created,
+            sent_ns=stamp(sent), admitted_ns=write_end, admission_event_ns=stamp(admitted) if admitted else None,
             grant_sequence=admitted.get("grant_sequence") if admitted else None,
             lease_valid_from_ns=finite(admitted.get("valid_from_ns")) if admitted else None,
             lease_valid_until_ns=finite(admitted.get("valid_until_ns")) if admitted else None,
             admission_checked_ns=finite(admitted.get("admission_checked_host_monotonic_ns")) if admitted else None,
-            latency_ms=latency, timely=latency is not None and 0 <= latency <= deadline_ms
-                and lease_status == "valid" and lineage == "valid",
+            latency_ms=latency, sent_to_uart_latency_ms=send_latency,
+            timely=latency is not None and 0 <= latency <= deadline_ms
+                and lease_status == "valid" and lineage == "valid" and chain,
             lease_status=lease_status, lineage_status=lineage, application_chain_complete=chain,
             target_position_m=target(sent)))
     unique_commands = {}
@@ -306,7 +318,12 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
     for i in UAVS:
         before = [row for row in completions if identifier(row.get("uav_id")) == i and fault is not None and stamp(row) < fault]
         previous = max(before, key=stamp) if before else None
-        reference = target(previous) if previous else None
+        before_admitted = [row for row in admissions if identifier(row.get("uav_id")) == i
+                           and fault is not None and finite(row.get("uart_write_end_host_monotonic_ns")) is not None
+                           and finite(row["uart_write_end_host_monotonic_ns"]) < fault
+                           and admission_status[id(row)] == "valid" and target(row) is not None]
+        active_target = max(before_admitted, key=lambda row: finite(row["uart_write_end_host_monotonic_ns"])) if before_admitted else None
+        reference = target(active_target) if active_target else None
         choices = []
         for row in completions:
             if identifier(row.get("uav_id")) != i:
@@ -318,10 +335,11 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
                 and changed and row.get("maneuver_observed") is True and (finite(row.get("dwell_s")) or 0) >= hold_s
                 and admission is not None and admission["lease_status"] == "valid"
                 and admission["lineage_status"] == "valid" and admission["application_chain_complete"]
+                and target(row) == admission["target_position_m"]
                 and admission["created_ns"] is not None and admission["created_ns"] >= created
                 and admission["admitted_ns"] is not None and admission["admitted_ns"] <= stamp(row))
             goals.append(dict(uav_id=i, goal_id=row.get("goal_id"), completed_ns=stamp(row), created_ns=created,
-                qualifies_postfault_recovery=qualifies, target_changed_from_prefault_completion=changed,
+                qualifies_postfault_recovery=qualifies, target_changed_from_prefault_admission=changed,
                 maneuver_observed=row.get("maneuver_observed"), dwell_s=row.get("dwell_s")))
             if qualifies:
                 choices.append(stamp(row))
@@ -363,11 +381,12 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
             no_new_leader_selection=len(selected_during) == 0 if condition == "total_GCS" and fault is not None else None),
         criteria=meta.get("criteria", {}), metadata=dict(environment=environment, config=config),
         data_quality_errors=errors,
-        definitions=dict(deadline_ms=deadline_ms, latency_clock="host monotonic; gcs_send event to UART event",
+        definitions=dict(deadline_ms=deadline_ms, latency_clock="host monotonic; command creation to actual UART write end; send-event latency reported separately",
             offered_denominator="all unique offered refresh requests, including unsent",
             sent_denominator="all unique target-bearing GCS sends, including lost/late; timely requires verified lease/payload lineage",
             group_recovery="first postfault-created refresh admitted to every member under one leader/epoch",
-            goal_recovery="new postfault goal, changed target >=1m, observed maneuver and dwell; not latest refresh creation",
+            goal_recovery="new postfault goal, target changed >=1m from last pre-fault admitted target, observed maneuver and dwell; not latest refresh creation",
+            completion_gap="last pre-fault completed goal to first eligible new goal completion",
             censoring="right-censored time is never substituted as a successful recovery",
             restricted_loss=f"unrecovered time restricted to {restricted_s}s; missing if horizon not observed",
             two_hop_evidence="application stage lineage; native PHY/PCAP proof remains a separate requirement",
@@ -390,10 +409,10 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
             source="existing live exporter; tracker/host samples filtered to measurement host interval",
             window_duration_s=distribution([float(row["wall_duration_s"]) for row in windows]))
     write_csv(output / "metrics/relay_commands.csv", commands, ["command_id", "uav_id", "leader_id", "epoch", "created_ns",
-        "sent_ns", "admitted_ns", "grant_sequence", "lease_valid_from_ns", "lease_valid_until_ns", "admission_checked_ns",
-        "latency_ms", "timely", "lease_status", "lineage_status", "application_chain_complete", "target_position_m"])
+        "sent_ns", "admitted_ns", "admission_event_ns", "grant_sequence", "lease_valid_from_ns", "lease_valid_until_ns", "admission_checked_ns",
+        "latency_ms", "sent_to_uart_latency_ms", "timely", "lease_status", "lineage_status", "application_chain_complete", "target_position_m"])
     write_csv(output / "metrics/relay_goals.csv", goals, ["uav_id", "goal_id", "created_ns", "completed_ns",
-        "qualifies_postfault_recovery", "target_changed_from_prefault_completion", "maneuver_observed", "dwell_s"])
+        "qualifies_postfault_recovery", "target_changed_from_prefault_admission", "maneuver_observed", "dwell_s"])
     recovery_rows = [dict(endpoint=f"uav{i}", **per_uav[str(i)]) for i in UAVS]
     recovery_rows += [dict(endpoint=name, **row) for name, row in control.items()]
     write_csv(output / "metrics/relay_recovery.csv", recovery_rows, ["endpoint", "status", "recovered", "time_s",
@@ -427,7 +446,7 @@ def plot_run(output, result, commands, events):
     denominator = len(commands)
     axes[0, 1].step(latencies, [(i + 1) / denominator for i in range(len(latencies))] if denominator else [], where="post")
     axes[0, 1].axvline(result["definitions"]["deadline_ms"], color="grey", linestyle="--")
-    axes[0, 1].set(title="Delivery CDF; denominator includes lost sends", xlabel="GCS send → UART (ms)", ylabel="fraction of all sent", ylim=(0, 1.02))
+    axes[0, 1].set(title="Delivery CDF; denominator includes lost sends", xlabel="command created → UART write end (ms)", ylabel="fraction of all sent", ylim=(0, 1.02))
     fault = result["actual_fault"]["start_host_monotonic_ns"]
     origin = result["observation_window"]["start_host_monotonic_ns"]
     for i in UAVS:
