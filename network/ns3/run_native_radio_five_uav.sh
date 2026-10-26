@@ -440,6 +440,20 @@ camera_args=()
 [[ "$CAPTURE_IMAGES" == 0 ]] && camera_args+=(--no-cameras)
 python3 "$ROOT_DIR/scripts/product/inject_native_radio_runtime_cameras.py" \
   --world "$WORLD" --fragment "$CAMERA_FRAGMENT" --output "$LAUNCH_WORLD" "${camera_args[@]}"
+if [[ "$PHYSICS_PROFILE" == bullet_rotor ]]; then
+  python3 - "$LAUNCH_WORLD" "$PHYSICS_PLUGIN_DIR/libgz-physics7-bullet-featherstone-plugin.so.7.8.0" <<'PYPHYSICS'
+import sys
+from pathlib import Path
+import xml.etree.ElementTree as ET
+world, library = map(Path, sys.argv[1:])
+tree = ET.parse(world)
+plugins = tree.findall(".//world/plugin[@name='gz::sim::systems::Physics']/engine/filename")
+if len(plugins) != 1:
+    raise SystemExit("bullet_rotor requires exactly one explicit world physics engine")
+plugins[0].text = str(library.resolve())
+tree.write(world, encoding="unicode", xml_declaration=True)
+PYPHYSICS
+fi
 printf '%q ' "$0" "$@" > "$RUN_DIR/command.txt"
 printf '\n' >> "$RUN_DIR/command.txt"
 printf 'preflight\n' > "$PHASE_FILE"
@@ -825,6 +839,14 @@ PY
   sleep 0.1
 done
 ((fresh == 1)) || { printf 'Live Gazebo odometry streams did not become fresh.\n' >&2; exit 1; }
+if [[ "$PHYSICS_PROFILE" == bullet_rotor ]]; then
+  grep -Fq "$PHYSICS_PLUGIN_DIR/libgz-physics7-bullet-featherstone-plugin.so.7.8.0" \
+    "$RUN_DIR/logs/gazebo_sitl.log" && \
+  grep -Fq 'BAS Bullet coordinate velocity cap=1000 rad/s' "$RUN_DIR/logs/gazebo_sitl.log" || {
+    printf 'Requested bullet_rotor library/cap was not observed in Gazebo startup; refusing stock fallback.\n' >&2
+    exit 1
+  }
+fi
 python3 "$ROOT_DIR/scripts/product/town01_stack_health.py" \
   --scenario "$SCENARIO" --tracker-state "$NODE_STATE" --tracker-events "$NODE_EVENTS" \
   --output "$RUN_DIR/metrics/health.json" --timeout-s 180 \
