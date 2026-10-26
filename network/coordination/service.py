@@ -70,6 +70,7 @@ class Network:
         self.peer_rtt_ns: dict[int, int] = {}
         self.probes: dict[int, list[int]] = {}
         self.last_probe_ns = 0
+        self.watchdog_seen_healthy = False
         self.running = True
         signal.signal(signal.SIGINT, self.stop)
         signal.signal(signal.SIGTERM, self.stop)
@@ -77,7 +78,19 @@ class Network:
     def stop(self, *_):
         self.running = False
 
+    def guard_radio(self):
+        """After native readiness, missing heartbeat is a failure too."""
+        path = self.args.radio_watchdog_file
+        if path is None:
+            return
+        healthy = radio_is_live(path, self.args.watchdog_s)
+        if healthy:
+            self.watchdog_seen_healthy = True
+        elif self.watchdog_seen_healthy:
+            raise RuntimeError("native radio watchdog expired or disappeared after readiness")
+
     def send(self, kind, body, destination: int):
+        self.guard_radio()
         raw = encode(kind, self.index, body)
         try:
             self.udp.sendto(raw, (endpoint_ip(destination), self.args.port))
@@ -157,13 +170,17 @@ class UAVService(Network):
         self.mav = self.mavutil.mavlink.MAVLink(None, srcSystem=255, srcComponent=190)
         self.gate = AdmissionGate(args.run_id, self.index, now_ns=time.monotonic_ns,
                                   hold=self.request_hold, emit=emit)
-        self.admission = UARTAdmission(self.gate, lambda data: os.write(self.uart, data), emit=emit)
+        self.admission = UARTAdmission(self.gate, self.write_uart, emit=emit)
         self.encoder = Encoder(channel="control", uav_id=self.index, direction="uart_to_gcs")
         self.hold_pending: bytes | None = None
         self.last_hold_ns = 0
         self.hold_confirmed = True
         self.uart_parser = self.mavutil.mavlink.MAVLink(None)
         self.uart_parser.robust_parsing = True
+
+    def write_uart(self, data: bytes) -> int:
+        self.guard_radio()
+        return os.write(self.uart, data)
 
     def request_hold(self):
         modes = {name: number for number, name in self.mavutil.mode_mapping_acm.items()}
@@ -182,7 +199,7 @@ class UAVService(Network):
         if self.admission.queue and self.admission.queue[0][2]:
             raise RuntimeError("cannot insert HOLD into a partially written command")
         try:
-            size = os.write(self.uart, self.hold_pending)
+            size = self.write_uart(self.hold_pending)
         except BlockingIOError:
             return
         if size != len(self.hold_pending):
@@ -252,6 +269,7 @@ class UAVService(Network):
                           leader_id=self.index, epoch=active.epoch)
 
     def step(self):
+        self.guard_radio()
         now = time.monotonic_ns()
         self.periodic(now)
         self.gate.tick()
@@ -395,9 +413,15 @@ class GCSService(Network):
                 self.emit("operator_data_rejected", destination_id=i, reason=str(exc))
 
     def deliver(self, i: int, record: bytes):
+        messages = self.uart_parsers[i].parse_buffer(record) or []
+        for message in messages:
+            if message.get_type() != "BAD_DATA" and int(message.get_srcSystem()) != i:
+                self.emit("telemetry_source_rejected", uav_id=i,
+                          observed_system_id=int(message.get_srcSystem()))
+                raise ProtocolError("MAVLink SYSID disagrees with native UART origin")
         if i in self.client_peers:
             self.clients[i].sendto(record, self.client_peers[i])
-        for message in self.uart_parsers[i].parse_buffer(record) or []:
+        for message in messages:
             if message.get_type() == "BAD_DATA":
                 continue
             self.latest_messages[i][message.get_type()] = message
@@ -437,6 +461,7 @@ class GCSService(Network):
             raise ProtocolError("unexpected GCS input kind")
 
     def step(self):
+        self.guard_radio()
         now = time.monotonic_ns()
         self.periodic(now)
         self.update_role(now)
@@ -501,9 +526,7 @@ def main(argv=None):
         emit("service_started", role=args.role)
         deadline = time.monotonic() + args.duration_s
         while service.running and time.monotonic() < deadline:
-            if args.radio_watchdog_file and args.radio_watchdog_file.exists():
-                if not radio_is_live(args.radio_watchdog_file, args.watchdog_s):
-                    raise RuntimeError("native radio watchdog expired")
+            service.guard_radio()
             service.step()
     except Exception as exc:
         emit("service_failed", reason=f"{type(exc).__name__}: {exc}")

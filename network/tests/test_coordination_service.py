@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import json
+from pathlib import Path
+import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -11,6 +15,28 @@ from network.coordination.service import GCSService, Network, UAVService
 
 
 class CoordinationServiceTests(unittest.TestCase):
+    def test_missing_native_heartbeat_after_readiness_is_failure(self):
+        service = Network.__new__(Network)
+        service.watchdog_seen_healthy = False
+        with tempfile.TemporaryDirectory() as temporary:
+            heartbeat = Path(temporary) / "heartbeat.json"
+            service.args = SimpleNamespace(radio_watchdog_file=heartbeat, watchdog_s=.3)
+            service.guard_radio()  # native has not reached readiness yet
+            heartbeat.write_text(json.dumps(dict(healthy=True, monotonic_ns=time.monotonic_ns())))
+            service.guard_radio()
+            self.assertTrue(service.watchdog_seen_healthy)
+            heartbeat.unlink()
+            with self.assertRaisesRegex(RuntimeError, "disappeared"):
+                service.guard_radio()
+
+    def test_wrong_actual_uart_sysid_is_rejected(self):
+        service = GCSService.__new__(GCSService)
+        message = SimpleNamespace(get_type=lambda: "HEARTBEAT", get_srcSystem=lambda: 4)
+        service.uart_parsers = {3: SimpleNamespace(parse_buffer=lambda raw: [message])}
+        service.emit = lambda *args, **kw: None
+        with self.assertRaisesRegex(ProtocolError, "SYSID"):
+            service.deliver(3, b"unit-parser-fixture")
+
     def test_old_master_gets_exact_gcs_grant_via_new_master(self):
         now = 1000
         grant = Authority("run").issue(2, now, 100)
