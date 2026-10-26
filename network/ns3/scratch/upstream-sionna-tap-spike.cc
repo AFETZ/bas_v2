@@ -138,6 +138,7 @@ std::string g_wifiControlMode;
 std::string g_wifiSsid;
 std::string g_wifiTopology{"bss"};
 bool g_wifiExplicitBarAfterMissedBlockAck{true};
+bool g_wifiAggregationEnabled{false};
 std::string g_faultProfile{"none"};
 uint32_t g_faultMasterId{1};
 double g_faultExtraLossDb{200.0};
@@ -1251,6 +1252,8 @@ WriteStats(const std::string& path)
            << "  \"wifi_topology\": \"" << g_wifiTopology << "\",\n"
            << "  \"wifi_explicit_bar_after_missed_block_ack\": "
            << (g_wifiExplicitBarAfterMissedBlockAck ? "true" : "false") << ",\n"
+           << "  \"wifi_aggregation_enabled\": "
+           << (g_wifiAggregationEnabled ? "true" : "false") << ",\n"
            << "  \"fault_profile\": \"" << g_faultProfile << "\",\n"
            << "  \"fault_master_id\": " << g_faultMasterId << ",\n"
            << "  \"fault_extra_loss_db\": " << g_faultExtraLossDb << ",\n"
@@ -1388,6 +1391,7 @@ main(int argc, char* argv[])
     std::string solverProfile = "realtime_minimal_solver_profile";
     std::string wifiDataMode = "HtMcs0";
     std::string wifiControlMode = "ErpOfdmRate6Mbps";
+    bool wifiAggregation = true;
     std::string sourceConfig;
     std::string attributeDump;
     std::string wifiSsid = "bas-native-radio";
@@ -1452,6 +1456,9 @@ main(int argc, char* argv[])
     command.AddValue("wifiExplicitBarAfterMissedBlockAck",
                      "Upstream QosTxop explicit BAR recovery after a missed Block ACK",
                      g_wifiExplicitBarAfterMissedBlockAck);
+    command.AddValue("wifiAggregation",
+                     "Preserve upstream aggregation defaults or explicitly disable aggregation/BA",
+                     wifiAggregation);
     command.AddValue("faultProfile", "Explicit none, selective or total_GCS pair-loss fault", g_faultProfile);
     command.AddValue("faultMasterId", "Initial coordinator UAV affected by selective loss", g_faultMasterId);
     command.AddValue("faultExtraLossDb", "Synthetic additional pair loss in dB during experiment_fault", g_faultExtraLossDb);
@@ -1760,6 +1767,18 @@ main(int argc, char* argv[])
 
         WifiHelper wifi;
         wifi.SetStandard(WIFI_STANDARD_80211n);
+        if (!wifiAggregation)
+        {
+            // Native 802.11n on 2.4 GHz has neither the VHT nor 6 GHz
+            // mandatory-BA exceptions in HtFrameExchangeManager::NeedSetupBlockAck.
+            // No A-MPDU and a zero threshold prevent BA agreement establishment.
+            for (const std::string ac : {"BE", "BK", "VI", "VO"})
+            {
+                Config::SetDefault("ns3::WifiMac::" + ac + "_MaxAmpduSize", UintegerValue(0));
+                Config::SetDefault("ns3::WifiMac::" + ac + "_MaxAmsduSize", UintegerValue(0));
+                Config::SetDefault("ns3::WifiMac::" + ac + "_BlockAckThreshold", UintegerValue(0));
+            }
+        }
         wifi.SetRemoteStationManager("ns3::ConstantRateWifiManager",
                                      "DataMode",
                                      StringValue(wifiDataMode),
@@ -1804,6 +1823,18 @@ main(int argc, char* argv[])
             for (AcIndex ac : {AC_BE,AC_BK,AC_VI,AC_VO}) {
                 auto txop=device->GetMac()->GetQosTxop(ac);
                 if (!txop) continue;
+                const auto maxAmpdu = device->GetMac()->GetMaxAmpduSize(ac);
+                const auto maxAmsdu = device->GetMac()->GetMaxAmsduSize(ac);
+                const auto blockAckThreshold = txop->GetBlockAckThreshold();
+                g_wifiAggregationEnabled |= maxAmpdu > 0 || maxAmsdu > 0;
+                NS_ABORT_MSG_IF(!wifiAggregation &&
+                                    (maxAmpdu != 0 || maxAmsdu != 0 || blockAckThreshold != 0 ||
+                                     device->GetVhtConfiguration()),
+                                "native aggregation/BlockAck disable setting was not applied");
+                LogEvent("wifi_aggregation_config", g_nodeNames.at(index), "", 0, uint32_t(ac),
+                         "source=ns3::WifiMac+QosTxop;max_ampdu_bytes=" + std::to_string(maxAmpdu) +
+                         ";max_amsdu_bytes=" + std::to_string(maxAmsdu) +
+                         ";block_ack_threshold_packets=" + std::to_string(blockAckThreshold));
                 txop->SetAttribute("UseExplicitBarAfterMissedBlockAck",
                                    BooleanValue(g_wifiExplicitBarAfterMissedBlockAck));
                 BooleanValue effectiveExplicitBar;

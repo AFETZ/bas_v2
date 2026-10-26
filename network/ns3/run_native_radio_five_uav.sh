@@ -51,6 +51,12 @@ WIFI_EXPLICIT_BAR="${BAS_NATIVE_WIFI_EXPLICIT_BAR:-$WIFI_EXPLICIT_BAR_DEFAULT}"
 [[ "$WIFI_EXPLICIT_BAR" == 0 || "$WIFI_EXPLICIT_BAR" == 1 ]] || {
   printf 'BAS_NATIVE_WIFI_EXPLICIT_BAR must be 0 or 1.\n' >&2; exit 2;
 }
+WIFI_AGGREGATION_DEFAULT=1
+[[ "$COORDINATION_POLICY" == off ]] || WIFI_AGGREGATION_DEFAULT=0
+WIFI_AGGREGATION="${BAS_NATIVE_WIFI_AGGREGATION:-$WIFI_AGGREGATION_DEFAULT}"
+[[ "$WIFI_AGGREGATION" == 0 || "$WIFI_AGGREGATION" == 1 ]] || {
+  printf 'BAS_NATIVE_WIFI_AGGREGATION must be 0 or 1.\n' >&2; exit 2;
+}
 PROPAGATION_PROFILE="${BAS_NATIVE_PROPAGATION_PROFILE:-sionna}"
 case "$PROPAGATION_PROFILE" in
   sionna|hybrid|friis) ;;
@@ -122,6 +128,7 @@ run_in_container() {
     -e BAS_NATIVE_PROPAGATION_PROFILE="${BAS_NATIVE_PROPAGATION_PROFILE:-sionna}" \
     -e BAS_NATIVE_WIFI_TOPOLOGY="$WIFI_TOPOLOGY" \
     -e BAS_NATIVE_WIFI_EXPLICIT_BAR="$WIFI_EXPLICIT_BAR" \
+    -e BAS_NATIVE_WIFI_AGGREGATION="$WIFI_AGGREGATION" \
     -e BAS_NATIVE_FAULT_PROFILE="$FAULT_PROFILE" \
     -e BAS_NATIVE_FAULT_MASTER_ID="$FAULT_MASTER_ID" \
     -e BAS_NATIVE_FAULT_EXTRA_LOSS_DB="$FAULT_EXTRA_LOSS_DB" \
@@ -563,6 +570,7 @@ PY
   printf 'physics_profile=%s\n' "$PHYSICS_PROFILE"
   printf 'wifi_topology=%s\n' "$WIFI_TOPOLOGY"
   printf 'wifi_explicit_bar_after_missed_block_ack_requested=%s\n' "$WIFI_EXPLICIT_BAR"
+  printf 'wifi_aggregation_requested=%s\n' "$WIFI_AGGREGATION"
   printf 'fault_profile=%s\nfault_master_id=%s\nfault_extra_loss_db=%s\n' \
     "$FAULT_PROFILE" "$FAULT_MASTER_ID" "$FAULT_EXTRA_LOSS_DB"
   printf 'simulation_mode=%s\nlockstep_step_ms=%s\nlockstep_wall_timeout_s=%s\n' "$BAS_SIMULATION_MODE" "$BAS_LOCKSTEP_STEP_MS" "$BAS_LOCKSTEP_TIMEOUT_S"
@@ -1060,6 +1068,7 @@ setsid ip netns exec ams-ns3 env \
   --wifiChannelWidthMhz="$WIFI_CHANNEL_WIDTH_MHZ" --wifiSsid="$WIFI_SSID" \
   --wifiTopology="$WIFI_TOPOLOGY" \
   --wifiExplicitBarAfterMissedBlockAck="$WIFI_EXPLICIT_BAR" \
+  --wifiAggregation="$WIFI_AGGREGATION" \
   --faultProfile="$FAULT_PROFILE" --faultMasterId="$FAULT_MASTER_ID" \
   --faultExtraLossDb="$FAULT_EXTRA_LOSS_DB" \
   --carrierHz="$CARRIER_HZ" --tapGcs=tap-gcs --tapUavs="$TAP_UAVS" \
