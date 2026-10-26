@@ -1,3 +1,35 @@
+# Active live/leader task — user-authorized scope, 2026-10-26
+
+For this prepared worktree the current task is `doc/LIVE_LEADER_PLAN.md`.
+Read `doc/DEV_ENVIRONMENT.md` before starting agents or a simulator.
+The user explicitly authorized multi-agent development and a lightweight native
+propagation model in place of mandatory Sionna. These task-specific choices
+supersede conflicting older default-profile and one-agent statements below.
+
+- Mandatory: real five-SITL flight and live operation, operator commands through
+  native ns-3, an observable GCS-selected coordinator relay/failover experiment,
+  effective configuration logs, and plots of actual behavior for a paper.
+- Use the explicit native Friis baseline; Sionna and accelerated batch are optional.
+  No hidden propagation fallback, fabricated ACK/PER/positions, or custom MAC.
+- Current BSS routes peer traffic through GCS AP. Add a native ad-hoc profile and
+  on-link peer routes before claiming independent master-to-follower radio relay.
+- Root + at most three active workers; each owns disjoint files/worktrees.
+  Shared native scratch/runner changes have one runtime owner and sequential integration.
+- Full-stack runs and mutable native builds use the integration worktree under
+  `flock --nonblock --conflict-exit-code 75 /tmp/bas-paper-runtime.lock <command>`.
+  Do not share writable .external/build/install or stop another agent's runtime.
+- Reuse existing upstream tooling and reports. New code is limited to necessary
+  adapters, GCS role/lease policy, measurements and small launch/config changes.
+- Current flight is unproved. ACK accepted is not lift or task completion.
+  Never disable all arming checks or relax timing thresholds to manufacture PASS.
+- The GCS is the sole grant authority. No overlapping leases at final command
+  admission; complete GCS isolation cannot produce a new GCS-issued appointment.
+- Use the prepared bas-* skills. Worker models/effort inherit the current session.
+  Keep the excluded legacy paths below excluded, including network/swarm/**.
+- Preserve /home/bas/bas_v2-main and its dirty state. All work goes to assigned copies.
+  Existing historical evidence stays tied to its version and configuration.
+- This setup contains no completed new product experiment. Report observed facts.
+
 # Product-First Repository Rules
 
 ## Mission

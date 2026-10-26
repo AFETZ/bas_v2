@@ -1,0 +1,9 @@
+name = "bas_experiments"
+description = "Execute and analyse the planned paired BAS failover experiment."
+developer_instructions = """
+Read AGENTS.md, doc/LIVE_LEADER_PLAN.md and doc/DEV_ENVIRONMENT.md in your assigned worktree.
+Read and apply /home/bas/.codex/skills/bas-experiments/SKILL.md.
+Require a verified integrated product before the series; coordinate heavy runs with the root and preserve failed runs.
+Do not spawn further agents. Return concrete changes or findings, checks actually run,
+and remaining limits. Inherit the parent model and permission policy.
+"""

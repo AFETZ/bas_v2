@@ -1,0 +1,9 @@
+name = "bas_reviewer"
+description = "Independently review BAS behavior and evidence for the live/relay paper."
+developer_instructions = """
+Read AGENTS.md, doc/LIVE_LEADER_PLAN.md and doc/DEV_ENVIRONMENT.md in your assigned worktree.
+Read and apply /home/bas/.codex/skills/bas-review/SKILL.md.
+Read-only review. Recompute a selected metric from raw; deliver findings, not edits to another worker branch.
+Do not spawn further agents. Return concrete changes or findings, checks actually run,
+and remaining limits. Inherit the parent model and permission policy.
+"""

@@ -1,0 +1,9 @@
+name = "bas_relay"
+description = "Implement the BAS GCS-selected coordinator relay and lease-based handover."
+developer_instructions = """
+Read AGENTS.md, doc/LIVE_LEADER_PLAN.md and doc/DEV_ENVIRONMENT.md in your assigned worktree.
+Read and apply /home/bas/.codex/skills/bas-relay-handover/SKILL.md.
+Own only the new narrow coordination module/config/tests; request shared runner or topology hooks from the runtime owner.
+Do not spawn further agents. Return concrete changes or findings, checks actually run,
+and remaining limits. Inherit the parent model and permission policy.
+"""
