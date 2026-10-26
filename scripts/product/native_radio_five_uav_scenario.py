@@ -1584,6 +1584,92 @@ class NativeFiveUavHarness(FlightHarness):
         self.phase("landing_complete")
         self.observe_for(2.0)
 
+    def diagnostic_flight(self, uav_count: int) -> dict[str, Any]:
+        """Measured vertical Guided cycle; deliberately separate from product gates."""
+        systems = tuple(range(1, uav_count + 1))
+        self.summary.update(scope="physical_flight_diagnostic", uav_count=uav_count)
+        self.wait(
+            lambda: all(("control", i, "HEARTBEAT") in self.latest for i in systems),
+            60, "active UAV control heartbeats",
+        )
+        initial = self.positions()
+        if any(f"uav{i}" not in initial for i in systems):
+            raise ScenarioError("active UAV tracker positions missing before diagnostic")
+        self.summary["initial_positions_m"] = initial
+        coordinates = {i: self.request_global_position(i) for i in systems}
+        self.set_mode_all(4, "diagnostic_guided", systems=systems)
+        armed_flag = int(self.mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+        is_armed = lambda i: bool(int(self.latest[("control", i, "HEARTBEAT")].base_mode) & armed_flag)
+        for i in systems:
+            self.phase(f"diagnostic_arm_uav{i}")
+            self.command_until_accepted(i, int(self.mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM),
+                                        [1, 0, 0, 0, 0, 0, 0], "diagnostic_arm", 90)
+            self.wait(lambda i=i: is_armed(i), 15, f"uav{i} armed heartbeat")
+            altitude = 8.0 + 4.0 * (i - 1)
+            self.phase(f"diagnostic_takeoff_uav{i}")
+            self.command_until_accepted(i, int(self.mavutil.mavlink.MAV_CMD_NAV_TAKEOFF),
+                                        [0, 0, 0, 0, 0, 0, altitude], "diagnostic_takeoff", 15)
+            self.event("flight_target", uav=i, detail=json.dumps(dict(
+                target_id=f"uav{i}-takeoff", target_enu_z_m=initial[f"uav{i}"][2] + altitude,
+                target_relative_alt_m=altitude, datum="relative_to_initial_gazebo_z")))
+            self.wait(lambda i=i, altitude=altitude:
+                      self.positions().get(f"uav{i}", [0, 0, -1e9])[2]
+                      >= initial[f"uav{i}"][2] + altitude - 1.5,
+                      75, f"uav{i} actual physical lift")
+            self.summary["uavs"][f"uav{i}"]["phases"].update(arm=True, takeoff=True)
+        self.summary["flight_targets"] = []
+        for stage, increment in enumerate((0.0, 4.0, 8.0)):
+            self.phase(f"diagnostic_hold_{stage}")
+            targets = {i: 8.0 + 4.0 * (i - 1) + increment for i in systems}
+            for i, altitude in targets.items():
+                record = dict(uav=i, target_id=f"uav{i}-hold-{stage}",
+                              target_enu_z_m=initial[f"uav{i}"][2] + altitude,
+                              target_relative_alt_m=altitude, datum="relative_to_initial_gazebo_z")
+                self.summary["flight_targets"].append(record)
+                self.event("flight_target", uav=i, detail=json.dumps(record))
+            deadline = clock.monotonic() + 90 * self.timeout_scale
+            stable_since = None
+            next_send = 0.0
+            while clock.monotonic() < deadline:
+                now = clock.monotonic()
+                if now >= next_send:
+                    for i, altitude in targets.items():
+                        lat, lon = coordinates[i]
+                        self.send("control", i,
+                                  self.transmitters[("control", i)].set_position_target_global_int_encode(
+                                      0, i, 1, int(self.mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT),
+                                      3576, round(lat * 1e7), round(lon * 1e7), altitude,
+                                      0, 0, 0, 0, 0, 0, 0, 0))
+                    next_send = now + 1.0
+                self.pump(0.1)
+                positions = self.positions()
+                within = all(
+                    is_armed(i) and f"uav{i}" in positions
+                    and abs(positions[f"uav{i}"][2] - initial[f"uav{i}"][2] - altitude) <= 1.5
+                    and math.dist(positions[f"uav{i}"][:2], initial[f"uav{i}"][:2]) <= 3.0
+                    for i, altitude in targets.items())
+                stable_since = (stable_since if stable_since is not None else now) if within else None
+                if stable_since is not None and now - stable_since >= 3.0:
+                    self.event("flight_target_completed", detail=json.dumps(dict(
+                        stage=stage, positions_m=positions, held_s=3.0)))
+                    break
+            else:
+                raise ScenarioError(f"physical targets not reached and held at stage {stage}")
+        self.phase("diagnostic_land")
+        self.set_mode_all(9, "diagnostic_land_mode", systems=systems)
+        self.wait(lambda: all(not is_armed(i) for i in systems), 120,
+                  "active UAVs automatic disarm after LAND")
+        final = self.positions()
+        if any(f"uav{i}" not in final or abs(final[f"uav{i}"][2] - initial[f"uav{i}"][2]) > 1.0
+               for i in systems):
+            raise ScenarioError("disarm observed without physical return to initial ground height")
+        for i in systems:
+            self.summary["uavs"][f"uav{i}"]["phases"].update(hold=True, land=True, auto_disarm=True)
+        self.summary.update(status="diagnostic_complete", final_positions_m=final,
+                            duration_s=round(clock.monotonic() - self.started, 3))
+        self.phase("diagnostic_complete")
+        return self.summary
+
     def run_native(self) -> dict[str, Any]:
         self.phase("stationary_communication_smoke")
         self.wait_heartbeats()
@@ -1610,6 +1696,8 @@ def run_scenario(args: argparse.Namespace) -> int:
             harness.summary["status"] = "diagnostic_complete"
             harness.summary["duration_s"] = round(clock.monotonic() - harness.started, 3)
             summary = harness.summary
+        elif args.mode == "flight_diagnostic":
+            summary = harness.diagnostic_flight(args.uav_count)
         else:
             summary = harness.run_native()
     except Exception as error:
@@ -1785,7 +1873,7 @@ def parser() -> argparse.ArgumentParser:
     scenario.add_argument("--schedule-file", required=True)
     scenario.add_argument("--scenario-config", default=str(DEFAULT_SCENARIO_CONFIG))
     scenario.add_argument("--timeout-scale", type=float, default=1.0)
-    scenario.add_argument("--mode", choices=("product", "latency_diagnostic"), default="product")
+    scenario.add_argument("--mode", choices=("product", "latency_diagnostic", "flight_diagnostic"), default="product")
     scenario.add_argument("--uav-count", type=int, choices=(1, 5), default=5)
     scenario.add_argument("--channels", default="control,payload")
     scenario.add_argument(

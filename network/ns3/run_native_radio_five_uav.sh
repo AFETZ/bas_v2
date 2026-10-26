@@ -89,6 +89,7 @@ run_in_container() {
     -e BAS_NATIVE_UPDATE_DISTANCE_THRESHOLD_M="${BAS_NATIVE_UPDATE_DISTANCE_THRESHOLD_M:-}" \
     -e BAS_NATIVE_FIVE_TIMEOUT_SCALE="${BAS_NATIVE_FIVE_TIMEOUT_SCALE:-5.0}" \
     -e BAS_NATIVE_LATENCY_MODE="${BAS_NATIVE_LATENCY_MODE:-0}" \
+    -e BAS_NATIVE_FLIGHT_DIAGNOSTIC="${BAS_NATIVE_FLIGHT_DIAGNOSTIC:-0}" \
     -e BAS_NATIVE_UAV_COUNT="${BAS_NATIVE_UAV_COUNT:-5}" \
     -e BAS_NATIVE_UART_CHANNELS="${BAS_NATIVE_UART_CHANNELS:-control,payload}" \
     -e BAS_NATIVE_RADIO_BACKEND="${BAS_NATIVE_RADIO_BACKEND:-}" \
@@ -142,13 +143,13 @@ EVENT_LOGGING="${BAS_NATIVE_EVENT_LOGGING:-batched_trace}"
 [[ "$UAV_COUNT" == 1 || "$UAV_COUNT" == 5 ]] || { printf 'UAV count must be 1 or 5: %s\n' "$UAV_COUNT" >&2; exit 2; }
 [[ ",$ACTIVE_UART_CHANNELS," == *,control,* ]] || { printf 'Control UART must remain active.\n' >&2; exit 2; }
 [[ "$EVENT_LOGGING" == metrics_only || "$EVENT_LOGGING" == batched_trace ]] || { printf 'Invalid event logging mode.\n' >&2; exit 2; }
-[[ "$SCENARIO_KEY" == town01 || "$UAV_COUNT" == 5 ]] || {
-  printf 'The rock_demo product scenario requires all five UAVs.\n' >&2
-  exit 2
-}
 SCENARIO_MODE="product"
 [[ "$LATENCY_MODE" == 1 ]] && SCENARIO_MODE="latency_diagnostic"
-[[ "$SCENARIO_MODE" == latency_diagnostic || "$UAV_COUNT" == 5 ]] || {
+if [[ "${BAS_NATIVE_FLIGHT_DIAGNOSTIC:-0}" == 1 ]]; then
+  [[ "$LATENCY_MODE" != 1 ]] || { printf 'Choose flight or latency diagnostic, not both.\n' >&2; exit 2; }
+  SCENARIO_MODE="flight_diagnostic"
+fi
+[[ "$SCENARIO_MODE" != product || "$UAV_COUNT" == 5 ]] || {
   printf 'The product flight proof requires five UAVs; one UAV is diagnostic-only.\n' >&2
   exit 2
 }
@@ -384,6 +385,18 @@ fi
 [[ -x "$PYTHON_TOOLING/bin/cmake" ]] || { printf 'Pinned CMake tooling is absent.\n' >&2; exit 2; }
 
 mkdir -p "$RUN_DIR"/{logs,metrics,pcap,screenshots,plots} "$UART_DIR" "$WORK_DIR"
+if [[ "$SCENARIO_MODE" == flight_diagnostic && "$UAV_COUNT" == 1 ]]; then
+  python3 - "$SCENARIO" "$RUN_DIR/diagnostic_scenario.yaml" <<'PYSCENARIO'
+import sys
+from pathlib import Path
+import yaml
+value = yaml.safe_load(Path(sys.argv[1]).read_text())
+value["robots"] = value["robots"][:1]
+value["scenario"]["name"] += "_one_uav_flight_diagnostic"
+Path(sys.argv[2]).write_text(yaml.safe_dump(value, sort_keys=False))
+PYSCENARIO
+  SCENARIO="$RUN_DIR/diagnostic_scenario.yaml"
+fi
 if [[ "$BAS_SIMULATION_MODE" == lockstep ]]; then
   PYTHONPATH="$ROOT_DIR:${PYTHONPATH:-}" python3 -c 'from pathlib import Path; import os; from network.scripts.simulation_clock import initial; initial(Path(os.environ["BAS_SIM_CLOCK"]))'
 fi
@@ -893,7 +906,7 @@ if ((SCENARIO_STATUS != 0)); then
   exit "$SCENARIO_STATUS"
 fi
 
-if [[ "$UAV_COUNT" == 5 && ",$ACTIVE_UART_CHANNELS," == *,control,* && ",$ACTIVE_UART_CHANNELS," == *,payload,* && -z "${BAS_NATIVE_EXTERNAL_CONFIG:-}" ]]; then
+if [[ "$SCENARIO_MODE" == product && "$UAV_COUNT" == 5 && ",$ACTIVE_UART_CHANNELS," == *,control,* && ",$ACTIVE_UART_CHANNELS," == *,payload,* && -z "${BAS_NATIVE_EXTERNAL_CONFIG:-}" ]]; then
   printf 'no_bypass_radio_off\n' > "$PHASE_FILE"
   run_with_native_watchdog ip netns exec ams-gcs env BAS_LOCKSTEP_PARTICIPANT=gcs \
     python3 -u "$ROOT_DIR/scripts/product/native_radio_five_uav_scenario.py" no-bypass-probe \
@@ -932,6 +945,10 @@ done
 capture_pids=()
 touch "$MONITOR_STOP"
 sleep 2
+if [[ "$SCENARIO_MODE" == flight_diagnostic ]]; then
+  printf 'Physical flight diagnostic completed; see metrics/scenario_summary.json and raw logs.\n'
+  exit 0
+fi
 summary_args=(--run-dir "$RUN_DIR" --scenario-config "$SCENARIO")
 if [[ "$SCENARIO_MODE" == latency_diagnostic ]]; then
   summary_args+=(--latency-diagnostic)
