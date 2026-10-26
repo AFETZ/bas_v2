@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from network.coordination.policy import Authority, make_command
 from scripts.product.relay_experiment import (EventTail, Goal, GoalObserver,
-                                              Pose, PoseReader, RegionHold, ScenarioError, main)
+                                              LandingTrace, Pose, PoseReader, RegionHold, ScenarioError, main)
 
 
 def pose(source, z=12., host=1000, velocity=(0., 0., 0.)):
@@ -21,6 +21,44 @@ def pose(source, z=12., host=1000, velocity=(0., 0., 0.)):
 
 
 class RelayExperimentTests(unittest.TestCase):
+    def test_controlled_landing_requires_uart_mode_descent_ground_then_disarm(self):
+        trace = LandingTrace(pose(0., z=10., host=1000), ground_z=.5)
+        trace.admit("land-command", 1100)
+        trace.observe(pose(1., z=8., host=1300, velocity=(0., 0., -1.)),
+                      heartbeat_ns=1200, mode_land=True, armed=True)
+        self.assertEqual(trace.events, ["land_mode_observed", "landing_descent_observed"])
+        trace.observe(pose(2., z=.5, host=2000), heartbeat_ns=1900, mode_land=True, armed=True)
+        self.assertFalse(trace.completed)
+        trace.observe(pose(3., z=.5, host=2300), heartbeat_ns=2200, mode_land=True, armed=False)
+        self.assertTrue(trace.completed)
+        self.assertIsNone(trace.terminal_reason)
+
+    def test_post_takeoff_ground_disarm_without_our_land_is_terminal_failure(self):
+        trace = LandingTrace(pose(0., z=.5, host=1000), ground_z=.5)
+        trace.observe(pose(1., z=.5, host=2000), heartbeat_ns=2000, mode_land=False, armed=False)
+        self.assertFalse(trace.completed)
+        self.assertIn("terminal_disarm", trace.terminal_reason)
+
+    def test_old_land_mode_before_our_uart_admission_cannot_prove_landing(self):
+        trace = LandingTrace(pose(0., z=10., host=1000), ground_z=.5)
+        trace.admit("new-land-command", 2000)
+        trace.observe(pose(1., z=8., host=2100, velocity=(0., 0., -1.)),
+                      heartbeat_ns=1900, mode_land=True, armed=True)
+        self.assertIsNone(trace.mode_ns)
+        trace.observe(pose(2., z=.5, host=2200), heartbeat_ns=1900, mode_land=True, armed=False)
+        self.assertFalse(trace.completed)
+        self.assertIsNotNone(trace.terminal_reason)
+
+    def test_land_mode_plus_uncontrolled_fast_fall_is_not_controlled_land(self):
+        trace = LandingTrace(pose(0., z=10., host=1000), ground_z=.5, max_descent_mps=3.)
+        trace.admit("land-command", 1100)
+        trace.observe(pose(1., z=7., host=1300, velocity=(0., 0., -8.)),
+                      heartbeat_ns=1200, mode_land=True, armed=True)
+        trace.observe(pose(2., z=.5, host=2000), heartbeat_ns=1900, mode_land=True, armed=True)
+        trace.observe(pose(3., z=.5, host=2300), heartbeat_ns=2200, mode_land=True, armed=False)
+        self.assertFalse(trace.completed)
+        self.assertIsNotNone(trace.terminal_reason)
+
     def test_repeated_pose_does_not_advance_hold(self):
         held = RegionHold((1., 2., 12.), hold_s=2)
         self.assertFalse(held.observe(pose(5)))

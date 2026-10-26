@@ -211,6 +211,49 @@ class GoalObserver:
                 self.emit("action_completed", command=command, **result)
 
 
+class LandingTrace:
+    """Require our UART LAND, observed LAND, descent, ground and then disarm."""
+
+    def __init__(self, start: Pose, ground_z: float, *, ground_tolerance=.75, max_descent_mps=3.):
+        self.start, self.ground_z = start, ground_z
+        self.ground_tolerance, self.max_descent_mps = ground_tolerance, max_descent_mps
+        self.admission_ns, self.command_id = None, None
+        self.mode_ns, self.descent_ns, self.ground_ns = None, None, None
+        self.unsafe_descent, self.completed, self.terminal_reason = False, False, None
+        self.events = []
+
+    def admit(self, command_id: str, host_ns: int):
+        if self.admission_ns is None:
+            self.admission_ns, self.command_id = host_ns, command_id
+
+    def observe(self, pose: Pose, *, heartbeat_ns: int, mode_land: bool, armed: bool):
+        if self.completed or self.terminal_reason:
+            return
+        if (self.admission_ns is not None and heartbeat_ns >= self.admission_ns
+                and mode_land and self.mode_ns is None):
+            self.mode_ns = heartbeat_ns
+            self.events.append("land_mode_observed")
+        speed = math.sqrt(sum(v * v for v in pose.velocity))
+        near_ground = abs(pose.position[2] - self.ground_z) <= self.ground_tolerance and speed <= .5
+        if self.mode_ns is not None and pose.sample_ns >= self.mode_ns:
+            self.unsafe_descent |= pose.velocity[2] < -self.max_descent_mps
+            if (self.descent_ns is None and self.start.position[2] >= self.ground_z + 2
+                    and pose.position[2] <= self.start.position[2] - 2 and pose.velocity[2] < -.1):
+                self.descent_ns = pose.sample_ns
+                self.events.append("landing_descent_observed")
+            if self.descent_ns is not None and near_ground and self.ground_ns is None:
+                self.ground_ns = pose.sample_ns
+                self.events.append("landing_ground_observed")
+        if not armed:
+            if self.mode_ns is not None and self.descent_ns is not None and self.ground_ns is not None and not self.unsafe_descent:
+                if heartbeat_ns >= self.ground_ns and near_ground:
+                    self.completed = True
+                    self.events.append("landing_disarm_observed")
+            else:
+                self.terminal_reason = "terminal_disarm_without_observed_controlled_LAND_chain"
+                self.events.append("landing_terminal_outcome")
+
+
 class RelayExperiment:
     def __init__(self, args):
         self.args = args
@@ -233,6 +276,7 @@ class RelayExperiment:
         self.modes = {name: number for number, name in self.gcs.mavutil.mode_mapping_acm.items()}
         self.initial, self.anchors = {}, {}
         self.mode_request_ns, self.mode_epoch = {}, {}
+        self.land_commands, self.landing_traces = {}, {}
         self.last_heartbeat_ns = 0
         self.refresh_counter = 0
         self.onboard_mode, self.brake_regions = {}, {}
@@ -299,6 +343,9 @@ class RelayExperiment:
         for i, tail in self.tails.items():
             for row in tail.read():
                 self.observer.admission(row)
+                landing_uav = self.land_commands.get(row.get("command_id"))
+                if row.get("event") == "uart_admitted" and landing_uav in self.landing_traces:
+                    self.landing_traces[landing_uav].admit(row["command_id"], row["host_monotonic_ns"])
                 if row.get("event") == "autopilot_mode_observed":
                     self.onboard_mode[i] = row
                     if row.get("mode") in ("BRAKE", "LAND"):
@@ -483,33 +530,48 @@ class RelayExperiment:
 
     def land(self):
         self.phase("experiment_landing")  # native fault is explicitly removed for bounded cleanup
+        self.landing_traces = {i: LandingTrace(self.poses[i], self.initial[i].position[2],
+                    ground_tolerance=self.args.land_z_tolerance_m,
+                    max_descent_mps=self.args.max_landing_descent_mps)
+                for i in UAV_IDS if i in self.initial and i in self.poses and self.summary["uavs"][str(i)]["armed"]}
         next_send, deadline = 0., time.monotonic() + self.args.land_timeout_s
         while time.monotonic() < deadline:
             self.pump(strict_pose=False, observe=False)
             if time.monotonic() >= next_send:
                 for i in UAV_IDS:
                     try:
-                        self.send(i, self.tx.set_mode_encode(i, self.mav.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
-                                                           self.modes["LAND"]))
+                        command = self.send(i, self.tx.set_mode_encode(i, self.mav.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                                                                     self.modes["LAND"]))
+                        self.land_commands[command.command_id] = i
                     except (ProtocolError, BlockingIOError):
                         pass
                 next_send = time.monotonic() + 1
             for i in UAV_IDS:
                 hb, pose = self.fresh(i, "HEARTBEAT"), self.poses.get(i)
-                if hb is None or pose is None or i not in self.initial:
+                if hb is None or pose is None:
                     continue
                 fresh_pose = 0 <= time.monotonic_ns() - pose.sample_ns <= 500_000_000
-                disarmed = not bool(hb.base_mode & self.mav.MAV_MODE_FLAG_SAFETY_ARMED)
-                near_ground = (abs(pose.position[2] - self.initial[i].position[2]) <= 1.5
-                               and math.sqrt(sum(v * v for v in pose.velocity)) <= .5)
-                if disarmed and fresh_pose and near_ground:
-                    row = self.summary["uavs"][str(i)]
-                    if not row["landed"]:
-                        row.update(landed=True, auto_disarm=row["armed"])
-                        self.emit("landing_disarm_observed", uav_id=i, actual_position_m=pose.position,
-                                  source_sim_time_s=pose.source_s)
-            if all(row["landed"] for row in self.summary["uavs"].values()):
-                return
+                trace = self.landing_traces.get(i)
+                if trace is not None and fresh_pose:
+                    trace.observe(pose, heartbeat_ns=self.gcs.latest_message_ns[i]["HEARTBEAT"],
+                                  mode_land=hb.custom_mode == self.modes["LAND"],
+                                  armed=bool(hb.base_mode & self.mav.MAV_MODE_FLAG_SAFETY_ARMED))
+                    for event in trace.events:
+                        self.emit(event, uav_id=i, actual_position_m=pose.position,
+                                  source_sim_time_s=pose.source_s, admitted_command_id=trace.command_id,
+                                  reason=trace.terminal_reason)
+                    trace.events.clear()
+                    if trace.completed:
+                        self.summary["uavs"][str(i)].update(landed=True, auto_disarm=True)
+                    if trace.terminal_reason:
+                        self.summary["uavs"][str(i)]["terminal_outcome"] = trace.terminal_reason
+            all_disarmed = all(self.fresh(i, "HEARTBEAT") is not None and not self.armed(i) for i in UAV_IDS)
+            if all_disarmed:
+                incomplete = [i for i, trace in self.landing_traces.items() if not trace.completed]
+                if any(trace.terminal_reason for trace in self.landing_traces.values()):
+                    raise ScenarioError(f"terminal disarm without controlled LAND evidence: {incomplete}")
+                if not incomplete:
+                    return
         raise ScenarioError("landing/automatic disarm not observed for all five")
 
     def run(self):
@@ -578,6 +640,8 @@ def main(argv=None):
     parser.add_argument("--arm-timeout-s", type=float, default=120)
     parser.add_argument("--takeoff-timeout-s", type=float, default=90)
     parser.add_argument("--land-timeout-s", type=float, default=180)
+    parser.add_argument("--land-z-tolerance-m", type=float, default=.75)
+    parser.add_argument("--max-landing-descent-mps", type=float, default=3.)
     args = parser.parse_args(argv)
     args.run_id = args.run_id or args.run_dir.name
     if not 0 < args.fault_start_s < args.fault_end_s < args.duration_s:
