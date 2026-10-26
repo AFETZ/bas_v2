@@ -28,12 +28,10 @@ fi
 }
 
 IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$IMAGE")"
-docker run --rm --user "$(id -u):$(id -g)" \
-  -e HOME=/tmp/bas-bullet-rotor-home \
+docker run --rm --user 0:0 \
   -v "$ROOT_DIR:/workspace/multiagent_simulation" \
-  -w /workspace/multiagent_simulation "$IMAGE_ID" bash -lc '
+  -w /workspace/multiagent_simulation "$IMAGE_ID" bash -c '
     set -Eeuo pipefail
-    mkdir -p "$HOME"
     [[ "$(dpkg-query -W -f="\${Version}" libgz-physics7 2>/dev/null)" == 7.8.0-* ]]
     engine_dir="$PWD/.external/gz-physics7-rotor"
     cmake -S "$engine_dir/source" -B "$engine_dir/build" \
