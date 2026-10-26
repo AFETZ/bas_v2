@@ -987,7 +987,7 @@ rows = [{"topic": f"/uav{i}/odometry",
         for i in range(1, int(sys.argv[2]) + 1)]
 (run / "logs/ros_qos.json").write_text(json.dumps({
     "provider": "ros2 topic info --verbose",
-    "scope": "active odometry publishers and subscriptions used by the tracker",
+    "scope": "active ROS odometry bridges; the tracker reads native Gazebo transport",
     "topics": rows}, indent=2) + "\n")
 PYQOS
 
