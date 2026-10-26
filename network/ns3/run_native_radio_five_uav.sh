@@ -108,6 +108,7 @@ run_in_container() {
     "${gui_args[@]}" \
     -e BAS_SIMULATION_MODE -e BAS_LOCKSTEP_STEP_MS -e BAS_LOCKSTEP_TIMEOUT_S \
     -e BAS_NATIVE_FIVE_IN_CONTAINER=1 \
+    -e BAS_CONTAINER_IMAGE_ID="$image_id" \
     -e BAS_SOURCE_HEAD="$(git -C "$ROOT_DIR" rev-parse HEAD)" \
     -e BAS_SOURCE_DIRTY="$(git -C "$ROOT_DIR" status --porcelain | wc -l)" \
     -e BAS_NATIVE_PROPAGATION_PROFILE="${BAS_NATIVE_PROPAGATION_PROFILE:-sionna}" \
@@ -313,7 +314,8 @@ RADIO_CONFIG="${SCENARIO_VALUES[3]}"
 SITL_DEFAULTS="${SCENARIO_VALUES[4]}"
 MAP_ID="${SCENARIO_VALUES[5]}"
 
-for required_file in "$PROJECT_SOURCE" "$PATCH_FILE" "$REALTIME_CACHE_PATCH" \
+for required_file in "$ROOT_DIR/scripts/product/capture_effective_config.py" \
+  "$PROJECT_SOURCE" "$PATCH_FILE" "$REALTIME_CACHE_PATCH" \
   "$PHASED_ARRAY_ADAPTER_PATCH" "$LOCKSTEP_TAP_PATCH" "$RADIO_CONFIG" "$WORLD" "$CAMERA_FRAGMENT" "$SITL_DEFAULTS"; do
   [[ -f "$required_file" ]] || { printf 'Missing input: %s\n' "$required_file" >&2; exit 2; }
 done
@@ -620,6 +622,35 @@ stop_pid() {
   wait "$pid" 2>/dev/null || true
 }
 
+capture_effective_configuration() {
+  local stage="$1"
+  local -a config_args=(
+    --run-dir "$RUN_DIR" --stage "$stage"
+    --config "world=$LAUNCH_WORLD" --config "scenario=$SCENARIO"
+    --config "radio=$RADIO_CONFIG" --config "sitl_defaults=$SITL_DEFAULTS"
+    --config "launch=$ROOT_DIR/src/multiagent_simulation/launch/multiagent_simulation.launch.py"
+    --config "iris_model=$ROOT_DIR/src/multiagent_simulation/models/iris/model.sdf"
+    --config "iris_radio_headless=$ROOT_DIR/src/multiagent_simulation/models/iris_radio_headless/model.sdf"
+    --config "native_routes=$RUN_DIR/logs/native_routes.txt"
+    --config "native_neighbors=$RUN_DIR/logs/static_neighbors.txt"
+  )
+  if [[ "$PROPAGATION_PROFILE" == friis ]]; then
+    config_args+=(--not-enabled sionna)
+  else
+    config_args+=(--config "sionna_scene=$SCENE")
+  fi
+  if [[ "$PHYSICS_PROFILE" == bullet_rotor ]]; then
+    config_args+=(--config "physics_runtime=$RUN_DIR/logs/physics_runtime.json")
+  else
+    config_args+=(--not-enabled physics_runtime_override)
+  fi
+  [[ ",$ACTIVE_UART_CHANNELS," == *,payload,* ]] || config_args+=(--not-enabled payload_network_adapter)
+  if [[ "$stage" == final ]]; then
+    config_args+=(--dataflash-params --observed-params "ns3_attributes=$RUN_DIR/logs/ns3_attributes.txt")
+  fi
+  python3 "$ROOT_DIR/scripts/product/capture_effective_config.py" "${config_args[@]}"
+}
+
 cleanup() {
   local status=$?
   ((CLEANUP_ACTIVE == 0)) || exit "$status"
@@ -644,6 +675,10 @@ cleanup() {
   [[ -f "$BAS_SIM_CLOCK" ]] && cp "$BAS_SIM_CLOCK" "$RUN_DIR/logs/simulation_clock.json"
   [[ -f "$BAS_SIM_CLOCK.ack" ]] && cp "$BAS_SIM_CLOCK.ack" "$RUN_DIR/logs/physics_barrier.json"
   if [[ -d "$RUN_DIR" ]]; then
+    if ! capture_effective_configuration final > "$RUN_DIR/logs/configuration_final.log" 2>&1; then
+      printf 'Final effective configuration capture failed; inspect logs/configuration_final.log.\n' >&2
+      ((status != 0)) || status=1
+    fi
     chown -R "${BAS_NATIVE_FIVE_HOST_UID:-0}:${BAS_NATIVE_FIVE_HOST_GID:-0}" "$RUN_DIR" 2>/dev/null || true
   fi
   [[ "$RUNTIME_DIR" == /tmp/bas-native-five-* ]] && rm -rf "$RUNTIME_DIR"
@@ -766,6 +801,7 @@ fi
     ip -n "$namespace" route show
   done
 } > "$RUN_DIR/logs/native_routes.txt"
+capture_effective_configuration initial > "$RUN_DIR/logs/configuration_initial.log" 2>&1
 
 for ((instance=0; instance<UAV_COUNT; ++instance)); do
   setsid socat -d -d "pty,raw,echo=0,link=$UART_DIR/control-sitl-$instance,mode=660" \
