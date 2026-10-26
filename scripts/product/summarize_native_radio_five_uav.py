@@ -3206,7 +3206,7 @@ def export_live_metrics(
         if row.get("stage", row.get("event")) != "uart_admitted":
             continue
         point = row.get("target_position_m")
-        at = finite(row.get("source_sim_time_s"))
+        at, host, clock_resolution, join_age = event_time(row)
         if (row.get("target_frame") != "ENU" or at is None
                 or not isinstance(point, list) or len(point) != 3
                 or any(finite(value) is None for value in point)):
@@ -3219,11 +3219,14 @@ def export_live_metrics(
         if uav not in UAVS:
             continue
         targets.append({"uav": uav, "source_sim_time_s": at,
+                        "host_monotonic_ns": host, "clock_resolution": clock_resolution,
+                        "host_join_abs_age_ms": join_age,
                         "x_m": point[0], "y_m": point[1], "z_m": point[2],
                         "altitude_datum": "world_ENU_z", "command_id": row.get("command_id"),
                         "epoch": row.get("epoch"), "source": "uart_admitted.target_position_m"})
     table("uav_admitted_targets.csv", targets, [
-        "uav", "source_sim_time_s", "x_m", "y_m", "z_m", "altitude_datum",
+        "uav", "source_sim_time_s", "host_monotonic_ns", "clock_resolution",
+        "host_join_abs_age_ms", "x_m", "y_m", "z_m", "altitude_datum",
         "command_id", "epoch", "source",
     ])
     sent_targets = []

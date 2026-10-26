@@ -58,13 +58,35 @@ def test_only_timestamped_ENU_admission_is_a_target(tmp_path):
             "target_frame": "ENU", "stage": "uart_admitted"}
     write_rows(raw / "logs/coordination_uav1.jsonl", [
         dict(base, stage="gcs_send"), dict(base, target_frame="NED"),
-        dict(base, source_sim_time_s=None), base,
+        dict(base, source_sim_time_s=None, host_monotonic_ns=None), base,
     ])
     result = REPORT.export_live_metrics(raw, tmp_path / "out", plots=False)
     assert result["coordination_events"] == 4
     assert result["uavs"]["uav1"]["admitted_target_samples"] == 1
     assert result["uavs"]["uav2"]["admitted_target_samples"] == 0
     assert result["uavs"]["uav1"]["world_z_m"]["max"] == 20
+
+
+def test_host_only_admission_uses_declared_tracker_clock_join_without_stale_guess(tmp_path):
+    raw = tmp_path / "raw"
+    write_rows(raw / "logs/node_state.jsonl", [snapshot(1, 20), snapshot(2, 21)])
+    event = {"uav_id": 1, "command_id": "1:1:9", "epoch": 1,
+             "source_sim_time_s": None, "clock_domain": "host_monotonic",
+             "host_monotonic_ns": 101_020_000_000, "target_position_m": [12, 25, 30],
+             "target_frame": "ENU", "stage": "uart_admitted"}
+    write_rows(raw / "logs/coordination_uav1.jsonl", [
+        event, dict(event, command_id="1:1:10", host_monotonic_ns=103_000_000_000),
+        dict(event, stage="gcs_send"),
+    ])
+    output = tmp_path / "out"
+    result = REPORT.export_live_metrics(raw, output, plots=False)
+    assert result["uavs"]["uav1"]["admitted_target_samples"] == 1
+    with (output / "metrics/uav_admitted_targets.csv").open() as stream:
+        target = next(csv.DictReader(stream))
+    assert target["command_id"] == "1:1:9"
+    assert float(target["source_sim_time_s"]) == 1
+    assert float(target["host_join_abs_age_ms"]) == 20
+    assert target["clock_resolution"] == "tracker_host_join_nearest"
 
 
 def test_report_exports_vector_plots_and_retains_partial_resource_sample(tmp_path):
