@@ -4,6 +4,7 @@
 #include "ns3/aloha-noack-mac-header.h"
 #include "ns3/aloha-noack-net-device.h"
 #include "ns3/core-module.h"
+#include "ns3/config-store.h"
 #include "ns3/csma-module.h"
 #include "ns3/ethernet-header.h"
 #include "ns3/half-duplex-ideal-phy.h"
@@ -1313,6 +1314,7 @@ main(int argc, char* argv[])
     std::string wifiDataMode = "HtMcs0";
     std::string wifiControlMode = "ErpOfdmRate6Mbps";
     std::string sourceConfig;
+    std::string attributeDump;
     std::string wifiSsid = "bas-native-radio";
     uint16_t wifiChannelNumber = 1;
     uint16_t wifiChannelWidthMhz = 20;
@@ -1368,6 +1370,7 @@ main(int argc, char* argv[])
     command.AddValue("solverProfile", "Sionna solver profile identifier", solverProfile);
     command.AddValue("wifiDataMode", "Constant 802.11n data mode", wifiDataMode);
     command.AddValue("sources", "Explicit resolved WaveformGenerator source config", sourceConfig);
+    command.AddValue("attributeDump", "Optional native ConfigStore RawText snapshot path", attributeDump);
     command.AddValue("wifiControlMode", "Constant 802.11n control mode", wifiControlMode);
     command.AddValue("wifiSsid", "Native Wi-Fi SSID", wifiSsid);
     command.AddValue("wifiTopology", "Explicit native bss or adhoc MAC topology", g_wifiTopology);
@@ -1838,6 +1841,25 @@ main(int argc, char* argv[])
         Simulator::Schedule(MilliSeconds(250), &WriteReady, readyFile);
     }
     if (g_executionMode == "realtime") Simulator::Stop(Seconds(duration));
+
+    if (!attributeDump.empty())
+    {
+        Config::SetDefault("ns3::ConfigStore::Filename", StringValue(attributeDump));
+        Config::SetDefault("ns3::ConfigStore::Mode", StringValue("Save"));
+        Config::SetDefault("ns3::ConfigStore::FileFormat", StringValue("RawText"));
+        {
+            ConfigStore attributes;
+            attributes.ConfigureDefaults(); // Includes registered GlobalValues.
+            attributes.ConfigureAttributes();
+        } // Close the upstream writer before checking and starting the runtime.
+        NS_ABORT_MSG_IF(!std::filesystem::exists(attributeDump) ||
+                        std::filesystem::file_size(attributeDump) == 0,
+                        "native ConfigStore failed to write " << attributeDump);
+        LogEvent("native_config_dump", "ns3", "", 0,
+                 static_cast<double>(std::filesystem::file_size(attributeDump)),
+                 "provider=ns3::ConfigStore;format=RawText;scope=defaults_globals_attributes;"
+                 "phase=topology_constructed_before_run;path=" + attributeDump);
+    }
 
     int result = 0;
     try

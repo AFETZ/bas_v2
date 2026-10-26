@@ -878,6 +878,7 @@ setsid ip netns exec ams-ns3 env \
   --radioPcap="$RUN_DIR/pcap/native_radio.pcap" \
   --eventCsv="$RUN_DIR/logs/native_radio_events.csv" \
   --statsFile="$RUN_DIR/metrics/native_radio_stats.json" \
+  --attributeDump="$RUN_DIR/logs/ns3_attributes.txt" \
   --executionMode="$BAS_SIMULATION_MODE" --clockFile="$BAS_SIM_CLOCK" \
   --couplingStepMs="$BAS_LOCKSTEP_STEP_MS" --stepTimeoutS="$BAS_LOCKSTEP_TIMEOUT_S" \
   --readyFile="$NS3_READY" --duration=2400 --txPowerW="$TX_POWER_W" \
