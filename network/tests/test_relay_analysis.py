@@ -18,7 +18,8 @@ def fixture(tmp_path, condition="selective", missing_uav=None):
     (run / "logs").mkdir(parents=True)
     (run / "metrics").mkdir()
     config = {"initial_master": 1, "policy": "failover", "fault_profile": condition,
-              "hold_s": 2, "duration_s": 180, "pilot": True}
+              "hold_s": 2, "duration_s": 180, "pilot": True,
+              "effective_service_args": {"command_max_age_ms": 250.}}
     summary = dict(config, run_id="unit-fixture", status="completed",
         measurement_start_host_monotonic_ns=10 * NS, measurement_start_source_sim_time_s=10,
         measurement_duration_wall_s=180, measurement_duration_source_s=180)
@@ -49,7 +50,7 @@ def fixture(tmp_path, condition="selective", missing_uav=None):
         # independently of the last completed goal and refresh offer fixtures.
         events.append(dict(body, event="uart_admitted", epoch=1, leader_id=1, grant_sequence=1,
             command_id=f"1:{i}:initial", node_id=i, target_position_m=[i, 0, 10],
-            command_created_host_monotonic_ns=53 * NS, valid_from_ns=NS, valid_until_ns=56 * NS,
+            command_created_host_monotonic_ns=53.9 * NS, valid_from_ns=NS, valid_until_ns=56 * NS,
             host_monotonic_ns=54 * NS, admission_checked_host_monotonic_ns=54 * NS - 10,
             uart_write_started_host_monotonic_ns=54 * NS - 30, uart_write_end_host_monotonic_ns=54 * NS - 20))
         offers.append(dict(request_id=f"sent-{i}", uav_id=i, host_monotonic_ns=created, command_id=body["command_id"]))
@@ -118,7 +119,6 @@ def test_log_emit_after_expiry_is_not_stale_if_exact_write_check_was_valid(tmp_p
     run, events = fixture(tmp_path)
     admitted = next(row for row in events if row.get("event") == "uart_admitted")
     admitted["host_monotonic_ns"] = 65 * NS + 10
-    admitted["admission_checked_host_monotonic_ns"] = 65 * NS - 10
     (run / "logs/coordination_events.jsonl").write_text("".join(json.dumps(row) + "\n" for row in events))
     result = analyze(run, tmp_path)
     assert result["admission_audit"]["valid"] == 10
@@ -168,6 +168,36 @@ def test_missing_relay_stage_cannot_be_a_timely_success(tmp_path):
     (run / "logs/coordination_events.jsonl").write_text("".join(json.dumps(row) + "\n" for row in events))
     result = analyze(run, tmp_path)
     assert result["rates"]["uav1"]["timely"] == 0
+
+
+def test_all_uart_commands_have_an_independent_effective_age_audit(tmp_path):
+    run, events = fixture(tmp_path)
+    admitted = next(row for row in events if row.get("event") == "uart_admitted" and row["epoch"] == 2)
+    created = admitted["command_created_host_monotonic_ns"]
+    for suffix, delay in (("exact-boundary", 250_000_000), ("late", 250_000_001)):
+        events.append(dict(admitted, command_id=f"non-target-{suffix}", target_position_m=None, target_frame=None,
+            uart_write_started_host_monotonic_ns=created + delay - 1,
+            uart_write_end_host_monotonic_ns=created + delay,
+            admission_checked_host_monotonic_ns=created + delay,
+            host_monotonic_ns=created + delay + 1))
+    events.append(dict(admitted, command_id="non-target-final-check-late", target_position_m=None, target_frame=None,
+        uart_write_started_host_monotonic_ns=created + 249_000_000,
+        uart_write_end_host_monotonic_ns=created + 250_000_000,
+        admission_checked_host_monotonic_ns=created + 250_000_001,
+        host_monotonic_ns=created + 250_000_002))
+    (run / "logs/coordination_events.jsonl").write_text("".join(json.dumps(row) + "\n" for row in events))
+    result = analyze(run, tmp_path)
+    assert result["admission_audit"]["valid"] == 11
+    assert result["admission_audit"]["command_age_exceeded"] == 1
+    assert result["admission_audit"]["command_age_exceeded_at_final_check"] == 1
+    assert result["admission_audit_settings"]["command_max_age_ms"] == 250
+    # These are non-target commands: refresh delivery rates cannot substitute
+    # for the independent UART audit.
+    assert result["rates"]["all_five"]["timely"] == 5
+    config = json.loads((run / "metrics/relay_experiment_config.json").read_text())
+    config.pop("effective_service_args")
+    (run / "metrics/relay_experiment_config.json").write_text(json.dumps(config))
+    assert analyze(run, tmp_path)["unverifiable_admissions"] == 13
 
 
 def test_total_isolation_counts_lost_renewals_separately_from_new_appointments(tmp_path):
@@ -347,7 +377,7 @@ def test_signature_excludes_run_paths_but_includes_mac_modes_and_effective_servi
     changed_paths["metadata"]["config"].update(run_id="another-run", run_dir="/another/run", node_state="/tmp/another/state", phase_file="/another/phase")
     changed_paths["metadata"]["config"]["effective_service_args"].update(event_log="/another/log", radio_watchdog_file="/another/watchdog", run_id="another-run")
     assert REPORT.campaign_record(planned, changed_paths)["comparability"] == first["comparability"]
-    for change in ("mac", "command_age", "landing", "mode"):
+    for change in ("mac", "command_age", "landing", "mode", "propagation"):
         value = deepcopy(base)
         if change == "mac":
             value["metadata"]["native_stats"]["wifi_aggregation_enabled"] = True
@@ -356,8 +386,10 @@ def test_signature_excludes_run_paths_but_includes_mac_modes_and_effective_servi
             value["metadata"]["config"]["effective_service_args"]["command_max_age_ms"] = 100
         elif change == "landing":
             value["metadata"]["config"]["land_z_tolerance_m"] = .5
-        else:
+        elif change == "mode":
             value["metadata"]["native_stats"]["wifi_data_mode"] = "HtMcs1"
+        else:
+            value["metadata"]["native_stats"]["selected_propagation_profile"] = "sionna"
         assert REPORT.campaign_record(planned, value)["comparability"] != first["comparability"]
     missing_effective = deepcopy(base)
     missing_effective["metadata"]["native_stats"].pop("wifi_aggregation_enabled")

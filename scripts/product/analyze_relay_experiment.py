@@ -194,6 +194,9 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
         errors.append("native selective fault does not establish loss of the actual pre-fault coordinator link")
 
     admissions = [row for row in events if stage(row) == "uart_admitted"]
+    admission_age_limit_ms = finite(config.get("effective_service_args", {}).get("command_max_age_ms"))
+    if admission_age_limit_ms is not None and admission_age_limit_ms <= 0:
+        admission_age_limit_ms = None
     audit = Counter()
     admission_status: dict[int, str] = {}
     seen = set()
@@ -215,6 +218,13 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
                 status = "write_outside_lease"
             elif not created <= write_start <= write_end <= checked:
                 status = "invalid_write_chronology"
+            elif status == "valid":
+                if admission_age_limit_ms is None:
+                    status = "unverifiable_missing_command_age_limit"
+                elif write_end - created > admission_age_limit_ms * 1e6:
+                    status = "command_age_exceeded"
+                elif checked - created > admission_age_limit_ms * 1e6:
+                    status = "command_age_exceeded_at_final_check"
             issued = grants.get(str(row.get("grant_sequence")))
             if issued is None:
                 status = "unverifiable_missing_issued_grant"
@@ -408,6 +418,8 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
         goal_recovery_per_uav=goal_recovery, completion_gap_s_per_uav=completion_gap,
         goal_recovery_all_five=recovery(group_goal_point, fault, end, applicable=applicable, restricted_s=restricted_s),
         admission_audit=dict(audit), unverifiable_admissions=sum(value for key, value in audit.items() if key.startswith("unverifiable")),
+        admission_audit_settings=dict(command_max_age_ms=admission_age_limit_ms,
+            source="recorded effective_service_args.command_max_age_ms; missing is unverifiable"),
         admission_total=len(admissions),
         command_lineage_errors=sum(row["lineage_status"] == "unverifiable_or_mismatched" for row in commands),
         total_GCS=dict(applicable=condition == "total_GCS", all_grants_issued_during_fault=len(issued_during),
@@ -570,7 +582,8 @@ ENVIRONMENT_FIELDS = ("map_id", "scenario_key", "physics_profile", "gazebo_reque
     "stack_cpuset", "radio_cpuset", "event_logging", "capture_images", "gui", "carrier_hz", "channel_number",
     "channel_width_mhz", "tx_power_w", "phy_rate_bps", "channel_state_max_age_s", "readiness_lag_max_ms",
     "wifi_data_mode", "wifi_control_mode", "wifi_explicit_bar_after_missed_block_ack_requested", "wifi_aggregation_requested")
-RADIO_FIELDS = ("propagation_profile", "wifi_topology", "fault_extra_loss_db", "fault_master_id", "tx_power_w",
+RADIO_FIELDS = ("selected_propagation_profile", "rx_psd_propagation_model", "sionna_in_process", "sionna_drives_rx_psd",
+    "wifi_topology", "fault_extra_loss_db", "fault_master_id", "tx_power_w",
     "state_max_age_s", "carrier_hz", "wifi_actual_channel_number", "wifi_actual_center_frequency_hz",
     "wifi_channel_width_mhz", "wifi_standard", "wifi_data_mode", "wifi_control_mode",
     "wifi_explicit_bar_after_missed_block_ack", "wifi_aggregation_enabled")
