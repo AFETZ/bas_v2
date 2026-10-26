@@ -1021,7 +1021,8 @@ PollFaultMatrix(Ptr<MatrixPropagationLossModel> loss,
 {
     const std::string phase = ReadPhase();
     const bool start = !g_faultActive && phase == "experiment_fault";
-    const bool finish = g_faultActive && phase == "experiment_recovery";
+    const bool finish = g_faultActive &&
+        (phase == "experiment_recovery" || phase == "experiment_landing");
     if (start || finish)
     {
         const double addedLoss = start ? g_faultExtraLossDb : 0.0;
