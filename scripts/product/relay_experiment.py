@@ -203,6 +203,7 @@ class GoalObserver:
                               dwell_s=self.args.hold_s, dwell_clock_domain="source_sim_time",
                               target_position_m=goal.target, leader_id=command.leader_id,
                               command_created_host_monotonic_ns=command.created_ns,
+                              admitted_command_id=command.command_id, admitted_epoch=command.epoch,
                               max_vertical_displacement_m=state["max_vertical_displacement_m"],
                               maneuver_observed=state["max_vertical_displacement_m"] >= 1.)
                 self.completed[goal.goal_id] = dict(result, uav_id=i, epoch=command.epoch,
@@ -233,6 +234,7 @@ class RelayExperiment:
         self.initial, self.anchors = {}, {}
         self.mode_request_ns, self.mode_epoch = {}, {}
         self.last_heartbeat_ns = 0
+        self.refresh_counter = 0
         self.onboard_mode, self.brake_regions = {}, {}
         self.source_s, self.poses = None, {}
         self.phase_name = None
@@ -246,7 +248,7 @@ class RelayExperiment:
         metrics.mkdir(exist_ok=True)
         self.csv_handle = (metrics / "relay_control_refresh.csv").open("w", newline="")
         self.csv = csv.DictWriter(self.csv_handle, fieldnames=["host_monotonic_ns", "source_sim_time_s",
-            "phase", "uav_id", "goal_id", "goal_created_host_monotonic_ns", "command_id", "epoch",
+            "request_id", "scheduled_host_monotonic_ns", "phase", "uav_id", "goal_id", "goal_created_host_monotonic_ns", "command_id", "epoch",
             "leader_id", "target_world_z_m", "target_relative_alt_m", "send_status"])
         self.csv.writeheader()
         frozen = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
@@ -394,10 +396,18 @@ class RelayExperiment:
             anchor["lat_int"], anchor["lon_int"], goal.relative_alt_m,
             0, 0, 0, 0, 0, 0, 0, 0)
 
-    def refresh(self, goals: dict[int, Goal]):
+    def refresh(self, goals: dict[int, Goal], *, scheduled_ns: int):
         now = time.monotonic_ns()
+        self.refresh_counter += 1
         grant = self.gcs.grant
         for i, goal in goals.items():
+            request_id = f"refresh{self.refresh_counter}:uav{i}"
+            self.emit("control_refresh_offered", uav_id=i, destination_id=i,
+                      request_id=request_id, goal_id=goal.goal_id,
+                      request_created_host_monotonic_ns=now,
+                      scheduled_host_monotonic_ns=scheduled_ns, source_sim_time_s=self.source_s,
+                      goal_created_host_monotonic_ns=goal.created_ns,
+                      target_position_m=goal.target, target_frame="ENU")
             command, status = None, "no_active_issued_lease"
             try:
                 if grant is None or not grant.valid_from_ns <= now < grant.valid_until_ns:
@@ -418,13 +428,19 @@ class RelayExperiment:
                     self.observer.register(command, goal)
                     status = "sent_to_native_radio"
                     self.emit("control_refresh_created", command=command, goal_id=goal.goal_id,
+                              request_id=request_id,
                               source_sim_time_s=self.source_s,
                               goal_created_host_monotonic_ns=goal.created_ns,
                               goal_created_source_sim_time_s=goal.created_source_s,
                               target_relative_alt_m=goal.relative_alt_m)
             except (ProtocolError, BlockingIOError) as exc:
                 status = str(exc)
+            if command is None:
+                self.emit("control_refresh_unavailable", uav_id=i, destination_id=i,
+                          request_id=request_id, goal_id=goal.goal_id, reason=status,
+                          request_created_host_monotonic_ns=now, source_sim_time_s=self.source_s)
             self.csv.writerow(dict(host_monotonic_ns=now, source_sim_time_s=self.source_s,
+                request_id=request_id, scheduled_host_monotonic_ns=scheduled_ns,
                 phase=self.phase_name, uav_id=i, goal_id=goal.goal_id, goal_created_host_monotonic_ns=goal.created_ns,
                 command_id=command.command_id if command else "", epoch=command.epoch if command else "",
                 leader_id=command.leader_id if command else "", target_world_z_m=goal.target[2],
@@ -458,7 +474,7 @@ class RelayExperiment:
                               source_sim_time_s=self.source_s, target_position_m=goal.target,
                               target_frame="ENU", target_relative_alt_m=relative)
             if time.monotonic_ns() >= next_refresh:
-                self.refresh(goals)
+                self.refresh(goals, scheduled_ns=next_refresh)
                 next_refresh += int(self.args.command_period_s * 1e9)
         self.summary["measurement_duration_source_s"] = self.source_s - start_source
         self.summary["measurement_duration_wall_s"] = (time.monotonic_ns() - start_ns) / 1e9
