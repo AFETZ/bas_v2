@@ -133,6 +133,7 @@ double g_wifiActualCenterFrequencyHz{0.0};
 std::string g_wifiDataMode;
 std::string g_wifiControlMode;
 std::string g_wifiSsid;
+std::string g_wifiTopology{"bss"};
 
 class NativeRuntimeSampler;
 NativeRuntimeSampler* g_runtimeSampler{nullptr};
@@ -1023,20 +1024,22 @@ WriteReady(const std::string& path)
 void
 WriteReadyWhenWifiAssociated(const std::string& path)
 {
-    const bool associated = !g_wifiStations.empty() &&
+    const bool associated = g_wifiTopology == "adhoc" || (!g_wifiStations.empty() &&
                             std::all_of(g_wifiStations.begin(),
                                         g_wifiStations.end(),
                                         [](const Ptr<StaWifiMac>& mac) {
                                             return mac && mac->IsAssociated();
-                                        });
+                                        }));
     const bool realtimeReady = g_realtimeLagSamples > 1 &&
                                g_healthyLagSamples >= g_readinessConsecutiveSamples;
     if (associated && (g_lockstep ? g_completedSteps>0 : realtimeReady) && g_liveStateValid)
     {
         std::ostringstream details;
-        details << "all_stations_associated;lag_ms=" << g_latestRealtimeLagMs
+        details << (g_wifiTopology == "adhoc" ? "native_adhoc;lag_ms=" : "all_stations_associated;lag_ms=")
+                << g_latestRealtimeLagMs
                 << ";healthy_samples=" << g_healthyLagSamples;
-        LogEvent("wifi_bss_ready", "cp", "", 0, g_wifiStations.size(), details.str());
+        LogEvent(g_wifiTopology == "adhoc" ? "wifi_adhoc_ready" : "wifi_bss_ready",
+                 "cp", "", 0, g_wifiStations.size(), details.str());
         WriteReady(path);
         return;
     }
@@ -1176,6 +1179,7 @@ WriteStats(const std::string& path)
            << "  \"wifi_data_mode\": \"" << g_wifiDataMode << "\",\n"
            << "  \"wifi_control_mode\": \"" << g_wifiControlMode << "\",\n"
            << "  \"wifi_ssid\": \"" << g_wifiSsid << "\",\n"
+           << "  \"wifi_topology\": \"" << g_wifiTopology << "\",\n"
            << "  \"tap_ingress_segment\": {\"type\": \"local_fast_csma\", \"radio_medium\": false},\n"
            << "  \"cache_policy\": \"displacement_velocity_orientation_or_time\",\n"
            << "  \"simulation_mode\": \"" << g_executionMode << "\",\n"
@@ -1365,7 +1369,8 @@ main(int argc, char* argv[])
     command.AddValue("wifiDataMode", "Constant 802.11n data mode", wifiDataMode);
     command.AddValue("sources", "Explicit resolved WaveformGenerator source config", sourceConfig);
     command.AddValue("wifiControlMode", "Constant 802.11n control mode", wifiControlMode);
-    command.AddValue("wifiSsid", "Infrastructure BSS SSID", wifiSsid);
+    command.AddValue("wifiSsid", "Native Wi-Fi SSID", wifiSsid);
+    command.AddValue("wifiTopology", "Explicit native bss or adhoc MAC topology", g_wifiTopology);
     command.AddValue("wifiChannelNumber", "802.11 channel number", wifiChannelNumber);
     command.AddValue("wifiChannelWidthMhz", "802.11n channel width", wifiChannelWidthMhz);
     command.AddValue("carrierHz", "Sionna and Wi-Fi carrier frequency", carrierHz);
@@ -1443,6 +1448,10 @@ main(int argc, char* argv[])
     NS_ABORT_MSG_IF(uavCount != 1 && uavCount != 5, "uavCount must be 1 or 5");
     NS_ABORT_MSG_IF(radioBackend != "aloha" && radioBackend != "wifi",
                     "radioBackend must be aloha or wifi");
+    NS_ABORT_MSG_IF(g_wifiTopology != "bss" && g_wifiTopology != "adhoc",
+                    "wifiTopology must be bss or adhoc");
+    NS_ABORT_MSG_IF(g_wifiTopology == "adhoc" && radioBackend != "wifi",
+                    "adhoc topology requires the native Wi-Fi backend");
     NS_ABORT_MSG_IF(radioBackend == "wifi" && wifiChannelWidthMhz != 20,
                     "the product Wi-Fi profile currently requires a 20 MHz channel");
     NS_ABORT_MSG_IF(radioBackend == "wifi" && wifiChannelNumber == 0,
@@ -1660,18 +1669,21 @@ main(int argc, char* argv[])
                                      StringValue(wifiControlMode));
         WifiMacHelper wifiMac;
         const Ssid ssid(wifiSsid);
-        wifiMac.SetType("ns3::ApWifiMac",
-                        "QosSupported",
-                        BooleanValue(true),
-                        "Ssid",
-                        SsidValue(ssid));
-        radioDevices.Add(wifi.Install(wifiPhy, wifiMac, NodeContainer(commandPost)));
-        wifiMac.SetType("ns3::StaWifiMac",
-                        "QosSupported",
-                        BooleanValue(true),
-                        "Ssid",
-                        SsidValue(ssid));
-        radioDevices.Add(wifi.Install(wifiPhy, wifiMac, uavs));
+        if (g_wifiTopology == "adhoc")
+        {
+            wifiMac.SetType("ns3::AdhocWifiMac", "QosSupported", BooleanValue(true),
+                            "Ssid", SsidValue(ssid));
+            radioDevices.Add(wifi.Install(wifiPhy, wifiMac, radioNodes));
+        }
+        else
+        {
+            wifiMac.SetType("ns3::ApWifiMac", "QosSupported", BooleanValue(true),
+                            "Ssid", SsidValue(ssid));
+            radioDevices.Add(wifi.Install(wifiPhy, wifiMac, NodeContainer(commandPost)));
+            wifiMac.SetType("ns3::StaWifiMac", "QosSupported", BooleanValue(true),
+                            "Ssid", SsidValue(ssid));
+            radioDevices.Add(wifi.Install(wifiPhy, wifiMac, uavs));
+        }
         wifiPhy.EnablePcap(radioPcap + ".radiotap", radioDevices);
 
         Ptr<WifiNetDevice> referenceDevice = DynamicCast<WifiNetDevice>(radioDevices.Get(0));
@@ -1724,7 +1736,7 @@ main(int argc, char* argv[])
             device->GetRemoteStationManager()->TraceConnectWithoutContext(
                 "MacTxDataFailed",
                 MakeBoundCallback(&WifiDataRetry, index));
-            if (index > 0)
+            if (index > 0 && g_wifiTopology == "bss")
             {
                 Ptr<StaWifiMac> station = DynamicCast<StaWifiMac>(device->GetMac());
                 NS_ABORT_MSG_IF(!station, "expected StaWifiMac on UAV radio");

@@ -7,6 +7,10 @@ CONTAINER_NAME="${BAS_NATIVE_FIVE_CONTAINER_NAME:-bas-v2-native-radio-five-uav}"
 SCENARIO_KEY="${BAS_NATIVE_FIVE_SCENARIO:-town01}"
 GUI="${BAS_NATIVE_FIVE_GUI:-0}"
 CAPTURE_IMAGES="${BAS_NATIVE_CAPTURE_IMAGES:-1}"
+WIFI_TOPOLOGY="${BAS_NATIVE_WIFI_TOPOLOGY:-bss}"
+[[ "$WIFI_TOPOLOGY" == bss || "$WIFI_TOPOLOGY" == adhoc ]] || {
+  printf 'Unsupported Wi-Fi topology: %s\n' "$WIFI_TOPOLOGY" >&2; exit 2;
+}
 PROPAGATION_PROFILE="${BAS_NATIVE_PROPAGATION_PROFILE:-sionna}"
 case "$PROPAGATION_PROFILE" in
   sionna|hybrid|friis) ;;
@@ -75,6 +79,7 @@ run_in_container() {
     -e BAS_SOURCE_HEAD="$(git -C "$ROOT_DIR" rev-parse HEAD)" \
     -e BAS_SOURCE_DIRTY="$(git -C "$ROOT_DIR" status --porcelain | wc -l)" \
     -e BAS_NATIVE_PROPAGATION_PROFILE="${BAS_NATIVE_PROPAGATION_PROFILE:-sionna}" \
+    -e BAS_NATIVE_WIFI_TOPOLOGY="$WIFI_TOPOLOGY" \
     -e BAS_NATIVE_OPERATOR_SECONDS="${BAS_NATIVE_OPERATOR_SECONDS:-0}" \
     -e BAS_NATIVE_SOURCES="${BAS_NATIVE_SOURCES:-}" \
     -e BAS_NATIVE_EXTERNAL_CONFIG="${BAS_NATIVE_EXTERNAL_CONFIG:-}" \
@@ -385,14 +390,14 @@ fi
 [[ -x "$PYTHON_TOOLING/bin/cmake" ]] || { printf 'Pinned CMake tooling is absent.\n' >&2; exit 2; }
 
 mkdir -p "$RUN_DIR"/{logs,metrics,pcap,screenshots,plots} "$UART_DIR" "$WORK_DIR"
-if [[ "$SCENARIO_MODE" == flight_diagnostic && "$UAV_COUNT" == 1 ]]; then
+if [[ "$SCENARIO_MODE" != product && "$UAV_COUNT" == 1 ]]; then
   python3 - "$SCENARIO" "$RUN_DIR/diagnostic_scenario.yaml" <<'PYSCENARIO'
 import sys
 from pathlib import Path
 import yaml
 value = yaml.safe_load(Path(sys.argv[1]).read_text())
 value["robots"] = value["robots"][:1]
-value["scenario"]["name"] += "_one_uav_flight_diagnostic"
+value["scenario"]["name"] += "_one_uav_diagnostic"
 Path(sys.argv[2]).write_text(yaml.safe_dump(value, sort_keys=False))
 PYSCENARIO
   SCENARIO="$RUN_DIR/diagnostic_scenario.yaml"
@@ -462,6 +467,7 @@ PY
   printf 'started_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf 'git_head=%s\n' "${BAS_SOURCE_HEAD:-$(git -C "$ROOT_DIR" rev-parse HEAD)}"
   printf 'source_dirty_paths=%s\n' "${BAS_SOURCE_DIRTY:-unknown}"
+  printf 'wifi_topology=%s\n' "$WIFI_TOPOLOGY"
   printf 'simulation_mode=%s\nlockstep_step_ms=%s\nlockstep_wall_timeout_s=%s\n' "$BAS_SIMULATION_MODE" "$BAS_LOCKSTEP_STEP_MS" "$BAS_LOCKSTEP_TIMEOUT_S"
   printf 'ns3_version=3.48\n'
   printf 'ns3_exact_sha=%s\n' "$(git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" rev-parse HEAD)"
@@ -649,10 +655,31 @@ ip -n ams-gcs neigh replace 10.71.0.1 lladdr 02:71:00:00:00:01 nud permanent dev
 for index in "${UAV_INDICES[@]}"; do
   ip -n "ams-uav$index" neigh replace "10.71.$index.1" lladdr 02:71:ff:00:00:01 nud permanent dev eth0
 done
+if [[ "$WIFI_TOPOLOGY" == adhoc ]]; then
+  # Peer host routes avoid the command-post router. Every packet still crosses
+  # the native Wi-Fi MAC/PHY through the per-UAV TAP; there is no Linux bridge
+  # joining UAV namespaces.
+  for index in "${UAV_INDICES[@]}"; do
+    for peer in "${UAV_INDICES[@]}"; do
+      [[ "$peer" != "$index" ]] || continue
+      printf -v peer_mac '02:71:%02x:00:10:10' "$peer"
+      ip -n "ams-uav$index" route add "10.71.$peer.10/32" dev eth0 scope link
+      ip -n "ams-uav$index" neigh replace "10.71.$peer.10" lladdr "$peer_mac" nud permanent dev eth0
+    done
+  done
+fi
 {
   ip -n ams-gcs neigh show dev eth0
   for index in "${UAV_INDICES[@]}"; do ip -n "ams-uav$index" neigh show dev eth0; done
 } > "$RUN_DIR/logs/static_neighbors.txt"
+{
+  for endpoint in gcs "${UAV_INDICES[@]}"; do
+    namespace="ams-uav$endpoint"
+    [[ "$endpoint" != gcs ]] || namespace=ams-gcs
+    printf '%s\n' "$namespace"
+    ip -n "$namespace" route show
+  done
+} > "$RUN_DIR/logs/native_routes.txt"
 
 for ((instance=0; instance<UAV_COUNT; ++instance)); do
   setsid socat -d -d "pty,raw,echo=0,link=$UART_DIR/control-sitl-$instance,mode=660" \
@@ -844,6 +871,7 @@ setsid ip netns exec ams-ns3 env \
   --wifiDataMode="$WIFI_DATA_MODE" --wifiControlMode="$WIFI_CONTROL_MODE" \
   --wifiChannelNumber="$WIFI_CHANNEL_NUMBER" \
   --wifiChannelWidthMhz="$WIFI_CHANNEL_WIDTH_MHZ" --wifiSsid="$WIFI_SSID" \
+  --wifiTopology="$WIFI_TOPOLOGY" \
   --carrierHz="$CARRIER_HZ" --tapGcs=tap-gcs --tapUavs="$TAP_UAVS" \
   --propagationProfile="${BAS_NATIVE_PROPAGATION_PROFILE:-sionna}" \
   --scene="$SCENE" --positionFile="$NODE_STATE" --phaseFile="$PHASE_FILE" \
