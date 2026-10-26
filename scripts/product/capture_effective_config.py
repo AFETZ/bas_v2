@@ -9,7 +9,10 @@ manifest distinguishes configured inputs from observed effective parameters.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import csv
 import json
+import math
 import os
 import platform
 import re
@@ -23,6 +26,105 @@ from typing import Any
 
 EXPECTED = ("world", "scenario", "radio", "ns3_attributes", "ros_topics", "ros_qos",
             *(f"ardupilot_uav{number}" for number in range(1, 6)))
+
+
+def export_dataflash_parameters(run_dir: Path, output_dir: Path) -> dict[str, Any]:
+    """Decode observed PARM records with upstream pymavlink, outside hot loops."""
+    from pymavlink import DFReader
+
+    run_dir, output_dir = run_dir.resolve(), output_dir.resolve()
+    if not run_dir.is_dir():
+        raise ValueError("raw run directory does not exist")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fields = ["uav", "source_log", "parm_record_index", "name", "value", "default_value",
+              "autopilot_time_us", "autopilot_time_s", "clock_domain", "value_status"]
+    result: dict[str, Any] = {
+        "decoder": "upstream pymavlink.DFReader.DFReader_binary",
+        "raw_run_dir": str(run_dir), "uavs": {},
+        "limits": ["Only PARM records physically present in DataFlash are exported.",
+                   "Completeness is not verified against live PARAM_COUNT; missing parameters are not invented.",
+                   "DataFlash boot time is separate from Gazebo and host clocks; no implicit alignment.",
+                   "Last observed values can precede shutdown when logging stops early; inspect source log coverage."],
+    }
+
+    def number(value: Any) -> float | None:
+        try:
+            value = float(value)
+            return value if math.isfinite(value) else None
+        except (TypeError, ValueError):
+            return None
+
+    for instance in range(5):
+        uav = f"uav{instance + 1}"
+        paths = sorted((run_dir / "sitl" / str(instance) / "logs").glob("*.BIN"))
+        initial, latest = {}, {}
+        logs = []
+        changes = 0
+        total = 0
+        csv_name = f"{uav}_parameters.csv"
+        with (output_dir / csv_name).open("w", encoding="utf-8", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=fields)
+            writer.writeheader()
+            for path in paths:
+                coverage: dict[str, Any] = {"source_log": str(path), "bytes": path.stat().st_size,
+                                            "parm_records": 0, "status": "not_recorded"}
+                names = set()
+                reader = None
+                warning_name = f"{uav}_{path.stem}_decoder.log"
+                with (output_dir / warning_name).open("w", encoding="utf-8") as warnings:
+                    try:
+                        # Upstream decode warnings remain inspectable; stdout
+                        # is not flooded with parser diagnostics in a campaign.
+                        with contextlib.redirect_stdout(warnings), contextlib.redirect_stderr(warnings):
+                            reader = DFReader.DFReader_binary(str(path))
+                            while True:
+                                message = reader.recv_match(type="PARM")
+                                if message is None:
+                                    break
+                                name = str(message.Name).rstrip("\0")
+                                value = number(message.Value)
+                                boot_us = number(getattr(message, "TimeUS", None))
+                                if boot_us is None:
+                                    boot_ms = number(getattr(message, "TimeMS", None))
+                                    boot_us = boot_ms * 1000 if boot_ms is not None else None
+                                coverage["parm_records"] += 1
+                                record = {"uav": uav, "source_log": str(path),
+                                          "parm_record_index": coverage["parm_records"],
+                                          "name": name, "value": value,
+                                          "default_value": number(getattr(message, "Default", None)),
+                                          "autopilot_time_us": boot_us,
+                                          "autopilot_time_s": boot_us / 1e6 if boot_us is not None else None,
+                                          "clock_domain": "ardupilot_boot",
+                                          "value_status": "observed" if value is not None else "invalid_nonfinite_value"}
+                                writer.writerow(record)
+                                total += 1
+                                names.add(name)
+                                initial.setdefault(name, record)
+                                if name in latest and latest[name]["value"] != value:
+                                    changes += 1
+                                latest[name] = record
+                        coverage["status"] = "observed" if coverage["parm_records"] else "not_recorded"
+                    except Exception as error:
+                        coverage["status"] = "partial_decode_error"
+                        coverage["decode_error"] = type(error).__name__ + ": " + str(error)
+                    finally:
+                        if reader is not None:
+                            reader.close()
+                coverage.update(unique_parameters=len(names), decoder_log=warning_name,
+                                decoder_log_bytes=(output_dir / warning_name).stat().st_size)
+                logs.append(coverage)
+        values_name = f"{uav}_observed_values.json"
+        (output_dir / values_name).write_text(json.dumps({"first_observed": initial, "last_observed": latest},
+            allow_nan=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        status = "partial_decode_error" if any(row["status"] == "partial_decode_error" for row in logs) else "observed" if total else "not_recorded"
+        result["uavs"][uav] = {"status": status,
+                               "parm_records": total, "unique_parameters": len(latest),
+                               "observed_value_changes": changes, "csv": csv_name,
+                               "observed_values_json": values_name, "logs": logs,
+                               "completeness": "observed_only_not_verified_against_live_parameter_count"}
+    (output_dir / "dataflash_parameter_summary.json").write_text(
+        json.dumps(result, allow_nan=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return result
 
 
 def named_file(value: str) -> tuple[str, Path]:
@@ -41,6 +143,17 @@ def source_state(repo_root: Path) -> dict[str, Any]:
                 "dirty_paths": git("status", "--porcelain=v1", "--untracked-files=normal").splitlines(),
                 "scope": "revision/status only; uncommitted source contents are not captured"}
     except (OSError, subprocess.SubprocessError):
+        launcher_head = os.environ.get("BAS_SOURCE_HEAD", "")
+        if re.fullmatch(r"[0-9a-fA-F]{40,64}", launcher_head):
+            try:
+                dirty_count = int(os.environ["BAS_SOURCE_DIRTY"])
+            except (KeyError, ValueError):
+                dirty_count = None
+            return {"repo_root": str(repo_root.resolve()), "head": launcher_head,
+                    "dirty_count": dirty_count, "status": "observed_launcher_metadata",
+                    "source": "host launcher env BAS_SOURCE_HEAD/BAS_SOURCE_DIRTY",
+                    "full_git_snapshot_available": False,
+                    "scope": "launcher-observed revision/count only; dirty contents require a host patch"}
         return {"repo_root": str(repo_root.resolve()), "head": None,
                 "status": "not_recorded", "reason": "git metadata unavailable"}
 
@@ -118,7 +231,8 @@ def capture_snapshot(
             "stage": stage, "run_dir": str(run_dir),
             "captured_host_monotonic_ns": time.monotonic_ns(),
             "captured_unix_ns": time.time_ns(),
-            "source": source_state(repo_root), "container_image_id": image_id,
+            "source": source_state(repo_root),
+            "container_image_id": image_id or os.environ.get("BAS_CONTAINER_IMAGE_ID"),
             "machine": {"platform": platform.platform(), "cpu_count": os.cpu_count(),
                         "memory_total_bytes": memory, "python": platform.python_version()},
             "files": records, "coverage": coverage,
@@ -151,8 +265,29 @@ def main() -> int:
     parser.add_argument("--not-enabled", action="append", default=[],
                         help="Explicitly inapplicable component/export, e.g. sionna")
     parser.add_argument("--image-id", help="Actual immutable image ID supplied by the launcher")
+    parser.add_argument("--dataflash-params", action="store_true",
+                        help="Decode actual PARM records from sitl/0..4/logs/*.BIN into the snapshot inputs")
+    parser.add_argument("--export-dataflash-only", action="store_true",
+                        help="Only export DataFlash parameters; allows read-only historical inputs")
+    parser.add_argument("--output-dir", type=Path,
+                        help="Output directory required for --export-dataflash-only")
     args = parser.parse_args()
     try:
+        if args.export_dataflash_only:
+            if args.output_dir is None:
+                parser.error("--export-dataflash-only requires --output-dir")
+            result = export_dataflash_parameters(args.run_dir, args.output_dir)
+            print(json.dumps({uav: {key: row[key] for key in ("status", "parm_records", "unique_parameters")}
+                              for uav, row in result["uavs"].items()}, sort_keys=True))
+            return 0
+        if args.output_dir is not None:
+            parser.error("--output-dir requires --export-dataflash-only")
+        if args.dataflash_params:
+            dataflash_dir = args.run_dir / "metrics/dataflash_parameters"
+            parameter_export = export_dataflash_parameters(args.run_dir, dataflash_dir)
+            args.observed_params += [("ardupilot_" + uav, dataflash_dir / row["csv"])
+                                     for uav, row in parameter_export["uavs"].items() if row["parm_records"]]
+            args.config += [("ardupilot_dataflash_index", dataflash_dir / "dataflash_parameter_summary.json")]
         result = capture_snapshot(args.run_dir, stage=args.stage, repo_root=args.repo_root,
                                   configs=args.config, observed=args.observed_params,
                                   not_enabled=args.not_enabled, image_id=args.image_id)

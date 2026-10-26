@@ -44,3 +44,13 @@ def test_existing_snapshot_cannot_be_replaced(tmp_path):
     with pytest.raises(FileExistsError):
         SNAPSHOT.capture_snapshot(run, stage="initial", repo_root=tmp_path, configs=[], observed=[])
     assert manifest.read_bytes() == before
+
+
+def test_host_launcher_metadata_is_explicit_fallback_when_git_is_unmounted(tmp_path, monkeypatch):
+    monkeypatch.setenv("BAS_SOURCE_HEAD", "a" * 40)
+    monkeypatch.setenv("BAS_SOURCE_DIRTY", "0")
+    result = SNAPSHOT.source_state(tmp_path)
+    assert result["head"] == "a" * 40
+    assert result["dirty_count"] == 0
+    assert result["full_git_snapshot_available"] is False
+    assert "launcher env" in result["source"]
