@@ -14,6 +14,7 @@ from unittest.mock import patch
 from network.coordination.policy import Authority, make_command
 from scripts.product.relay_experiment import (EventTail, Goal, GoalObserver,
                                               LandingTrace, Pose, PoseReader, RegionHold, ScenarioError, main)
+from scripts.product.relay_experiment import RelayExperiment
 
 
 def pose(source, z=12., host=1000, velocity=(0., 0., 0.)):
@@ -21,6 +22,46 @@ def pose(source, z=12., host=1000, velocity=(0., 0., 0.)):
 
 
 class RelayExperimentTests(unittest.TestCase):
+    def test_guided_is_reestablished_after_brake_and_requires_post_request_heartbeat(self):
+        now = 2_000_000_000
+        grant = Authority("run").issue(1, now - 100_000_000, 2_000_000_000)
+        scenario = RelayExperiment.__new__(RelayExperiment)
+        scenario.gcs = SimpleNamespace(grant=grant, latest_message_ns={1: {"HEARTBEAT": now - 10}})
+        heartbeat = SimpleNamespace(custom_mode=17)
+        scenario.fresh = lambda *args: heartbeat
+        scenario.mode_epoch, scenario.mode_request_ns = {1: 1}, {1: now - 1_000_000_000}
+        scenario.modes = {"GUIDED": 4}
+        scenario.mav = SimpleNamespace(MAV_MODE_FLAG_CUSTOM_MODE_ENABLED=1)
+        scenario.tx = SimpleNamespace(set_mode_encode=lambda *args: args)
+        sent = []
+        scenario.send = lambda i, message: sent.append(message) or SimpleNamespace(created_ns=now)
+        with patch("scripts.product.relay_experiment.time.monotonic_ns", return_value=now):
+            self.assertFalse(scenario.guided_ready(1))
+            self.assertEqual(len(sent), 1)
+            heartbeat.custom_mode = 4
+            self.assertFalse(scenario.guided_ready(1))  # old cached GUIDED is insufficient
+            scenario.gcs.latest_message_ns[1]["HEARTBEAT"] = now
+            self.assertTrue(scenario.guided_ready(1))
+
+    def test_new_epoch_requires_new_guided_confirmation_even_if_cached_mode_matches(self):
+        issuer = Authority("run")
+        old = issuer.issue(1, 3_000_000_000, 2_000_000_000)
+        new = issuer.issue(2, 4_800_000_000, 2_000_000_000)
+        now = new.valid_from_ns
+        scenario = RelayExperiment.__new__(RelayExperiment)
+        scenario.gcs = SimpleNamespace(grant=new, latest_message_ns={1: {"HEARTBEAT": now - 1}})
+        scenario.fresh = lambda *args: SimpleNamespace(custom_mode=4)
+        scenario.mode_epoch, scenario.mode_request_ns = {1: old.epoch}, {1: now - 100_000_000}
+        scenario.modes = {"GUIDED": 4}
+        scenario.mav = SimpleNamespace(MAV_MODE_FLAG_CUSTOM_MODE_ENABLED=1)
+        scenario.tx = SimpleNamespace(set_mode_encode=lambda *args: args)
+        sent = []
+        scenario.send = lambda i, message: sent.append(message) or SimpleNamespace(created_ns=now)
+        with patch("scripts.product.relay_experiment.time.monotonic_ns", return_value=now):
+            self.assertFalse(scenario.guided_ready(1))
+        self.assertEqual(scenario.mode_epoch[1], new.epoch)
+        self.assertEqual(len(sent), 1)
+
     def test_controlled_landing_requires_uart_mode_descent_ground_then_disarm(self):
         trace = LandingTrace(pose(0., z=10., host=1000), ground_z=.5)
         trace.admit("land-command", 1100)

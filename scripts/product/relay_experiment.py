@@ -411,21 +411,33 @@ class RelayExperiment:
         self.summary["anchors"] = self.anchors
         for i in UAV_IDS:
             self.phase(f"experiment_takeoff_uav{i}")
-            self.wait(lambda i=i: self.fresh(i, "HEARTBEAT") is not None
-                    and self.fresh(i, "HEARTBEAT").custom_mode == self.modes["GUIDED"],
-                30, f"uav{i} actual GUIDED", lambda i=i: self.send(i,
-                    self.tx.set_mode_encode(i, self.mav.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, self.modes["GUIDED"])))
-            self.wait(lambda i=i: self.armed(i), self.args.arm_timeout_s, f"uav{i} armed heartbeat",
-                      lambda i=i: self.long(i, self.mav.MAV_CMD_COMPONENT_ARM_DISARM, [1, 0, 0, 0, 0, 0, 0]))
+            self.wait(lambda i=i: self.guided_ready(i), 30, f"uav{i} actual GUIDED")
+            def arm(i=i):
+                if self.guided_ready(i):
+                    self.long(i, self.mav.MAV_CMD_COMPONENT_ARM_DISARM, [1, 0, 0, 0, 0, 0, 0])
+            self.wait(lambda i=i: self.armed(i) and self.guided_ready(i),
+                      self.args.arm_timeout_s, f"uav{i} armed heartbeat", arm)
             self.summary["uavs"][str(i)]["armed"] = True
             relative = self.args.base_altitude_m + (i - 1) * self.args.altitude_separation_m
             target = (*self.initial[i].position[:2], self.anchors[i]["world_z_offset_m"] + relative)
             hold = RegionHold(target, self.args.hold_s, self.args.z_tolerance_m,
                               self.args.xy_tolerance_m, self.args.hold_speed_mps)
+            takeoff_goal = Goal(f"takeoff:uav{i}", i, time.monotonic_ns(), self.source_s, relative, target)
             def takeoff(i=i, relative=relative):
-                if self.poses[i].position[2] - self.initial[i].position[2] < 2:
+                if not self.guided_ready(i):
+                    return
+                climb = self.poses[i].position[2] - self.initial[i].position[2]
+                if not self.armed(i):
+                    if climb >= 2:
+                        raise ScenarioError(f"uav{i} disarmed during observed takeoff")
+                    self.long(i, self.mav.MAV_CMD_COMPONENT_ARM_DISARM, [1, 0, 0, 0, 0, 0, 0])
+                elif climb < 2:
                     self.long(i, self.mav.MAV_CMD_NAV_TAKEOFF, [0, 0, 0, 0, 0, 0, relative])
-            self.wait(lambda i=i: self.armed(i) and hold.observe(self.poses[i]),
+                else:
+                    # BRAKE may have interrupted the climb after initial lift.
+                    # Restore native GUIDED position control to the same goal.
+                    self.send(i, self.setpoint(i, takeoff_goal), target_position_m=target, target_frame="ENU")
+            self.wait(lambda i=i: self.armed(i) and self.guided_ready(i) and hold.observe(self.poses[i]),
                       self.args.takeoff_timeout_s, f"uav{i} measured takeoff and hold", takeoff, 2.)
             self.summary["uavs"][str(i)]["takeoff"] = True
             self.emit("takeoff_observed", uav_id=i, actual_position_m=self.poses[i].position,
@@ -434,6 +446,26 @@ class RelayExperiment:
     def armed(self, i):
         heartbeat = self.fresh(i, "HEARTBEAT")
         return heartbeat is not None and bool(heartbeat.base_mode & self.mav.MAV_MODE_FLAG_SAFETY_ARMED)
+
+    def guided_ready(self, i: int) -> bool:
+        now = time.monotonic_ns()
+        grant = self.gcs.grant
+        if grant is None or not grant.valid_from_ns <= now < grant.valid_until_ns:
+            return False
+        heartbeat = self.fresh(i, "HEARTBEAT")
+        produced = self.gcs.latest_message_ns[i].get("HEARTBEAT", 0)
+        if (self.mode_epoch.get(i) == grant.epoch and heartbeat is not None
+                and heartbeat.custom_mode == self.modes["GUIDED"]
+                and produced >= self.mode_request_ns.get(i, 1 << 63)):
+            return True
+        if self.mode_epoch.get(i) != grant.epoch or now - self.mode_request_ns.get(i, 0) >= 1_000_000_000:
+            try:
+                command = self.send(i, self.tx.set_mode_encode(i,
+                    self.mav.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, self.modes["GUIDED"]))
+            except (ProtocolError, BlockingIOError):
+                return False
+            self.mode_request_ns[i], self.mode_epoch[i] = command.created_ns, grant.epoch
+        return False
 
     def setpoint(self, i: int, goal: Goal):
         anchor = self.anchors[i]
@@ -459,16 +491,7 @@ class RelayExperiment:
             try:
                 if grant is None or not grant.valid_from_ns <= now < grant.valid_until_ns:
                     raise ProtocolError(status)
-                hb = self.fresh(i, "HEARTBEAT")
-                hb_ns = self.gcs.latest_message_ns[i].get("HEARTBEAT", 0)
-                confirmed = (self.mode_epoch.get(i) == grant.epoch
-                             and hb is not None and hb.custom_mode == self.modes["GUIDED"]
-                             and hb_ns >= self.mode_request_ns.get(i, 1 << 63))
-                if not confirmed:
-                    if now - self.mode_request_ns.get(i, 0) >= 1_000_000_000:
-                        self.send(i, self.tx.set_mode_encode(i,
-                            self.mav.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, self.modes["GUIDED"]))
-                        self.mode_request_ns[i], self.mode_epoch[i] = now, grant.epoch
+                if not self.guided_ready(i):
                     status = "waiting_fresh_GUIDED_heartbeat"
                 else:
                     command = self.send(i, self.setpoint(i, goal), target_position_m=goal.target, target_frame="ENU")
