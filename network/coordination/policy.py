@@ -188,10 +188,14 @@ class AdmissionGate:
     """Final endpoint fence. No outcome is inferred from passing this check."""
 
     def __init__(self, run_id: str, uav_id: int, *, now_ns: Callable[[], int],
-                 hold: Callable[[], None], emit: Callable[..., None] | None = None) -> None:
+                 hold: Callable[[], None], emit: Callable[..., None] | None = None,
+                 max_command_age_ns: int = 250_000_000) -> None:
         self.run_id, self.uav_id = _run(run_id), _uav(uav_id, "uav_id")
         self.now_ns, self.hold = now_ns, hold
         self.emit = emit or (lambda *args, **kwargs: None)
+        self.max_command_age_ns = _integer(max_command_age_ns, "max_command_age_ns", 1)
+        if self.max_command_age_ns > 250_000_000:
+            raise ProtocolError("control command age cannot exceed canonical 250 ms")
         self.grants: dict[int, Grant] = {}
         self.highest_epoch = 0
         self.highest_grant_sequence = 0
@@ -250,9 +254,13 @@ class AdmissionGate:
             raise ProtocolError("command altered grant interval")
         if not command.valid_from_ns <= now < command.valid_until_ns or command.created_ns > now:
             raise ProtocolError("command not currently valid")
+        if now - command.created_ns > self.max_command_age_ns:
+            raise ProtocolError("control_command_age_deadline")
         checked_ns = self.now_ns()
         if not command.valid_from_ns <= checked_ns < command.valid_until_ns:
             raise ProtocolError("command expired during authority check")
+        if checked_ns - command.created_ns > self.max_command_age_ns:
+            raise ProtocolError("control_command_age_deadline")
         return checked_ns
 
     def check(self, command: Command, *, sender_id: int, reserve: bool = False) -> int:
@@ -325,7 +333,7 @@ class UARTAdmission:
         command, sender, offset, first_checked_ns = self.queue[0]
         try:
             before_write_ns = self.gate.check(command, sender_id=sender)
-        except ProtocolError:
+        except ProtocolError as exc:
             self.queue.popleft()
             self.pending_ids.discard(command.command_id)
             if offset:
@@ -333,7 +341,7 @@ class UARTAdmission:
                           uart_write_started_host_monotonic_ns=first_checked_ns,
                           reason="partially_written_command_expired_or_changed_epoch")
                 raise RuntimeError("lease/epoch invalidated a partially written UART command")
-            self.emit("command_rejected", command=command, reason="expired_or_stale_at_uart")
+            self.emit("command_rejected", command=command, reason=str(exc), rejection_stage="uart_write_boundary")
             return True
         try:
             written = self.write(command.payload[offset:])

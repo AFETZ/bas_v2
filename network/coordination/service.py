@@ -172,7 +172,8 @@ class UAVService(Network):
         self.mavutil = mavlink_api()
         self.mav = self.mavutil.mavlink.MAVLink(None, srcSystem=255, srcComponent=190)
         self.gate = AdmissionGate(args.run_id, self.index, now_ns=time.monotonic_ns,
-                                  hold=self.request_hold, emit=emit)
+                                  hold=self.request_hold, emit=emit,
+                                  max_command_age_ns=int(args.command_max_age_ms * 1e6))
         self.admission = UARTAdmission(self.gate, self.write_uart, emit=emit)
         self.encoder = Encoder(channel="control", uav_id=self.index, direction="uart_to_gcs")
         self.hold_pending: bytes | None = None
@@ -602,6 +603,7 @@ def build_parser():
     parser.add_argument("--detection-s", type=float, default=1)
     parser.add_argument("--skew-margin-s", type=float, default=.01)
     parser.add_argument("--telemetry-max-age-ms", type=float, default=250.)
+    parser.add_argument("--command-max-age-ms", type=float, default=250.)
     return parser
 
 
@@ -617,6 +619,8 @@ def main(argv=None):
     if (not 1 <= args.port <= 65535 or not args.duration_s > 0 or not args.watchdog_s > 0
             or args.skew_margin_s < 0 or not 0 < args.telemetry_max_age_ms <= 250):
         parser.error("invalid port/duration/watchdog/skew margin")
+    if not 0 < args.command_max_age_ms <= 250:
+        parser.error("control command max age must preserve canonical 250 ms deadline")
     emit = Events(args.event_log, args.run_id, args.uav_id if args.role == "uav" else 0)
     service = None
     try:

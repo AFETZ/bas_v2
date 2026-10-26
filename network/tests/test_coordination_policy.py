@@ -197,6 +197,32 @@ class CoordinationPolicyTests(unittest.TestCase):
             uart.drain_one()
         self.assertEqual(events, ["uart_write_invalidated"])
 
+    def test_old_command_rejected_even_while_two_second_lease_is_valid(self):
+        grant = self.grant(lease=2_000_000_000)
+        command = self.command(grant)
+        self.now += 250_000_001
+        self.assertIsNotNone(self.gate.active_grant())
+        with self.assertRaisesRegex(ProtocolError, "command_age_deadline"):
+            self.gate.check_authority(command)  # same check used for master forwarding
+        with self.assertRaisesRegex(ProtocolError, "command_age_deadline"):
+            self.gate.check(command, sender_id=1)
+
+    def test_queued_command_cannot_wait_past_control_deadline(self):
+        grant = self.grant(lease=2_000_000_000)
+        written, events = [], []
+        uart = UARTAdmission(self.gate, lambda raw: written.append(raw) or len(raw),
+                             emit=lambda event, **fields: events.append((event, fields)))
+        uart.enqueue(self.command(grant), sender_id=1)
+        self.now += 250_000_001
+        uart.drain_one()
+        self.assertEqual(written, [])
+        self.assertEqual(events[0][1]["reason"], "control_command_age_deadline")
+
+    def test_control_age_limit_cannot_be_relaxed_to_lease_duration(self):
+        with self.assertRaisesRegex(ProtocolError, "250 ms"):
+            AdmissionGate("run", 1, now_ns=lambda: self.now, hold=lambda: None,
+                          max_command_age_ns=2_000_000_000)
+
     def test_expiry_requests_hold_once_and_never_appoints_a_new_leader(self):
         grant = self.grant()
         self.gate.tick()
