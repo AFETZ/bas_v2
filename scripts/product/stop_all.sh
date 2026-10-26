@@ -49,7 +49,8 @@ if command -v docker >/dev/null 2>&1 \
     exit 1
   fi
   printf 'Stopping native five-UAV demo container %s.\n' "$NATIVE_FIVE_CONTAINER_NAME"
-  docker stop --timeout 15 "$NATIVE_FIVE_CONTAINER_NAME" >/dev/null
+  # Native RAM captures are copied to the run directory after writers stop.
+  docker stop --timeout 120 "$NATIVE_FIVE_CONTAINER_NAME" >/dev/null
   stopped=$((stopped + 1))
 fi
 
