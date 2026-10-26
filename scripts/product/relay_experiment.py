@@ -281,6 +281,7 @@ class RelayExperiment:
         self.refresh_counter = 0
         self.onboard_mode, self.brake_regions = {}, {}
         self.source_s, self.poses = None, {}
+        self.observation_end_source_s = None
         self.phase_name = None
         self.summary = dict(status="failed", run_id=args.run_id, policy=args.policy,
                 fault_profile=args.fault_profile, pilot=args.pilot, phase_clock_domain="source_sim_time",
@@ -350,7 +351,9 @@ class RelayExperiment:
                     self.onboard_mode[i] = row
                     if row.get("mode") in ("BRAKE", "LAND"):
                         self.summary["mode_observations"].append(dict(row))
-        if observe and self.poses:
+        within_window = (self.observation_end_source_s is None
+                         or (self.source_s is not None and self.source_s < self.observation_end_source_s))
+        if observe and self.poses and within_window:
             self.observer.observe(self.poses, now)
             if self.phase_name == "experiment_fault":
                 for i, pose in self.poses.items():
@@ -521,10 +524,14 @@ class RelayExperiment:
         start_source, start_ns = self.source_s, time.monotonic_ns()
         self.summary["measurement_start_source_sim_time_s"] = start_source
         self.summary["measurement_start_host_monotonic_ns"] = start_ns
+        self.observation_end_source_s = start_source + self.args.duration_s
+        self.summary["measurement_end_source_sim_time_s"] = self.observation_end_source_s
         current_goal, goals, next_refresh = -1, {}, start_ns
         while self.source_s - start_source < self.args.duration_s:
             self.pump()
             elapsed = self.source_s - start_source
+            if elapsed >= self.args.duration_s:
+                break  # a new source sample may cross the half-open measurement window
             if time.monotonic_ns() - start_ns > int((self.args.duration_s * 1.1 + 10) * 1e9):
                 raise ScenarioError("measurement failed to advance at live rate")
             phase = ("experiment_normal" if elapsed < self.args.fault_start_s else

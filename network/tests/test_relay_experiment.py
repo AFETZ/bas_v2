@@ -22,6 +22,53 @@ def pose(source, z=12., host=1000, velocity=(0., 0., 0.)):
 
 
 class RelayExperimentTests(unittest.TestCase):
+    def test_final_pump_at_or_beyond_end_cannot_offer_refresh_goal_or_completion(self):
+        for final_source in (103., 103.4):
+            with self.subTest(final_source=final_source):
+                scenario = RelayExperiment.__new__(RelayExperiment)
+                scenario.args = SimpleNamespace(duration_s=3., fault_start_s=1., fault_end_s=2.,
+                        task_period_s=3., command_period_s=1., base_altitude_m=8.,
+                        altitude_separation_m=4., altitude_step_m=4.)
+                clock = SimpleNamespace(source=100., now=10_000_000_000)
+                samples = iter((100., 101., 102., final_source))
+                def step():
+                    clock.source = next(samples)
+                    clock.now = 10_000_000_000 + int((clock.source - 100.) * 1e9)
+                scenario.gcs = SimpleNamespace(step=step, running=True, grant=None)
+                scenario.reader = SimpleNamespace(read=lambda: (clock.source,
+                            {i: pose(clock.source, host=clock.now) for i in range(1, 6)}))
+                scenario.source_s, scenario.poses = 100., {}
+                scenario.observation_end_source_s = None
+                scenario.last_heartbeat_ns, scenario.refresh_counter = clock.now, 0
+                scenario.send = lambda *args, **fields: None  # unrelated real GCS heartbeat transport
+                scenario.tx = SimpleNamespace(heartbeat_encode=lambda *args: None)
+                scenario.mav = SimpleNamespace(MAV_TYPE_GCS=6, MAV_AUTOPILOT_INVALID=8, MAV_STATE_ACTIVE=4)
+                scenario.tails, scenario.land_commands, scenario.landing_traces = {}, {}, {}
+                scenario.onboard_mode, scenario.brake_regions = {}, {}
+                observed = []
+                scenario.observer = SimpleNamespace(observe=lambda poses, now: observed.append(clock.source),
+                                                    completed={})
+                scenario.summary = dict(failsafe_holds={})
+                scenario.initial = {i: pose(100.) for i in range(1, 6)}
+                scenario.anchors = {i: dict(world_z_offset_m=0.) for i in range(1, 6)}
+                events, offers = [], []
+                scenario.emit = lambda event, **fields: events.append((event, fields))
+                scenario.phase_name = None
+                scenario.phase = lambda name: setattr(scenario, "phase_name", name)
+                scenario.csv = SimpleNamespace(writerow=offers.append)
+                scenario.csv_handle = SimpleNamespace(flush=lambda: None)
+                with patch("scripts.product.relay_experiment.time.monotonic_ns", side_effect=lambda: clock.now):
+                    scenario.measure()
+                # Actual refresh() emitted three five-UAV batches at [0,1,2], never t>=3.
+                self.assertEqual(len(offers), 15)
+                self.assertTrue(all(row["source_sim_time_s"] < 103. for row in offers))
+                goals = [fields for event, fields in events if event == "goal_created"]
+                self.assertEqual(len(goals), 5)
+                self.assertTrue(all(row["goal_id"].startswith("goal0:") for row in goals))
+                self.assertEqual(observed, [100., 101., 102.])
+                self.assertAlmostEqual(scenario.summary["measurement_duration_source_s"], final_source - 100.)
+                self.assertEqual(scenario.summary["measurement_end_source_sim_time_s"], 103.)
+
     def test_guided_is_reestablished_after_brake_and_requires_post_request_heartbeat(self):
         now = 2_000_000_000
         grant = Authority("run").issue(1, now - 100_000_000, 2_000_000_000)
