@@ -109,6 +109,7 @@ std::chrono::steady_clock::time_point g_lastEventFlush{std::chrono::steady_clock
 std::unordered_map<uint64_t, Time> g_queueEnqueueAt;
 std::vector<Ptr<Queue<Packet>>> g_queues;
 std::vector<Ptr<StaWifiMac>> g_wifiStations;
+std::vector<std::vector<Ptr<WifiMacQueue>>> g_wifiQueues;
 std::string g_radioBackend{"aloha"};
 std::string g_radioProfile{"generic_native_spectrum_aloha_reference"};
 std::string g_neighborDiscoveryMode{"preconfigured_static_neighbors"};
@@ -644,6 +645,14 @@ std::map<std::tuple<uint32_t, uint32_t, uint64_t>, Time> g_queueEntered;
 void WifiQueueObservation(uint32_t node, uint32_t ac, Ptr<WifiMacQueue> queue,
                           std::string event, Ptr<const WifiMpdu> mpdu)
 {
+    NodeCounters& counters = g_nodeCounters.at(node);
+    if (event == "enqueue") ++counters.queueEnqueue;
+    else if (event == "dequeue") ++counters.queueDequeue;
+    else if (event == "drop") ++counters.queueDrop;
+    uint32_t totalDepth = 0;
+    for (const auto& nativeQueue : g_wifiQueues.at(node))
+        totalDepth += nativeQueue->GetNPackets();
+    counters.queueMaxDepth = std::max(counters.queueMaxDepth, totalDepth);
     const auto uid=mpdu->GetPacket()->GetUid();
     const auto key=std::make_tuple(node,ac,uid);
     double residenceMs = std::numeric_limits<double>::quiet_NaN();
@@ -658,7 +667,8 @@ void WifiQueueObservation(uint32_t node, uint32_t ac, Ptr<WifiMacQueue> queue,
     if (g_eventLogging == "metrics_only") return;
     std::ostringstream details;
     details << "packet_uid=" << uid << ";ac=" << ac << ";queue_packets=" << queue->GetNPackets()
-            << ";queue_bytes=" << queue->GetNBytes() << ";source=WifiMacQueue." << event;
+            << ";queue_bytes=" << queue->GetNBytes() << ";node_all_ac_queue_packets=" << totalDepth
+            << ";source=WifiMacQueue." << event;
     if (std::isfinite(residenceMs)) details << ";residence_ms=" << residenceMs;
     LogEvent("wifi_mac_queue_"+event,g_nodeNames.at(node),"",mpdu->GetPacket()->GetSize(),
              queue->GetNPackets(),details.str());
@@ -1290,6 +1300,13 @@ WriteStats(const std::string& path)
            << "  \"queue_enqueue_total\": " << queueEnqueue << ",\n"
            << "  \"queue_dequeue_total\": " << queueDequeue << ",\n"
            << "  \"queue_drop_total\": " << queueDrop << ",\n"
+           << "  \"queue_counter_source\": \""
+           << (g_radioBackend == "wifi" ? "ns3::WifiMacQueue.Enqueue/Dequeue/Drop"
+                                         : "ns3::Queue<Packet>.Enqueue/Dequeue/Drop") << "\",\n"
+           << "  \"queue_max_depth_scope\": \""
+           << (g_radioBackend == "wifi"
+                   ? "sum_of_four_AC_GetNPackets_at_queue_events_including_inflight_MPDUs"
+                   : "single_native_queue_GetNPackets_at_queue_events") << "\",\n"
            << "  \"wifi_data_retry_total\": " << wifiDataRetries << ",\n"
            << "  \"wifi_association_total\": " << wifiAssociations << ",\n"
            << "  \"wifi_deassociation_total\": " << wifiDeassociations << ",\n"
@@ -1621,6 +1638,7 @@ main(int argc, char* argv[])
         g_nodeNames.push_back("uav" + std::to_string(index));
     }
     g_nodeCounters.resize(g_nodeNames.size());
+    g_wifiQueues.resize(g_nodeNames.size());
     g_positions.resize(g_nodeNames.size());
     g_events.open(eventCsv, std::ios::out | std::ios::trunc);
     g_phaseFile = phaseFile;
@@ -1845,10 +1863,15 @@ main(int argc, char* argv[])
                          "source=ns3::QosTxop;attribute=UseExplicitBarAfterMissedBlockAck;effective=" +
                              std::string(effectiveExplicitBar.Get() ? "true" : "false"));
                 auto queue=txop->GetWifiMacQueue();
+                g_wifiQueues.at(index).push_back(queue);
                 for (const auto& trace : {std::pair{"Enqueue","enqueue"}, {"Dequeue","dequeue"}, {"Drop","drop"}})
-                    queue->TraceConnectWithoutContext(trace.first,MakeBoundCallback(&WifiQueueObservation,
-                        index,uint32_t(ac),queue,std::string(trace.second)));
+                    NS_ABORT_MSG_IF(!queue->TraceConnectWithoutContext(trace.first,
+                                        MakeBoundCallback(&WifiQueueObservation, index, uint32_t(ac),
+                                                          queue, std::string(trace.second))),
+                                    "native Wi-Fi queue trace is unavailable");
             }
+            NS_ABORT_MSG_IF(g_wifiQueues.at(index).size() != 4,
+                            "native Wi-Fi queue observation requires all four ACs");
             device->GetPhy()->TraceConnectWithoutContext(
                 "MonitorSnifferRx", MakeBoundCallback(&WifiMonitorRx, index));
             device->GetPhy()->TraceConnectWithoutContext(
