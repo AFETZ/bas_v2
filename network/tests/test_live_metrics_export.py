@@ -5,6 +5,8 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location(
     "live_metrics_report", ROOT / "scripts/product/summarize_native_radio_five_uav.py"
@@ -98,3 +100,40 @@ def test_end_to_end_rtf_retains_host_pauses_omitted_by_gazebo_stats(tmp_path):
     assert result["end_to_end_clock_segments"][0]["integral_rtf"] == 1 / 3
     assert result["end_to_end_window_rtf"]["min"] == 0
     assert result["end_to_end_window_wall_duration_s"]["min"] == 3
+
+
+def test_explicit_phase_window_and_sent_intent_keep_their_own_meaning(tmp_path):
+    raw = tmp_path / "raw"
+    write_rows(raw / "logs/node_state.jsonl", [snapshot(1, 20), snapshot(2, 21), snapshot(3, 22)])
+    write_rows(raw / "logs/scenario_events.jsonl", [
+        {"event": "phase", "detail": "after_warmup", "monotonic_ns": 101_500_000_000},
+        {"event": "flight_target", "uav": "uav1", "monotonic_ns": 102_100_000_000,
+         "detail": json.dumps({"target_id": "takeoff", "target_enu_z_m": 50})},
+    ])
+    (raw / "metrics").mkdir()
+    (raw / "metrics/scenario_summary.json").write_text(json.dumps({"status": "failed", "timestamp_domain": "realtime"}))
+    result = REPORT.export_live_metrics(raw, tmp_path / "out", plots=False, start_phase="after_warmup")
+    window = result["analysis_window"]
+    assert window["requested_start_phase"] == "after_warmup"
+    assert window["resolved_start_sim_time_s"] == 2
+    assert window["phase_host_join_age_ms"] == 500
+    assert result["uavs"]["uav1"]["position_samples"] == 2
+    assert result["uavs"]["uav1"]["admitted_target_samples"] == 0
+    assert result["sent_target_samples"] == 1
+    assert result["end_to_end_window_rtf"]["p5"] == 1
+    assert result["scenario_status"] == "failed"
+    with (tmp_path / "out/metrics/uav_sent_targets.csv").open() as stream:
+        target = next(csv.DictReader(stream))
+    assert float(target["host_join_abs_age_ms"]) == 100
+    assert target["target_z_m"] == "50.0"
+    assert result["uavs"]["uav1"]["world_z_m"]["max"] == 22
+
+
+def test_ambiguous_phase_clock_cannot_select_a_warmup_window(tmp_path):
+    raw = tmp_path / "raw"
+    write_rows(raw / "logs/node_state.jsonl", [snapshot(1, 20), snapshot(2, 20)])
+    write_rows(raw / "logs/scenario_events.jsonl", [
+        {"event": "phase", "detail": "ready", "monotonic_ns": 101_000_000_000},
+    ])
+    with pytest.raises(ValueError, match="no usable declared clock"):
+        REPORT.export_live_metrics(raw, tmp_path / "out", plots=False, start_phase="ready")

@@ -2991,6 +2991,7 @@ def plot_native_overview(run_dir: Path, events: list[dict[str, Any]]) -> None:
 
 def export_live_metrics(
     run_dir: Path, output_dir: Path | None = None, *, plots: bool = True,
+    start_sim_time_s: float | None = None, start_phase: str | None = None,
 ) -> dict[str, Any]:
     """Export observed flight/timing data, optionally outside a read-only raw run.
 
@@ -3004,6 +3005,11 @@ def export_live_metrics(
     metrics.mkdir(parents=True, exist_ok=True)
 
     input_errors: Counter[str] = Counter()
+    scenario = read_json(run_dir / "metrics/scenario_summary.json", {})
+    if start_sim_time_s is not None and (not math.isfinite(start_sim_time_s) or start_sim_time_s < 0):
+        raise ValueError("start simulation time must be finite and nonnegative")
+    if start_sim_time_s is not None and start_phase is not None:
+        raise ValueError("choose a start simulation time or a start phase, not both")
 
     def rows(path: Path) -> Iterable[dict[str, Any]]:
         if not path.is_file():
@@ -3089,6 +3095,56 @@ def export_live_metrics(
                 "sample_age_ms": finite(node.get("sample_age_ms")),
                 "source_topic": node.get("source_topic"),
             })
+    scenario_events = list(rows(run_dir / "logs/scenario_events.jsonl"))
+    host_clocks = sorted(clocks, key=lambda row: row["host_monotonic_ns"])
+    host_stamps = [row["host_monotonic_ns"] for row in host_clocks]
+
+    def event_time(row: dict[str, Any], *, after: bool = False) -> tuple[float | None, float | None, str, float | None]:
+        model = finite(row.get("source_sim_time_s"))
+        host = finite(row.get("host_monotonic_ns"))
+        domain = row.get("clock_domain", scenario.get("timestamp_domain"))
+        if host is None and domain in {"realtime", "host_monotonic"}:
+            host = finite(row.get("monotonic_ns"))
+        if model is not None:
+            return model, host, "explicit_source_sim_time_s", None
+        if domain in {"lockstep", "simulation", "model"}:
+            stamp = finite(row.get("monotonic_ns"))
+            return stamp / 1e9 if stamp is not None else None, host, "declared_model_clock", None
+        if host is not None and host_clocks:
+            index = bisect_right(host_stamps, host)
+            candidates = host_clocks[index:index + 1] if after else host_clocks[max(0, index - 1):index + 1]
+            if candidates:
+                nearest = min(candidates, key=lambda point: abs(point["host_monotonic_ns"] - host))
+                age = abs(nearest["host_monotonic_ns"] - host) / 1e6
+                if age <= 500:
+                    return nearest["source_sim_time_s"], host, "tracker_host_join_after" if after else "tracker_host_join_nearest", age
+        return None, host, "unavailable_no_model_clock_or_tracker_within_500ms", None
+
+    analysis_window: dict[str, Any] = {
+        "requested_start_sim_time_s": start_sim_time_s, "requested_start_phase": start_phase,
+        "scope": "all recorded time; startup included", "resolved_start_sim_time_s": None,
+        "resolved_start_host_monotonic_ns": None,
+    }
+    if start_phase is not None:
+        phases = [row for row in scenario_events if row.get("event") == "phase"
+                  and row.get("phase", row.get("detail")) == start_phase]
+        if not phases:
+            raise ValueError(f"phase is not recorded: {start_phase}")
+        start_sim_time_s, phase_host, method, age = event_time(phases[0], after=True)
+        if start_sim_time_s is None:
+            raise ValueError(f"phase has no usable declared clock: {start_phase}")
+        analysis_window.update(phase_clock_resolution=method, phase_host_join_age_ms=age,
+                               phase_event_host_monotonic_ns=phase_host)
+    host_cut = None
+    if start_sim_time_s is not None:
+        selected = [row for row in clocks if row["source_sim_time_s"] >= start_sim_time_s]
+        host_cut = selected[0]["host_monotonic_ns"] if selected else None
+        trajectory = [row for row in trajectory if row["source_sim_time_s"] >= start_sim_time_s]
+        clocks = selected
+        quality = Counter(row["quality"] for row in trajectory)
+        analysis_window.update(scope="explicit post-start slice", resolved_start_sim_time_s=start_sim_time_s,
+                               resolved_start_host_monotonic_ns=host_cut,
+                               status="observed" if selected else "empty_no_tracker_samples_in_window")
     table("uav_trajectories.csv", trajectory, [
         "session_id", "uav", "source_sim_time_s", "timestamp_source", "host_monotonic_ns",
         "x_m", "y_m", "z_m", "altitude_datum", "quality", "sample_age_ms", "source_topic",
@@ -3151,6 +3207,8 @@ def export_live_metrics(
                 or not isinstance(point, list) or len(point) != 3
                 or any(finite(value) is None for value in point)):
             continue
+        if start_sim_time_s is not None and at < start_sim_time_s:
+            continue
         uav = str(row.get("uav_id", ""))
         if uav.isdigit():
             uav = "uav" + uav
@@ -3164,6 +3222,29 @@ def export_live_metrics(
         "uav", "source_sim_time_s", "x_m", "y_m", "z_m", "altitude_datum",
         "command_id", "epoch", "source",
     ])
+    sent_targets = []
+    for row in scenario_events:
+        if row.get("event") != "flight_target":
+            continue
+        detail = row.get("detail")
+        try:
+            detail = json.loads(detail) if isinstance(detail, str) else detail
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(detail, dict) or finite(detail.get("target_enu_z_m")) is None:
+            continue
+        at, host, method, age = event_time(row)
+        if start_sim_time_s is not None and (at is None or at < start_sim_time_s):
+            continue
+        sent_targets.append({"uav": row.get("uav"), "source_sim_time_s": at,
+                             "host_monotonic_ns": host, "target_z_m": finite(detail["target_enu_z_m"]),
+                             "altitude_datum": "world_ENU_z", "target_id": detail.get("target_id"),
+                             "clock_resolution": method, "host_join_abs_age_ms": age,
+                             "source": "GCS flight_target intent; not UART admission"})
+    table("uav_sent_targets.csv", sent_targets, [
+        "uav", "source_sim_time_s", "host_monotonic_ns", "target_z_m", "altitude_datum",
+        "target_id", "clock_resolution", "host_join_abs_age_ms", "source",
+    ])
     with (metrics / "coordination_events.jsonl").open("w", encoding="utf-8") as stream:
         for row in coordination:
             stream.write(json.dumps(row, allow_nan=False, sort_keys=True) + "\n")
@@ -3175,6 +3256,9 @@ def export_live_metrics(
             for row in csv.DictReader(stream):
                 if row.get("event") == "realtime_lag":
                     at, value = finite(row.get("time_s")), finite(row.get("value"))
+                    if start_sim_time_s is not None and (host_cut is None or
+                            (finite(row.get("wall_monotonic_ns")) or 0) < host_cut):
+                        continue
                     if at is not None and value is not None:
                         lag.append({"ns3_time_s": at, "scheduler_lag_ms": value,
                                     "host_monotonic_ns": row.get("wall_monotonic_ns"),
@@ -3196,12 +3280,17 @@ def export_live_metrics(
             model, wall = duration("sim_time"), duration("real_time")
             rtf = re.search(r"\breal_time_factor:\s*([-+0-9.eE]+)", block)
             if model is not None and wall is not None:
+                if start_sim_time_s is not None and model < start_sim_time_s:
+                    continue
                 gazebo.append({"gazebo_sim_time_s": model, "gazebo_real_time_s": wall,
                                "reported_rtf": finite(rtf[1]) if rtf else None})
     table("gazebo_timing.csv", gazebo, ["gazebo_sim_time_s", "gazebo_real_time_s", "reported_rtf"])
 
     grouped: dict[tuple[Any, str], list[dict[str, Any]]] = defaultdict(list)
     for row in rows(run_dir / "logs/runtime_resources.jsonl"):
+        if start_sim_time_s is not None and (host_cut is None or
+                (finite(row.get("monotonic_ns")) or 0) < host_cut):
+            continue
         grouped[(row.get("monotonic_ns"), str(row.get("component")))].append(row)
     resources: list[dict[str, Any]] = []
     for (stamp, component), samples in sorted(grouped.items(), key=lambda item: finite(item[0][0]) or 0):
@@ -3222,7 +3311,7 @@ def export_live_metrics(
             integral_rtf = (gazebo[-1]["gazebo_sim_time_s"] - gazebo[0]["gazebo_sim_time_s"]) / wall_span
     summary = {
         "raw_run_dir": str(run_dir), "output_dir": str(output),
-        "scenario_status": read_json(run_dir / "metrics/scenario_summary.json", {}).get("status"),
+        "scenario_status": scenario.get("status"), "analysis_window": analysis_window,
         "trajectory_quality_rows": dict(quality),
         "input_errors": dict(input_errors),
         "trajectory_clock": "node.source_sim_time_s; gaps use snapshot source clock",
@@ -3233,16 +3322,19 @@ def export_live_metrics(
                        "admitted_target_samples": sum(r["uav"] == uav for r in targets)} for uav in UAVS},
         "target_status": "observed_admission_points" if targets else "unavailable_no_timestamped_ENU_admitted_targets",
         "target_scope": "markers at UART admission; no inferred active target between events",
+        "sent_target_samples": len(sent_targets),
+        "sent_target_scope": "GCS intent only; host-to-model joins report nearest sample age <=500ms",
         "coordination_events": len(coordination),
         "scheduler_lag_ms": distribution(r["scheduler_lag_ms"] for r in lag),
         "gazebo_integral_rtf_all_recorded_time": integral_rtf,
         "gazebo_reported_rtf": distribution(r["reported_rtf"] for r in gazebo if r["reported_rtf"] is not None),
         "end_to_end_clock_segments": clock_summary,
-        "end_to_end_window_rtf": distribution(r["end_to_end_rtf"] for r in windows),
+        "end_to_end_window_rtf": {**distribution(r["end_to_end_rtf"] for r in windows),
+                                  "p5": percentile((r["end_to_end_rtf"] for r in windows), 5)},
         "end_to_end_window_wall_duration_s": distribution(r["wall_duration_s"] for r in windows),
         "resource_rows": len(resources),
         "limits": ["No flight, command completion or handover verdict is inferred from these plots.",
-                   "All recorded timing includes startup; no warm-up window is silently removed.",
+                   "Startup is included unless analysis_window records an explicit start timestamp or phase.",
                    "End-to-end RTF uses paired tracker source/host clocks, in non-overlapping observed windows >=1 s; Gazebo reported RTF alone can omit pauses.",
                    "CPU is summed per component in percent of one core; summed process RSS can count shared pages repeatedly.",
                    "Different clock domains occupy separate panels; unavailable values remain empty."],
@@ -3279,10 +3371,14 @@ def export_live_metrics(
                 axes[0].scatter([r["source_sim_time_s"] for r in selected],
                                 [r["z_m"] for r in selected], color=color, marker="x", s=35,
                                 label=f"{uav} admitted target")
+            sent = [r for r in sent_targets if r["uav"] == uav and r["source_sim_time_s"] is not None]
+            if sent:
+                axes[0].scatter([r["source_sim_time_s"] for r in sent], [r["target_z_m"] for r in sent],
+                                color=color, marker="+", s=55, label=f"{uav} GCS sent intent")
         axes[0].set(title="Observed height; targets are admission markers when available",
                     xlabel="Gazebo odometry source simulation time (s)", ylabel="world ENU z (m)")
         if not targets:
-            axes[0].text(.01, .98, "Target unavailable: no timestamped ENU command admission",
+            axes[0].text(.01, .98, "Admitted target unavailable; '+' markers, if present, show GCS intent only",
                          transform=axes[0].transAxes, va="top", fontsize=9)
         axes[1].set(title="Observed XY trajectory (gaps retained)", xlabel="world ENU x (m)", ylabel="world ENU y (m)")
         axes[1].set_aspect("equal", adjustable="datalim")
@@ -3302,7 +3398,7 @@ def export_live_metrics(
                         linewidth=.6, alpha=.5, label="Gazebo reported")
         axes[0, 1].plot([r["source_sim_time_s"] for r in windows], [r["end_to_end_rtf"] for r in windows],
                         linewidth=.9, label="tracker model / host elapsed")
-        axes[0, 1].set(title="RTF with pauses (startup included)", xlabel="Gazebo model time (s)", ylabel="RTF")
+        axes[0, 1].set(title="RTF with pauses (explicit analysis window)", xlabel="Gazebo model time (s)", ylabel="RTF")
         if gazebo or windows:
             axes[0, 1].legend(fontsize=7)
         origin = min((finite(r["host_monotonic_ns"]) for r in resources if finite(r["host_monotonic_ns"]) is not None), default=0)
@@ -3322,6 +3418,7 @@ def export_live_metrics(
         save(fig, "live_timing_resources")
     report = [f"# Observed live metrics: {run_dir.name}", "", f"Raw input: `{run_dir}`.",
               f"Scenario status: `{summary['scenario_status']}` (missing remains unavailable).",
+              f"Analysis window: `{json.dumps(analysis_window, sort_keys=True)}`.",
               "", "![Height and trajectory](plots/uav_height_trajectory.png)",
               "![Timing and resources](plots/live_timing_resources.png)", "",
               f"Target coverage: `{summary['target_status']}`.",
@@ -3384,15 +3481,27 @@ def main() -> int:
                         help="Export observed trajectories/timing without requiring a completed scenario")
     parser.add_argument("--output-dir", type=Path,
                         help="Separate output directory for --live-metrics-only; raw input is read-only")
+    window = parser.add_mutually_exclusive_group()
+    window.add_argument("--live-start-sim-time", type=float,
+                        help="Explicit Gazebo source-time slice for --live-metrics-only")
+    window.add_argument("--live-start-phase",
+                        help="Start at a recorded scenario phase with an explicit clock domain")
     args = parser.parse_args()
     run_dir = args.run_dir.resolve()
     if args.live_metrics_only:
-        summary = export_live_metrics(run_dir, args.output_dir)
+        try:
+            summary = export_live_metrics(run_dir, args.output_dir,
+                                          start_sim_time_s=args.live_start_sim_time,
+                                          start_phase=args.live_start_phase)
+        except ValueError as error:
+            parser.error(str(error))
         print(json.dumps({"raw_run_dir": str(run_dir), "output_dir": summary["output_dir"],
                           "target_status": summary["target_status"]}, sort_keys=True))
         return 0
     if args.output_dir:
         parser.error("--output-dir is only supported with --live-metrics-only")
+    if args.live_start_sim_time is not None or args.live_start_phase is not None:
+        parser.error("explicit analysis windows require --live-metrics-only")
     if args.latency_diagnostic:
         return write_latency_diagnostic_report(
             run_dir,
