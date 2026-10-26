@@ -137,6 +137,7 @@ std::string g_wifiDataMode;
 std::string g_wifiControlMode;
 std::string g_wifiSsid;
 std::string g_wifiTopology{"bss"};
+bool g_wifiExplicitBarAfterMissedBlockAck{true};
 std::string g_faultProfile{"none"};
 uint32_t g_faultMasterId{1};
 double g_faultExtraLossDb{200.0};
@@ -1248,6 +1249,8 @@ WriteStats(const std::string& path)
            << "  \"wifi_control_mode\": \"" << g_wifiControlMode << "\",\n"
            << "  \"wifi_ssid\": \"" << g_wifiSsid << "\",\n"
            << "  \"wifi_topology\": \"" << g_wifiTopology << "\",\n"
+           << "  \"wifi_explicit_bar_after_missed_block_ack\": "
+           << (g_wifiExplicitBarAfterMissedBlockAck ? "true" : "false") << ",\n"
            << "  \"fault_profile\": \"" << g_faultProfile << "\",\n"
            << "  \"fault_master_id\": " << g_faultMasterId << ",\n"
            << "  \"fault_extra_loss_db\": " << g_faultExtraLossDb << ",\n"
@@ -1446,6 +1449,9 @@ main(int argc, char* argv[])
     command.AddValue("wifiControlMode", "Constant 802.11n control mode", wifiControlMode);
     command.AddValue("wifiSsid", "Native Wi-Fi SSID", wifiSsid);
     command.AddValue("wifiTopology", "Explicit native bss or adhoc MAC topology", g_wifiTopology);
+    command.AddValue("wifiExplicitBarAfterMissedBlockAck",
+                     "Upstream QosTxop explicit BAR recovery after a missed Block ACK",
+                     g_wifiExplicitBarAfterMissedBlockAck);
     command.AddValue("faultProfile", "Explicit none, selective or total_GCS pair-loss fault", g_faultProfile);
     command.AddValue("faultMasterId", "Initial coordinator UAV affected by selective loss", g_faultMasterId);
     command.AddValue("faultExtraLossDb", "Synthetic additional pair loss in dB during experiment_fault", g_faultExtraLossDb);
@@ -1798,6 +1804,15 @@ main(int argc, char* argv[])
             for (AcIndex ac : {AC_BE,AC_BK,AC_VI,AC_VO}) {
                 auto txop=device->GetMac()->GetQosTxop(ac);
                 if (!txop) continue;
+                txop->SetAttribute("UseExplicitBarAfterMissedBlockAck",
+                                   BooleanValue(g_wifiExplicitBarAfterMissedBlockAck));
+                BooleanValue effectiveExplicitBar;
+                txop->GetAttribute("UseExplicitBarAfterMissedBlockAck", effectiveExplicitBar);
+                NS_ABORT_MSG_IF(effectiveExplicitBar.Get() != g_wifiExplicitBarAfterMissedBlockAck,
+                                "upstream QosTxop recovery setting was not applied");
+                LogEvent("wifi_qos_config", g_nodeNames.at(index), "", 0, uint32_t(ac),
+                         "source=ns3::QosTxop;attribute=UseExplicitBarAfterMissedBlockAck;effective=" +
+                             std::string(effectiveExplicitBar.Get() ? "true" : "false"));
                 auto queue=txop->GetWifiMacQueue();
                 for (const auto& trace : {std::pair{"Enqueue","enqueue"}, {"Dequeue","dequeue"}, {"Drop","drop"}})
                     queue->TraceConnectWithoutContext(trace.first,MakeBoundCallback(&WifiQueueObservation,

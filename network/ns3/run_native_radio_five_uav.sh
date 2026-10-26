@@ -43,6 +43,14 @@ WIFI_TOPOLOGY="${BAS_NATIVE_WIFI_TOPOLOGY:-bss}"
 [[ "$WIFI_TOPOLOGY" == bss || "$WIFI_TOPOLOGY" == adhoc ]] || {
   printf 'Unsupported Wi-Fi topology: %s\n' "$WIFI_TOPOLOGY" >&2; exit 2;
 }
+# The coordinator profile explicitly uses native data retransmission after a
+# missed Block ACK. Preserve the upstream explicit-BAR default in other modes.
+WIFI_EXPLICIT_BAR_DEFAULT=1
+[[ "$COORDINATION_POLICY" == off ]] || WIFI_EXPLICIT_BAR_DEFAULT=0
+WIFI_EXPLICIT_BAR="${BAS_NATIVE_WIFI_EXPLICIT_BAR:-$WIFI_EXPLICIT_BAR_DEFAULT}"
+[[ "$WIFI_EXPLICIT_BAR" == 0 || "$WIFI_EXPLICIT_BAR" == 1 ]] || {
+  printf 'BAS_NATIVE_WIFI_EXPLICIT_BAR must be 0 or 1.\n' >&2; exit 2;
+}
 PROPAGATION_PROFILE="${BAS_NATIVE_PROPAGATION_PROFILE:-sionna}"
 case "$PROPAGATION_PROFILE" in
   sionna|hybrid|friis) ;;
@@ -113,6 +121,7 @@ run_in_container() {
     -e BAS_SOURCE_DIRTY="$(git -C "$ROOT_DIR" status --porcelain | wc -l)" \
     -e BAS_NATIVE_PROPAGATION_PROFILE="${BAS_NATIVE_PROPAGATION_PROFILE:-sionna}" \
     -e BAS_NATIVE_WIFI_TOPOLOGY="$WIFI_TOPOLOGY" \
+    -e BAS_NATIVE_WIFI_EXPLICIT_BAR="$WIFI_EXPLICIT_BAR" \
     -e BAS_NATIVE_FAULT_PROFILE="$FAULT_PROFILE" \
     -e BAS_NATIVE_FAULT_MASTER_ID="$FAULT_MASTER_ID" \
     -e BAS_NATIVE_FAULT_EXTRA_LOSS_DB="$FAULT_EXTRA_LOSS_DB" \
@@ -553,6 +562,7 @@ PY
   printf 'coordination_policy=%s\nactive_uart_channels=%s\n' "$COORDINATION_POLICY" "$ACTIVE_UART_CHANNELS"
   printf 'physics_profile=%s\n' "$PHYSICS_PROFILE"
   printf 'wifi_topology=%s\n' "$WIFI_TOPOLOGY"
+  printf 'wifi_explicit_bar_after_missed_block_ack_requested=%s\n' "$WIFI_EXPLICIT_BAR"
   printf 'fault_profile=%s\nfault_master_id=%s\nfault_extra_loss_db=%s\n' \
     "$FAULT_PROFILE" "$FAULT_MASTER_ID" "$FAULT_EXTRA_LOSS_DB"
   printf 'simulation_mode=%s\nlockstep_step_ms=%s\nlockstep_wall_timeout_s=%s\n' "$BAS_SIMULATION_MODE" "$BAS_LOCKSTEP_STEP_MS" "$BAS_LOCKSTEP_TIMEOUT_S"
@@ -1049,6 +1059,7 @@ setsid ip netns exec ams-ns3 env \
   --wifiChannelNumber="$WIFI_CHANNEL_NUMBER" \
   --wifiChannelWidthMhz="$WIFI_CHANNEL_WIDTH_MHZ" --wifiSsid="$WIFI_SSID" \
   --wifiTopology="$WIFI_TOPOLOGY" \
+  --wifiExplicitBarAfterMissedBlockAck="$WIFI_EXPLICIT_BAR" \
   --faultProfile="$FAULT_PROFILE" --faultMasterId="$FAULT_MASTER_ID" \
   --faultExtraLossDb="$FAULT_EXTRA_LOSS_DB" \
   --carrierHz="$CARRIER_HZ" --tapGcs=tap-gcs --tapUavs="$TAP_UAVS" \
