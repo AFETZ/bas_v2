@@ -1295,7 +1295,8 @@ int
 main(int argc, char* argv[])
 {
     GlobalValue::Bind("ChecksumEnabled", BooleanValue(true));
-    std::unique_ptr<py::scoped_interpreter> python;
+    // LiveStateReader uses Python stdlib JSON even with native Friis.
+    py::scoped_interpreter python{};
 
     uint32_t uavCount = 1;
     std::string radioBackend = "aloha";
@@ -1461,7 +1462,6 @@ main(int argc, char* argv[])
     NS_ABORT_MSG_IF(g_propagationProfile != "sionna" && g_propagationProfile != "friis" &&
                     g_propagationProfile != "hybrid", "invalid explicit propagation profile");
     const bool requiresRt = g_propagationProfile != "friis";
-    if (requiresRt || !sourceConfig.empty()) python = std::make_unique<py::scoped_interpreter>();
     NS_ABORT_MSG_IF(positionFile.empty() || readyFile.empty() || phaseFile.empty(),
                     "positionFile, readyFile, and phaseFile are required");
     NS_ABORT_MSG_IF(requiresRt && (scene.empty() || !std::filesystem::exists(scene)),
