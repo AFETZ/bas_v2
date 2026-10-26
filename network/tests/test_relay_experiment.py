@@ -21,44 +21,51 @@ def pose(source, z=12., host=1000, velocity=(0., 0., 0.)):
     return Pose((1., 2., z), velocity, source, host)
 
 
+def measure_clock_samples(sample_pairs, *, duration_s, task_period_s):
+    """Exercise actual measure/pump/refresh with independent wall/source clocks."""
+    scenario = RelayExperiment.__new__(RelayExperiment)
+    scenario.args = SimpleNamespace(duration_s=duration_s, fault_start_s=1., fault_end_s=2.,
+            task_period_s=task_period_s, command_period_s=1., base_altitude_m=8.,
+            altitude_separation_m=4., altitude_step_m=4.)
+    source, host = sample_pairs[0]
+    clock = SimpleNamespace(source=source, now=host)
+    samples = iter(sample_pairs)
+    def step():
+        clock.source, clock.now = next(samples)
+    scenario.gcs = SimpleNamespace(step=step, running=True, grant=None)
+    scenario.reader = SimpleNamespace(read=lambda: (clock.source,
+                {i: pose(clock.source, host=clock.now) for i in range(1, 6)}))
+    scenario.source_s, scenario.poses = source, {}
+    scenario.observation_end_source_s = None
+    scenario.last_heartbeat_ns, scenario.refresh_counter = clock.now, 0
+    scenario.send = lambda *args, **fields: None  # unrelated GCS heartbeat transport
+    scenario.tx = SimpleNamespace(heartbeat_encode=lambda *args: None)
+    scenario.mav = SimpleNamespace(MAV_TYPE_GCS=6, MAV_AUTOPILOT_INVALID=8, MAV_STATE_ACTIVE=4)
+    scenario.tails, scenario.land_commands, scenario.landing_traces = {}, {}, {}
+    scenario.onboard_mode, scenario.brake_regions = {}, {}
+    observed = []
+    scenario.observer = SimpleNamespace(observe=lambda poses, now: observed.append(clock.source), completed={})
+    scenario.summary = dict(failsafe_holds={})
+    scenario.initial = {i: pose(source) for i in range(1, 6)}
+    scenario.anchors = {i: dict(world_z_offset_m=0.) for i in range(1, 6)}
+    events, offers = [], []
+    scenario.emit = lambda event, **fields: events.append((event, fields))
+    scenario.phase_name = None
+    scenario.phase = lambda name: setattr(scenario, "phase_name", name)
+    scenario.csv = SimpleNamespace(writerow=offers.append)
+    scenario.csv_handle = SimpleNamespace(flush=lambda: None)
+    with patch("scripts.product.relay_experiment.time.monotonic_ns", side_effect=lambda: clock.now):
+        scenario.measure()
+    return scenario, offers, events, observed
+
+
 class RelayExperimentTests(unittest.TestCase):
     def test_final_pump_at_or_beyond_end_cannot_offer_refresh_goal_or_completion(self):
         for final_source in (103., 103.4):
             with self.subTest(final_source=final_source):
-                scenario = RelayExperiment.__new__(RelayExperiment)
-                scenario.args = SimpleNamespace(duration_s=3., fault_start_s=1., fault_end_s=2.,
-                        task_period_s=3., command_period_s=1., base_altitude_m=8.,
-                        altitude_separation_m=4., altitude_step_m=4.)
-                clock = SimpleNamespace(source=100., now=10_000_000_000)
-                samples = iter((100., 101., 102., final_source))
-                def step():
-                    clock.source = next(samples)
-                    clock.now = 10_000_000_000 + int((clock.source - 100.) * 1e9)
-                scenario.gcs = SimpleNamespace(step=step, running=True, grant=None)
-                scenario.reader = SimpleNamespace(read=lambda: (clock.source,
-                            {i: pose(clock.source, host=clock.now) for i in range(1, 6)}))
-                scenario.source_s, scenario.poses = 100., {}
-                scenario.observation_end_source_s = None
-                scenario.last_heartbeat_ns, scenario.refresh_counter = clock.now, 0
-                scenario.send = lambda *args, **fields: None  # unrelated real GCS heartbeat transport
-                scenario.tx = SimpleNamespace(heartbeat_encode=lambda *args: None)
-                scenario.mav = SimpleNamespace(MAV_TYPE_GCS=6, MAV_AUTOPILOT_INVALID=8, MAV_STATE_ACTIVE=4)
-                scenario.tails, scenario.land_commands, scenario.landing_traces = {}, {}, {}
-                scenario.onboard_mode, scenario.brake_regions = {}, {}
-                observed = []
-                scenario.observer = SimpleNamespace(observe=lambda poses, now: observed.append(clock.source),
-                                                    completed={})
-                scenario.summary = dict(failsafe_holds={})
-                scenario.initial = {i: pose(100.) for i in range(1, 6)}
-                scenario.anchors = {i: dict(world_z_offset_m=0.) for i in range(1, 6)}
-                events, offers = [], []
-                scenario.emit = lambda event, **fields: events.append((event, fields))
-                scenario.phase_name = None
-                scenario.phase = lambda name: setattr(scenario, "phase_name", name)
-                scenario.csv = SimpleNamespace(writerow=offers.append)
-                scenario.csv_handle = SimpleNamespace(flush=lambda: None)
-                with patch("scripts.product.relay_experiment.time.monotonic_ns", side_effect=lambda: clock.now):
-                    scenario.measure()
+                samples = [(s, 10_000_000_000 + int((s - 100.) * 1e9))
+                           for s in (100., 101., 102., final_source)]
+                scenario, offers, events, observed = measure_clock_samples(samples, duration_s=3., task_period_s=3.)
                 # Actual refresh() emitted three five-UAV batches at [0,1,2], never t>=3.
                 self.assertEqual(len(offers), 15)
                 self.assertTrue(all(row["source_sim_time_s"] < 103. for row in offers))
@@ -68,6 +75,21 @@ class RelayExperimentTests(unittest.TestCase):
                 self.assertEqual(observed, [100., 101., 102.])
                 self.assertAlmostEqual(scenario.summary["measurement_duration_source_s"], final_source - 100.)
                 self.assertEqual(scenario.summary["measurement_end_source_sim_time_s"], 103.)
+
+    def test_wall_schedule_end_does_not_add_refresh_while_source_is_just_before_end(self):
+        samples = [(100. + second, 10_000_000_000 + second * 1_000_000_000) for second in range(40)]
+        samples += [(139.993, 50_008_000_000), (140.013, 50_028_000_000)]
+        scenario, offers, events, observed = measure_clock_samples(samples, duration_s=40., task_period_s=20.)
+        self.assertEqual(len(offers), 200)  # forty declared one-second slots for all five UAVs
+        self.assertTrue(all(row["scheduled_host_monotonic_ns"] < 50_000_000_000 for row in offers))
+        self.assertFalse(any(row["source_sim_time_s"] == 139.993 for row in offers))
+        self.assertEqual(sum(event == "control_refresh_offered" for event, _ in events), 200)
+        self.assertEqual(sum(event == "control_refresh_unavailable" for event, _ in events), 200)
+        self.assertIn(139.993, observed)  # physical observation continues to declared model-time end
+        self.assertNotIn(140.013, observed)
+        self.assertEqual(scenario.summary["measurement_refresh_schedule_end_host_monotonic_ns"], 50_000_000_000)
+        self.assertAlmostEqual(scenario.summary["measurement_duration_source_s"], 40.013)
+        self.assertAlmostEqual(scenario.summary["measurement_duration_wall_s"], 40.028)
 
     def test_guided_is_reestablished_after_brake_and_requires_post_request_heartbeat(self):
         now = 2_000_000_000

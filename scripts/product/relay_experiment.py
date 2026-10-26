@@ -526,6 +526,8 @@ class RelayExperiment:
         self.summary["measurement_start_host_monotonic_ns"] = start_ns
         self.observation_end_source_s = start_source + self.args.duration_s
         self.summary["measurement_end_source_sim_time_s"] = self.observation_end_source_s
+        refresh_end_ns = start_ns + int(self.args.duration_s * 1e9)
+        self.summary["measurement_refresh_schedule_end_host_monotonic_ns"] = refresh_end_ns
         current_goal, goals, next_refresh = -1, {}, start_ns
         while self.source_s - start_source < self.args.duration_s:
             self.pump()
@@ -550,7 +552,7 @@ class RelayExperiment:
                               goal_created_host_monotonic_ns=goal.created_ns,
                               source_sim_time_s=self.source_s, target_position_m=goal.target,
                               target_frame="ENU", target_relative_alt_m=relative)
-            if time.monotonic_ns() >= next_refresh:
+            if next_refresh < refresh_end_ns and time.monotonic_ns() >= next_refresh:
                 self.refresh(goals, scheduled_ns=next_refresh)
                 next_refresh += int(self.args.command_period_s * 1e9)
         self.summary["measurement_duration_source_s"] = self.source_s - start_source
