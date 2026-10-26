@@ -7,6 +7,11 @@ CONTAINER_NAME="${BAS_NATIVE_FIVE_CONTAINER_NAME:-bas-v2-native-radio-five-uav}"
 SCENARIO_KEY="${BAS_NATIVE_FIVE_SCENARIO:-town01}"
 GUI="${BAS_NATIVE_FIVE_GUI:-0}"
 CAPTURE_IMAGES="${BAS_NATIVE_CAPTURE_IMAGES:-1}"
+PROPAGATION_PROFILE="${BAS_NATIVE_PROPAGATION_PROFILE:-sionna}"
+case "$PROPAGATION_PROFILE" in
+  sionna|hybrid|friis) ;;
+  *) printf 'Unsupported propagation profile: %s\n' "$PROPAGATION_PROFILE" >&2; exit 2 ;;
+esac
 export BAS_SIMULATION_MODE="${BAS_SIMULATION_MODE:-realtime}"
 export BAS_LOCKSTEP_STEP_MS="${BAS_LOCKSTEP_STEP_MS:-20}"
 export BAS_LOCKSTEP_TIMEOUT_S="${BAS_LOCKSTEP_TIMEOUT_S:-60}"
@@ -44,7 +49,8 @@ run_in_container() {
     python3 "$ROOT_DIR/scripts/product/prepare_town01_gazebo.py"
   fi
   local -a gpu_args=()
-  if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+  if [[ "$PROPAGATION_PROFILE" != friis || "$GUI" == 1 || "$CAPTURE_IMAGES" == 1 ]] && \
+    command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
     gpu_args=(--gpus all -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=graphics,utility,compute)
   fi
   local -a gui_args=()
@@ -238,9 +244,12 @@ SITL_DEFAULTS="${SCENARIO_VALUES[4]}"
 MAP_ID="${SCENARIO_VALUES[5]}"
 
 for required_file in "$PROJECT_SOURCE" "$PATCH_FILE" "$REALTIME_CACHE_PATCH" \
-  "$PHASED_ARRAY_ADAPTER_PATCH" "$LOCKSTEP_TAP_PATCH" "$RADIO_CONFIG" "$WORLD" "$SCENE" "$CAMERA_FRAGMENT" "$SITL_DEFAULTS"; do
+  "$PHASED_ARRAY_ADAPTER_PATCH" "$LOCKSTEP_TAP_PATCH" "$RADIO_CONFIG" "$WORLD" "$CAMERA_FRAGMENT" "$SITL_DEFAULTS"; do
   [[ -f "$required_file" ]] || { printf 'Missing input: %s\n' "$required_file" >&2; exit 2; }
 done
+if [[ "$PROPAGATION_PROFILE" != friis && ! -f "$SCENE" ]]; then
+  printf 'Missing RT scene: %s\n' "$SCENE" >&2; exit 2
+fi
 export GZ_SIM_RESOURCE_PATH="${GZ_SIM_RESOURCE_PATH:-}:$(dirname "$WORLD")"
 mapfile -t RADIO_VALUES < <(python3 - "$RADIO_CONFIG" <<'PY'
 import sys
@@ -360,10 +369,12 @@ if ! git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply --reverse --check "$PH
     exit 2
   }
 fi
-PYTHONPATH="$PYTHON_DEPS" python3 - <<'PY'
+PYTHONPATH="$PYTHON_DEPS" python3 - "$PROPAGATION_PROFILE" <<'PY'
+import sys
 from importlib.metadata import version
-assert version("sionna") == "1.2.0"
-assert version("sionna-rt") == "1.2.0"
+if sys.argv[1] != "friis":
+    assert version("sionna") == "1.2.0"
+    assert version("sionna-rt") == "1.2.0"
 assert version("pybind11") == "2.11.1"
 assert version("cppyy") == "3.5.0"
 PY
@@ -424,9 +435,13 @@ fi
 [[ -x "$BINARY" ]] || { printf 'Focused native target did not build.\n' >&2; exit 1; }
 
 mapfile -t DEPENDENCIES < <(PYTHONPATH="$PYTHON_DEPS" python3 - <<'PY'
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 for name in ("sionna", "sionna-rt", "mitsuba", "drjit", "pybind11", "cppyy"):
-    print(f"{name}={version(name)}")
+    try:
+        value = version(name)
+    except PackageNotFoundError:
+        value = "not_installed"
+    print(f"{name}={value}")
 PY
 )
 {

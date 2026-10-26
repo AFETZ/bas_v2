@@ -30,6 +30,11 @@ EXPECTED_PATCHED_FILES=(
   src/tap-bridge/model/tap-bridge.h
 )
 
+PROPAGATION_PROFILE="${BAS_NATIVE_PROPAGATION_PROFILE:-sionna}"
+case "$PROPAGATION_PROFILE" in
+  sionna|hybrid|friis) ;;
+  *) printf 'ERROR: unsupported propagation profile: %s\n' "$PROPAGATION_PROFILE" >&2; exit 2 ;;
+esac
 SCENARIO="town01"
 BOOTSTRAP=0
 GUI=0
@@ -51,6 +56,9 @@ Options:
   --bootstrap                  Create missing image, workspace, ns-3 checkout,
                                patches, and pinned Python 3.10 dependencies
   -h, --help                   Show this help
+
+Select propagation with BAS_NATIVE_PROPAGATION_PROFILE=sionna|hybrid|friis.
+Native Friis requires no Sionna import, RT scene or NVIDIA/OptiX execution.
 
 Town01 assets are not downloaded automatically.  If they are absent, place the
 official archive under CAVISE_MAPS_DIR and rerun with --bootstrap.
@@ -141,7 +149,7 @@ ensure_image() {
 ensure_town01_assets() {
   local scene="$ROOT_DIR/.external/cavise_maps/Town01/map/scene.xml"
   local world="$ROOT_DIR/.external/cavise_maps/Town01/gazebo/town01.sdf"
-  [[ -f "$scene" ]] || {
+  [[ "$PROPAGATION_PROFILE" == friis || -f "$scene" ]] || {
     ((BOOTSTRAP == 1)) || return 1
     [[ -n "${CAVISE_MAPS_DIR:-}" ]] || die \
       "Town01 is absent; set CAVISE_MAPS_DIR to the official bundle directory"
@@ -152,7 +160,7 @@ ensure_town01_assets() {
     ((BOOTSTRAP == 1)) || return 1
     python3 "$ROOT_DIR/scripts/product/prepare_town01_gazebo.py"
   fi
-  [[ -f "$scene" && -f "$world" ]]
+  [[ -f "$world" && ( "$PROPAGATION_PROFILE" == friis || -f "$scene" ) ]]
 }
 
 ensure_ns3_checkout() {
@@ -215,8 +223,9 @@ python_deps_ok() {
   docker run --rm -i \
     -v "$ROOT_DIR:/workspace/multiagent_simulation" \
     -w /workspace/multiagent_simulation \
-    -e "PYTHONPATH=$runtime_path" \
+    -e "PYTHONPATH=$runtime_path" -e BAS_NATIVE_PROPAGATION_PROFILE="$PROPAGATION_PROFILE" \
     "$(image_id)" python3 - >/dev/null 2>&1 <<'PY'
+import os
 from importlib.metadata import version
 
 expected = {
@@ -235,10 +244,13 @@ expected = {
     "pybind11": "2.11.1",
     "cppyy": "3.5.0",
 }
+if os.environ["BAS_NATIVE_PROPAGATION_PROFILE"] == "friis":
+    expected = {name: expected[name] for name in ("pybind11", "cppyy")}
 assert all(version(name) == wanted for name, wanted in expected.items())
 import cppyy  # noqa: E402,F401
 import pybind11  # noqa: E402,F401
-import sionna.rt  # noqa: E402,F401
+if os.environ["BAS_NATIVE_PROPAGATION_PROFILE"] != "friis":
+    import sionna.rt  # noqa: E402,F401
 PY
 }
 
@@ -285,6 +297,12 @@ ensure_python_dependencies() {
   ((BOOTSTRAP == 1)) || return 1
   [[ ! -e "$PYTHON_DEPS" && ! -L "$PYTHON_DEPS" ]] || die \
     "Python dependency directory exists but is not the pinned runtime: $PYTHON_DEPS"
+  if [[ "$PROPAGATION_PROFILE" == friis ]]; then
+    printf 'BOOTSTRAP installing pinned native build Python dependencies\n'
+    install_python_target "$PYTHON_DEPS" 'pybind11==2.11.1' 'cppyy==3.5.0'
+    python_deps_ok || die "pinned native dependency verification failed"
+    return
+  fi
   printf 'BOOTSTRAP installing pinned Python 3.10 Sionna runtime\n'
   install_python_target "$PYTHON_DEPS" \
     'sionna==1.2.0' 'sionna-rt==1.2.0' \
@@ -438,17 +456,21 @@ else
   fail "container:image" "cannot inspect $IMAGE until Docker is reachable"
 fi
 
-if has_command nvidia-smi && nvidia-smi -L >/dev/null 2>&1; then
+if [[ "$PROPAGATION_PROFILE" == friis ]]; then
+  pass "gpu:not-required" "explicit native Friis profile; NVIDIA/OptiX checks skipped"
+elif has_command nvidia-smi && nvidia-smi -L >/dev/null 2>&1; then
   pass "gpu:host" "$(nvidia-smi -L | head -n1)"
 else
   fail "gpu:host" "a working NVIDIA GPU is required; no propagation fallback is used"
 fi
 
 if [[ -n "$runtime_image_id" ]]; then
+  if [[ "$PROPAGATION_PROFILE" != friis ]]; then
   if docker run --rm --gpus all "$runtime_image_id" nvidia-smi -L >/dev/null 2>&1; then
     pass "gpu:container" "NVIDIA container runtime is usable"
   else
     fail "gpu:container" "docker --gpus all cannot access the NVIDIA GPU"
+  fi
   fi
   if docker run --rm \
     -v "$ROOT_DIR:/workspace/multiagent_simulation" \
@@ -493,10 +515,12 @@ else
     "$ROOT_DIR/network/config/native_wifi_rugged_village_product.yaml"
     "$ROOT_DIR/network/ns3/runtime_rugged_village_cameras.sdf.inc"
     "$ROOT_DIR/src/multiagent_simulation/worlds/rock_demo/rock_demo.sdf"
-    "$ROOT_DIR/src/multiagent_simulation/worlds/rock_demo/sionna_scene.xml"
     "$ROOT_DIR/src/multiagent_simulation/worlds/rock_demo/engineering_terrain.obj"
     "$ROOT_DIR/src/multiagent_simulation/worlds/rock_demo/engineering_buildings.obj"
     "$ROOT_DIR/src/multiagent_simulation/worlds/rock_demo/radio_blocker.obj"
+  )
+  [[ "$PROPAGATION_PROFILE" == friis ]] || rugged_files+=(
+    "$ROOT_DIR/src/multiagent_simulation/worlds/rock_demo/sionna_scene.xml"
   )
   missing_rugged=()
   for path in "${rugged_files[@]}"; do
@@ -531,7 +555,8 @@ else
 fi
 
 if [[ -n "$runtime_image_id" ]] && python_deps_ok; then
-  pass "python:pins" "Sionna 1.2.0, Sionna RT 1.2.0, pybind11 2.11.1, cppyy 3.5.0"
+  pass "python:pins" "selected $PROPAGATION_PROFILE dependencies are pinned"
+  if [[ "$PROPAGATION_PROFILE" != friis ]]; then
   if optix_output="$(docker run --rm -i --gpus all \
     -e NVIDIA_DRIVER_CAPABILITIES=graphics,utility,compute \
     -e "PYTHONPATH=$(container_path "$PYTHON_DEPS")" \
@@ -551,6 +576,7 @@ PY
   else
     fail "gpu:optix" "CUDA/OptiX execution failed; nvidia-smi alone is insufficient. On WSL, use native Linux for the integrated runtime."
     printf '%s\n' "$optix_output" >&2
+  fi
   fi
 else
   fail "python:pins" "pinned target is absent or invalid; rerun with --bootstrap"
@@ -588,6 +614,6 @@ else
   pass "runtime:exclusive" "no conflicting native demo container"
 fi
 
-printf 'Native demo preflight (%s): %d failure(s), %d warning(s).\n' \
-  "$SCENARIO" "$failures" "$warnings"
+printf 'Native demo preflight (%s, %s): %d failure(s), %d warning(s).\n' \
+  "$SCENARIO" "$PROPAGATION_PROFILE" "$failures" "$warnings"
 ((failures == 0))

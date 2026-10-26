@@ -74,11 +74,12 @@ inline Ptr<SourcePropagation> InstallSpectrumSources(
     Ptr<SionnaRtSpectrumPropagationLossModel> reference,
     Ptr<MultiModelSpectrumChannel> channel, const std::string& config,
     const std::string& scene, const SionnaRtChannelModel::RtPathSolverConfig& solver,
-    double maxPaths, EventSink emit)
+    double maxPaths, const std::string& profile, EventSink emit)
 {
     namespace py = pybind11;
     auto router = CreateObject<SourcePropagation>();
     router->reference = reference;
+    router->profile = profile;
     auto text = py::module_::import("pathlib").attr("Path")(config).attr("read_text")();
     py::list entries = py::module_::import("json").attr("loads")(text)["segments"];
     auto active = std::make_shared<unsigned>(0);
@@ -92,9 +93,12 @@ inline Ptr<SourcePropagation> InstallSpectrumSources(
         std::filesystem::rename(config + ".state.tmp", config + ".state");
     };
     std::map<double, Ptr<SionnaRtSpectrumPropagationLossModel>> frequencies;
-    DoubleValue referenceFrequency;
-    reference->GetChannelModelAttribute("Frequency", referenceFrequency);
-    frequencies[referenceFrequency.Get()] = reference;
+    if (reference)
+    {
+        DoubleValue referenceFrequency;
+        reference->GetChannelModelAttribute("Frequency", referenceFrequency);
+        frequencies[referenceFrequency.Get()] = reference;
+    }
     for (auto item : entries)
     {
         auto entry = py::reinterpret_borrow<py::dict>(item);
@@ -114,6 +118,8 @@ inline Ptr<SourcePropagation> InstallSpectrumSources(
             hz <= bandwidth / 2 || power <= 0 || start < 0 || stop <= start ||
             period <= 0 || duty <= 0 || duty > 1 ||
             (pattern != "iso" && pattern != "tr38901"), "invalid source segment");
+        NS_ABORT_MSG_IF(profile == "friis" && pattern != "iso",
+                        "native Friis source profile requires an isotropic element");
         // The envelope gain is the explicitly configured feed gain. The pattern
         // is supplied only to Sionna: the outer AntennaModel stays 0 dBi, avoiding
         // double application by MultiModelSpectrumChannel.
@@ -146,7 +152,7 @@ inline Ptr<SourcePropagation> InstallSpectrumSources(
         auto psd = Create<SpectrumValue>(Create<SpectrumModel>(bands));
         *psd = power * std::pow(10.0, gain / 10.0) / bandwidth;
         generator->SetTxPowerSpectralDensity(psd);
-        if (!frequencies.count(hz))
+        if (profile != "friis" && !frequencies.count(hz))
         {
             auto model = CreateObject<SionnaRtSpectrumPropagationLossModel>();
             model->SetChannelModelAttribute("Frequency", DoubleValue(hz));
@@ -156,7 +162,7 @@ inline Ptr<SourcePropagation> InstallSpectrumSources(
             model->SetRtPathSolverConfig(solver);
             frequencies[hz] = model;
         }
-        router->sources[generator] = frequencies.at(hz);
+        if (profile != "friis") router->sources[generator] = frequencies.at(hz);
         router->sourcePsds[generator] = psd;
         router->sourceTimes[generator] = {start, stop, period, duty};
         const auto details = "source=ns3::WaveformGenerator;center_hz=" + std::to_string(hz) +

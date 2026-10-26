@@ -843,6 +843,7 @@ class NativeRuntimeSampler
 
     void PollSionnaPaths()
     {
+        if (!m_channelModel) return;
         for (uint32_t uavIndex = 1; uavIndex < m_mobility.size(); ++uavIndex)
         {
             Ptr<const MatrixBasedChannelModel::ChannelParams> params =
@@ -860,6 +861,7 @@ class NativeRuntimeSampler
 
     void ObserveReceivedPath(uint32_t receiverIndex, Ptr<const Packet> packet)
     {
+        if (!m_channelModel) return;
         Ptr<Packet> copy = packet->Copy();
         AlohaNoackMacHeader aloha;
         if (copy->RemoveHeader(aloha) == 0)
@@ -905,7 +907,7 @@ class NativeRuntimeSampler
 
     void ObserveWifiPath(uint32_t receiver, uint32_t transmitter, Ptr<const Packet> packet)
     {
-        if (receiver == transmitter) return;
+        if (!m_channelModel || receiver == transmitter) return;
         auto params = m_channelModel->GetParams(m_mobility.at(transmitter), m_mobility.at(receiver));
         if (params) EmitPathObservation(transmitter, receiver, params,
             "sample=decoded_wifi_mpdu;packet_uid=" + std::to_string(packet->GetUid()));
@@ -1251,7 +1253,8 @@ WriteStats(const std::string& path)
            << "  \"native_ns3_mac\": true,\n"
            << "  \"custom_packet_error_model\": false,\n"
            << "  \"custom_scheduler\": false,\n"
-           << "  \"sionna_in_process\": true,\n"
+           << "  \"sionna_in_process\": "
+           << (g_propagationProfile != "friis" ? "true" : "false") << ",\n"
            << "  \"selected_propagation_profile\": \"" << g_propagationProfile << "\",\n"
            << "  \"phased_array_spectrum_propagation_model_count\": "
            << g_phasedArraySpectrumPropagationModels.size() << ",\n"
@@ -1292,7 +1295,7 @@ int
 main(int argc, char* argv[])
 {
     GlobalValue::Bind("ChecksumEnabled", BooleanValue(true));
-    py::scoped_interpreter python{};
+    std::unique_ptr<py::scoped_interpreter> python;
 
     uint32_t uavCount = 1;
     std::string radioBackend = "aloha";
@@ -1455,9 +1458,14 @@ main(int argc, char* argv[])
     NS_ABORT_MSG_IF(uavTapNames.size() != uavCount,
                     "tapUavs count must match uavCount (got "
                         << uavTapNames.size() << ", expected " << uavCount << ")");
-    NS_ABORT_MSG_IF(scene.empty() || positionFile.empty() || readyFile.empty() || phaseFile.empty(),
-                    "scene, positionFile, readyFile, and phaseFile are required");
-    NS_ABORT_MSG_IF(!std::filesystem::exists(scene), "Town01 scene.xml is missing: " << scene);
+    NS_ABORT_MSG_IF(g_propagationProfile != "sionna" && g_propagationProfile != "friis" &&
+                    g_propagationProfile != "hybrid", "invalid explicit propagation profile");
+    const bool requiresRt = g_propagationProfile != "friis";
+    if (requiresRt || !sourceConfig.empty()) python = std::make_unique<py::scoped_interpreter>();
+    NS_ABORT_MSG_IF(positionFile.empty() || readyFile.empty() || phaseFile.empty(),
+                    "positionFile, readyFile, and phaseFile are required");
+    NS_ABORT_MSG_IF(requiresRt && (scene.empty() || !std::filesystem::exists(scene)),
+                    "RT scene.xml is missing: " << scene);
 
     std::signal(SIGTERM, HandleSignal);
     std::signal(SIGINT, HandleSignal);
@@ -1542,26 +1550,27 @@ main(int argc, char* argv[])
 
     Ptr<MultiModelSpectrumChannel> channel = CreateObject<MultiModelSpectrumChannel>();
     channel->SetPropagationDelayModel(CreateObject<ConstantSpeedPropagationDelayModel>());
-    Ptr<SionnaRtSpectrumPropagationLossModel> sionna =
-        CreateObject<SionnaRtSpectrumPropagationLossModel>();
-    sionna->SetChannelModelAttribute("Frequency", DoubleValue(carrierHz));
-    sionna->SetChannelModelAttribute("Scenario", StringValue(scene));
-    sionna->SetChannelModelAttribute("IsMergeShapeEnabled", BooleanValue(true));
-    sionna->SetChannelModelAttribute("MaxNumberOfPaths",
-                                     DoubleValue(static_cast<double>(sionnaMaxNumberOfPaths)));
+    Ptr<SionnaRtSpectrumPropagationLossModel> sionna;
     SionnaRtChannelModel::RtPathSolverConfig solver;
-    solver.maxDepth = sionnaMaxDepth;
-    solver.los = sionnaLos;
-    solver.specularReflection = sionnaSpecularReflection;
-    solver.diffuseReflection = sionnaDiffuseReflection;
-    solver.diffraction = sionnaDiffraction;
-    solver.edgeDiffraction = sionnaEdgeDiffraction;
-    solver.refraction = sionnaRefraction;
-    solver.syntheticArray = sionnaSyntheticArray;
-    solver.seed = sionnaSeed;
-    sionna->SetRtPathSolverConfig(solver);
-    NS_ABORT_MSG_IF(g_propagationProfile != "sionna" && g_propagationProfile != "friis" &&
-                    g_propagationProfile != "hybrid", "invalid explicit propagation profile");
+    if (requiresRt)
+    {
+        sionna = CreateObject<SionnaRtSpectrumPropagationLossModel>();
+        sionna->SetChannelModelAttribute("Frequency", DoubleValue(carrierHz));
+        sionna->SetChannelModelAttribute("Scenario", StringValue(scene));
+        sionna->SetChannelModelAttribute("IsMergeShapeEnabled", BooleanValue(true));
+        sionna->SetChannelModelAttribute("MaxNumberOfPaths",
+                                         DoubleValue(static_cast<double>(sionnaMaxNumberOfPaths)));
+        solver.maxDepth = sionnaMaxDepth;
+        solver.los = sionnaLos;
+        solver.specularReflection = sionnaSpecularReflection;
+        solver.diffuseReflection = sionnaDiffuseReflection;
+        solver.diffraction = sionnaDiffraction;
+        solver.edgeDiffraction = sionnaEdgeDiffraction;
+        solver.refraction = sionnaRefraction;
+        solver.syntheticArray = sionnaSyntheticArray;
+        solver.seed = sionnaSeed;
+        sionna->SetRtPathSolverConfig(solver);
+    }
     if (sourceConfig.empty() && g_propagationProfile == "sionna")
         channel->AddPhasedArraySpectrumPropagationLossModel(sionna);
     else
@@ -1569,7 +1578,7 @@ main(int argc, char* argv[])
         Ptr<bas::SourcePropagation> router;
         if (sourceConfig.empty()) { router=CreateObject<bas::SourcePropagation>(); router->reference=sionna; }
         else router = bas::InstallSpectrumSources(sionna, channel, sourceConfig, scene,
-            solver, sionnaMaxNumberOfPaths,
+            solver, sionnaMaxNumberOfPaths, g_propagationProfile,
             [](const std::string& event, const std::string& id, double value,
                const std::string& details) { LogEvent(event, id, "", 0, value, details); });
         router->profile=g_propagationProfile;
@@ -1578,7 +1587,8 @@ main(int argc, char* argv[])
                  "wrapper=bas::SourcePropagation;selected_profile=" + g_propagationProfile + ";one_model_per_signal=true");
     }
     g_phasedArraySpectrumPropagationModels.push_back(g_propagationProfile == "sionna"
-        ? sionna->GetInstanceTypeId().GetName() : "bas::ExplicitNativeSionnaFriisSelection");
+        ? sionna->GetInstanceTypeId().GetName() : (g_propagationProfile == "friis"
+            ? "ns3::FriisSpectrumPropagationLossModel" : "bas::ExplicitNativeSionnaFriisSelection"));
     LogEvent("rx_psd_model_binding",
              "ns3",
              "",
@@ -1797,7 +1807,7 @@ main(int argc, char* argv[])
     }
 
     LivePositionSource positions(positionFile, mobility);
-    NativeRuntimeSampler metrics(sionna->GetChannelModel(), cpMobility, uavMobility);
+    NativeRuntimeSampler metrics(sionna ? sionna->GetChannelModel() : nullptr, cpMobility, uavMobility);
     for (uint32_t index = 0; index < radioDevices.GetN(); ++index)
         g_wifiRadioIndices[Mac48Address::ConvertFrom(radioDevices.Get(index)->GetAddress())] = index;
     g_runtimeHeartbeat = readyFile + ".heartbeat";
