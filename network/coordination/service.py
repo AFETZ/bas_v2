@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from collections import deque
 import hashlib
 import json
 import os
@@ -24,7 +25,7 @@ from typing import Any
 
 from .policy import (AdmissionGate, Authority, Command, Grant, MAX_DATAGRAM_BYTES,
                      ProtocolError, UARTAdmission, decode, encode, make_command)
-from network.scripts.serial_transport import Encoder, Reassembler, radio_is_live
+from network.scripts.serial_transport import Encoder, Reassembler, decode_chunk, radio_is_live
 
 
 UAV_IDS = tuple(range(1, 6))
@@ -238,7 +239,8 @@ class UAVService(Network):
             return
         for datagram in self.encoder.encode(raw, sent_monotonic_ns=now):
             body = dict(run_id=self.args.run_id, origin_id=self.index,
-                        leader_id=active.leader_id, epoch=active.epoch, payload=datagram)
+                        leader_id=active.leader_id, epoch=active.epoch,
+                        grant_sequence=active.grant_sequence, producer_ns=now, payload=datagram)
             self.send("telemetry", body, 0 if active.leader_id == self.index else active.leader_id)
 
     def handle(self, packet):
@@ -261,8 +263,14 @@ class UAVService(Network):
             self.command(sender, body)
         elif kind == "telemetry":
             active = self.gate.active_grant()
+            grant = self.gate.grants.get(body.get("grant_sequence"))
+            producer = body.get("producer_ns")
+            now = time.monotonic_ns()
             if (active is None or active.leader_id != self.index or body.get("epoch") != active.epoch
-                    or body.get("leader_id") != self.index or body.get("origin_id") != sender):
+                    or body.get("leader_id") != self.index or body.get("origin_id") != sender
+                    or grant is None or grant.epoch != active.epoch or grant.leader_id != self.index
+                    or type(producer) is not int
+                    or not grant.valid_from_ns <= producer <= now < grant.valid_until_ns):
                 raise ProtocolError("telemetry relay role mismatch")
             if self.send("telemetry", body, 0):
                 self.emit("relay_return", uav_id=sender, origin_id=sender,
@@ -303,18 +311,24 @@ class GCSService(Network):
         self.authority = Authority(args.run_id, skew_margin_ns=int(args.skew_margin_s * 1e9))
         self.grant: Grant | None = None
         self.grants_by_epoch: dict[int, Grant] = {}
+        self.issued_grants: dict[int, Grant] = {}
         self.last_renew_ns = 0
         self.detected_unavailable_leader = None
         self.heartbeat: dict[int, tuple[int, dict]] = {}
         self.sequence = 0
         self.clients, self.client_peers, self.parsers = {}, {}, {}
-        self.receivers = {i: Reassembler(channel="control", uav_id=i, direction="uart_to_gcs")
+        self.receivers = {i: Reassembler(channel="control", uav_id=i, direction="uart_to_gcs",
+                                         max_age_ms=args.telemetry_max_age_ms)
                           for i in UAV_IDS}
+        self.telemetry_provenance = {i: {} for i in UAV_IDS}
+        self.telemetry_scope = {}
+        self.stream_provenance = {i: deque() for i in UAV_IDS}
         self.mavutil = mavlink_api()
         self.transmitter = self.mavutil.mavlink.MAVLink(None, srcSystem=255, srcComponent=190)
         self.uart_parsers = {}
         self.latest_messages: dict[int, dict[str, Any]] = {i: {} for i in UAV_IDS}
         self.latest_message_ns: dict[int, dict[str, int]] = {i: {} for i in UAV_IDS}
+        self.latest_message_received_ns: dict[int, dict[str, int]] = {i: {} for i in UAV_IDS}
         for i in UAV_IDS:
             client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             client.bind(("127.0.0.1", 14550 + i))
@@ -360,6 +374,7 @@ class GCSService(Network):
         previous = self.authority.leader_id
         self.grant = self.authority.issue(leader, now, int(self.args.lease_s * 1e9))
         self.grants_by_epoch[self.grant.epoch] = self.grant
+        self.issued_grants[self.grant.grant_sequence] = self.grant
         self.last_renew_ns = now
         self.emit("grant_issued", leader_id=leader, epoch=self.grant.epoch,
                   grant_sequence=self.grant.grant_sequence,
@@ -412,24 +427,92 @@ class GCSService(Network):
             except (ProtocolError, BlockingIOError) as exc:
                 self.emit("operator_data_rejected", destination_id=i, reason=str(exc))
 
-    def deliver(self, i: int, record: bytes):
+    def telemetry_eligible(self, grant: Grant, producer_ns: int, now: int) -> bool:
+        return (self.issued_grants.get(grant.grant_sequence) == grant
+                and type(producer_ns) is int
+                and grant.valid_from_ns <= producer_ns <= now < grant.valid_until_ns
+                and now - producer_ns <= self.args.telemetry_max_age_ms * 1e6)
+
+    def prepare_telemetry_scope(self, i: int, grant: Grant, producer_ns: int, sequence: int):
+        scope = self.telemetry_scope.get(i)
+        if (scope is None or scope[0] != (grant.epoch, grant.leader_id)
+                or producer_ns >= scope[1]):
+            # Public BSF1 sequence anchors a restarted stream; no 500-record wait.
+            self.receivers[i] = Reassembler(channel="control", uav_id=i, direction="uart_to_gcs",
+                    initial_sequence=sequence, max_age_ms=self.args.telemetry_max_age_ms)
+            self.telemetry_provenance[i].clear()
+            self.stream_provenance[i].clear()
+            self.uart_parsers[i] = self.mavutil.mavlink.MAVLink(None)
+            self.uart_parsers[i].robust_parsing = True
+            self.latest_messages[i].clear()
+            self.latest_message_ns[i].clear()
+            self.latest_message_received_ns[i].clear()
+            self.emit("telemetry_scope_started", uav_id=i, epoch=grant.epoch,
+                      leader_id=grant.leader_id, grant_sequence=grant.grant_sequence)
+            self.telemetry_scope[i] = ((grant.epoch, grant.leader_id), grant.valid_until_ns)
+        else:
+            self.telemetry_scope[i] = (scope[0], max(scope[1], grant.valid_until_ns))
+
+    def release_telemetry(self, i: int, records: list[bytes], sent_times: list[int]):
+        if len(records) != len(sent_times):
+            raise RuntimeError("BSF1 release provenance mismatch")
+        for record, producer in zip(records, sent_times):
+            grant = self.telemetry_provenance[i].pop(producer, None)
+            if grant is None or not self.telemetry_eligible(grant, producer, time.monotonic_ns()):
+                self.emit("telemetry_record_rejected", uav_id=i, producer_ns=producer,
+                          reason="expired_original_grant_or_telemetry_age")
+                continue
+            self.deliver(i, record, producer_ns=producer, grant=grant)
+
+    def consume_provenance(self, i: int, count: int):
+        parts = []
+        while count:
+            data, producer, grant = self.stream_provenance[i].popleft()
+            consumed = min(count, len(data))
+            parts.append((producer, grant))
+            if consumed < len(data):
+                self.stream_provenance[i].appendleft((data[consumed:], producer, grant))
+            count -= consumed
+        return parts
+
+    def deliver(self, i: int, record: bytes, *, producer_ns: int, grant: Grant):
+        now = time.monotonic_ns()
+        if not self.telemetry_eligible(grant, producer_ns, now):
+            self.emit("telemetry_record_rejected", uav_id=i, reason="expired_before_MAVLink_parse")
+            return
+        self.stream_provenance[i].append((record, producer_ns, grant))
         messages = self.uart_parsers[i].parse_buffer(record) or []
         for message in messages:
             if message.get_type() != "BAD_DATA" and int(message.get_srcSystem()) != i:
                 self.emit("telemetry_source_rejected", uav_id=i,
                           observed_system_id=int(message.get_srcSystem()))
                 raise ProtocolError("MAVLink SYSID disagrees with native UART origin")
-        if i in self.client_peers:
-            self.clients[i].sendto(record, self.client_peers[i])
-        for message in messages:
+            native_frame = bytes(message.get_msgbuf())
+            pending = b"".join(part[0] for part in self.stream_provenance[i])
+            offset = pending.find(native_frame)
+            if not native_frame or offset < 0:
+                raise RuntimeError("MAVLink bytes lost their UART production provenance")
+            self.consume_provenance(i, offset)
+            parts = self.consume_provenance(i, len(native_frame))
             if message.get_type() == "BAD_DATA":
                 continue
+            now = time.monotonic_ns()
+            if not all(self.telemetry_eligible(g, stamp, now) for stamp, g in parts):
+                self.emit("telemetry_message_rejected", uav_id=i, reason="expired_frame_prefix")
+                continue
+            produced = min(stamp for stamp, _ in parts)
+            if i in self.client_peers:
+                self.clients[i].sendto(native_frame, self.client_peers[i])
             self.latest_messages[i][message.get_type()] = message
-            self.latest_message_ns[i][message.get_type()] = time.monotonic_ns()
+            self.latest_message_ns[i][message.get_type()] = produced
+            self.latest_message_received_ns[i][message.get_type()] = now
             if message.get_type() == "COMMAND_ACK":
                 self.emit("autopilot_ack", uav_id=i, command_id=None,
                           mavlink_command=int(message.command), result=int(message.result),
+                          producer_host_monotonic_ns=produced, received_host_monotonic_ns=now,
                           reason="MAVLink_ACK_has_no_application_command_id")
+        if sum(len(part[0]) for part in self.stream_provenance[i]) > 8192:
+            raise RuntimeError("MAVLink parser retained an unbounded UART prefix")
 
     def handle(self, packet):
         if packet is None:
@@ -446,17 +529,28 @@ class GCSService(Network):
             self.heartbeat[sender] = (time.monotonic_ns(), body)
         elif kind == "telemetry":
             now = time.monotonic_ns()
-            grant = self.grants_by_epoch.get(body.get("epoch"))
+            grant = self.issued_grants.get(body.get("grant_sequence"))
+            producer = body.get("producer_ns")
             i = body.get("origin_id")
             if (grant is None or sender != grant.leader_id or type(i) is not int or i not in UAV_IDS
                     or body.get("leader_id") != sender
-                    or not grant.valid_from_ns <= now < grant.valid_until_ns):
+                    or body.get("epoch") != grant.epoch
+                    or not self.telemetry_eligible(grant, producer, now)):
                 raise ProtocolError("telemetry did not return through selected coordinator")
             payload = base64.b64decode(body["payload"], validate=True)
+            chunk = decode_chunk(payload)
+            if chunk.sent_monotonic_ns != producer or chunk.uav_id != i:
+                raise ProtocolError("outer telemetry provenance disagrees with BSF1 header")
+            self.prepare_telemetry_scope(i, grant, producer, chunk.sequence)
+            previous = self.telemetry_provenance[i].get(producer)
+            if previous is not None and previous != grant:
+                raise ProtocolError("one UART record changed its producing grant")
+            self.telemetry_provenance[i][producer] = grant
             self.emit("gcs_receive", uav_id=i, origin_id=i, leader_id=sender, epoch=grant.epoch,
                       payload_sha256=hashlib.sha256(payload).hexdigest(), bytes=len(payload))
-            for record in self.receivers[i].ingest(payload, time.monotonic_ns()):
-                self.deliver(i, record)
+            receiver = self.receivers[i]
+            records = receiver.ingest(payload, time.monotonic_ns())
+            self.release_telemetry(i, records, receiver.released_sent_ns)
         else:
             raise ProtocolError("unexpected GCS input kind")
 
@@ -474,8 +568,11 @@ class GCSService(Network):
             else:
                 self.operator(key.data)
         for i, receiver in self.receivers.items():
-            for record in receiver.expire(time.monotonic_ns()):
-                self.deliver(i, record)
+            records = receiver.expire(time.monotonic_ns())
+            self.release_telemetry(i, records, receiver.released_sent_ns)
+            now = time.monotonic_ns()
+            self.telemetry_provenance[i] = {stamp: grant for stamp, grant in self.telemetry_provenance[i].items()
+                                            if self.telemetry_eligible(grant, stamp, now)}
 
     def close(self):
         for client in self.clients.values():
@@ -502,6 +599,7 @@ def build_parser():
     parser.add_argument("--renew-s", type=float, default=.5)
     parser.add_argument("--detection-s", type=float, default=1)
     parser.add_argument("--skew-margin-s", type=float, default=.01)
+    parser.add_argument("--telemetry-max-age-ms", type=float, default=250.)
     return parser
 
 
@@ -514,7 +612,8 @@ def main(argv=None):
         parser.error("uav requires --uav-id and --tty")
     if not 0 < args.heartbeat_s < args.detection_s < args.lease_s or not 0 < args.renew_s < args.lease_s:
         parser.error("require heartbeat < detection < lease and 0 < renew < lease")
-    if not 1 <= args.port <= 65535 or not args.duration_s > 0 or not args.watchdog_s > 0 or args.skew_margin_s < 0:
+    if (not 1 <= args.port <= 65535 or not args.duration_s > 0 or not args.watchdog_s > 0
+            or args.skew_margin_s < 0 or not 0 < args.telemetry_max_age_ms <= 250):
         parser.error("invalid port/duration/watchdog/skew margin")
     emit = Events(args.event_log, args.run_id, args.uav_id if args.role == "uav" else 0)
     service = None
