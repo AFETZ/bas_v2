@@ -1,0 +1,14 @@
+--- a/bullet-featherstone/src/SDFFeatures.cc
++++ b/bullet-featherstone/src/SDFFeatures.cc
+@@ -576,6 +576,11 @@
+                 structure.inertia,
+                 structure.fixedBase || isStatic,
+                 true);
++          // BAS compatibility configuration: the upstream Iris rotor target is
++          // 838 rad/s; Bullet's default global 100 rad/s cap prevents its lift.
++          rootMultiBody->setMaxCoordinateVelocity(btScalar(1000));
++          gzmsg << "BAS Bullet coordinate velocity cap=1000 rad/s for model ["
++                << _model->Name() << "]" << std::endl;
+           world = this->ReferenceInterface<WorldInfo>(worldIdentity);
+           auto id = this->AddModel(
+               _model->Name(), worldIdentity,

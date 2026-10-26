@@ -7,6 +7,21 @@ CONTAINER_NAME="${BAS_NATIVE_FIVE_CONTAINER_NAME:-bas-v2-native-radio-five-uav}"
 SCENARIO_KEY="${BAS_NATIVE_FIVE_SCENARIO:-town01}"
 GUI="${BAS_NATIVE_FIVE_GUI:-0}"
 CAPTURE_IMAGES="${BAS_NATIVE_CAPTURE_IMAGES:-1}"
+PHYSICS_PROFILE="${BAS_NATIVE_PHYSICS_PROFILE:-stock}"
+PHYSICS_PLUGIN_DIR="$ROOT_DIR/.external/gz-physics7-rotor/lib"
+case "$PHYSICS_PROFILE" in
+  stock) ;;
+  bullet_rotor)
+    [[ -s "$ROOT_DIR/.external/gz-physics7-rotor/build_manifest.json" &&
+       -s "$PHYSICS_PLUGIN_DIR/libgz-physics7-bullet-featherstone-plugin.so.7.8.0" ]] || {
+      printf 'Build the explicit bullet_rotor runtime with scripts/product/build_bullet_rotor_runtime.sh first.\n' >&2
+      exit 2
+    }
+    export GZ_SIM_PHYSICS_ENGINE_PATH="$PHYSICS_PLUGIN_DIR:${GZ_SIM_PHYSICS_ENGINE_PATH:-}"
+    export LD_LIBRARY_PATH="$PHYSICS_PLUGIN_DIR:${LD_LIBRARY_PATH:-}"
+    ;;
+  *) printf 'Unsupported physics profile: %s\n' "$PHYSICS_PROFILE" >&2; exit 2 ;;
+esac
 FAULT_PROFILE="${BAS_NATIVE_FAULT_PROFILE:-none}"
 FAULT_MASTER_ID="${BAS_NATIVE_FAULT_MASTER_ID:-1}"
 FAULT_EXTRA_LOSS_DB="${BAS_NATIVE_FAULT_EXTRA_LOSS_DB:-200}"
@@ -97,6 +112,7 @@ run_in_container() {
     -e BAS_NATIVE_FIVE_SCENARIO="$SCENARIO_KEY" \
     -e BAS_NATIVE_FIVE_GUI="$GUI" \
     -e BAS_NATIVE_CAPTURE_IMAGES="$CAPTURE_IMAGES" \
+    -e BAS_NATIVE_PHYSICS_PROFILE="$PHYSICS_PROFILE" \
     -e BAS_NATIVE_FIVE_SKIP_BUILD="${BAS_NATIVE_FIVE_SKIP_BUILD:-0}" \
     -e BAS_NATIVE_FIVE_ONE_UAV_RUN="${BAS_NATIVE_FIVE_ONE_UAV_RUN:-}" \
     -e BAS_NATIVE_FIVE_GAZEBO_RTF="${BAS_NATIVE_FIVE_GAZEBO_RTF:-1.0}" \
@@ -400,6 +416,9 @@ fi
 [[ -x "$PYTHON_TOOLING/bin/cmake" ]] || { printf 'Pinned CMake tooling is absent.\n' >&2; exit 2; }
 
 mkdir -p "$RUN_DIR"/{logs,metrics,pcap,screenshots,plots} "$UART_DIR" "$WORK_DIR"
+if [[ "$PHYSICS_PROFILE" == bullet_rotor ]]; then
+  cp "$ROOT_DIR/.external/gz-physics7-rotor/build_manifest.json" "$RUN_DIR/logs/physics_runtime.json"
+fi
 if [[ "$SCENARIO_MODE" != product && "$UAV_COUNT" == 1 ]]; then
   python3 - "$SCENARIO" "$RUN_DIR/diagnostic_scenario.yaml" <<'PYSCENARIO'
 import sys
@@ -477,6 +496,7 @@ PY
   printf 'started_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf 'git_head=%s\n' "${BAS_SOURCE_HEAD:-$(git -C "$ROOT_DIR" rev-parse HEAD)}"
   printf 'source_dirty_paths=%s\n' "${BAS_SOURCE_DIRTY:-unknown}"
+  printf 'physics_profile=%s\n' "$PHYSICS_PROFILE"
   printf 'wifi_topology=%s\n' "$WIFI_TOPOLOGY"
   printf 'fault_profile=%s\nfault_master_id=%s\nfault_extra_loss_db=%s\n' \
     "$FAULT_PROFILE" "$FAULT_MASTER_ID" "$FAULT_EXTRA_LOSS_DB"
