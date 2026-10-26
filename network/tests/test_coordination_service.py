@@ -13,11 +13,23 @@ import unittest
 from unittest.mock import patch
 
 from network.coordination.policy import AdmissionGate, Authority, ProtocolError, encode, make_command
-from network.coordination.service import GCSService, Network, UAVService, mavlink_api
+from network.coordination.service import Events, GCSService, Network, UAVService, mavlink_api
 from network.scripts.serial_transport import Encoder, Reassembler
 
 
 class CoordinationServiceTests(unittest.TestCase):
+    def test_uart_event_carries_original_absolute_lease_for_offline_audit(self):
+        grant = Authority("run").issue(1, 1000, 500)
+        command = make_command(grant, destination_id=3, sequence=2, now_ns=1100, payload=b"unit-frame")
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "events.jsonl"
+            emit = Events(path, "run", 3)
+            emit("uart_admitted", command=command)
+            emit.stream.close()
+            row = json.loads(path.read_text())
+        self.assertEqual((row["grant_sequence"], row["valid_from_ns"], row["valid_until_ns"]),
+                         (grant.grant_sequence, grant.valid_from_ns, grant.valid_until_ns))
+
     def test_missing_native_heartbeat_after_readiness_is_failure(self):
         service = Network.__new__(Network)
         service.watchdog_seen_healthy = False

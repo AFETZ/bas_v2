@@ -224,6 +224,7 @@ class AdmissionGate:
         self.highest_epoch = grant.epoch
         self.highest_grant_sequence = grant.grant_sequence
         self.emit("grant_received", epoch=grant.epoch, leader_id=grant.leader_id,
+                  grant_sequence=grant.grant_sequence, issued_ns=grant.issued_ns,
                   valid_from_ns=grant.valid_from_ns, valid_until_ns=grant.valid_until_ns)
         return True
 

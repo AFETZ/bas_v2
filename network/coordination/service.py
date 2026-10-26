@@ -47,6 +47,8 @@ class Events:
                      source_sim_time_s=None, uav_id=self.uav_id, node_id=self.uav_id)
         if command is not None:
             value.update(leader_id=command.leader_id, epoch=command.epoch,
+                         grant_sequence=command.grant_sequence,
+                         valid_from_ns=command.valid_from_ns, valid_until_ns=command.valid_until_ns,
                          uav_id=command.destination_id,
                          command_id=command.command_id, sequence=command.sequence,
                          command_created_host_monotonic_ns=command.created_ns,
