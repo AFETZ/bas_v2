@@ -39,9 +39,26 @@ class CoordinationPolicyTests(unittest.TestCase):
     def test_only_gcs_can_issue_grants(self):
         grant = self.authority.issue(1, self.now, 1000)
         with self.assertRaises(ProtocolError):
-            self.gate.receive_grant(grant, sender_id=1)
+            self.gate.receive_grant(grant, sender_id=2)
         with self.assertRaises(ProtocolError):
-            decode(encode("grant", 1, grant))
+            decode(encode("grant", 2, grant))
+        with self.assertRaises(ProtocolError):
+            dataclasses.replace(grant, issuer_id=1)
+
+    def test_former_master_accepts_unmodified_gcs_grant_via_new_master(self):
+        former = AdmissionGate("run-1", 1, now_ns=lambda: self.now, hold=lambda: None)
+        old = self.authority.issue(1, self.now, 1000)
+        former.receive_grant(old, sender_id=0)
+        self.now += 100
+        new = self.authority.issue(2, self.now, 1000)
+        # Direct GCS->UAV1 has failed; original GCS-issued grant takes UAV2->UAV1.
+        kind, sender, forwarded = decode(encode("grant", 2, new))
+        self.assertEqual(forwarded, new)
+        former.receive_grant(forwarded, sender_id=sender)
+        self.now = new.valid_from_ns
+        command = make_command(new, destination_id=1, sequence=1,
+                               now_ns=self.now, payload=b"opaque-native-frame")
+        former.check(command, sender_id=2)
 
     def test_unacknowledged_renewal_delays_new_leader(self):
         first = self.grant()

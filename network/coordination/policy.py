@@ -51,6 +51,7 @@ class Grant:
     issued_ns: int
     valid_from_ns: int
     valid_until_ns: int
+    issuer_id: int = 0
 
     def __post_init__(self) -> None:
         _run(self.run_id)
@@ -60,6 +61,8 @@ class Grant:
         _integer(self.issued_ns, "issued_ns")
         _integer(self.valid_from_ns, "valid_from_ns")
         _integer(self.valid_until_ns, "valid_until_ns")
+        if type(self.issuer_id) is not int or self.issuer_id != 0:
+            raise ProtocolError("only GCS issues grants")
         if not self.issued_ns <= self.valid_from_ns < self.valid_until_ns:
             raise ProtocolError("invalid grant time interval")
 
@@ -132,9 +135,10 @@ def decode(raw: bytes) -> tuple[str, int, Grant | Command | dict[str, Any]]:
         if type(sender) is not int or sender not in {0, *UAV_IDS} or not isinstance(body, dict):
             raise ProtocolError("invalid sender/body")
         if kind == "grant":
-            if sender != 0:
-                raise ProtocolError("only GCS issues grants")
-            return kind, sender, Grant(**body)
+            grant = Grant(**body)
+            if sender not in (0, grant.leader_id):
+                raise ProtocolError("grant must arrive from GCS or its named coordinator")
+            return kind, sender, grant
         if kind == "command":
             body["payload"] = base64.b64decode(body["payload"], validate=True)
             if body.get("target_position_m") is not None:
@@ -194,10 +198,11 @@ class AdmissionGate:
         self.last_sequence: dict[int, int] = {}
         self.hold_required = False
         self.ever_active = False
+        self.observed_epoch = 0
 
     def receive_grant(self, grant: Grant, *, sender_id: int) -> bool:
         now = self.now_ns()
-        if sender_id != 0 or grant.run_id != self.run_id:
+        if sender_id not in (0, grant.leader_id) or grant.run_id != self.run_id:
             raise ProtocolError("untrusted issuer or foreign run")
         if grant.issued_ns > now:
             raise ProtocolError("grant issued in future")
@@ -229,13 +234,11 @@ class AdmissionGate:
             return None
         return max(active, key=lambda g: (g.epoch, g.grant_sequence))
 
-    def check(self, command: Command, *, sender_id: int, reserve: bool = False) -> None:
-        """Call before EVERY write, including a partial-write continuation."""
+    def check_authority(self, command: Command) -> None:
+        """Validate authority for relay forwarding without claiming local admission."""
         now = self.now_ns()
-        if command.run_id != self.run_id or command.destination_id != self.uav_id:
-            raise ProtocolError("foreign run or destination")
-        if sender_id != command.leader_id:
-            raise ProtocolError("command did not arrive from its coordinator")
+        if command.run_id != self.run_id:
+            raise ProtocolError("foreign run")
         grant = self.grants.get(command.grant_sequence)
         active = self.active_grant()
         if grant is None or active is None:
@@ -246,6 +249,14 @@ class AdmissionGate:
             raise ProtocolError("command altered grant interval")
         if not command.valid_from_ns <= now < command.valid_until_ns or command.created_ns > now:
             raise ProtocolError("command not currently valid")
+
+    def check(self, command: Command, *, sender_id: int, reserve: bool = False) -> None:
+        """Call before EVERY write, including a partial-write continuation."""
+        self.check_authority(command)
+        if command.destination_id != self.uav_id:
+            raise ProtocolError("foreign destination")
+        if sender_id != command.leader_id:
+            raise ProtocolError("command did not arrive from its coordinator")
         if command.sequence <= self.last_sequence.get(command.epoch, 0):
             raise ProtocolError("duplicate or reordered command")
         if reserve:
@@ -259,6 +270,10 @@ class AdmissionGate:
         if active is not None:
             self.ever_active = True
             self.hold_required = True
+            if active.epoch != self.observed_epoch:
+                self.observed_epoch = active.epoch
+                self.emit("leader_activated", leader_id=active.leader_id, epoch=active.epoch,
+                          grant_sequence=active.grant_sequence)
         elif self.ever_active and self.hold_required:
             self.hold()  # no success event if native request raises
             self.hold_required = False
