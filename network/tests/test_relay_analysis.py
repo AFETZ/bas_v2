@@ -210,8 +210,10 @@ def test_failed_run_remains_an_unconditional_outcome_when_network_window_is_inco
     base = analyze(run, tmp_path)
     base["pilot"] = False
     metadata = base["metadata"]
-    metadata["environment"].update(git_head="f" * 40, source_dirty_paths="0")
-    metadata["native_stats"].update(rng_seed=1, rng_run=1)
+    metadata["environment"].update(git_head="f" * 40, source_dirty_paths="0",
+        wifi_explicit_bar_after_missed_block_ack_requested="1", wifi_aggregation_requested="1")
+    metadata["native_stats"].update(rng_seed=1, rng_run=1,
+        wifi_explicit_bar_after_missed_block_ack=True, wifi_aggregation_enabled=True)
     metadata["configuration_snapshot"] = {"container_image_id": "sha256:unit-fixture"}
     metadata["config"].update({key: 1 for key in REPORT.MISSION_FIELDS})
     metadata["config"]["effective_service_args"] = {key: 1 for key in REPORT.SERVICE_FIELDS}
@@ -325,3 +327,40 @@ def test_fixed_policy_cannot_credit_a_different_master_as_its_recovery(tmp_path)
     assert result["policy_audit"]["fixed_policy_new_leader_appointments"] == 1
     assert result["rates"]["all_five"]["timely"] == 0
     assert result["goal_recovery_all_five"]["recovered"] is False
+
+
+def test_signature_excludes_run_paths_but_includes_mac_modes_and_effective_service_thresholds(tmp_path):
+    run, _ = fixture(tmp_path)
+    base = analyze(run, tmp_path)
+    base["pilot"] = False
+    meta = base["metadata"]
+    meta["environment"].update(git_head="f" * 40, source_dirty_paths="0",
+        wifi_explicit_bar_after_missed_block_ack_requested="0", wifi_aggregation_requested="0")
+    meta["native_stats"].update(rng_seed=1, rng_run=1, wifi_data_mode="HtMcs0", wifi_control_mode="ErpOfdmRate6Mbps",
+        wifi_explicit_bar_after_missed_block_ack=False, wifi_aggregation_enabled=False)
+    meta["configuration_snapshot"] = {"container_image_id": "sha256:unit-fixture"}
+    meta["config"].update({key: 1 for key in REPORT.MISSION_FIELDS})
+    meta["config"]["effective_service_args"] = {key: 1 for key in REPORT.SERVICE_FIELDS}
+    planned = next(row for row in REPORT.campaign_plan(repeats=1) if row["policy"] == "failover" and row["fault_profile"] == "selective")
+    first = REPORT.campaign_record(planned, base)
+    changed_paths = deepcopy(base)
+    changed_paths["metadata"]["config"].update(run_id="another-run", run_dir="/another/run", node_state="/tmp/another/state", phase_file="/another/phase")
+    changed_paths["metadata"]["config"]["effective_service_args"].update(event_log="/another/log", radio_watchdog_file="/another/watchdog", run_id="another-run")
+    assert REPORT.campaign_record(planned, changed_paths)["comparability"] == first["comparability"]
+    for change in ("mac", "command_age", "landing", "mode"):
+        value = deepcopy(base)
+        if change == "mac":
+            value["metadata"]["native_stats"]["wifi_aggregation_enabled"] = True
+            value["metadata"]["environment"]["wifi_aggregation_requested"] = "1"
+        elif change == "command_age":
+            value["metadata"]["config"]["effective_service_args"]["command_max_age_ms"] = 100
+        elif change == "landing":
+            value["metadata"]["config"]["land_z_tolerance_m"] = .5
+        else:
+            value["metadata"]["native_stats"]["wifi_data_mode"] = "HtMcs1"
+        assert REPORT.campaign_record(planned, value)["comparability"] != first["comparability"]
+    missing_effective = deepcopy(base)
+    missing_effective["metadata"]["native_stats"].pop("wifi_aggregation_enabled")
+    record = REPORT.campaign_record(planned, missing_effective)
+    assert record["comparability"]["radio"]["wifi_aggregation_enabled"] is None
+    assert record["study_eligible"] is False

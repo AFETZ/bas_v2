@@ -562,11 +562,20 @@ def paired_interval(differences: list[float], *, seed: int = 20261026) -> dict[s
 
 MISSION_FIELDS = ("initial_master", "duration_s", "fault_start_s", "fault_end_s", "command_period_s", "task_period_s",
     "base_altitude_m", "altitude_separation_m", "altitude_step_m", "hold_s", "z_tolerance_m",
-    "xy_tolerance_m", "hold_speed_mps", "ready_timeout_s", "arm_timeout_s", "takeoff_timeout_s", "land_timeout_s")
-SERVICE_FIELDS = ("port", "heartbeat_s", "lease_s", "renew_s", "detection_s", "skew_margin_s", "telemetry_max_age_ms")
+    "xy_tolerance_m", "hold_speed_mps", "ready_timeout_s", "arm_timeout_s", "takeoff_timeout_s", "land_timeout_s",
+    "watchdog_s", "land_z_tolerance_m", "max_landing_descent_mps")
+SERVICE_FIELDS = ("role", "port", "initial_master", "duration_s", "watchdog_s", "heartbeat_s", "lease_s", "renew_s",
+    "detection_s", "skew_margin_s", "telemetry_max_age_ms", "command_max_age_ms")
 ENVIRONMENT_FIELDS = ("map_id", "scenario_key", "physics_profile", "gazebo_requested_rtf", "active_uart_channels",
     "stack_cpuset", "radio_cpuset", "event_logging", "capture_images", "gui", "carrier_hz", "channel_number",
-    "channel_width_mhz", "tx_power_w", "phy_rate_bps", "channel_state_max_age_s", "readiness_lag_max_ms")
+    "channel_width_mhz", "tx_power_w", "phy_rate_bps", "channel_state_max_age_s", "readiness_lag_max_ms",
+    "wifi_data_mode", "wifi_control_mode", "wifi_explicit_bar_after_missed_block_ack_requested", "wifi_aggregation_requested")
+RADIO_FIELDS = ("propagation_profile", "wifi_topology", "fault_extra_loss_db", "fault_master_id", "tx_power_w",
+    "state_max_age_s", "carrier_hz", "wifi_actual_channel_number", "wifi_actual_center_frequency_hz",
+    "wifi_channel_width_mhz", "wifi_standard", "wifi_data_mode", "wifi_control_mode",
+    "wifi_explicit_bar_after_missed_block_ack", "wifi_aggregation_enabled")
+MAC_REQUESTS = {"wifi_explicit_bar_after_missed_block_ack": "wifi_explicit_bar_after_missed_block_ack_requested",
+                "wifi_aggregation_enabled": "wifi_aggregation_requested"}
 
 
 def campaign_record(plan_row: dict[str, Any], result: dict[str, Any] | None) -> dict[str, Any]:
@@ -601,6 +610,12 @@ def campaign_record(plan_row: dict[str, Any], result: dict[str, Any] | None) -> 
     dirty = finite(env.get("source_dirty_paths", source.get("dirty_count")))
     if dirty != 0:
         study_problem("clean frozen source is not established")
+    for effective, requested in MAC_REQUESTS.items():
+        observed, requested_value = stats.get(effective), env.get(requested)
+        if type(observed) is not bool or requested_value not in ("0", "1"):
+            study_problem(f"requested/effective native MAC setting not recorded: {effective}")
+        elif observed != (requested_value == "1"):
+            study_problem(f"requested/effective native MAC setting disagrees: {effective}")
     if not result.get("observation_window", {}).get("complete"):
         reasons.append("full measurement window not observed; outcome remains in failure counts")
     if result.get("data_quality_errors"):
@@ -624,8 +639,7 @@ def campaign_record(plan_row: dict[str, Any], result: dict[str, Any] | None) -> 
         environment={key: env.get(key) for key in ENVIRONMENT_FIELDS},
         mission={key: cfg.get(key) for key in MISSION_FIELDS},
         service={key: service.get(key) for key in SERVICE_FIELDS},
-        radio={key: stats.get(key) for key in ("propagation_profile", "wifi_topology", "fault_extra_loss_db",
-            "fault_master_id", "tx_power_w", "state_max_age_s")}, physics_runtime=metadata.get("physics_runtime", {}),
+        radio={key: stats.get(key) for key in RADIO_FIELDS}, physics_runtime=metadata.get("physics_runtime", {}),
         analysis=result.get("definitions", {}))
     record.update(recorded=terminal, has_artifacts=True, run_status=result.get("run_status", "not_recorded"),
         run_error=result.get("run_error"), raw_run_dir=result.get("raw_run_dir"),
