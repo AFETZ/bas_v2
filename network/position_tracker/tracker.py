@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish normalized radio node state from ROS odometry or scenario config."""
+"""Publish measured Gazebo/ROS radio state; config snapshots are offline only."""
 
 from __future__ import annotations
 
@@ -10,7 +10,10 @@ import os
 import sys
 import time
 import uuid
-from collections import deque
+import threading
+import signal
+from types import SimpleNamespace
+from collections import deque, Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -164,6 +167,8 @@ class LiveState:
         self.clock_rx_ns = 0
         self.fault: str | None = None
         self.rejected = 0
+        self.rejection_reasons = Counter()
+        self.source = 'ros_odometry'
 
     def clock(self, sim_s: float, now_ns: int) -> None:
         if not math.isfinite(sim_s) or sim_s < 0:
@@ -183,12 +188,22 @@ class LiveState:
         history = self.history[name]
         valid_frames = str(msg.header.frame_id).strip('/') in ('odom', f'{name}/odom')
         valid_frames &= str(msg.child_frame_id).strip('/') in ('base_link', f'{name}/base_link')
-        if (not valid_frames or not all(math.isfinite(x) for x in [stamp,*q,*p,*v,*omega])
-                or not 1e-12 <= sum(x*x for x in q) < float("inf") or self.clock_s is None
-                or abs(stamp-self.clock_s) > self.stale_ns/1e9
-                or (self.simulation_mode == "realtime" and now_ns-self.clock_rx_ns > self.stale_ns)
-                or (history and stamp <= history[-1]['source_sim_time_s'])):
+        reason = None
+        if not valid_frames:
+            reason = 'frame'
+        elif not all(math.isfinite(x) for x in [stamp,*q,*p,*v]) or not 1e-12 <= sum(x*x for x in q) < float("inf"):
+            reason = 'nonfinite_or_orientation'
+        elif self.clock_s is None:
+            reason = 'clock_missing'
+        elif abs(stamp-self.clock_s) > self.stale_ns/1e9:
+            reason = 'source_clock_skew'
+        elif self.simulation_mode == "realtime" and now_ns-self.clock_rx_ns > self.stale_ns:
+            reason = 'clock_stale'
+        elif history and stamp <= history[-1]['source_sim_time_s']:
+            reason = 'out_of_order'
+        if reason:
             self.rejected += 1
+            self.rejection_reasons[reason] += 1
             return False
         norm = math.sqrt(sum(x*x for x in q))
         q = [x/norm for x in q]
@@ -196,7 +211,7 @@ class LiveState:
         # with the publication time, or extrapolate physical state in this adapter.
         sample_ns = now_ns - int(max(0., self.clock_s-stamp)*1e9)
         history.append(dict(id=name, role='uav', position_m=p, orientation_quat_xyzw=q,
-            velocity_enu_mps=rotate_vector(q,v), angular_velocity_enu_radps=rotate_vector(q,omega),
+            velocity_enu_mps=rotate_vector(q,v), angular_velocity_enu_radps=rotate_vector(q,omega) if all(math.isfinite(x) for x in omega) else None,
             source_sim_time_s=stamp, received_monotonic_ns=now_ns, sample_monotonic_ns=sample_ns,
             source_frame=msg.header.frame_id, child_frame=msg.child_frame_id,
             source_topic=f'/{name}/odometry', antenna='omni', stale=False))
@@ -218,10 +233,57 @@ class LiveState:
             node['history'] = list(history)
             nodes.append(node)
         return dict(type='node_state', schema_version=2, session_id=self.session,
-            simulation_mode=self.simulation_mode, coordinate_frame='ENU', source='ros_odometry', time_s=time.time(),
+            simulation_mode=self.simulation_mode, coordinate_frame='ENU', source=self.source, time_s=time.time(),
             published_monotonic_ns=now_ns, source_sim_time_s=self.clock_s,
             clock_received_monotonic_ns=self.clock_rx_ns, fault=self.fault,
-            nodes=nodes, missing_nodes=missing, stale_nodes=stale, rejected_samples=self.rejected)
+            nodes=nodes, missing_nodes=missing, stale_nodes=stale, rejected_samples=self.rejected,
+            rejection_reasons=dict(self.rejection_reasons))
+
+
+def run_gazebo_tracker(args: argparse.Namespace) -> int:
+    """Read the same native odometry without a DDS bridge in the clock path."""
+    from gz.transport13 import Node
+    from gz.msgs10.clock_pb2 import Clock
+    from gz.msgs10.odometry_pb2 import Odometry
+    state = LiveState(load_yaml(Path(args.scenario)), args.stale_after_s,
+                      os.environ.get('BAS_SIMULATION_MODE', 'realtime'))
+    state.source = 'gazebo_odometry'
+    mutex, stop = threading.Lock(), threading.Event()
+    node = Node()
+    def receive_clock(msg):
+        with mutex:
+            state.clock(msg.sim.sec + msg.sim.nsec / 1e9, time.monotonic_ns())
+    def receive_pose(name, msg):
+        fields = {item.key: list(item.value) for item in msg.header.data}
+        adapted = SimpleNamespace(
+            header=SimpleNamespace(stamp=SimpleNamespace(sec=msg.header.stamp.sec,
+                nanosec=msg.header.stamp.nsec), frame_id=fields.get('frame_id', [''])[0]),
+            child_frame_id=fields.get('child_frame_id', [''])[0],
+            pose=SimpleNamespace(pose=msg.pose), twist=SimpleNamespace(twist=msg.twist))
+        with mutex:
+            if state.odometry(name, adapted, time.monotonic_ns()):
+                state.history[name][-1]['source_topic'] = f'/model/{name}/odometry'
+    if not node.subscribe(Clock, f'/world/{args.world_name}/clock', receive_clock):
+        raise RuntimeError('cannot subscribe to Gazebo world clock')
+    for name in state.history:
+        if not node.subscribe(Odometry, f'/model/{name}/odometry',
+                              lambda msg, name=name: receive_pose(name, msg)):
+            raise RuntimeError(f'cannot subscribe to Gazebo odometry: {name}')
+    signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    signal.signal(signal.SIGINT, lambda *_: stop.set())
+    try:
+        while not stop.is_set():
+            with mutex:
+                value = state.snapshot(time.monotonic_ns())
+            write_state(Path(args.output_json), Path(args.output_jsonl) if args.output_jsonl else None, value)
+            stop.wait(1 / args.rate_hz)
+    finally:
+        # Release native callbacks while Python is still running, before
+        # interpreter teardown races Gazebo Transport's receiving threads.
+        for topic in node.subscribed_topics():
+            node.unsubscribe(topic)
+        del node
+    return 0
 
 
 def run_ros_tracker(args: argparse.Namespace) -> int:
@@ -306,6 +368,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-json", default=str(ROOT_DIR / "runs/latest/logs/node_state.json"))
     parser.add_argument("--output-jsonl", default=str(ROOT_DIR / "runs/latest/logs/node_state.jsonl"))
     parser.add_argument("--rate-hz", type=float, default=5.0)
+    parser.add_argument('--transport', choices=('ros', 'gazebo'), default='ros')
+    parser.add_argument('--world-name', default='map')
     parser.add_argument("--stale-after-s", type=float, default=.5)
     parser.add_argument(
         "--from-config-once",
@@ -319,6 +383,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.from_config_once:
         return run_config_once(args)
+    if args.transport == 'gazebo':
+        return run_gazebo_tracker(args)
     return run_ros_tracker(args)
 
 

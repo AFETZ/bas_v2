@@ -6,6 +6,7 @@ IMAGE="${BAS_CONTAINER_IMAGE:-multiagent_simulation:latest}"
 CONTAINER_NAME="${BAS_NATIVE_FIVE_CONTAINER_NAME:-bas-v2-native-radio-five-uav}"
 SCENARIO_KEY="${BAS_NATIVE_FIVE_SCENARIO:-town01}"
 GUI="${BAS_NATIVE_FIVE_GUI:-0}"
+CAPTURE_IMAGES="${BAS_NATIVE_CAPTURE_IMAGES:-1}"
 export BAS_SIMULATION_MODE="${BAS_SIMULATION_MODE:-realtime}"
 export BAS_LOCKSTEP_STEP_MS="${BAS_LOCKSTEP_STEP_MS:-20}"
 export BAS_LOCKSTEP_TIMEOUT_S="${BAS_LOCKSTEP_TIMEOUT_S:-60}"
@@ -26,6 +27,7 @@ PYMODE
   exit 2
 }
 [[ "$GUI" == 0 || "$GUI" == 1 ]] || { printf 'BAS_NATIVE_FIVE_GUI must be 0 or 1.\n' >&2; exit 2; }
+[[ "$CAPTURE_IMAGES" == 0 || "$CAPTURE_IMAGES" == 1 ]] || { printf 'BAS_NATIVE_CAPTURE_IMAGES must be 0 or 1.\n' >&2; exit 2; }
 
 run_in_container() {
   command -v docker >/dev/null 2>&1 || { printf 'Docker is required.\n' >&2; return 2; }
@@ -59,6 +61,7 @@ run_in_container() {
     --name "$CONTAINER_NAME" \
     --label bas.product=native-radio-five-uav \
     --privileged --network=host --user 0:0 \
+    --tmpfs /tmp:rw,nosuid,size=1g,mode=1777 \
     "${gpu_args[@]}" \
     "${gui_args[@]}" \
     -e BAS_SIMULATION_MODE -e BAS_LOCKSTEP_STEP_MS -e BAS_LOCKSTEP_TIMEOUT_S \
@@ -72,6 +75,7 @@ run_in_container() {
     -e BAS_NATIVE_FIVE_RUN_ID="${BAS_NATIVE_FIVE_RUN_ID:-}" \
     -e BAS_NATIVE_FIVE_SCENARIO="$SCENARIO_KEY" \
     -e BAS_NATIVE_FIVE_GUI="$GUI" \
+    -e BAS_NATIVE_CAPTURE_IMAGES="$CAPTURE_IMAGES" \
     -e BAS_NATIVE_FIVE_SKIP_BUILD="${BAS_NATIVE_FIVE_SKIP_BUILD:-0}" \
     -e BAS_NATIVE_FIVE_ONE_UAV_RUN="${BAS_NATIVE_FIVE_ONE_UAV_RUN:-}" \
     -e BAS_NATIVE_FIVE_GAZEBO_RTF="${BAS_NATIVE_FIVE_GAZEBO_RTF:-1.0}" \
@@ -155,7 +159,7 @@ RUN_DIR="$ROOT_DIR/runs/native-radio-$BAS_SIMULATION_MODE/$RUN_ID"
 RUNTIME_DIR="/tmp/bas-native-five-$RUN_ID"
 ONE_UAV_RUN="${BAS_NATIVE_FIVE_ONE_UAV_RUN:-}"
 UART_DIR="$RUNTIME_DIR/uart"
-WORK_DIR="$RUNTIME_DIR/work"
+WORK_DIR="$RUN_DIR/sitl"
 NS3_DIR="$ROOT_DIR/.external/ns-3-sionna-native"
 PYTHON_DEPS="$NS3_DIR/.python-deps-py310"
 PYTHON_TOOLING="$NS3_DIR/.tooling-py310"
@@ -165,6 +169,7 @@ BINARY="$NS3_DIR/build/scratch/ns3.48-upstream-sionna-tap-spike-default"
 PATCH_FILE="$ROOT_DIR/network/ns3/patches/mr2608-spike-compatibility.patch"
 REALTIME_CACHE_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-realtime-scene-cache.patch"
 PHASED_ARRAY_ADAPTER_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-spectrumwifi-phased-array-adapter.patch"
+LOCKSTEP_TAP_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-lockstep-tap-read.patch"
 if [[ "$SCENARIO_KEY" == customer ]]; then
   SCENARIO="$ROOT_DIR/network/config/scenario_5uav_customer_native_product.yaml"
 elif [[ "$SCENARIO_KEY" == rock_demo ]]; then
@@ -233,7 +238,7 @@ SITL_DEFAULTS="${SCENARIO_VALUES[4]}"
 MAP_ID="${SCENARIO_VALUES[5]}"
 
 for required_file in "$PROJECT_SOURCE" "$PATCH_FILE" "$REALTIME_CACHE_PATCH" \
-  "$PHASED_ARRAY_ADAPTER_PATCH" "$RADIO_CONFIG" "$WORLD" "$SCENE" "$CAMERA_FRAGMENT" "$SITL_DEFAULTS"; do
+  "$PHASED_ARRAY_ADAPTER_PATCH" "$LOCKSTEP_TAP_PATCH" "$RADIO_CONFIG" "$WORLD" "$SCENE" "$CAMERA_FRAGMENT" "$SITL_DEFAULTS"; do
   [[ -f "$required_file" ]] || { printf 'Missing input: %s\n' "$required_file" >&2; exit 2; }
 done
 export GZ_SIM_RESOURCE_PATH="${GZ_SIM_RESOURCE_PATH:-}:$(dirname "$WORLD")"
@@ -362,6 +367,9 @@ assert version("sionna-rt") == "1.2.0"
 assert version("pybind11") == "2.11.1"
 assert version("cppyy") == "3.5.0"
 PY
+if ! git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply --reverse --check "$LOCKSTEP_TAP_PATCH" >/dev/null 2>&1; then
+  git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply "$LOCKSTEP_TAP_PATCH"
+fi
 [[ -x "$PYTHON_TOOLING/bin/cmake" ]] || { printf 'Pinned CMake tooling is absent.\n' >&2; exit 2; }
 
 mkdir -p "$RUN_DIR"/{logs,metrics,pcap,screenshots,plots} "$UART_DIR" "$WORK_DIR"
@@ -370,8 +378,10 @@ if [[ "$BAS_SIMULATION_MODE" == lockstep ]]; then
 fi
 printf 'Starting native five-UAV demo: scenario=%s map=%s gui=%s run=%s\n' \
   "$SCENARIO_KEY" "$MAP_ID" "$GUI" "$RUN_ID"
+camera_args=()
+[[ "$CAPTURE_IMAGES" == 0 ]] && camera_args+=(--no-cameras)
 python3 "$ROOT_DIR/scripts/product/inject_native_radio_runtime_cameras.py" \
-  --world "$WORLD" --fragment "$CAMERA_FRAGMENT" --output "$LAUNCH_WORLD"
+  --world "$WORLD" --fragment "$CAMERA_FRAGMENT" --output "$LAUNCH_WORLD" "${camera_args[@]}"
 printf '%q ' "$0" "$@" > "$RUN_DIR/command.txt"
 printf '\n' >> "$RUN_DIR/command.txt"
 printf 'preflight\n' > "$PHASE_FILE"
@@ -397,7 +407,7 @@ if [[ -n "${BAS_NATIVE_EXTERNAL_CONFIG:-}" && "$SCENARIO_MODE" != latency_diagno
 fi
 if [[ "${BAS_NATIVE_FIVE_SKIP_BUILD:-0}" == 1 ]]; then
   [[ -x "$BINARY" ]] || { printf 'Requested binary reuse but binary is absent.\n' >&2; exit 2; }
-  [[ "$BINARY" -nt "$PROJECT_SOURCE" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-live-state.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-lockstep.h" && "$BINARY" -nt "$REALTIME_CACHE_PATCH" ]] || {
+  [[ "$BINARY" -nt "$PROJECT_SOURCE" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-live-state.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-lockstep.h" && "$BINARY" -nt "$REALTIME_CACHE_PATCH" && "$BINARY" -nt "$LOCKSTEP_TAP_PATCH" ]] || {
     printf 'Binary predates native source/header; rerun without BAS_NATIVE_FIVE_SKIP_BUILD.\n' >&2; exit 2;
   }
   printf 'Reused focused native target after exact project/upstream source synchronization.\n' \
@@ -437,6 +447,7 @@ PY
   printf 'scenario_key=%s\nscenario=%s\nmap_id=%s\nworld=%s\nscene=%s\n' \
     "$SCENARIO_KEY" "$SCENARIO" "$MAP_ID" "$WORLD" "$SCENE"
   printf 'gui=%s\n' "$GUI"
+  printf 'capture_images=%s\nstate_transport=gazebo\n' "$CAPTURE_IMAGES"
   printf 'launch_world=%s\ngazebo_requested_rtf=%s\nscenario_timeout_scale=%s\n' \
     "$LAUNCH_WORLD" "$GAZEBO_RTF" "$SCENARIO_TIMEOUT_SCALE"
   printf 'stack_cpuset=%s\nradio_cpuset=%s\n' "$STACK_CPUSET" "$RADIO_CPUSET"
@@ -511,13 +522,16 @@ cleanup() {
   [[ -f "$NODE_STATE" ]] && cp "$NODE_STATE" "$RUN_DIR/logs/node_state.json"
   [[ -f "$NS3_READY" ]] && cp "$NS3_READY" "$RUN_DIR/logs/ns3.ready"
   [[ -f "$BAS_SIM_CLOCK" ]] && cp "$BAS_SIM_CLOCK" "$RUN_DIR/logs/simulation_clock.json"
+  [[ -f "$BAS_SIM_CLOCK.ack" ]] && cp "$BAS_SIM_CLOCK.ack" "$RUN_DIR/logs/physics_barrier.json"
   if [[ -d "$RUN_DIR" ]]; then
     chown -R "${BAS_NATIVE_FIVE_HOST_UID:-0}:${BAS_NATIVE_FIVE_HOST_GID:-0}" "$RUN_DIR" 2>/dev/null || true
   fi
   [[ "$RUNTIME_DIR" == /tmp/bas-native-five-* ]] && rm -rf "$RUNTIME_DIR"
   exit "$status"
 }
-trap cleanup EXIT INT TERM HUP
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
 
 run_with_native_watchdog() {
   # Supervise liveness even when radio exits before wait() sees the child.
@@ -649,7 +663,7 @@ PYCFG
       continue
     fi
     if [[ "$channel" == control ]]; then base_port=14600; else base_port=14700; fi
-    setsid ip netns exec "ams-uav$index" python3 -u \
+    setsid ip netns exec "ams-uav$index" env BAS_LOCKSTEP_PARTICIPANT="uart-${channel}-${index}" python3 -u \
       "$ROOT_DIR/network/scripts/communication_vertical.py" uart-adapter \
       --channel "$channel" --uav-id "$index" --framed --baud-rate 115200 \
       --radio-watchdog-file "$NS3_READY.heartbeat" --watchdog-s 0.3 \
@@ -662,7 +676,7 @@ PYCFG
       > "$RUN_DIR/logs/${channel}_uart_uav$index.log" 2>&1 &
     managed_pids+=("$!")
   done
-  setsid ip netns exec "ams-uav$index" python3 -u \
+  setsid ip netns exec "ams-uav$index" env BAS_LOCKSTEP_PARTICIPANT="data-${index}" python3 -u \
     "$ROOT_DIR/scripts/product/native_radio_five_uav_scenario.py" additional-agent \
     --index "$index" --schedule-file "$SCHEDULE_FILE" \
     --scenario-config "$SCENARIO" \
@@ -701,9 +715,10 @@ setsid taskset -c "$STACK_CPUSET" ros2 launch multiagent_simulation multiagent_s
   > "$RUN_DIR/logs/gazebo_sitl.log" 2>&1 &
 managed_pids+=("$!")
 cd "$ROOT_DIR"
-setsid taskset -c "$STACK_CPUSET" python3 "$ROOT_DIR/network/position_tracker/tracker.py" \
+setsid taskset -c "$STACK_CPUSET" env PYTHONPATH=/home/ubuntu/.local/lib/python3.10/site-packages \
+  python3 "$ROOT_DIR/network/position_tracker/tracker.py" \
   --scenario "$SCENARIO" --output-json "$NODE_STATE" --output-jsonl "$NODE_EVENTS" \
-  --rate-hz 10 --stale-after-s "$STATE_MAX_AGE_S" \
+  --transport gazebo --rate-hz 50 --stale-after-s "$STATE_MAX_AGE_S" \
   > "$RUN_DIR/logs/position_tracker.log" 2>&1 &
 managed_pids+=("$!")
 setsid stdbuf -oL gz topic -e -t /world/map/stats > "$RUN_DIR/logs/gazebo_stats.log" 2>&1 &
@@ -715,14 +730,14 @@ for _ in $(seq 1 2400); do
 import json, sys
 value = json.load(open(sys.argv[1], encoding="utf-8"))
 nodes = {node["id"]: node for node in value.get("nodes", [])}
-assert value.get("source") == "ros_odometry"
+assert value.get("source") == "gazebo_odometry"
 assert not value.get("missing_nodes") and not value.get("stale_nodes")
 assert all(not nodes[f"uav{i}"].get("stale") for i in range(1, int(sys.argv[2]) + 1))
 PY
   then fresh=1; break; fi
   sleep 0.1
 done
-((fresh == 1)) || { printf 'Live ROS odometry streams did not become fresh.\n' >&2; exit 1; }
+((fresh == 1)) || { printf 'Live Gazebo odometry streams did not become fresh.\n' >&2; exit 1; }
 python3 "$ROOT_DIR/scripts/product/town01_stack_health.py" \
   --scenario "$SCENARIO" --tracker-state "$NODE_STATE" --tracker-events "$NODE_EVENTS" \
   --output "$RUN_DIR/metrics/health.json" --timeout-s 180 \
@@ -745,6 +760,7 @@ for index in "${UAV_INDICES[@]}"; do
   }
 done
 
+if [[ "$CAPTURE_IMAGES" == 1 ]]; then
 for camera in overview obstacle uav_focus; do
   setsid ros2 run ros_gz_image image_bridge "/native_radio/$camera/image" \
     > "$RUN_DIR/logs/gazebo_${camera}_image_bridge.log" 2>&1 &
@@ -759,6 +775,7 @@ setsid python3 -u "$ROOT_DIR/scripts/product/capture_live_gazebo_screenshots.py"
   > "$RUN_DIR/logs/live_screenshot_capture.log" 2>&1 &
 managed_pids+=("$!")
 
+fi
 for endpoint in "${TAP_ENDPOINTS[@]}"; do
   setsid ip netns exec ams-ns3 tcpdump -U -i "tap-$endpoint" -nn \
     -w "$RUN_DIR/pcap/tap_${endpoint}.pcap" \
@@ -841,14 +858,14 @@ ps -eo pid,ppid,pgid,etimes,cmd > "$RUN_DIR/logs/process_snapshot.txt"
 if [[ "${BAS_NATIVE_OPERATOR_SECONDS:-0}" != 0 ]]; then
   printf 'latency_stationary_warmup\n' > "$PHASE_FILE"
   printf 'MAVProxy bridge ready in ams-gcs: udpout:127.0.0.1:14551 .. 14555\n'
-  run_with_native_watchdog ip netns exec ams-gcs python3 -u "$ROOT_DIR/scripts/product/native_operator_bridge.py" \
+  run_with_native_watchdog ip netns exec ams-gcs env BAS_LOCKSTEP_PARTICIPANT=gcs python3 -u "$ROOT_DIR/scripts/product/native_operator_bridge.py" \
     --run-dir "$RUN_DIR" --node-state "$NODE_STATE" --duration-s "$BAS_NATIVE_OPERATOR_SECONDS" \
     > "$RUN_DIR/logs/operator_bridge.log" 2>&1
   exit 0
 fi
 
 set +e
-run_with_native_watchdog ip netns exec ams-gcs python3 -u "$ROOT_DIR/scripts/product/native_radio_five_uav_scenario.py" run \
+run_with_native_watchdog ip netns exec ams-gcs env BAS_LOCKSTEP_PARTICIPANT=gcs python3 -u "$ROOT_DIR/scripts/product/native_radio_five_uav_scenario.py" run \
   --run-dir "$RUN_DIR" --node-state "$NODE_STATE" --phase-file "$PHASE_FILE" \
   --schedule-file "$SCHEDULE_FILE" --timeout-scale "$SCENARIO_TIMEOUT_SCALE" \
   --mode="$SCENARIO_MODE" --uav-count="$UAV_COUNT" --channels="$ACTIVE_UART_CHANNELS" \
@@ -861,6 +878,17 @@ if ((SCENARIO_STATUS != 0)); then
   exit "$SCENARIO_STATUS"
 fi
 
+if [[ "$UAV_COUNT" == 5 && ",$ACTIVE_UART_CHANNELS," == *,control,* && ",$ACTIVE_UART_CHANNELS," == *,payload,* && -z "${BAS_NATIVE_EXTERNAL_CONFIG:-}" ]]; then
+  printf 'no_bypass_radio_off\n' > "$PHASE_FILE"
+  run_with_native_watchdog ip netns exec ams-gcs env BAS_LOCKSTEP_PARTICIPANT=gcs \
+    python3 -u "$ROOT_DIR/scripts/product/native_radio_five_uav_scenario.py" no-bypass-probe \
+    --run-dir "$RUN_DIR" --node-state "$NODE_STATE" --duration-s 10.5 \
+    --radio-heartbeat "$NS3_READY.heartbeat" \
+    --radio-profile="$RADIO_PROFILE" --scenario-config="$SCENARIO" \
+    --output "$RUN_DIR/metrics/no_bypass_summary.json" \
+    > "$RUN_DIR/logs/no_bypass_probe.log" 2>&1
+  ip netns exec ams-gcs ss -H -tunap > "$RUN_DIR/logs/gcs_sockets_after_10s.txt" 2>&1 || true
+fi
 printf 'no_bypass_stop\n' > "$PHASE_FILE"
 kill -TERM "$NS3_PID"
 for _ in $(seq 1 1200); do
@@ -880,14 +908,7 @@ NS3_PID=""
 wait "$NS3_LOGGER_PID" || true
 NS3_LOGGER_PID=""
 ip netns exec ams-gcs ss -H -tunap > "$RUN_DIR/logs/gcs_sockets_after_stop.txt" 2>&1 || true
-if [[ "$SCENARIO_MODE" == product ]]; then
-  ip netns exec ams-gcs python3 -u "$ROOT_DIR/scripts/product/native_radio_five_uav_scenario.py" no-bypass-probe \
-    --run-dir "$RUN_DIR" --node-state "$NODE_STATE" --duration-s 10.5 \
-    --radio-profile="$RADIO_PROFILE" --scenario-config="$SCENARIO" \
-    --output "$RUN_DIR/metrics/no_bypass_summary.json" \
-    > "$RUN_DIR/logs/no_bypass_probe.log" 2>&1
-  ip netns exec ams-gcs ss -H -tunap > "$RUN_DIR/logs/gcs_sockets_after_10s.txt" 2>&1 || true
-fi
+
 
 for pid in "${capture_pids[@]}"; do
   kill -INT -- "-$pid" 2>/dev/null || true

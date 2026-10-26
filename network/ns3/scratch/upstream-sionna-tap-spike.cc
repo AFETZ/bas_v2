@@ -138,6 +138,7 @@ class NativeRuntimeSampler;
 NativeRuntimeSampler* g_runtimeSampler{nullptr};
 std::map<Mac48Address, uint32_t> g_wifiRadioIndices;
 std::string g_runtimeHeartbeat;
+bool g_radiosIsolated{false};
 std::string g_propagationProfile{"sionna"};
 bool g_runtimeOperational{false};
 bool g_liveStateValid{false};
@@ -782,7 +783,8 @@ class LivePositionSource
                 return;
             }
         }
-        Simulator::Schedule(MilliSeconds(20), &LivePositionSource::Poll, this);
+        if (g_executionMode == "realtime")
+            Simulator::Schedule(MilliSeconds(20), &LivePositionSource::Poll, this);
     }
   private:
     std::string m_path;
@@ -805,7 +807,6 @@ class NativeRuntimeSampler
 
     void PollLag()
     {
-        if (g_lockstep) return;
         Ptr<RealtimeSimulatorImpl> realtime =
             DynamicCast<RealtimeSimulatorImpl>(Simulator::GetImplementation());
         if (realtime)
@@ -824,13 +825,15 @@ class NativeRuntimeSampler
             LogEvent("realtime_lag", "ns3", "", 0, lagMs, "lag_ms");
         }
         if (!g_runtimeHeartbeat.empty() && g_runtimeOperational && g_liveStateValid &&
-            g_latestRealtimeLagMs <= g_runtimeLagMaxMs)
+            (g_lockstep || g_latestRealtimeLagMs <= g_runtimeLagMaxMs))
         {
             const auto stamp = std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
             std::ofstream heartbeat(g_runtimeHeartbeat + ".tmp");
             heartbeat << "{\"healthy\":true,\"monotonic_ns\":" << stamp
-                      << ",\"simulation_s\":" << Simulator::Now().GetSeconds() << "}\n";
+                      << ",\"simulation_s\":" << Simulator::Now().GetSeconds()
+                      << ",\"completed_lockstep_steps\":" << g_completedSteps
+                      << ",\"radios_isolated\":" << (g_radiosIsolated ? "true" : "false") << "}\n";
             heartbeat.close();
             std::filesystem::rename(g_runtimeHeartbeat + ".tmp", g_runtimeHeartbeat);
         }
@@ -964,7 +967,7 @@ void ObserveWifiPath(uint32_t receiver, Mac48Address sender, Ptr<const Packet> p
 }
 
 void
-PollSignal()
+PollSignal(NetDeviceContainer devices)
 {
     if (g_stopRequested)
     {
@@ -973,7 +976,33 @@ PollSignal()
         Simulator::Stop();
         return;
     }
-    Simulator::Schedule(MilliSeconds(100), &PollSignal);
+    if (!g_radiosIsolated && ReadPhase() == "no_bypass_radio_off")
+    {
+        NS_ABORT_MSG_IF(g_radioBackend != "wifi", "Radio isolation requires native Wi-Fi PHYs");
+        bool allSleeping = true;
+        for (uint32_t i = 0; i < devices.GetN(); ++i)
+        {
+            auto phy = DynamicCast<WifiNetDevice>(devices.Get(i))->GetPhy();
+            if (!phy->IsStateSleep())
+            {
+                // ns-3.48 SetOffMode during a no-ACK transmission leaves a MAC
+                // callback referring to a cleared MPDU. Native sleep waits for
+                // TX/RX completion and disables subsequent packet exchange.
+                phy->SetSleepMode();
+            }
+            allSleeping = allSleeping && phy->IsStateSleep();
+        }
+        if (allSleeping)
+        {
+            for (uint32_t i = 0; i < devices.GetN(); ++i)
+            {
+                LogEvent("wifi_radio_sleep", g_nodeNames.at(i), "", 0, 1,
+                         "WifiPhy.SetSleepMode; IsStateSleep confirmed");
+            }
+            g_radiosIsolated = true;
+        }
+    }
+    Simulator::Schedule(MilliSeconds(100), &PollSignal, devices);
 }
 
 void
@@ -1398,7 +1427,6 @@ main(int argc, char* argv[])
         ? "ns3::DefaultSimulatorImpl" : "ns3::RealtimeSimulatorImpl"));
     if (g_executionMode=="lockstep") {
         NS_ABORT_MSG_IF(clockFile.empty(), "lockstep requires clockFile");
-        g_lockstep=std::make_unique<bas::Lockstep>(clockFile, g_stepTimeoutS, g_couplingStepMs*1000000LL);
     }
     g_txPowerW = txPowerW;
     g_carrierHz = carrierHz;
@@ -1756,14 +1784,16 @@ main(int argc, char* argv[])
                                std::vector<uint32_t>{radioInterface});
 
     TapBridgeHelper tap;
+    std::vector<Ptr<TapBridge>> tapDevices;
+    tap.SetAttribute("SynchronousRead", BooleanValue(g_executionMode == "lockstep"));
     tap.SetAttribute("Mode", StringValue("UseBridge"));
     tap.SetAttribute("DeviceName", StringValue(tapGcs));
-    tap.Install(ghostGcs, ingressDevices.Get(0));
+    tapDevices.push_back(DynamicCast<TapBridge>(tap.Install(ghostGcs, ingressDevices.Get(0))));
     tap.SetAttribute("Mode", StringValue(radioBackend == "wifi" ? "UseLocal" : "UseBridge"));
     for (uint32_t index = 0; index < uavCount; ++index)
     {
         tap.SetAttribute("DeviceName", StringValue(uavTapNames[index]));
-        tap.Install(uavs.Get(index), radioDevices.Get(index + 1));
+        tapDevices.push_back(DynamicCast<TapBridge>(tap.Install(uavs.Get(index), radioDevices.Get(index + 1))));
     }
 
     LivePositionSource positions(positionFile, mobility);
@@ -1772,11 +1802,11 @@ main(int argc, char* argv[])
         g_wifiRadioIndices[Mac48Address::ConvertFrom(radioDevices.Get(index)->GetAddress())] = index;
     g_runtimeHeartbeat = readyFile + ".heartbeat";
     g_runtimeSampler = &metrics;
-    positions.Poll();
+    if (g_executionMode == "realtime") positions.Poll();
     Simulator::ScheduleNow(&NativeRuntimeSampler::PollLag, &metrics);
     Simulator::Schedule(Seconds(1), &NativeRuntimeSampler::PollSionnaPaths, &metrics);
     Simulator::ScheduleNow(&SampleQueues);
-    Simulator::ScheduleNow(&PollSignal);
+    Simulator::ScheduleNow(&PollSignal, radioDevices);
     if (radioBackend == "wifi")
     {
         Simulator::ScheduleNow(&WriteReadyWhenWifiAssociated, readyFile);
@@ -1785,16 +1815,27 @@ main(int argc, char* argv[])
     {
         Simulator::Schedule(MilliSeconds(250), &WriteReady, readyFile);
     }
-    if (!g_lockstep) Simulator::Stop(Seconds(duration));
+    if (g_executionMode == "realtime") Simulator::Stop(Seconds(duration));
 
     int result = 0;
     try
     {
+        if (g_executionMode == "lockstep")
+            g_lockstep = std::make_unique<bas::Lockstep>(clockFile, g_stepTimeoutS, g_couplingStepMs*1000000LL);
         g_radioEpochNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
         if (g_lockstep) {
             while (!g_stopRequested && g_stopReason=="duration" && Simulator::Now()<Seconds(duration)) {
                 g_lockstep->Begin(Simulator::Now().GetNanoSeconds(), g_runtimeOperational);
+                // The completed physics barrier owns this measured boundary.
+                // Apply it before events at the next radio interval, never midway.
+                positions.Poll();
+                if (g_stopReason != "duration") break;
+                for (uint32_t i = 0; i < tapDevices.size(); ++i) {
+                    const auto frames = tapDevices[i]->ReadTap();
+                    if (frames) LogEvent("tap_ingress_batch", g_nodeNames.at(i), "", 0,
+                                         frames, "boundary_read_complete");
+                }
                 Simulator::Stop(MilliSeconds(g_couplingStepMs));
                 Simulator::Run();
                 if (g_stopRequested || g_stopReason!="duration") break;

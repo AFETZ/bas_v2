@@ -18,6 +18,7 @@ PATCHES=(
   "$ROOT_DIR/network/ns3/patches/mr2608-spike-compatibility.patch"
   "$ROOT_DIR/network/ns3/patches/mr2608-realtime-scene-cache.patch"
   "$ROOT_DIR/network/ns3/patches/mr2608-spectrumwifi-phased-array-adapter.patch"
+  "$ROOT_DIR/network/ns3/patches/mr2608-lockstep-tap-read.patch"
 )
 EXPECTED_PATCHED_FILES=(
   src/spectrum/model/half-duplex-ideal-phy.cc
@@ -25,6 +26,8 @@ EXPECTED_PATCHED_FILES=(
   src/spectrum/model/multi-model-spectrum-channel.cc
   src/spectrum/model/sionna-rt-channel-model.cc
   src/spectrum/model/sionna-rt-channel-model.h
+  src/tap-bridge/model/tap-bridge.cc
+  src/tap-bridge/model/tap-bridge.h
 )
 
 SCENARIO="town01"
@@ -352,7 +355,7 @@ check_patched_files() {
     fail "ns3:tracked-changes" "unexpected paths: ${unexpected[*]}"
     return 1
   }
-  pass "ns3:tracked-changes" "only the three product patches modify tracked files"
+  pass "ns3:tracked-changes" "only the product patches modify tracked files"
 }
 
 check_demo_inputs() {

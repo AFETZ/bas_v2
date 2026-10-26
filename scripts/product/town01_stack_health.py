@@ -63,12 +63,12 @@ def tracker_state(path: Path, names: list[str]) -> tuple[bool, dict[str, Any]]:
     nodes = {str(node.get("id")): node for node in state.get("nodes", []) if isinstance(node, dict)}
     ready = (
         state.get("type") == "node_state"
-        and state.get("source") == "ros_odometry"
+        and state.get("source") in ("ros_odometry", "gazebo_odometry")
         and not state.get("missing_nodes")
         and not state.get("stale_nodes")
         and all(
             name in nodes
-            and nodes[name].get("source_topic") == f"/{name}/odometry"
+            and nodes[name].get("source_topic") in (f"/{name}/odometry", f"/model/{name}/odometry")
             and not nodes[name].get("stale", True)
             for name in names
         )

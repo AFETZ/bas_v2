@@ -9,6 +9,7 @@
 #include <chrono>
 #include <fstream>
 #include <map>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -102,7 +103,8 @@ public:
         if (wallNs==0) wallNs=std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
         auto root=py::module_::import("json").attr("loads")(json).cast<py::dict>();
-        if (root["schema_version"].cast<int>()!=2 || root["source"].cast<std::string>()!="ros_odometry"
+        const auto sourceKind=root["source"].cast<std::string>();
+        if (root["schema_version"].cast<int>()!=2 || (sourceKind!="ros_odometry" && sourceKind!="gazebo_odometry")
             || root["coordinate_frame"].cast<std::string>()!="ENU" || !root["fault"].is_none())
             throw std::runtime_error("invalid state contract or source clock reset");
         if (lockstep && (!root.contains("simulation_mode") || root["simulation_mode"].cast<std::string>()!="lockstep"))
@@ -122,6 +124,11 @@ public:
                 throw std::runtime_error("duplicate node identity");
         }
         std::vector<MeasuredState> states;
+        // Choose a measured slice shared by independently delivered ROS streams.
+        // If a history has a gap, move the window back until every source fits.
+        int64_t sourceLimitNs=std::numeric_limits<int64_t>::max();
+        for (;;) {
+        states.clear();
         double oldest=1e100,newest=-1e100;
         for (const auto& name:names) {
             auto found=nodes.find(name);
@@ -138,13 +145,15 @@ public:
             for (auto sample:history) {
                 auto stamp=sample["sample_monotonic_ns"].cast<int64_t>();
                 auto source=sample["source_sim_time_s"].cast<double>();
-                if (lockstep ? (source<=sourceEventS+1e-9 && source>selectedSource)
-                             : (stamp<=eventNs && stamp>selectedNs)) {
+                if (!std::isfinite(source) || source<0) throw std::runtime_error("invalid source time");
+                if (std::llround(source*1e9)>sourceLimitNs) continue;
+                if ((lockstep ? std::llround(source*1e9)<=std::llround(sourceEventS*1e9)
+                              : stamp<=eventNs) && source>selectedSource) {
                     selected=py::reinterpret_borrow<py::dict>(sample); selectedNs=stamp;
                     selectedSource=source;
                 }
             }
-            if (selectedNs<0 || (lockstep ? (sourceEventS-selectedSource)*1e9>maxAgeNs
+            if (selectedNs<0 || (lockstep ? std::llround(sourceEventS*1e9)-std::llround(selectedSource*1e9)>maxAgeNs
                                          : wallNs-selectedNs>maxAgeNs))
                 throw std::runtime_error("no timely causal pose for "+name);
             auto state=DecodeState(selected);
@@ -153,7 +162,14 @@ public:
             oldest=std::min(oldest,state.sourceTime); newest=std::max(newest,state.sourceTime);
             states.push_back(state);
         }
-        if (newest-oldest>.1) throw std::runtime_error("cross-UAV source time skew exceeds 100 ms");
+        // Source stamps originate as integer ROS nanoseconds. Compare in that
+        // domain so an exact 100 ms difference is not rejected by double rounding.
+        if (states.size() && newest>=0 && std::llround(newest*1e9)-std::llround(oldest*1e9)>100000000LL) {
+            sourceLimitNs=std::llround(oldest*1e9)+100000000LL;
+            continue;
+        }
+        break;
+        }
         m_session=session;
         return states;
     }

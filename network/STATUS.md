@@ -1,6 +1,38 @@
 # Product Status
 
-Updated: 2026-10-21. Canonical test baseline consolidated on `main`.
+Updated: 2026-10-26. Timing fixes verified on Linux; complete flight remains unverified.
+
+## Timing repair, 2026-10-26
+
+- Updated workspace: `/home/bas/bas_v2-main`, branch `fix/time-sync-20261026`, based on
+  upstream `304b9ef`. Dirty historical worktrees were preserved; pinned Docker image reused.
+- Before repair: Sionna realtime exceeded 250 ms jitter; lockstep and Friis stopped on
+  cross-UAV timestamp skew. Logs remain in `runs/update-20261025/`.
+- Native Gazebo clock/odometry now feed the tracker; unavailable angular velocity is
+  reported as null, while invalid required position/orientation/linear velocity still fail.
+- Coherent causal history selection uses integer-nanosecond limits. Lockstep waits for
+  physics/pose acknowledgements and every endpoint; native TAP ingress is drained at boundaries.
+- Cache remains 0.5 s/0.5 m; pose deadline 0.5 s, source skew 100 ms, realtime jitter 250 ms.
+  No limit was relaxed; no propagation fallback or fabricated ACK/RF outcomes.
+- `sync-20261026-sionna-final`: 3,646 steps / 72.92 model s, zero stale poses, max pose age 12 ms;
+  115/115 command deliveries at real UARTs, ACK RTT p95 80 ms **model time**.
+  9,448 decoded-MPDU channel samples: age p95/max 0.315607/0.489337 s; idle cache polls excluded.
+- Native Wi-Fi sleep isolation passed: all six PHYs asleep, all five physics sources advanced
+  10.52 s and all ten UARTs produced bytes; zero commands/data/telemetry bypassed the radio.
+- A deliberate 1.2 s ns-3 host stall froze model time and all five pose timestamps; execution resumed.
+- `sync-20261026-friis-final`: 225/225 TIMESYNC replies over 45 wall s; five accepted version requests;
+  RTT p95 15.503 ms, max scheduler lag 14.484 ms, normal max pose age 44.561 ms.
+  Stopping the tracker triggered `state_coupling_deadline` in 476 ms; no later pose was applied.
+- 88 focused Python tests passed; 16 command tests rechecked after the final retry change.
+  Native state/TAP checks passed (104 actual TAP frames); async negative control reproduced mid-step ingress.
+  Python 3.10 compile, shell/config/port checks and final GPU/OptiX preflight passed.
+- Full `rock_demo` flight did **not** pass: lost mission opener and 20 s flight retry pauses were fixed;
+  all five missions then loaded, but accepted takeoff commands did not lift UAVs and compass checks
+  delayed/rejected arming. Flight run 03 was stopped intentionally (143). Physics/flight needs separate repair.
+- Heavy timing check: `BAS_NATIVE_LATENCY_MODE=1 BAS_NATIVE_CAPTURE_IMAGES=0 make demo-rugged SIMULATION_MODE=lockstep DEMO_GUI=0`.
+  Light live check: `BAS_NATIVE_PROPAGATION_PROFILE=friis BAS_NATIVE_CAPTURE_IMAGES=0 make operator DEMO_SCENARIO=rock_demo DEMO_GUI=0`; connect with `make gcs`, stop with `make stop`.
+- Evidence: `runs/time-sync-20261026/`, `runs/native-radio-lockstep/sync-20261026-sionna-final/`,
+  `runs/native-radio-realtime/sync-20261026-friis-final/`. All test processes were stopped.
 
 ## Current test baseline
 
@@ -42,7 +74,7 @@ Updated: 2026-10-21. Canonical test baseline consolidated on `main`.
   native state/clock tests and target builds, shell/port and watchdog checks.
   Gazebo/ArduPilot/ROS + stock ns-3 completed 25 barriers with a 1.2 s host stall;
   a native Wi-Fi/TAP/Friis baseline completed 100 barriers and 3/3 pings, without stale poses.
-  Full Sionna lockstep integration was not demonstrated; old logs: `runs/lockstep/`, `runs/coupling/`.
+  Those historical tests did not demonstrate full Sionna lockstep integration; old logs: `runs/lockstep/`, `runs/coupling/`.
 - The shared-uplink gate can accept 95% loss when fairness is equal. A newly received delayed
   same-command MAVLink ACK can still match a later operation; cached ACK reuse is fixed separately.
   Counterexamples: `runs/audit-2026-09-24/`. These are still open product defects.
@@ -103,7 +135,6 @@ Focused tests: 40 passed; latest reporting tests: 21 passed.
 Package: /home/bas/bas_v2-delivery/rc1-2026-09-05-final
 Archive readability and source bundle verification passed. A separate checkout restored
 source/dependencies/scenes, built its ROS workspace, and passed bootstrap with 0 errors/warnings.
-Source bundle is refreshed to the final delivery commit; runtime image remains pinned.
 Historical publishing path: release/bas-v2-rc1 → native-radio-wifi; current baseline is on `main`.
 
 make demo-preflight DEMO_GUI=0 DEMO_BOOTSTRAP=1

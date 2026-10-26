@@ -28,6 +28,7 @@ from network.scripts.data_transport import (  # noqa: E402
     decode as decode_data,
     encode as encode_data,
 )
+from network.scripts.serial_transport import ready_events
 from network.scripts import simulation_clock as clock
 from scripts.product.town01_full_stack_scenario import (  # noqa: E402
     FlightHarness,
@@ -249,143 +250,105 @@ def run_additional_agent(args: argparse.Namespace) -> int:
             "p2mp_endpoint": f"{MULTICAST_GROUP}:{MULTICAST_PORT}",
         },
     )
-    p2p_sent = False
-    simultaneous_sent = False
+    sent_counts = {"p2p_uplink": 0, "simultaneous_uplink": 0}
     append_jsonl(event_log, {"event": "start", "uav": index, "monotonic_ns": clock.monotonic_ns()})
     try:
         while not stop:
-            if clock.mode() == "lockstep" and clock.snapshot()["phase"] not in ("exchange", "stopped"):
-                time.sleep(.002)
-                continue
-            for key, _mask in selector.select(0.01):
-                datagram, source = key.fileobj.recvfrom(65535)
-                now_ns = clock.monotonic_ns()
-                try:
-                    message = decode_data(datagram)
-                except DataProtocolError as error:
-                    append_jsonl(
-                        event_log,
-                        {"event": "malformed", "error": str(error), "monotonic_ns": now_ns},
-                    )
+            with clock.io_window() as allowed:
+                if not allowed:
+                    time.sleep(.001)
                     continue
-                append_jsonl(
-                    event_log,
-                    {
-                        "event": "receive",
-                        "kind": message.kind,
-                        "uav": index,
-                        "sequence": message.sequence,
-                        "sender_id": message.sender_id,
-                        "receiver_id": message.receiver_id,
-                        "source_monotonic_ns": message.sent_monotonic_ns,
-                        "received_monotonic_ns": now_ns,
-                        "latency_ms": (now_ns - message.sent_monotonic_ns) / 1e6,
-                        "payload_length": len(message.payload),
-                        "checksum": message.checksum,
-                        "sha256": hashlib.sha256(datagram).hexdigest(),
-                        "source": f"{source[0]}:{source[1]}",
-                    },
-                )
-                if (
-                    key.data == "p2p"
-                    and message.kind == "p2p_downlink"
-                    and message.sender_id == 0
-                    and message.receiver_id == index
-                ):
-                    # A single endpoint ACK makes delivery observable at the
-                    # application boundary.  It is deliberately un-retried and
-                    # crosses the same native Wi-Fi/Sionna medium on the return
-                    # path; ns-3 never synthesizes application success.
-                    response = encode_data(
-                        "p2p_downlink_ack",
-                        sender_id=index,
-                        receiver_id=0,
-                        sequence=message.sequence,
-                        payload=f"{message.checksum:08x}".encode(),
-                    )
-                    p2p.sendto(response, (GCS_IP, P2P_PORT))
+                for key, _mask in ready_events(selector, 0 if clock.mode() == "lockstep" and clock.live() else .01):
+                    datagram, source = key.fileobj.recvfrom(65535)
+                    now_ns = clock.monotonic_ns()
+                    try:
+                        message = decode_data(datagram)
+                    except DataProtocolError as error:
+                        append_jsonl(
+                            event_log,
+                            {"event": "malformed", "error": str(error), "monotonic_ns": now_ns},
+                        )
+                        continue
                     append_jsonl(
                         event_log,
                         {
-                            "event": "transmit",
-                            "kind": "p2p_downlink_ack",
+                            "event": "receive",
+                            "kind": message.kind,
                             "uav": index,
                             "sequence": message.sequence,
-                            "bytes": len(response),
-                            "monotonic_ns": clock.monotonic_ns(),
-                        },
-                    )
-
-            try:
-                schedule = json.loads(schedule_file.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                schedule = {}
-            now_ns = clock.monotonic_ns()
-            p2p_start_ns = int(schedule.get("p2p_uplink_start_monotonic_ns", 0) or 0)
-            if p2p_start_ns and not p2p_sent and now_ns >= p2p_start_ns:
-                for sequence in range(p2p_packets):
-                    target_ns = p2p_start_ns + (index - 1) * 25_000_000 + sequence * 100_000_000
-                    while clock.monotonic_ns() < target_ns and not stop:
-                        time.sleep(0.001)
-                    datagram = encode_data(
-                        "p2p_uplink",
-                        sender_id=index,
-                        receiver_id=0,
-                        sequence=sequence,
-                        payload=f"native-five-p2p-uplink-uav{index}-{sequence}".encode(),
-                    )
-                    message = decode_data(datagram)
-                    p2p.sendto(datagram, (GCS_IP, P2P_PORT))
-                    append_jsonl(
-                        event_log,
-                        {
-                            "event": "transmit",
-                            "kind": "p2p_uplink",
-                            "uav": index,
-                            "sequence": sequence,
+                            "sender_id": message.sender_id,
+                            "receiver_id": message.receiver_id,
                             "source_monotonic_ns": message.sent_monotonic_ns,
+                            "received_monotonic_ns": now_ns,
+                            "latency_ms": (now_ns - message.sent_monotonic_ns) / 1e6,
                             "payload_length": len(message.payload),
-                            "bytes": len(datagram),
                             "checksum": message.checksum,
-                            "monotonic_ns": clock.monotonic_ns(),
+                            "sha256": hashlib.sha256(datagram).hexdigest(),
+                            "source": f"{source[0]}:{source[1]}",
                         },
                     )
-                p2p_sent = True
+                    if (
+                        key.data == "p2p"
+                        and message.kind == "p2p_downlink"
+                        and message.sender_id == 0
+                        and message.receiver_id == index
+                    ):
+                        # A single endpoint ACK makes delivery observable at the
+                        # application boundary.  It is deliberately un-retried and
+                        # crosses the same native Wi-Fi/Sionna medium on the return
+                        # path; ns-3 never synthesizes application success.
+                        response = encode_data(
+                            "p2p_downlink_ack",
+                            sender_id=index,
+                            receiver_id=0,
+                            sequence=message.sequence,
+                            payload=f"{message.checksum:08x}".encode(),
+                        )
+                        p2p.sendto(response, (GCS_IP, P2P_PORT))
+                        append_jsonl(
+                            event_log,
+                            {
+                                "event": "transmit",
+                                "kind": "p2p_downlink_ack",
+                                "uav": index,
+                                "sequence": message.sequence,
+                                "bytes": len(response),
+                                "monotonic_ns": clock.monotonic_ns(),
+                            },
+                        )
 
-            simultaneous_start_ns = int(schedule.get("simultaneous_start_monotonic_ns", 0) or 0)
-            if simultaneous_start_ns and not simultaneous_sent and now_ns >= simultaneous_start_ns:
-                for sequence in range(simultaneous_packets):
-                    target_ns = simultaneous_start_ns + sequence * simultaneous_interval_ns
-                    while clock.monotonic_ns() < target_ns and not stop:
-                        time.sleep(0.001)
-                    payload = f"native-five-simultaneous-uplink-uav{index}-{sequence}".encode()
-                    payload = payload.ljust(simultaneous_payload_bytes, b".")
-                    datagram = encode_data(
-                        "simultaneous_uplink",
-                        sender_id=index,
-                        receiver_id=0,
-                        sequence=sequence,
-                        payload=payload,
-                    )
-                    message = decode_data(datagram)
-                    p2p.sendto(datagram, (GCS_IP, P2P_PORT))
-                    append_jsonl(
-                        event_log,
-                        {
-                            "event": "transmit",
-                            "kind": "simultaneous_uplink",
-                            "uav": index,
-                            "sequence": sequence,
-                            "source_monotonic_ns": message.sent_monotonic_ns,
-                            "payload_length": len(message.payload),
-                            "bytes": len(datagram),
-                            "checksum": message.checksum,
-                            "scheduled_monotonic_ns": target_ns,
-                            "monotonic_ns": clock.monotonic_ns(),
-                        },
-                    )
-                simultaneous_sent = True
+                try:
+                    schedule = json.loads(schedule_file.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    schedule = {}
+                now_ns = clock.monotonic_ns()
+                # Both traffic schedules are serviced without waiting for future
+                # model time while holding the exchange barrier.
+                for kind, field, count, interval, offset in (
+                    ("p2p_uplink", "p2p_uplink_start_monotonic_ns", p2p_packets, 100_000_000, (index-1)*25_000_000),
+                    ("simultaneous_uplink", "simultaneous_start_monotonic_ns", simultaneous_packets, simultaneous_interval_ns, 0),
+                ):
+                    start_ns = int(schedule.get(field, 0) or 0)
+                    if not start_ns:
+                        continue
+                    due = min(count, max(0, (now_ns-start_ns-offset)//interval+1))
+                    for sequence in range(sent_counts[kind], due):
+                        target_ns = start_ns + offset + sequence*interval
+                        label = "p2p" if kind == "p2p_uplink" else "simultaneous"
+                        payload = f"native-five-{label}-uplink-uav{index}-{sequence}".encode()
+                        if kind == "simultaneous_uplink":
+                            payload = payload[:simultaneous_payload_bytes].ljust(simultaneous_payload_bytes, b".")
+                        datagram = encode_data(kind, sender_id=index, receiver_id=0,
+                                               sequence=sequence, payload=payload)
+                        message = decode_data(datagram)
+                        p2p.sendto(datagram, (GCS_IP, P2P_PORT))
+                        append_jsonl(event_log, dict(event="transmit", kind=kind, uav=index,
+                            sequence=sequence, source_monotonic_ns=message.sent_monotonic_ns,
+                            payload_length=len(payload), bytes=len(datagram), checksum=message.checksum,
+                            scheduled_monotonic_ns=target_ns, monotonic_ns=clock.monotonic_ns()))
+                    sent_counts[kind] = due
     finally:
+        clock.close_participant()
         append_jsonl(event_log, {"event": "stop", "uav": index, "monotonic_ns": clock.monotonic_ns()})
         selector.close()
         p2p.close()
@@ -971,7 +934,7 @@ class NativeFiveUavHarness(FlightHarness):
                     payload=f"native-five-p2p-downlink-uav{system_id}-{sequence}".encode(),
                 )
                 message = decode_data(datagram)
-                sock.sendto(datagram, (endpoint_ip(system_id), P2P_PORT + system_id))
+                self.send_datagram(sock, datagram, (endpoint_ip(system_id), P2P_PORT + system_id))
                 downlink_sends.append(
                     {
                         "uav": f"uav{system_id}",
@@ -1021,7 +984,7 @@ class NativeFiveUavHarness(FlightHarness):
                 payload=payload,
             )
             message = decode_data(datagram)
-            sock.sendto(datagram, (MULTICAST_GROUP, MULTICAST_PORT))
+            self.send_datagram(sock, datagram, (MULTICAST_GROUP, MULTICAST_PORT))
             root_sends.append(
                 {
                     "sequence": sequence,
@@ -1108,7 +1071,7 @@ class NativeFiveUavHarness(FlightHarness):
                     system_id, 1, command, 0, *params
                 )
                 self.send("control", system_id, message)
-                next_send = clock.monotonic() + self.diagnostic_retry_interval_s
+                next_send = clock.monotonic() + 1.0
             self.pump(0.2)
             ack = self.acks.get(("control", system_id, command))
             if ack and ack[1] >= started_ns and int(ack[0].result) in accepted:
@@ -1147,7 +1110,7 @@ class NativeFiveUavHarness(FlightHarness):
                             system_id, flag, custom_mode
                         ),
                     )
-                next_send = clock.monotonic() + self.diagnostic_retry_interval_s
+                next_send = clock.monotonic() + 1.0
             self.pump(0.2)
             for system_id in tuple(pending):
                 heartbeat = self.latest.get(("control", system_id, "HEARTBEAT"))
@@ -1159,7 +1122,7 @@ class NativeFiveUavHarness(FlightHarness):
 
     def request_global_position(self, system_id: int) -> tuple[float, float]:
         command = int(self.mavutil.mavlink.MAV_CMD_REQUEST_MESSAGE)
-        sent_ns, _latency = self.native_command_one(
+        sent_ns, _latency = self.command_one(
             "control",
             system_id,
             command,
@@ -1261,6 +1224,7 @@ class NativeFiveUavHarness(FlightHarness):
         handled_at_ns = 0
         last_requested_sequence = -1
         count_packets_sent = 0
+        next_count_s = 0.0
         ignored_stale_requests: list[int] = []
         request_history: list[dict[str, Any]] = []
         deferred_repeat_sequence: int | None = None
@@ -1274,11 +1238,9 @@ class NativeFiveUavHarness(FlightHarness):
         deadline = clock.monotonic() + 60 * self.timeout_scale
         requested: set[int] = set()
         while clock.monotonic() < deadline:
-            # The ALOHA medium can delay an earlier MISSION_COUNT until the item
-            # exchange is in progress.  A second count restarts that exchange in
-            # ArduPilot, so send this protocol opener exactly once.  Item repeats
-            # remain driven only by the flight controller's MISSION_REQUEST.
-            if count_packets_sent == 0:
+            # Retry a lost opener until the first request arrives. Once transfer
+            # starts, the flight controller's requests drive item retries.
+            if last_requested_sequence < 0 and clock.monotonic() >= next_count_s:
                 self.send(
                     "control",
                     system_id,
@@ -1287,6 +1249,7 @@ class NativeFiveUavHarness(FlightHarness):
                     ),
                 )
                 count_packets_sent += 1
+                next_count_s = clock.monotonic() + 1.0
                 mission_upload["mission_count_packets_sent"] = count_packets_sent
             if (
                 deferred_repeat_sequence is not None
@@ -1397,7 +1360,7 @@ class NativeFiveUavHarness(FlightHarness):
                     payload=payload,
                 )
                 sent_ns = clock.monotonic_ns()
-                sock.sendto(datagram, (endpoint_ip(system_id), P2P_PORT + system_id))
+                self.send_datagram(sock, datagram, (endpoint_ip(system_id), P2P_PORT + system_id))
                 sends[(system_id, sequence)] = {
                     "uav": f"uav{system_id}",
                     "sequence": local_sequence,
@@ -1684,22 +1647,63 @@ def run_no_bypass_probe(args: argparse.Namespace) -> int:
     for (channel, system_id), encoder in harness.transport_encoders.items():
         encoder.sequence = int(sequences[f"{channel}:uav{system_id}"])
 
-    def delivered_bytes():
+    # Observe the native PHY transition, not an assumed settling delay. Keep
+    # Gazebo, SITL, the clock and UART adapters running throughout isolation.
+    deadline = time.monotonic()+10
+    first_off = None
+    while time.monotonic() < deadline:
+        heartbeat = json.loads(Path(args.radio_heartbeat).read_text())
+        if heartbeat.get('radios_isolated'):
+            if first_off is None:
+                first_off = heartbeat
+            field = 'completed_lockstep_steps' if clock.mode() == 'lockstep' else 'simulation_s'
+            if heartbeat[field] > first_off[field]:
+                break  # Native isolation and continuing exchange, before draining old records.
+        time.sleep(.01)
+    else:
+        raise ScenarioError('native radio isolation was not acknowledged with continuing simulator progress')
+    harness.pump(0)
+
+    def source_times():
+        state = json.loads(Path(args.node_state).read_text())
+        return {node['id']: node['source_sim_time_s'] for node in state['nodes']
+                if node['id'] in {f'uav{i}' for i in UAV_IDS}}
+
+    def uart_bytes(counter, after_ns=0):
         values = {}
         for system_id in UAV_IDS:
             for channel in ("control", "payload"):
                 path = run_dir / f"metrics/{channel}_uart_uav{system_id}.json"
-                counter = "uart_output_bytes"
+                field = counter
                 if system_id == 1 and channel == "control" and not path.exists():
                     path = run_dir / "external_endpoint/metrics.json"
-                    counter = "radio_to_endpoint_bytes"
+                    field = 'radio_to_endpoint_bytes' if counter == 'uart_output_bytes' else 'endpoint_to_radio_bytes'
                 try:
-                    values[f"{channel}:uav{system_id}"] = int(json.loads(path.read_text())[counter])
+                    sample = json.loads(path.read_text())
+                    if after_ns and (sample.get('sampled_monotonic_ns', -1) < after_ns
+                            or sample.get('uart_queue_bytes', 0) or sample.get('reassembly_pending_records', 0)):
+                        return None
+                    values[f"{channel}:uav{system_id}"] = int(sample[field])
                 except (OSError, ValueError, KeyError):
                     return None
         return values
 
-    uart_before = delivered_bytes()
+    # Periodic counters must describe the completed post-isolation cycle.
+    # Otherwise an old heartbeat delivered before OFF can look like a bypass.
+    sampled_after = time.monotonic_ns()
+    deadline = time.monotonic()+10
+    while time.monotonic() < deadline:
+        uart_before = uart_bytes('uart_output_bytes', sampled_after)
+        source_uart_before = uart_bytes('uart_input_bytes', sampled_after)
+        if (uart_before is not None and source_uart_before is not None
+                and all(receiver.pending_records == 0 for receiver in harness.transport_receivers.values())):
+            break
+        harness.pump(.02)
+    else:
+        raise ScenarioError('fresh drained UART counters unavailable after native radio isolation')
+    harness.acks.clear()
+    harness.additional_received.clear()
+    source_before = source_times()
     before = sum(harness.message_counts.values())
     request = int(harness.mavutil.mavlink.MAV_CMD_REQUEST_MESSAGE)
     for system_id in UAV_IDS:
@@ -1716,16 +1720,20 @@ def run_no_bypass_probe(args: argparse.Namespace) -> int:
             sender_id=0,
             receiver_id=system_id,
             sequence=system_id,
-            payload=b"native-process-stopped",
+            payload=b"native-wifi-phys-off",
         )
-        harness.sockets["additional_data"].sendto(
+        harness.send_datagram(harness.sockets["additional_data"],
             datagram, (endpoint_ip(system_id), P2P_PORT + system_id)
         )
     started_ns = clock.monotonic_ns()
-    harness.observe_for(float(args.duration_s), wall_time=True)
+    wall_started = time.monotonic()
+    harness.observe_for(float(args.duration_s))
     messages = sum(harness.message_counts.values()) - before
     result = {
         "duration_s": float(args.duration_s),
+        "duration_domain": 'simulation' if clock.mode() == 'lockstep' else 'wall',
+        "wall_duration_s": time.monotonic()-wall_started,
+        "isolation_method": "WifiPhy.SetSleepMode confirmed on all six native radios; other components keep running",
         "started_monotonic_ns": started_ns,
         "ended_monotonic_ns": clock.monotonic_ns(),
         "control_or_payload_messages_received": messages,
@@ -1740,12 +1748,21 @@ def run_no_bypass_probe(args: argparse.Namespace) -> int:
         "additional_data_absent": not harness.additional_received,
         "passed": messages == 0 and not harness.additional_received,
     }
-    uart_after = delivered_bytes()
-    metrics_complete = uart_before is not None and uart_after is not None
+    uart_after = uart_bytes('uart_output_bytes')
+    source_uart_after = uart_bytes('uart_input_bytes')
+    source_after = source_times()
+    metrics_complete = all(value is not None for value in
+                           (uart_before, uart_after, source_uart_before, source_uart_after))
     deltas = {key: uart_after[key]-value for key,value in uart_before.items()} if metrics_complete else {}
+    source_deltas = {key: source_uart_after[key]-value for key,value in source_uart_before.items()} if metrics_complete else {}
+    progress = {name: source_after[name]-stamp for name,stamp in source_before.items() if name in source_after}
+    progressing = len(progress) == len(UAV_IDS) and all(value > 0 for value in progress.values())
     result.update(transport_sequences_resumed=True, uart_metrics_complete=metrics_complete,
                   uart_delivered_bytes_delta=deltas,
-                  passed=result['passed'] and metrics_complete and all(v == 0 for v in deltas.values()))
+                  source_uart_bytes_delta=source_deltas, physics_progress_s=progress,
+                  physics_progressed_all_five=progressing,
+                  passed=result['passed'] and metrics_complete and progressing
+                      and all(v > 0 for v in source_deltas.values()) and all(v == 0 for v in deltas.values()))
     harness.close()
     write_json(Path(args.output), result)
     return 0 if result["passed"] else 1
@@ -1779,6 +1796,7 @@ def parser() -> argparse.ArgumentParser:
     probe.add_argument("--run-dir", required=True)
     probe.add_argument("--node-state", required=True)
     probe.add_argument("--scenario-config", default=str(DEFAULT_SCENARIO_CONFIG))
+    probe.add_argument("--radio-heartbeat", required=True)
     probe.add_argument("--duration-s", type=float, default=10.5)
     probe.add_argument("--output", required=True)
     probe.add_argument(

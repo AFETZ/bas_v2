@@ -33,6 +33,21 @@ SEQUENCE_MASK = SEQUENCE_MODULUS - 1
 SEQUENCE_HALF_RANGE = SEQUENCE_MODULUS >> 1
 
 
+def ready_events(selector, timeout_s, limit=4096):
+    """Drain currently readable endpoints, with a bounded turn under overload."""
+    remaining = limit
+    while remaining:
+        events = selector.select(timeout_s)
+        if not events:
+            return
+        for key, mask in events[:remaining]:
+            yield key, mask
+            remaining -= 1
+        timeout_s = 0
+    if clock.mode() == 'lockstep' and clock.live() and selector.select(0):
+        raise RuntimeError('lockstep endpoint exchange capacity exceeded before input was drained')
+
+
 def sequence_forward_distance(reference: int, candidate: int) -> int:
     """Return the unsigned 32-bit distance from reference to candidate."""
 
@@ -261,6 +276,11 @@ class Reassembler:
                 raise ValueError('max_age_ms must be finite and positive')
             # A lost record must not hold later records beyond their whole deadline.
             self.timeout_ns = min(self.timeout_ns, max(1, int(max_age_ms*500_000)))
+
+    @property
+    def pending_records(self) -> int:
+        """Records waiting for fragments or an earlier sequence to expire."""
+        return len(self._records) + len(self._complete)
 
     def ingest(self, datagram: bytes, now_ns: int | None = None) -> list[bytes]:
         observed_ns = clock.monotonic_ns() if now_ns is None else now_ns

@@ -57,6 +57,37 @@ def receive_ack(harness, channel, system_id=1, command=512, result=0):
     harness._consume_mavlink(channel, system_id, [frame], ("127.0.0.1", 0), clock.monotonic_ns())
 
 
+def test_mission_retries_lost_opener_without_restarting_item_transfer(harness, model_clock):
+    # Protocol stimuli only: the first opener is lost, then the final ACK is
+    # delayed beyond the opener retry interval. Neither is RF evidence.
+    messages = []
+    harness.positions = lambda: {"uav1": [0., 0., 0.]}
+    harness.request_global_position = lambda _system: (40., 10.)
+    harness.event = lambda *args, **kwargs: None
+    harness.send = lambda channel, system, message: messages.append(message)
+    request_sent = False
+
+    def pump(_timeout):
+        nonlocal request_sent
+        model_clock(clock.monotonic_ns() + 1_000_000_000)
+        openers = [m for m in messages if m.get_type() == "MISSION_COUNT"]
+        items = [m for m in messages if m.get_type() == "MISSION_ITEM_INT"]
+        if len(openers) >= 2 and not request_sent:
+            key = ("control", 1, "MISSION_REQUEST_INT")
+            harness.latest[key] = SimpleNamespace(seq=0)
+            harness.latest_at_ns[key] = clock.monotonic_ns()
+            request_sent = True
+        if items and clock.monotonic() >= 7:
+            key = ("control", 1, "MISSION_ACK")
+            harness.latest[key] = SimpleNamespace(type=0)
+            harness.latest_at_ns[key] = clock.monotonic_ns()
+
+    harness.pump = pump
+    harness.upload_uav_mission(1, [{"name": "test", "position_m": [10., 0., 20.], "hold_s": 0.}])
+    assert [m.get_type() for m in messages] == ["MISSION_COUNT", "MISSION_COUNT", "MISSION_ITEM_INT"]
+    assert harness.summary["missions"]["uav1"]["upload_ack"] == 0
+
+
 def run_command(harness, method, channel):
     params = [148.0, 0, 0, 0, 0, 0, 0]
     if method == "command_operation":
@@ -134,7 +165,7 @@ def gcs_receiver(model_clock, monkeypatch):
     # Exercise phase transitions on Windows too; the Linux cases use real flock.
     if os.name == "nt":
         @contextmanager
-        def io_window():
+        def io_window(**_kwargs):
             yield clock.mode() == "realtime" or clock.snapshot()["phase"] in ("exchange", "stopped")
         monkeypatch.setattr(clock, "io_window", io_window)
     value = object.__new__(FlightHarness)
@@ -206,7 +237,7 @@ def test_gcs_leaves_udp_queued_while_controller_holds_barrier(gcs_receiver):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="runtime Linux flock barrier")
-def test_gcs_holds_barrier_while_consuming_but_not_while_selecting(gcs_receiver, monkeypatch):
+def test_gcs_holds_barrier_while_draining_but_not_while_waiting(gcs_receiver, monkeypatch):
     import fcntl
     from scripts.product import town01_full_stack_scenario as scenario
 
@@ -215,9 +246,18 @@ def test_gcs_holds_barrier_while_consuming_but_not_while_selecting(gcs_receiver,
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
         sender.sendto(packet, receiver.getsockname())
     with open(os.environ["BAS_SIM_CLOCK"] + ".lock", "a") as controller:
+        selections = []
         def select_without_barrier(timeout):
-            fcntl.flock(controller, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            fcntl.flock(controller, fcntl.LOCK_UN)
+            if not selections:
+                fcntl.flock(controller, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(controller, fcntl.LOCK_UN)
+            else:
+                # Drain already available bytes atomically; never wait under
+                # the phase barrier for bytes a future radio step must deliver.
+                assert timeout == 0
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(controller, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            selections.append(timeout)
             return selector.select(timeout)
 
         def require_barrier():

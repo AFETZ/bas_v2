@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <sys/file.h>
 #include <unistd.h>
+#include <signal.h>
 
 namespace bas {
 class Lockstep {
@@ -48,9 +49,30 @@ public:
         Wait(targetNs);
         Clock(targetNs,"exchange",healthy);
         flock(m_lock,LOCK_UN);
-        // Real TAP/PTY and endpoint processes need an I/O opportunity at each
-        // barrier. This is sampled co-simulation, not bitwise replay or HIL.
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        // Each registered endpoint completes its nonblocking I/O cycle before
+        // the next step. This does not claim bitwise replay of kernel TAP I/O.
+        const auto start=WallNs();
+        const auto directory=m_path+".participants";
+        for (;;) {
+            std::string pending;
+            if (std::filesystem::exists(directory)) {
+                for (const auto& entry:std::filesystem::directory_iterator(directory)) {
+                    if (entry.path().extension()!=".json") continue;
+                    std::ifstream in(entry.path());
+                    if (!in) continue; // a normally completed endpoint deregistered
+                    std::string value((std::istreambuf_iterator<char>(in)),{});
+                    auto state=pybind11::module_::import("json").attr("loads")(value).cast<pybind11::dict>();
+                    if (kill(state["pid"].cast<int>(),0)!=0)
+                        throw std::runtime_error("lockstep endpoint exited: "+entry.path().filename().string());
+                    if (state["simulation_ns"].cast<int64_t>()<targetNs)
+                        pending+=entry.path().filename().string()+" ";
+                }
+            }
+            if (pending.empty()) break;
+            if ((WallNs()-start)/1e9>m_timeoutS)
+                throw std::runtime_error("lockstep exchange timeout: "+pending);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
     }
     static int64_t WallNs() {
         return std::chrono::duration_cast<std::chrono::nanoseconds>(

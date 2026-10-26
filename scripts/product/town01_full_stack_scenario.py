@@ -297,6 +297,7 @@ class FlightHarness:
         }
 
     def close(self) -> None:
+        clock.close_participant()
         self.summary["gcs_serial_transport"] = self.transport_summary()
         write_json(self.events_path.parent / "transport_sequences.json", {
             f"{channel}:uav{system_id}": encoder.sequence
@@ -396,7 +397,7 @@ class FlightHarness:
         if clock.mode() == "lockstep" and clock.snapshot()["phase"] not in ("exchange", "stopped"):
             time.sleep(max(0., min(.01, timeout_s)))
             return
-        with clock.io_window() as allowed:
+        with clock.io_window(acknowledge=False) as allowed:
             if not allowed:
                 return
             now_ns = clock.monotonic_ns()
@@ -410,13 +411,15 @@ class FlightHarness:
                         (endpoint_ip(system_id), (14600 if channel == "control" else 14700) + system_id),
                         now_ns,
                     )
-        ready = self.selector.select(timeout_s)
+        ready = self.selector.select(0 if clock.mode() == "lockstep" else timeout_s)
         # Recheck the phase after waiting, and hold the shared barrier through
         # reception and timestamping. Never hold it while selecting.
         with clock.io_window() as allowed:
             if not allowed:
                 return
-            for key, _mask in ready:
+            from network.scripts.serial_transport import ready_events
+            from itertools import chain
+            for key, _mask in chain(ready, ready_events(self.selector, 0)):
                 channel = str(key.data)
                 data, source = key.fileobj.recvfrom(65535)
                 if channel == "additional_data":
@@ -449,6 +452,14 @@ class FlightHarness:
         raise ScenarioError(f"timeout waiting for {description}")
 
     def send(self, channel: str, system_id: int, message: Any) -> int:
+        with clock.io_window(wait=True, acknowledge=False):
+            return self._send(channel, system_id, message)
+
+    def send_datagram(self, sock, data, address):
+        with clock.io_window(wait=True, acknowledge=False):
+            return sock.sendto(data, address)
+
+    def _send(self, channel: str, system_id: int, message: Any) -> int:
         key = (channel, system_id)
         frame = message.pack(self.transmitters[key], force_mavlink1=False)
         if message.get_type() == "COMMAND_LONG":
@@ -932,7 +943,7 @@ class FlightHarness:
                         sequence=sequence,
                         payload=payload,
                     )
-                    sock.sendto(datagram, (endpoint_ip(target), 14800 + target))
+                    self.send_datagram(sock, datagram, (endpoint_ip(target), 14800 + target))
                     downlink_attempts[sequence] += 1
                 next_p2p = clock.monotonic() + 1.0
             if clock.monotonic() >= next_multicast and len(multicast_acks) < 5:
@@ -941,7 +952,7 @@ class FlightHarness:
                 # radio, and each UAV endpoint router.  A TTL of one expires at
                 # the first routed hop and can never exercise the P2MP path.
                 sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 8)
-                sock.sendto(
+                self.send_datagram(sock,
                     encode_data(
                         "p2mp_downlink",
                         sender_id=0,
@@ -968,7 +979,7 @@ class FlightHarness:
                         sequence=message.sequence,
                         payload=f"{message.checksum:08x}".encode(),
                     )
-                    sock.sendto(confirmation, source)
+                    self.send_datagram(sock, confirmation, source)
                 elif message.kind == "p2mp_ack" and message.sender_id in UAV_IDS:
                     multicast_acks.add(message.sender_id)
         if len(downlink_acks) != len(p2p_payloads) or len(uplinks) != len(p2p_payloads):

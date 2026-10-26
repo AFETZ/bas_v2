@@ -68,6 +68,23 @@ def test_queue_preserves_end_to_end_deadline_after_partial_write():
     assert not q.items
 
 
+def test_unavailable_angular_velocity_preserves_valid_pose_and_linear_velocity():
+    state = LiveState({'robots': [{'name': 'uav1'}]})
+    state.clock(10, 1_000_000_000)
+    message = odom(10)
+    message.twist.twist.angular.x = float('nan')
+    assert state.odometry('uav1', message, 1_000_000_000)
+    node = state.snapshot(1_000_000_000)['nodes'][1]
+    assert node['angular_velocity_enu_radps'] is None
+    assert node['position_m'] == [1, 2, 3]
+    assert node['velocity_enu_mps'] == [1, 0, 0]
+    json.dumps(node, allow_nan=False)
+    message = odom(10.02)
+    message.twist.twist.linear.x = float('nan')
+    assert not state.odometry('uav1', message, 1_020_000_000)
+    assert state.rejection_reasons['nonfinite_or_orientation'] == 1
+
+
 def test_reassembly_preserves_original_timestamp_and_rejects_old_or_future():
     encoder=Encoder(channel='control',uav_id=1,direction='gcs_to_uart')
     rx=Reassembler(channel='control',uav_id=1,direction='gcs_to_uart',max_age_ms=250)
@@ -144,32 +161,64 @@ def test_lost_serial_record_does_not_exhaust_deadline_of_next_record():
     assert rx.ingest(resumed.encode(b'probe',1_140_000_000)[0],1_150_000_000)==[b'probe']
 
 
-@pytest.mark.parametrize('delivery,missing,passed',[(0,False,True),(7,False,False),(0,True,False)])
-def test_no_bypass_checks_uart_delivery_even_when_gcs_is_silent(tmp_path,monkeypatch,delivery,missing,passed):
-    # Controlled counterexample for report logic, not a simulated RF result.
+@pytest.mark.parametrize('delivery,missing,physics,source,passed',[
+    (0,False,True,True,True), (7,False,True,True,False),
+    (0,True,True,True,False), (0,False,False,True,False),
+    (0,False,True,False,False),
+])
+@pytest.mark.parametrize('buffered_telemetry', [False, True])
+def test_no_bypass_requires_live_sources_and_no_uart_delivery(tmp_path,monkeypatch,delivery,missing,physics,source,passed,buffered_telemetry):
+    # Controlled counterexamples for the decision logic; actual RF isolation is
+    # checked separately with all five running Gazebo/SITL instances.
     from scripts.product import native_radio_five_uav_scenario as scenario
     from pymavlink import mavutil
+    monkeypatch.setenv('BAS_SIMULATION_MODE','realtime')
     (tmp_path/'logs').mkdir();(tmp_path/'metrics').mkdir()
     keys=[(channel,uav) for channel in ('control','payload') for uav in range(1,6)]
     (tmp_path/'logs/transport_sequences.json').write_text(json.dumps({f'{c}:uav{u}':42 for c,u in keys}))
-    for c,u in keys:
-        (tmp_path/f'metrics/{c}_uart_uav{u}.json').write_text(json.dumps({'uart_output_bytes':100}))
+    heartbeat=tmp_path/'heartbeat.json'
+    def publish_heartbeat(t):
+        heartbeat.write_text(json.dumps(dict(radios_isolated=True,simulation_s=t)))
+    publish_heartbeat(1)
+    monkeypatch.setattr(scenario.time,'sleep',lambda seconds:publish_heartbeat(2))
+    state=tmp_path/'state.json'
+    def publish_state(t):
+        state.write_text(json.dumps({'nodes':[dict(id=f'uav{u}',source_sim_time_s=t) for u in range(1,6)]}))
+    publish_state(10)
+    def publish_counters(received=0,produced=0):
+        for c,u in keys:
+            (tmp_path/f'metrics/{c}_uart_uav{u}.json').write_text(json.dumps(dict(
+                uart_output_bytes=100+(received if (c,u)==('control',1) else 0),
+                uart_input_bytes=200+produced,uart_queue_bytes=0,
+                sampled_monotonic_ns=time.monotonic_ns())))
+    publish_counters()
     class CounterHarness:
+        send_datagram = scenario.FlightHarness.send_datagram
         def __init__(self,args):
             self.message_counts={};self.additional_received=[];self.acks={};self.mavutil=mavutil
+            self.transport_receivers={'control': NS(pending_records=int(buffered_telemetry))}
             self.transport_encoders={key:Encoder(channel=key[0],uav_id=key[1],direction='gcs_to_uart') for key in keys}
             self.transmitters={key:mavutil.mavlink.MAVLink(None) for key in keys}
             self.sockets={'additional_data':NS(sendto=lambda *args:None)}
+        def release_buffered(self):
+            receiver=self.transport_receivers['control']
+            if receiver.pending_records:
+                receiver.pending_records=0
+                self.message_counts['old_telemetry']=1
+        def pump(self,seconds):
+            publish_counters()
+            if seconds>0:self.release_buffered()
         def send(self,channel,uav,message):
             assert self.transport_encoders[channel,uav].sequence==42
         def observe_for(self,duration,**kwargs):
-            path=tmp_path/'metrics/control_uart_uav1.json'
-            if missing:path.unlink()
-            else:path.write_text(json.dumps({'uart_output_bytes':100+delivery}))
+            self.release_buffered()
+            publish_counters(delivery,5 if source else 0)
+            publish_state(11 if physics else 10)
+            if missing:(tmp_path/'metrics/control_uart_uav1.json').unlink()
         def close(self):pass
     monkeypatch.setattr(scenario,'NativeFiveUavHarness',CounterHarness)
-    args=NS(run_dir=str(tmp_path),node_state='unused',radio_profile='test',scenario_config='unused',
-            duration_s=0,output=str(tmp_path/'result.json'))
+    args=NS(run_dir=str(tmp_path),node_state=str(state),radio_heartbeat=str(heartbeat),
+            radio_profile='test',scenario_config='unused',duration_s=0,output=str(tmp_path/'result.json'))
     status=scenario.run_no_bypass_probe(args)
     result=json.loads((tmp_path/'result.json').read_text())
     assert result['passed'] is passed and status==(0 if passed else 1)

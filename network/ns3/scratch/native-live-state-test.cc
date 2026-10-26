@@ -11,6 +11,18 @@ int main(int argc, char** argv) {
     namespace py=pybind11;
     auto json=py::module_::import("json");
     auto pathlib=py::module_::import("pathlib");
+    if (argc==3 && std::string(argv[1])=="--exchange") {
+        try {
+            bas::Lockstep barrier(argv[2],2,20000000);
+            barrier.Begin(0,true);
+            barrier.Physics(20000000,true);
+            barrier.Clock(20000000,"stopped",false);
+            return 0;
+        } catch (const std::exception& error) {
+            std::cerr << error.what() << "\n";
+            return 2;
+        }
+    }
     if (argc==4 && std::string(argv[1])=="--lockstep") {
         bas::Lockstep barrier(argv[2],10,20000000);
         bas::LiveStateReader reader;
@@ -101,6 +113,39 @@ int main(int argc, char** argv) {
     rejected=false;
     try {clocks.Check(11.1,4,.5);} catch (const std::exception&) {rejected=true;}
     check(rejected,"accepted slow Gazebo clock despite fresh publication");
+    // A real five-UAV startup produced 3.48 - 3.38 = 0.10000000000000009.
+    // Exact 100 ms is allowed; one additional source nanosecond is not.
+    auto boundary=json.attr("loads")(R"({"schema_version":2,"session_id":"boundary",
+      "simulation_mode":"lockstep","coordinate_frame":"ENU","source":"ros_odometry",
+      "fault":null,"published_monotonic_ns":2000000000,"nodes":[
+      {"id":"uav1","role":"uav","history":[{"sample_monotonic_ns":1900000000,
+       "source_sim_time_s":3.38,"position_m":[0,0,30],"velocity_enu_mps":[0,0,0],
+       "orientation_quat_xyzw":[0,0,0,1]}]},
+      {"id":"uav2","role":"uav","history":[{"sample_monotonic_ns":1900000000,
+       "source_sim_time_s":3.48,"position_m":[1,0,30],"velocity_enu_mps":[0,0,0],
+       "orientation_quat_xyzw":[0,0,0,1]}]}]})").cast<py::dict>();
+    pathlib.attr("Path")(path).attr("write_text")(json.attr("dumps")(boundary));
+    bas::LiveStateReader boundaryReader;
+    check(boundaryReader.Read(path,{"uav1","uav2"},2000000000,2000000000,500000000,3.5).size()==2,
+          "rejected exact 100 ms source skew");
+    boundary["nodes"][py::int_(1)]["history"][py::int_(0)]["source_sim_time_s"]=3.480000001;
+    pathlib.attr("Path")(path).attr("write_text")(json.attr("dumps")(boundary));
+    rejected=false;
+    try {boundaryReader.Read(path,{"uav1","uav2"},2000000000,2000000000,500000000,3.5);}
+    catch (const std::exception&) {rejected=true;}
+    check(rejected,"accepted source skew above 100 ms");
+    // Delayed ROS delivery must select older real measurements on the faster
+    // stream. No averaging or extrapolation of coordinates is allowed.
+    auto measured=json.attr("loads")(json.attr("dumps")(
+        boundary["nodes"][py::int_(1)]["history"][py::int_(0)])).cast<py::dict>();
+    measured["source_sim_time_s"]=3.46;
+    measured["position_m"]=std::vector<double>{7,8,31};
+    boundary["nodes"][py::int_(1)]["history"].attr("append")(measured);
+    boundary["nodes"][py::int_(1)]["history"][py::int_(0)]["source_sim_time_s"]=3.6;
+    pathlib.attr("Path")(path).attr("write_text")(json.attr("dumps")(boundary));
+    auto coherent=boundaryReader.Read(path,{"uav1","uav2"},2000000000,2000000000,500000000,3.7);
+    check(coherent.at(1).position.x==7 && coherent.at(1).sourceTime==3.46,
+          "did not select a coherent measured history slice");
     std::filesystem::remove(path);
     std::cout << "PASS: causal pose, velocity, attitude, height change, deadline, session reset, clock drift\n";
 }

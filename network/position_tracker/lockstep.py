@@ -38,9 +38,10 @@ def control_worker(pipe, world, timeout_s):
 
 
 class GazeboStepper:
-    def __init__(self, world_file: Path, state_file: Path, timeout_s=60., max_pose_age_s=.5):
+    def __init__(self, world_file: Path, state_file: Path, timeout_s=60., max_pose_age_s=.02):
         from gz.transport13 import Node
         from gz.msgs10.world_stats_pb2 import WorldStatistics
+        from gz.msgs10.clock_pb2 import Clock
         world = ET.parse(world_file).getroot().find("world")
         self.physics_ns = round(float(world.findtext("physics/max_step_size")) * 1e9)
         if self.physics_ns <= 0:
@@ -48,6 +49,7 @@ class GazeboStepper:
         self.state_file, self.timeout_s = state_file, timeout_s
         self.max_pose_age_s = max_pose_age_s
         self.stats, self.mutex = {}, threading.Lock()
+        self.clock_ns = None
         self.node = Node()
         def observe(msg):
             with self.mutex:
@@ -55,6 +57,11 @@ class GazeboStepper:
                     iterations=msg.iterations, paused=msg.paused, rx=time.monotonic())
         if not self.node.subscribe(WorldStatistics, f"/world/{world.get('name')}/stats", observe):
             raise RuntimeError("cannot subscribe to Gazebo stats")
+        def observe_clock(msg):
+            with self.mutex:
+                self.clock_ns = msg.sim.sec*10**9+msg.sim.nsec
+        if not self.node.subscribe(Clock, f"/world/{world.get('name')}/clock", observe_clock):
+            raise RuntimeError("cannot subscribe to Gazebo clock")
         context = multiprocessing.get_context("spawn")
         self.pipe, child = context.Pipe()
         self.worker = context.Process(target=control_worker,
@@ -88,14 +95,18 @@ class GazeboStepper:
             value = self._state()
             if value.get("fault") or (hasattr(self, "session") and value["session_id"] != self.session):
                 raise RuntimeError("source clock or tracker reset")
-            if value.get("missing_nodes") or not value.get("source_sim_time_s"):
+            if value.get("missing_nodes") or value.get("source_sim_time_s") is None:
                 return False
-            if abs(value["source_sim_time_s"] - target/1e9) > self.physics_ns/1e9 + 1e-8:
+            if abs(round(value["source_sim_time_s"]*1e9) - target) > self.physics_ns:
                 return False
             nodes = [n for n in value["nodes"] if n["role"] != "command_post"]
-            return bool(nodes) and all(-1e-8 <= target/1e9-n["source_sim_time_s"] <= self.max_pose_age_s for n in nodes)
+            # Iris publishes stock odometry at 50 Hz. A clock callback alone
+            # must not acknowledge a boundary while the poses still lag a step.
+            # At exactly one publication period a newer callback is already due.
+            return bool(nodes) and all(0 <= target-round(n["source_sim_time_s"]*1e9)
+                < round(self.max_pose_age_s*1e9) for n in nodes)
         try:
-            self._wait(received, "ROS clock/odometry did not reach the Gazebo barrier")
+            self._wait(received, "measured clock/odometry did not reach the Gazebo barrier")
         except TimeoutError as error:
             state = self._state()
             raise TimeoutError(f"{error}: target={target}, clock={state.get('source_sim_time_s')}, poses="
@@ -105,13 +116,14 @@ class GazeboStepper:
         delta = target_ns - self.target_ns
         if delta <= 0 or delta % self.physics_ns:
             raise ValueError("macrostep must advance by an integer number of physics steps")
-        before = dict(self.stats)
-        if not before["paused"] or before["sim_ns"] != self.origin_ns + self.target_ns:
+        if self.clock_ns != self.origin_ns + self.target_ns:
             raise RuntimeError("Gazebo moved outside the lockstep controller")
         self._request(delta // self.physics_ns)
-        expected = self.origin_iterations + target_ns // self.physics_ns
-        self._wait(lambda: self.stats["paused"] and self.stats["iterations"] >= expected, "Gazebo step")
-        if self.stats["iterations"] != expected or self.stats["sim_ns"] != self.origin_ns + target_ns:
+        expected = self.origin_ns + target_ns
+        # WorldStatistics is throttled in host time. The native world clock is
+        # emitted on every physics update and acknowledges the requested target.
+        self._wait(lambda: self.clock_ns >= expected, "Gazebo step")
+        if self.clock_ns != expected:
             raise RuntimeError("Gazebo step overshoot / reset")
         self._wait_state(self.origin_ns + target_ns)
         self.target_ns = target_ns

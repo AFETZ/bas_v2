@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 import yaml
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -65,7 +66,8 @@ def test_realtime_patch_spreads_pair_expiry_below_declared_maxima() -> None:
     assert "m_updateDistanceThreshold * pairThresholdScale" in patch
 
 
-def test_exact_tracker_stream_survives_transient_ros_graph_discovery(tmp_path: Path) -> None:
+@pytest.mark.parametrize("transport", ["ros", "gazebo"])
+def test_exact_tracker_stream_survives_transient_ros_graph_discovery(tmp_path: Path, transport: str) -> None:
     logs = tmp_path / "logs"
     logs.mkdir()
     snapshots = []
@@ -77,7 +79,7 @@ def test_exact_tracker_stream_survives_transient_ros_graph_discovery(tmp_path: P
                     {
                         "id": f"uav{index}",
                         "position_m": [float(index), 0.0, timestamp],
-                        "source_topic": f"/uav{index}/odometry",
+                        "source_topic": f"/uav{index}/odometry" if transport == "ros" else f"/model/uav{index}/odometry",
                         "stale": False,
                     }
                     for index in range(1, 6)
@@ -104,7 +106,7 @@ def test_exact_tracker_stream_survives_transient_ros_graph_discovery(tmp_path: P
     assert mobility["uavs"]["uav3"]["stream_observed"] is True
     assert (
         mobility["uavs"]["uav3"]["stream_observation_basis"]
-        == "tracker_received_exact_ros_topic"
+        == f"tracker_received_exact_{transport}_topic"
     )
 
 

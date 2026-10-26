@@ -23,7 +23,7 @@ from typing import Any
 import simulation_clock as clock
 
 from serial_transport import (Encoder, MavlinkStreamCounter, Reassembler, TransportCounters,
-                              BoundedQueue, radio_is_live)
+                              BoundedQueue, radio_is_live, ready_events)
 
 
 DATA_HEADER = struct.Struct("!4sBBIQ")
@@ -160,6 +160,7 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
         values.update(
             {
                 "pid": os.getpid(),
+                "sampled_monotonic_ns": time.monotonic_ns(),
                 "uav_id": args.uav_id,
                 "channel": args.channel,
                 "tty": args.tty,
@@ -175,6 +176,7 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
                 "queue_drops": to_uart.dropped + to_radio.dropped,
                 "queue_deadline_drops": to_uart.expired + to_radio.expired,
                 "uart_queue_bytes": to_uart.bytes,
+                "reassembly_pending_records": reassembler.pending_records if reassembler else 0,
                 "radio_queue_bytes": to_radio.bytes,
                 "queue_peak_bytes": max(to_uart.peak, to_radio.peak),
                 "deadline_ms": deadline_ms,
@@ -248,7 +250,7 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
                             else:
                                 stale_radio_drops += 1
                     publish_metrics(time.monotonic_ns())
-                    for key, _mask in selector.select(0.01 if to_uart.items or to_radio.items else 0.05):
+                    for key, _mask in ready_events(selector, 0 if clock.mode() == "lockstep" and live else (0.01 if to_uart.items or to_radio.items else 0.05)):
                         if key.data == "uart":
                             try:
                                 data = os.read(uart, 4096)
@@ -318,29 +320,33 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
                                     "monotonic_ns": observed_ns,
                                 },
                             )
-                    # At most one nonblocking write per queue per iteration: a full
-                    # PTY cannot prevent ingress, expiry, metrics or stop processing.
+                    # Complete queued writes before acknowledging the exchange.
+                    # Nonblocking backpressure retains the bounded queue for the
+                    # next physics cycle; it never stalls the phase barrier.
                     live = radio_is_live(args.radio_watchdog_file, args.watchdog_s)
                     to_uart.expire(clock.monotonic())
                     to_radio.expire(clock.monotonic())
-                    if live and to_uart.items:
+                    while live and to_uart.items:
                         try:
                             data = to_uart.items[0][0]
                             written = os.write(uart, data)
+                            if written <= 0:
+                                raise OSError("UART closed during exchange")
                             counters.uart_output_bytes += written
                             output_frames.feed(data[:written])
                             emit_mavlink_frames('ns3_to_uart', output_parser, data[:written], clock.monotonic_ns())
                             to_uart.sent(written)
                         except BlockingIOError:
-                            pass
-                    if live and to_radio.items:
+                            break
+                    while live and to_radio.items:
                         try:
                             written = udp.sendto(to_radio.items[0][0], peer_address)
                             counters.ns3_input_bytes += written
                             to_radio.sent(written)
                         except BlockingIOError:
-                            pass
+                            break
         finally:
+            clock.close_participant()
             if reassembler is not None:
                 reassembler.expire(clock.monotonic_ns(), force=True)
             publish_metrics(time.monotonic_ns(), force=True)

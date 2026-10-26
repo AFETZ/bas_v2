@@ -587,11 +587,15 @@ def build_mobility(run_dir: Path, events: list[dict[str, Any]]) -> dict[str, Any
         publisher = None
         if publisher_match:
             publisher = f"{publisher_match.group(2).rstrip('/')}/{publisher_match.group(1)}".replace("//", "/")
-        expected_topic = f"/{uav}/odometry"
+        native_topic = f"/model/{uav}/odometry"
+        native_transport = source_topics.get(native_topic, 0) > 0
+        expected_topic = native_topic if native_transport else f"/{uav}/odometry"
         tracker_stream_samples = source_topics.get(expected_topic, 0)
         stream_observed = publisher_count > 0 or tracker_stream_samples > 0
         observation_basis = (
-            "ros2_topic_info_and_tracker_stream"
+            "tracker_received_exact_gazebo_topic"
+            if native_transport
+            else "ros2_topic_info_and_tracker_stream"
             if publisher_count > 0 and tracker_stream_samples > 0
             else "ros2_topic_info"
             if publisher_count > 0
@@ -608,7 +612,8 @@ def build_mobility(run_dir: Path, events: list[dict[str, Any]]) -> dict[str, Any
             "observation_basis": observation_basis,
         }
         result["uavs"][uav] = {
-            "ros_topic": expected_topic,
+            "source_topic": expected_topic,
+            "ros_topic": None if native_transport else expected_topic,
             "publisher_node": publisher,
             "publisher_count": publisher_count,
             "stream_observed": stream_observed,
@@ -3252,7 +3257,7 @@ def main() -> int:
         ),
         f"- P2MP: {p2mp['root_transmissions']} application roots, {p2mp['command_post_mac_tx']} command-post MacTx.",
         f"- Simultaneous uplink Jain fairness: {shared['jain_fairness']}",
-        f"- No-bypass after common native process stop: {no_bypass.get('passed')}",
+        f"- No-bypass with native PHYs asleep and physics/UART sources running: {no_bypass.get('passed')}",
         (
             f"- One-UAV regression: {'passed' if functional_checks.get('one_uav_regression') else 'failed'} (required)."
             if args.one_uav_run

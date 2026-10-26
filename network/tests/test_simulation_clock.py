@@ -1,5 +1,8 @@
 """Clock-domain and barrier fixtures; these do not simulate radio outcomes."""
 import time
+import json
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -157,3 +160,100 @@ def test_real_uart_waits_for_barrier_and_ages_in_model_time(tmp_path, model_cloc
         _, error = process.communicate(timeout=5)
         os.close(master); os.close(slave); peer.close()
         assert process.returncode == 0, error.decode()
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='Linux flock exchange barrier')
+def test_exchange_acknowledges_steps_and_rejoining_endpoint(model_clock, monkeypatch):
+    monkeypatch.setenv('BAS_LOCKSTEP_PARTICIPANT', 'rejoining')
+    model_clock(20_000_000, 'exchange')
+    cycles = []
+    for _ in range(2):
+        with clock.io_window() as allowed:
+            assert allowed
+            cycles.append(clock.monotonic_ns())
+    path = clock.participant_path()
+    assert json.loads(path.read_text())['simulation_ns'] == 20_000_000
+    clock.close_participant()
+    with clock.io_window() as allowed:
+        assert allowed
+    assert json.loads(path.read_text())['simulation_ns'] == 20_000_000
+    model_clock(40_000_000, 'exchange')
+    with clock.io_window() as allowed:
+        assert allowed
+    assert json.loads(path.read_text())['simulation_ns'] == 40_000_000
+    assert cycles == [20_000_000, 20_000_000]
+    clock.close_participant()
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='Linux flock exchange barrier')
+def test_gcs_real_datagram_waits_for_exchange(model_clock, monkeypatch):
+    import fcntl
+    import socket
+    from concurrent.futures import ThreadPoolExecutor
+    from pymavlink import mavutil
+    from network.scripts.serial_transport import TransportCounters, MavlinkStreamCounter
+    from scripts.product import town01_full_stack_scenario as scenario
+    h = object.__new__(scenario.FlightHarness)
+    key = ('control', 1)
+    h.transmitters = {key: mavutil.mavlink.MAVLink(None)}
+    h.transport_counters = {key: TransportCounters()}
+    h.transport_input_frames = {key: MavlinkStreamCounter()}
+    h.transport_encoders = {key: Encoder(channel='control', uav_id=1, direction='gcs_to_uart')}
+    monkeypatch.setattr(scenario, 'endpoint_ip', lambda _: '127.0.0.1')
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as rx, socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as tx:
+        rx.bind(('127.0.0.1', 14601))
+        rx.settimeout(.05)
+        h.sockets = {'control': tx}
+        model_clock(1_000_000_000, 'radio')
+        with open(os.environ['BAS_SIM_CLOCK']+'.lock', 'a') as owner, ThreadPoolExecutor(1) as pool:
+            fcntl.flock(owner, fcntl.LOCK_EX)
+            future = pool.submit(h.send, 'control', 1, h.transmitters[key].heartbeat_encode(6, 8, 0, 0, 0))
+            try:
+                with pytest.raises(socket.timeout):
+                    rx.recvfrom(65535)
+            finally:
+                model_clock(1_000_000_000)
+                fcntl.flock(owner, fcntl.LOCK_UN)
+            assert future.result(timeout=2) > 0
+            rx.settimeout(1)
+            data, _ = rx.recvfrom(65535)
+            records = Reassembler(channel='control', uav_id=1, direction='gcs_to_uart').ingest(data)
+            assert records and mavutil.mavlink.MAVLink(None).parse_buffer(records[0])[0].get_type() == 'HEARTBEAT'
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='Linux native exchange binary')
+def test_native_exchange_waits_for_every_registered_endpoint(tmp_path, model_clock, monkeypatch):
+    binary = Path(__file__).resolve().parents[2]/'.external/ns-3-sionna-native/build/scratch/ns3.48-native-live-state-test-default'
+    if not binary.exists():
+        pytest.skip('focused native state test binary not built')
+    path = Path(os.environ['BAS_SIM_CLOCK'])
+    clock.initial(path)
+    for name in ('first', 'delayed'):
+        monkeypatch.setenv('BAS_LOCKSTEP_PARTICIPANT', name)
+        with clock.io_window() as allowed:
+            assert allowed
+    ack = Path(str(path)+'.ack')
+    clock.write(ack, dict(target_ns=0, source_origin_ns=0, physics_step_ns=1_000_000, fault=None))
+    process = subprocess.Popen([str(binary), '--exchange', str(path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        deadline = time.monotonic()+2
+        while not Path(str(path)+'.request').exists() and time.monotonic()<deadline:
+            time.sleep(.001)
+        assert Path(str(path)+'.request').exists()
+        clock.write(ack, dict(target_ns=20_000_000, source_origin_ns=0, physics_step_ns=1_000_000, fault=None))
+        while clock.snapshot()['phase'] != 'exchange' and time.monotonic()<deadline:
+            time.sleep(.001)
+        monkeypatch.setenv('BAS_LOCKSTEP_PARTICIPANT', 'first')
+        with clock.io_window() as allowed:
+            assert allowed
+        time.sleep(.1)  # greater than the removed fixed 20 ms opportunity
+        assert process.poll() is None
+        monkeypatch.setenv('BAS_LOCKSTEP_PARTICIPANT', 'delayed')
+        with clock.io_window() as allowed:
+            assert allowed
+        stdout, stderr = process.communicate(timeout=2)
+        assert process.returncode == 0, stderr.decode()
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
