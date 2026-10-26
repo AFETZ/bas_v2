@@ -7,6 +7,12 @@ CONTAINER_NAME="${BAS_NATIVE_FIVE_CONTAINER_NAME:-bas-v2-native-radio-five-uav}"
 SCENARIO_KEY="${BAS_NATIVE_FIVE_SCENARIO:-town01}"
 GUI="${BAS_NATIVE_FIVE_GUI:-0}"
 CAPTURE_IMAGES="${BAS_NATIVE_CAPTURE_IMAGES:-1}"
+CAPTURE_STORAGE="${BAS_NATIVE_CAPTURE_STORAGE:-disk}"
+case "$CAPTURE_STORAGE" in
+  disk) CONTAINER_TMPFS_SIZE=1g; NATIVE_CAPTURE_TMPFS_LIMIT_BYTES=0 ;;
+  tmpfs) CONTAINER_TMPFS_SIZE=4g; NATIVE_CAPTURE_TMPFS_LIMIT_BYTES=4294967296 ;;
+  *) printf 'BAS_NATIVE_CAPTURE_STORAGE must be disk or tmpfs.\n' >&2; exit 2 ;;
+esac
 RNG_SEED="${BAS_NATIVE_RNG_SEED:-1}"
 RNG_RUN="${BAS_NATIVE_RNG_RUN:-1}"
 [[ "$RNG_SEED" =~ ^[1-9][0-9]*$ && "$RNG_RUN" =~ ^[0-9]+$ ]] || {
@@ -117,7 +123,7 @@ run_in_container() {
     --name "$CONTAINER_NAME" \
     --label bas.product=native-radio-five-uav \
     --privileged --network=host --user 0:0 \
-    --tmpfs /tmp:rw,nosuid,size=1g,mode=1777 \
+    --tmpfs "/tmp:rw,nosuid,size=$CONTAINER_TMPFS_SIZE,mode=1777" \
     "${gpu_args[@]}" \
     "${gui_args[@]}" \
     -e BAS_SIMULATION_MODE -e BAS_LOCKSTEP_STEP_MS -e BAS_LOCKSTEP_TIMEOUT_S \
@@ -139,6 +145,7 @@ run_in_container() {
     -e BAS_NATIVE_FIVE_SCENARIO="$SCENARIO_KEY" \
     -e BAS_NATIVE_FIVE_GUI="$GUI" \
     -e BAS_NATIVE_CAPTURE_IMAGES="$CAPTURE_IMAGES" \
+    -e BAS_NATIVE_CAPTURE_STORAGE="$CAPTURE_STORAGE" \
     -e BAS_NATIVE_PHYSICS_PROFILE="$PHYSICS_PROFILE" \
     -e BAS_NATIVE_COORDINATION_POLICY="$COORDINATION_POLICY" \
     -e BAS_NATIVE_RNG_SEED="$RNG_SEED" -e BAS_NATIVE_RNG_RUN="$RNG_RUN" \
@@ -193,7 +200,7 @@ if [[ "${BAS_NATIVE_FIVE_IN_CONTAINER:-0}" != 1 ]]; then
 fi
 
 ((EUID == 0)) || { printf 'Root is required in the privileged runtime container.\n' >&2; exit 2; }
-for required_command in cmake c++ gz ip nproc python3 ros2 socat ss stdbuf taskset tcpdump; do
+for required_command in cmake c++ findmnt gz ip nproc python3 ros2 socat ss stdbuf taskset tcpdump; do
   command -v "$required_command" >/dev/null 2>&1 || {
     printf 'Required command is unavailable: %s\n' "$required_command" >&2
     exit 2
@@ -250,6 +257,14 @@ done
 RUN_DIR="$ROOT_DIR/runs/native-radio-$BAS_SIMULATION_MODE/$RUN_ID"
 [[ ! -e "$RUN_DIR" ]] || { printf 'Run directory exists: %s\n' "$RUN_DIR" >&2; exit 2; }
 RUNTIME_DIR="/tmp/bas-native-five-$RUN_ID"
+NATIVE_CAPTURE_SPOOL=""
+NATIVE_EVENT_CSV="$RUN_DIR/logs/native_radio_events.csv"
+NATIVE_PCAP_PREFIX="$RUN_DIR/pcap/native_radio.pcap"
+if [[ "$CAPTURE_STORAGE" == tmpfs ]]; then
+  NATIVE_CAPTURE_SPOOL="$RUNTIME_DIR/native-radio-raw"
+  NATIVE_EVENT_CSV="$NATIVE_CAPTURE_SPOOL/logs/native_radio_events.csv"
+  NATIVE_PCAP_PREFIX="$NATIVE_CAPTURE_SPOOL/pcap/native_radio.pcap"
+fi
 ONE_UAV_RUN="${BAS_NATIVE_FIVE_ONE_UAV_RUN:-}"
 UART_DIR="$RUNTIME_DIR/uart"
 WORK_DIR="$RUN_DIR/sitl"
@@ -472,6 +487,34 @@ fi
 [[ -x "$PYTHON_TOOLING/bin/cmake" ]] || { printf 'Pinned CMake tooling is absent.\n' >&2; exit 2; }
 
 mkdir -p "$RUN_DIR"/{logs,metrics,pcap,screenshots,plots} "$UART_DIR" "$WORK_DIR"
+mkdir -p "$(dirname "$NATIVE_EVENT_CSV")" "$(dirname "$NATIVE_PCAP_PREFIX")"
+mapfile -t NATIVE_CAPTURE_MOUNT < <(python3 - "$CAPTURE_STORAGE" "$NATIVE_CAPTURE_TMPFS_LIMIT_BYTES" \
+  "$NATIVE_EVENT_CSV" "$NATIVE_PCAP_PREFIX" "$NATIVE_CAPTURE_SPOOL" \
+  "$RUN_DIR/logs/native_capture_storage.json" <<'PYCAPTURE'
+import json, os, subprocess, sys
+from pathlib import Path
+profile, limit, events, pcap, spool, manifest = sys.argv[1:]
+mount = json.loads(subprocess.check_output([
+    "findmnt", "--bytes", "--json", "--target", str(Path(events).parent),
+    "--output", "TARGET,FSTYPE"], text=True))["filesystems"][0]
+capacity = os.statvfs(Path(events).parent)
+observed = dict(mount_point=mount["target"], filesystem=mount["fstype"],
+                total_bytes=capacity.f_blocks * capacity.f_frsize,
+                available_bytes=capacity.f_bavail * capacity.f_frsize)
+if profile == "tmpfs" and (observed["filesystem"] != "tmpfs" or observed["total_bytes"] != int(limit)):
+    raise SystemExit("Requested native raw spool is not on the declared 4 GiB tmpfs")
+value = dict(requested_profile=profile, effective_profile=profile,
+    declared_container_tmpfs_limit_bytes=int(limit), observed_mount=observed,
+    native_event_csv_path=events, native_pcap_prefix_path=pcap, spool_directory=spool,
+    scope="native ns-3 PCAPs and event CSV; TAP/sidecar logs remain separate disk writers",
+    memory_accounting="tmpfs raw bytes are memory use outside native process RSS",
+    publication=dict(status="pending" if profile == "tmpfs" else "direct_disk"))
+Path(manifest).write_text(json.dumps(value, indent=2) + "\n")
+print(observed["filesystem"])
+print(observed["total_bytes"])
+PYCAPTURE
+)
+(( ${#NATIVE_CAPTURE_MOUNT[@]} == 2 )) || { printf 'Native capture storage readback failed.\n' >&2; exit 2; }
 if [[ "$PHYSICS_PROFILE" == bullet_rotor ]]; then
   cp "$ROOT_DIR/.external/gz-physics7-rotor/build_manifest.json" "$RUN_DIR/logs/physics_runtime.json"
 fi
@@ -600,6 +643,11 @@ PY
     "$CARRIER_HZ" "$WIFI_CHANNEL_NUMBER" "$WIFI_CHANNEL_WIDTH_MHZ" "$WIFI_DATA_MODE" "$WIFI_CONTROL_MODE"
   printf 'phy_rate_bps=%s\ntx_power_w=%s\nwifi_ssid=%s\n' "$PHY_RATE_BPS" "$TX_POWER_W" "$WIFI_SSID"
   printf 'event_logging=%s\nactive_uart_channels=%s\nlatency_mode=%s\n' "$EVENT_LOGGING" "$ACTIVE_UART_CHANNELS" "$LATENCY_MODE"
+  printf 'native_capture_storage_requested=%s\nnative_capture_storage_effective=%s\n' "$CAPTURE_STORAGE" "$CAPTURE_STORAGE"
+  printf 'native_capture_tmpfs_limit_bytes=%s\nnative_capture_mount_fstype=%s\nnative_capture_mount_total_bytes=%s\n' \
+    "$NATIVE_CAPTURE_TMPFS_LIMIT_BYTES" "${NATIVE_CAPTURE_MOUNT[0]}" "${NATIVE_CAPTURE_MOUNT[1]}"
+  printf 'native_event_csv_path=%s\nnative_pcap_prefix_path=%s\nnative_capture_spool_path=%s\n' \
+    "$NATIVE_EVENT_CSV" "$NATIVE_PCAP_PREFIX" "$NATIVE_CAPTURE_SPOOL"
   printf 'solver_profile=%s\n' "$SOLVER_PROFILE"
   printf 'sionna_max_depth=%s\nsionna_los=%s\nsionna_specular_reflection=%s\n' \
     "$SIONNA_MAX_DEPTH" "$SIONNA_LOS" "$SIONNA_SPECULAR_REFLECTION"
@@ -651,6 +699,7 @@ capture_effective_configuration() {
     --config "iris_radio_headless=$ROOT_DIR/src/multiagent_simulation/models/iris_radio_headless/model.sdf"
     --config "native_routes=$RUN_DIR/logs/native_routes.txt"
     --config "native_neighbors=$RUN_DIR/logs/static_neighbors.txt"
+    --config "native_capture_storage=$RUN_DIR/logs/native_capture_storage.json"
   )
   if [[ "$PROPAGATION_PROFILE" == friis ]]; then
     config_args+=(--not-enabled sionna)
@@ -691,6 +740,45 @@ cleanup() {
     stop_pid "${managed_pids[$pid_index]}"
   done
   [[ -n "$NS3_LOGGER_PID" ]] && wait "$NS3_LOGGER_PID" 2>/dev/null || true
+  # Every native writer is closed before copying, including on ns-3 hard abort.
+  # Use the same upstream PCAP bytes; this changes storage, never capture scope.
+  if ! python3 - "$RUN_DIR" "$NATIVE_EVENT_CSV" "$NATIVE_PCAP_PREFIX" <<'PYPUBLISH' \
+    > "$RUN_DIR/logs/native_capture_publish.log" 2>&1
+import json, shutil, sys, time
+from pathlib import Path
+run, event_file, pcap_prefix = map(Path, sys.argv[1:])
+manifest = run / "logs/native_capture_storage.json"
+value = json.loads(manifest.read_text())
+sources = [(event_file, run / "logs/native_radio_events.csv")]
+sources += [(path, run / "pcap" / path.name) for path in sorted(pcap_prefix.parent.glob("native_radio*.pcap"))]
+started = time.monotonic()
+copied, errors, staged = [], [], 0
+for source, destination in sources:
+    if not source.is_file():
+        continue
+    size = source.stat().st_size
+    staged += size
+    try:
+        if source != destination:
+            partial = destination.with_name(destination.name + ".partial")
+            shutil.copy2(source, partial)
+            if partial.stat().st_size != size:
+                raise OSError("native raw copy size mismatch")
+            partial.replace(destination)
+        copied.append(dict(source=str(source), destination=str(destination), bytes=size))
+    except OSError as error:
+        errors.append(dict(source=str(source), destination=str(destination), reason=str(error)))
+value["publication"] = dict(status="copy_failed" if errors else (
+    "copied" if value["effective_profile"] == "tmpfs" else "direct_disk"),
+    bytes_staged=staged, copy_wall_s=time.monotonic() - started, files=copied, errors=errors)
+manifest.write_text(json.dumps(value, indent=2) + "\n")
+print(json.dumps(value["publication"], sort_keys=True))
+raise SystemExit(1 if errors else 0)
+PYPUBLISH
+  then
+    printf 'Native raw publication failed; inspect logs/native_capture_publish.log and storage JSON.\n' >&2
+    ((status != 0)) || status=1
+  fi
   for namespace in "${created_namespaces[@]}"; do
     ip netns del "$namespace" 2>/dev/null || true
   done
@@ -1074,8 +1162,8 @@ setsid ip netns exec ams-ns3 env \
   --carrierHz="$CARRIER_HZ" --tapGcs=tap-gcs --tapUavs="$TAP_UAVS" \
   --propagationProfile="${BAS_NATIVE_PROPAGATION_PROFILE:-sionna}" \
   --scene="$SCENE" --positionFile="$NODE_STATE" --phaseFile="$PHASE_FILE" \
-  --radioPcap="$RUN_DIR/pcap/native_radio.pcap" \
-  --eventCsv="$RUN_DIR/logs/native_radio_events.csv" \
+  --radioPcap="$NATIVE_PCAP_PREFIX" \
+  --eventCsv="$NATIVE_EVENT_CSV" \
   --statsFile="$RUN_DIR/metrics/native_radio_stats.json" \
   --attributeDump="$RUN_DIR/logs/ns3_attributes.txt" \
   --executionMode="$BAS_SIMULATION_MODE" --clockFile="$BAS_SIM_CLOCK" \
