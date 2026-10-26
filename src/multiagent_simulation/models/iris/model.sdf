@@ -248,21 +248,11 @@
         <update_rate>1000.0</update_rate>
       </sensor>
     </link>
-    <joint name='imu_joint' type='revolute'>
+    <!-- The IMU is rigidly mounted. A zero-limit damped revolute joint
+         oscillates under Bullet Featherstone rather than fixing the sensor. -->
+    <joint name='imu_joint' type='fixed'>
       <child>imu_link</child>
       <parent>base_link</parent>
-      <axis>
-        <xyz>0 0 1</xyz>
-        <limit>
-          <lower>0</lower>
-          <upper>0</upper>
-          <effort>0</effort>
-          <velocity>0</velocity>
-        </limit>
-        <dynamics>
-          <damping>1.0</damping>
-        </dynamics>
-      </axis>
     </joint>
     <link name='rotor_0'>
       <pose>0.13 -0.22 0.023 0 0 0</pose>
