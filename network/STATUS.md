@@ -1,150 +1,47 @@
 # Product Status
 
-Updated: 2026-10-26. Timing fixes verified on Linux; complete flight remains unverified.
+Updated: 2026-10-27. This status describes the user-authorized paper/live worktree `/home/bas/bas_v2-paper-live`, not every historical BAS profile.
+Measured implementation: `8e16ec223e895c11891e6e7d7c39dff8cee39cac`, pinned image `sha256:89d78eff9914b1644a1b01b793612e9ee8b19916c5a7bf5f578ba6d8bfbfafe5`.
 
-## Timing repair, 2026-10-26
+## Observed product
 
-- Updated workspace: `/home/bas/bas_v2-main`, branch `fix/time-sync-20261026`, based on
-  upstream `304b9ef`. Dirty historical worktrees were preserved; pinned Docker image reused.
-- Before repair: Sionna realtime exceeded 250 ms jitter; lockstep and Friis stopped on
-  cross-UAV timestamp skew. Logs remain in `runs/update-20261025/`.
-- Native Gazebo clock/odometry now feed the tracker; unavailable angular velocity is
-  reported as null, while invalid required position/orientation/linear velocity still fail.
-- Coherent causal history selection uses integer-nanosecond limits. Lockstep waits for
-  physics/pose acknowledgements and every endpoint; native TAP ingress is drained at boundaries.
-- Cache remains 0.5 s/0.5 m; pose deadline 0.5 s, source skew 100 ms, realtime jitter 250 ms.
-  No limit was relaxed; no propagation fallback or fabricated ACK/RF outcomes.
-- `sync-20261026-sionna-final`: 3,646 steps / 72.92 model s, zero stale poses, max pose age 12 ms;
-  115/115 command deliveries at real UARTs, ACK RTT p95 80 ms **model time**.
-  9,448 decoded-MPDU channel samples: age p95/max 0.315607/0.489337 s; idle cache polls excluded.
-- Native Wi-Fi sleep isolation passed: all six PHYs asleep, all five physics sources advanced
-  10.52 s and all ten UARTs produced bytes; zero commands/data/telemetry bypassed the radio.
-- A deliberate 1.2 s ns-3 host stall froze model time and all five pose timestamps; execution resumed.
-- `sync-20261026-friis-final`: 225/225 TIMESYNC replies over 45 wall s; five accepted version requests;
-  RTT p95 15.503 ms, max scheduler lag 14.484 ms, normal max pose age 44.561 ms.
-  Stopping the tracker triggered `state_coupling_deadline` in 476 ms; no later pose was applied.
-- 88 focused Python tests passed; 16 command tests rechecked after the final retry change.
-  Native state/TAP checks passed (104 actual TAP frames); async negative control reproduced mid-step ingress.
-  Python 3.10 compile, shell/config/port checks and final GPU/OptiX preflight passed.
-- Full `rock_demo` flight did **not** pass: lost mission opener and 20 s flight retry pauses were fixed;
-  all five missions then loaded, but accepted takeoff commands did not lift UAVs and compass checks
-  delayed/rejected arming. Flight run 03 was stopped intentionally (143). Physics/flight needs separate repair.
-- Heavy timing check: `BAS_NATIVE_LATENCY_MODE=1 BAS_NATIVE_CAPTURE_IMAGES=0 make demo-rugged SIMULATION_MODE=lockstep DEMO_GUI=0`.
-  Light live check: `BAS_NATIVE_PROPAGATION_PROFILE=friis BAS_NATIVE_CAPTURE_IMAGES=0 make operator DEMO_SCENARIO=rock_demo DEMO_GUI=0`; connect with `make gcs`, stop with `make stop`.
-- Evidence: `runs/time-sync-20261026/`, `runs/native-radio-lockstep/sync-20261026-sionna-final/`,
-  `runs/native-radio-realtime/sync-20261026-friis-final/`. All test processes were stopped.
+- Town01 / stock DART, five real ArduPilot SITL, native ns-3.48 ad-hoc/Friis, headless control UART. Sionna RT is not instantiated; Friis does not run GPU/OptiX preflight.
+- Native direct peer routes replace AP-dependent peer routing. GCS executable frames go to one coordinator, which forwards to four followers; actual UART response and physical action are recorded.
+- GCS is the sole issuer. Epoch/lease fencing accounts for every issued old permission, including unacknowledged renewals; final UART write checks enforce authority and 250 ms command age.
+- Native 802.11n aggregation/Block ACK is explicitly disabled for the coordinator profile using upstream attributes. No custom physics, MAC, PER or autopilot is introduced.
+- Native PCAP/event CSV use an explicit observed 4 GiB tmpfs and are published after writers stop. All capture scope is retained. Native stop grace is 120 s.
+- Real external operator UDP control was observed in flight: GUIDED→BRAKE→GUIDED on UAV3; 225/225 actual TIMESYNC responses. MAVProxy remains available through `make gcs`.
 
-## Current test baseline
+## Completed measurements
 
-- `main` is the only permanent remote branch; fixed test revision:
-  `test-baseline-2026-10-21`. This is a component-tested source baseline, not a new full-stack certification.
-- Clean Windows checkout prepared through `scripts/setup_dev.ps1` using CPython 3.10.22
-  and the unchanged development lock file; all 25 installed dependencies pass `uv pip check`.
-- 61 focused tests passed, 4 Linux PTY/flock tests skipped. Files: `test_gcs_lockstep.py`,
-  `test_simulation_clock.py`, `test_serial_transport.py`, `test_data_transport.py`,
-  `test_native_latency_report.py`, `test_native_wifi_five_uav_product.py` under `network/tests/`.
-- Compile, local Markdown references, diff and five-UAV port checks passed.
-- ACK caches are invalidated for each command send. GCS reassembly and reception hold the
-  I/O barrier; socket selection waits outside it. Windows phase-transition tests use a barrier fixture.
-- Recovered the diagnostic source-report fix from `06b2293`: no undefined `native_sources`,
-  incomplete switch windows stay unavailable, and failed/limited run verdicts are preserved.
-- Product config path assertions now use POSIX paths consistently on Windows and Linux.
-- Full Gazebo/SITL/ns-3/Sionna and physical controller tests were not run in this cleanup.
-  Local WSL cannot start because its virtual disk is missing; Linux lock/PTY coverage remains unverified here.
+- Engineering `paper-live600-02`: 600.001 model / 600.123 wall s (scenario RTF0.999796); tracker sample interval599.978/600.110 s gives RTF0.999779, p5 of approximately1 s windows0.998672, minimum0.970634; native lag p95/max1.499/28.952 ms. All five LAND/disarm; 150 real height-goal completions.
+- Frozen main matrix fixed/failover × none/selective/total_GCS × five paired RngRun: **30 attempted,30 completed,30 comparable**, 15 pairs, one source/image/settings signature, zero excluded runs.
+- Each main run:180 model s after airborne readiness, fault45–105 s,900 offered refreshes. All30 completed real five-UAV flight, two target levels, controlled LAND and auto-disarm.
+- Selective timely/offered: fixed65.711% vsfailover98.222%; mean paired effect+32.511 pp, exploratory95% interval[32.267,32.756]pp, n=5 whole pairs /3125 exact bootstrap resamples.
+- Selective mean all-five UART recovery62.356→3.963 s; real new-goal recovery67.715→21.302 s. Failover UART range3.927–3.982 s. In all five selective failover runs, former master UAV1 remains a reachable peer follower.
+- All10 total-GCS runs: real BRAKE/stable HOLD of five, zero new appointments or target UART admissions during isolation; recovery follows restored radio. Issued lost renewals are recorded separately.
+- No-fault mean timely99.511% for both policies; recovery is N/A. Equal observed means and saturated total-GCS30 s losses do not establish equivalence.
+- Main tracker RTF0.999564–0.999883; worst run p5=0.997355; measurement native lag max7.847 ms. Existing250 ms lag/500 ms pose/100 ms cross-source limits remain unchanged.
+- 75058 actual UART admissions audited valid; no observed duplicate/stale/lease/lineage anomalies.27000 offers include unsent/lost commands. Old pre-fault goals completed later are excluded from recovery.
+- 240 native files (10,184,179,226 bytes) published without errors;660 effective snapshot files checked;150 DataFlash exports each contain1388 observed parameter names. All observed ARMING_SKIPCHK=0,COMPASS_USE=1,SIM_SPEEDUP=1.
+- Native radiotap proof for the first planned main pair verifies both command and return hops for followers1/2/3/5 under master4; the new physical goal completes inside the actual60 s RF outage.
+- Grounded master-service SIGSTOP negative control:223/225→0/225→220/225 nonce replies while other followers and simulation continue. This pauses the whole master service; it is not an in-flight process-crash guarantee.
 
-## Repository cleanup
+## Reproduction and evidence
 
-- Inspected all 12 remote branches and all four PRs; there were no open PRs or Actions runs.
-- Removed 11 obsolete branches: seven already reachable from `main`; four divergent tips
-  were archived before deletion, then their tags were checked for redundancy.
-- Three remote tags remain: the test baseline plus `archive/2026-10-21/` tags for
-  `agent/publish-network-radio-milestones` and `feature/bas-v2-rc1-stabilization`.
-- Removed five old milestone tags whose commits are in `main`, and the demo/handover tags
-  whose tips are ancestors of the retained stabilization archive. No GitHub releases used them.
-  All unique commit history remains reachable; old tag annotations were saved locally.
-- GitHub deletes merged PR branches automatically. The test-baseline tag remains unchanged.
-- README documents the pinned baseline, separate software/runtime setup, focused tests,
-  realtime/lockstep commands and result paths. Existing dirty local review copies were preserved.
+- [Russian report, numerical text and start/stop commands](../doc/LIVE_LEADER_RESULTS.md).
+- [Frozen plan, environment, source archive and exact commands](../runs/paper-live-20261026/campaign/).
+- [All main CSV/PNG/SVG/PDF reports and paired outcomes](../runs/paper-live-20261026/campaign-analysis/relay_campaign_analysis.md).
+- [First planned pair illustration](../runs/paper-live-20261026/first-pair-figure/first_planned_selective_pair.png).
+- [Independent aggregate review](../runs/paper-live-20261026/campaign-final-review/review.md), [metadata/raw integrity](../runs/paper-live-20261026/campaign-metadata-integrity-review.md), [native hop review](../runs/paper-live-20261026/main-selective-s1-r04-native-path-review.md).
+- Raw runs: `runs/native-radio-realtime/paper-relay-*`; engineering/failed runs remain alongside, outside the frozen cohort. No pilot is pooled into the main matrix.
+- Focused mission/analysis tests passed37 cases; after capture-signature changes22 analysis cases passed. Native binary was built and exercised by the actual runs; other historical profiles were not fully regressed.
 
-## Runtime evidence and remaining defects
+## Scope and remaining limits
 
-- Earlier workstation results (September 2026): Windows CUDA Sionna RT 1.2.0 / Mitsuba 3.7.1 /
-  Dr.Jit 1.2.0 solved rock_demo; Linux/WSL OptiX failed initialization. These are historical results.
-- The previous coupling work reported 43 model-time and 38 realtime focused Python cases,
-  native state/clock tests and target builds, shell/port and watchdog checks.
-  Gazebo/ArduPilot/ROS + stock ns-3 completed 25 barriers with a 1.2 s host stall;
-  a native Wi-Fi/TAP/Friis baseline completed 100 barriers and 3/3 pings, without stale poses.
-  Those historical tests did not demonstrate full Sionna lockstep integration; old logs: `runs/lockstep/`, `runs/coupling/`.
-- The shared-uplink gate can accept 95% loss when fairness is equal. A newly received delayed
-  same-command MAVLink ACK can still match a later operation; cached ACK reuse is fixed separately.
-  Counterexamples: `runs/audit-2026-09-24/`. These are still open product defects.
-- Current radio caches use 0.5 s/0.5 m bounds; new full five-UAV GPU performance measurements are needed.
-  Sionna remains the default; no silent propagation fallback or fabricated RF/ACK outcomes.
-
-## Historical software RC verification
-
-The results below were reported on 2026-09-05 for release/bas-v2-rc1 on the previous
-Linux stand. They are not measurements from this Windows/WSL workstation.
-Original native-radio-wifi worktree and its user edits were preserved.
-
-software_release_status=verified (local software RC, measured reference envelope)
-full_tz_status=blocked_external
-hardware_validation_status=blocked_external
-
-| Requirement | Status | Actual verification |
-| --- | --- | --- |
-| R1 five SITL/Gazebo | verified | customer-final-01/02: flight, LAND, auto-disarm, real odometry and cleanup |
-| R2 UART/P2P/P2MP | verified | Ten UART; 50/50 parallel one-shot; P2P 100/100; P2MP 20 roots/100 deliveries; native stop proof |
-| R3 native radio | verified | ns-3.48 Wi-Fi PHY/MAC/ARQ/queues and in-process Sionna, no bypass/custom PER |
-| R4 sources | verified | Eight WaveformGenerator cases, packet impact, pulse/sweep/orientation/multiple/non-overlap, two integrated on/off runs |
-| R5 observability | verified | Native S/N and predecode power; derived RSSI/J/S, application PDR/goodput/IPDV, queue/airtime, raw Gazebo, radiotap and map point comparison |
-| R6 external FC | blocked_external | Serial/UDP/TCP software tests, real SITL UART gateway/MAVProxy ACK; no physical FC |
-| R7 timing/cache/scale | verified | 1/5 SITL, 16 radio-only STA, three cache profiles, explicit native Friis/hybrid studies |
-| R8 shared scene | verified | 10×10 km field/Town01, 188.791 m terrain relief, explicit 15-storey addition, shared meshes |
-| R9 operator | verified | Existing MAVProxy, SYSID selection and commands through modeled path; Makefile/CLI |
-| R10 delivery | verified | Two full runs, pinned source/image/dependencies, local package and clean restored bootstrap |
-
-## Final runtime measurements
-
-runs/native-radio-realtime/rc1-customer-final-01 and ...-02 passed all 20 gates.
-Both: five flight/LAND/auto-disarm, ten UART, P2P/P2MP/shared delivery and 10.5 s no-bypass.
-Steady ns-3 lag p95/max: 0.336842/58.01054 ms and 16.076663/108.432918 ms.
-Gazebo RTF mean: .996636/.995554; cold start reported separately.
-Actual sampled channel age p95: 13.928/13.870 s; maximum 19.880 s.
-Runtime HEADs: 547a536 and 2fb157b; later report-only additions retain raw data.
-Focused tests: 40 passed; latest reporting tests: 21 passed.
-
-## Limits that remain
-
-- No physical FC or ttyUSB/ttyACM/serial-by-id device. PTY is software validation,
-  not hardware or flight-HIL. Needed: FC, serial/COM or Ethernet access and safe bench.
-- Historical cache 20 s/10 m delayed disappearance and missed a 1 s recovery.
-  The new 0.5 s/0.5 m profile has not been profiled in a full five-UAV GPU run.
-  Moving blockers/material edits are not synchronized live; scene changes require restart.
-- 16 STA test is radio-only; its 11.63 wall s / 8 sim s does not establish 16-SITL real time.
-- At 10 dBm, 500/1000/2000 m native reference links delivered 0/100; no power retuning.
-- RSSI/J/S energy sums use native arrivals plus configured thermal floor. Decoder S/N
-  has decoded-frame sampling bias. Airtime is not CCA busy-state fraction. Application
-  PDR and PHY decoder PER have different denominators. Unattributable values stay null.
-- Terrain/tower are synthetic; original Town01 collision proxies are approximate.
-  CAVISE third-party redistribution terms are not supplied. Assets stay local.
-- Software RC is ready for repeatable bench review, not a hard-RT guarantee or full-TZ claim.
-
-## Delivery and commands
-
-Package: /home/bas/bas_v2-delivery/rc1-2026-09-05-final
-Archive readability and source bundle verification passed. A separate checkout restored
-source/dependencies/scenes, built its ROS workspace, and passed bootstrap with 0 errors/warnings.
-Historical publishing path: release/bas-v2-rc1 → native-radio-wifi; current baseline is on `main`.
-
-make demo-preflight DEMO_GUI=0 DEMO_BOOTSTRAP=1
-make prepare-customer
-BAS_NATIVE_FIVE_RUN_ID=my-demo BAS_NATIVE_SOURCES=network/config/native_jammers_town01.yaml make demo-customer DEMO_GUI=0
-make operator DEMO_GUI=0
-make gcs
-make stop
-
-Use doc/USER_GUIDE.md for endpoints, maps/cache/matrix and troubleshooting.
-Use doc/VALIDATION_REPORT.md and doc/DELIVERY_SCOPE.md for scopes and failed diagnostics.
-Next hardware step: connect an authorized safe FC bench and run REQUEST_MESSAGE through
-the same gateway; retain hardware_validation_status=blocked_external until actually tested.
+- Result covers Town01, vertical missions, one host/shared monotonic clock, native Friis and declared symmetric link losses. No physical HitL, distributed-clock guarantee, hard real time or urban geometric radio shadowing is claimed.
+- Town01 collision geometry uses approximated building/surface boxes; vegetation has no collision. Rock/Bullet lift remains unverified; GUI/Sionna/accelerated batch are outside these measurements.
+- Resource figures cover three simulator process categories, not all helpers. tmpfs raw files add memory outside RSS. DataFlash PARAM_COUNT completeness is unverified; optional native_sources has generic not_recorded coverage while disabled.
+- One de-duplicated publication contains four unique poses; it was not filled. Ten pair_exclusions are expected no-fault N/A recovery endpoints, not excluded runs.
+- Failed developmental runs are retained, including old rock takeoff failures, BAR starvation, logging overload and `paper-live600-01` jitter261.329 ms. Exact cause of that isolated stall was not measured; no causal HDD-overhead estimate is claimed.
+- Original `/home/bas/bas_v2-main` HEAD/status/diff and saved untracked bytes still match preparation. Its local changes were not reset. All owned simulators are stopped; no repository publication or paper submission was performed.
