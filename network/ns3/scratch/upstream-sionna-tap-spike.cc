@@ -16,6 +16,7 @@
 #include "ns3/multi-model-spectrum-channel.h"
 #include "ns3/pcap-file-wrapper.h"
 #include "ns3/propagation-delay-model.h"
+#include "ns3/propagation-loss-model.h"
 #include "ns3/queue.h"
 #include "ns3/realtime-simulator-impl.h"
 #include "ns3/sionna-rt-spectrum-propagation-loss-model.h"
@@ -135,6 +136,10 @@ std::string g_wifiDataMode;
 std::string g_wifiControlMode;
 std::string g_wifiSsid;
 std::string g_wifiTopology{"bss"};
+std::string g_faultProfile{"none"};
+uint32_t g_faultMasterId{1};
+double g_faultExtraLossDb{200.0};
+bool g_faultActive{false};
 
 class NativeRuntimeSampler;
 NativeRuntimeSampler* g_runtimeSampler{nullptr};
@@ -1010,6 +1015,33 @@ PollSignal(NetDeviceContainer devices)
 }
 
 void
+PollFaultMatrix(Ptr<MatrixPropagationLossModel> loss,
+                Ptr<MobilityModel> cpMobility,
+                std::vector<Ptr<MobilityModel>> uavMobility)
+{
+    const std::string phase = ReadPhase();
+    const bool start = !g_faultActive && phase == "experiment_fault";
+    const bool finish = g_faultActive && phase == "experiment_recovery";
+    if (start || finish)
+    {
+        const double addedLoss = start ? g_faultExtraLossDb : 0.0;
+        for (uint32_t i = 0; i < uavMobility.size(); ++i)
+        {
+            if (g_faultProfile == "total_GCS" || i + 1 == g_faultMasterId)
+                loss->SetLoss(cpMobility, uavMobility.at(i), addedLoss, true);
+        }
+        g_faultActive = start;
+        LogEvent(start ? "fault_start" : "fault_end", "cp",
+                 g_faultProfile == "total_GCS" ? "all_uavs" : "uav" + std::to_string(g_faultMasterId),
+                 0, addedLoss,
+                 "provider=ns3::MatrixPropagationLossModel;profile=" + g_faultProfile +
+                 ";symmetric=true;default_extra_loss_db=0;base_propagation=friis;"
+                 "trigger=phase_file;phase=" + phase);
+    }
+    Simulator::Schedule(MilliSeconds(50), &PollFaultMatrix, loss, cpMobility, uavMobility);
+}
+
+void
 WriteReady(const std::string& path)
 {
     auto realtime=DynamicCast<RealtimeSimulatorImpl>(Simulator::GetImplementation());
@@ -1181,6 +1213,11 @@ WriteStats(const std::string& path)
            << "  \"wifi_control_mode\": \"" << g_wifiControlMode << "\",\n"
            << "  \"wifi_ssid\": \"" << g_wifiSsid << "\",\n"
            << "  \"wifi_topology\": \"" << g_wifiTopology << "\",\n"
+           << "  \"fault_profile\": \"" << g_faultProfile << "\",\n"
+           << "  \"fault_master_id\": " << g_faultMasterId << ",\n"
+           << "  \"fault_extra_loss_db\": " << g_faultExtraLossDb << ",\n"
+           << "  \"fault_default_extra_loss_db\": 0,\n"
+           << "  \"fault_active_at_stop\": " << (g_faultActive ? "true" : "false") << ",\n"
            << "  \"tap_ingress_segment\": {\"type\": \"local_fast_csma\", \"radio_medium\": false},\n"
            << "  \"cache_policy\": \"displacement_velocity_orientation_or_time\",\n"
            << "  \"simulation_mode\": \"" << g_executionMode << "\",\n"
@@ -1374,6 +1411,9 @@ main(int argc, char* argv[])
     command.AddValue("wifiControlMode", "Constant 802.11n control mode", wifiControlMode);
     command.AddValue("wifiSsid", "Native Wi-Fi SSID", wifiSsid);
     command.AddValue("wifiTopology", "Explicit native bss or adhoc MAC topology", g_wifiTopology);
+    command.AddValue("faultProfile", "Explicit none, selective or total_GCS pair-loss fault", g_faultProfile);
+    command.AddValue("faultMasterId", "Initial coordinator UAV affected by selective loss", g_faultMasterId);
+    command.AddValue("faultExtraLossDb", "Synthetic additional pair loss in dB during experiment_fault", g_faultExtraLossDb);
     command.AddValue("wifiChannelNumber", "802.11 channel number", wifiChannelNumber);
     command.AddValue("wifiChannelWidthMhz", "802.11n channel width", wifiChannelWidthMhz);
     command.AddValue("carrierHz", "Sionna and Wi-Fi carrier frequency", carrierHz);
@@ -1474,6 +1514,13 @@ main(int argc, char* argv[])
     NS_ABORT_MSG_IF(g_propagationProfile != "sionna" && g_propagationProfile != "friis" &&
                     g_propagationProfile != "hybrid", "invalid explicit propagation profile");
     const bool requiresRt = g_propagationProfile != "friis";
+    NS_ABORT_MSG_IF(g_faultProfile != "none" && g_faultProfile != "selective" &&
+                    g_faultProfile != "total_GCS", "invalid explicit fault profile");
+    NS_ABORT_MSG_IF(g_faultMasterId < 1 || g_faultMasterId > uavCount ||
+                    !std::isfinite(g_faultExtraLossDb) || g_faultExtraLossDb <= 0.0,
+                    "invalid fault master ID or added pair loss");
+    NS_ABORT_MSG_IF(g_faultProfile != "none" && (requiresRt || radioBackend != "wifi"),
+                    "pair-loss experiment currently requires explicit native Friis Wi-Fi");
     NS_ABORT_MSG_IF(positionFile.empty() || readyFile.empty() || phaseFile.empty(),
                     "positionFile, readyFile, and phaseFile are required");
     NS_ABORT_MSG_IF(requiresRt && (scene.empty() || !std::filesystem::exists(scene)),
@@ -1562,6 +1609,15 @@ main(int argc, char* argv[])
 
     Ptr<MultiModelSpectrumChannel> channel = CreateObject<MultiModelSpectrumChannel>();
     channel->SetPropagationDelayModel(CreateObject<ConstantSpeedPropagationDelayModel>());
+    if (g_faultProfile != "none")
+    {
+        // This contributes only declared extra pair attenuation. Native Friis
+        // remains the single base path-loss model for every transmission.
+        auto extraLoss = CreateObject<MatrixPropagationLossModel>();
+        extraLoss->SetDefaultLoss(0.0);
+        channel->AddPropagationLossModel(extraLoss);
+        Simulator::ScheduleNow(&PollFaultMatrix, extraLoss, cpMobility, uavMobility);
+    }
     Ptr<SionnaRtSpectrumPropagationLossModel> sionna;
     SionnaRtChannelModel::RtPathSolverConfig solver;
     if (requiresRt)

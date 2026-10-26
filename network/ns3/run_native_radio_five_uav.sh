@@ -7,6 +7,13 @@ CONTAINER_NAME="${BAS_NATIVE_FIVE_CONTAINER_NAME:-bas-v2-native-radio-five-uav}"
 SCENARIO_KEY="${BAS_NATIVE_FIVE_SCENARIO:-town01}"
 GUI="${BAS_NATIVE_FIVE_GUI:-0}"
 CAPTURE_IMAGES="${BAS_NATIVE_CAPTURE_IMAGES:-1}"
+FAULT_PROFILE="${BAS_NATIVE_FAULT_PROFILE:-none}"
+FAULT_MASTER_ID="${BAS_NATIVE_FAULT_MASTER_ID:-1}"
+FAULT_EXTRA_LOSS_DB="${BAS_NATIVE_FAULT_EXTRA_LOSS_DB:-200}"
+case "$FAULT_PROFILE" in
+  none|selective|total_GCS) ;;
+  *) printf 'Unsupported fault profile: %s\n' "$FAULT_PROFILE" >&2; exit 2 ;;
+esac
 WIFI_TOPOLOGY="${BAS_NATIVE_WIFI_TOPOLOGY:-bss}"
 [[ "$WIFI_TOPOLOGY" == bss || "$WIFI_TOPOLOGY" == adhoc ]] || {
   printf 'Unsupported Wi-Fi topology: %s\n' "$WIFI_TOPOLOGY" >&2; exit 2;
@@ -80,6 +87,9 @@ run_in_container() {
     -e BAS_SOURCE_DIRTY="$(git -C "$ROOT_DIR" status --porcelain | wc -l)" \
     -e BAS_NATIVE_PROPAGATION_PROFILE="${BAS_NATIVE_PROPAGATION_PROFILE:-sionna}" \
     -e BAS_NATIVE_WIFI_TOPOLOGY="$WIFI_TOPOLOGY" \
+    -e BAS_NATIVE_FAULT_PROFILE="$FAULT_PROFILE" \
+    -e BAS_NATIVE_FAULT_MASTER_ID="$FAULT_MASTER_ID" \
+    -e BAS_NATIVE_FAULT_EXTRA_LOSS_DB="$FAULT_EXTRA_LOSS_DB" \
     -e BAS_NATIVE_OPERATOR_SECONDS="${BAS_NATIVE_OPERATOR_SECONDS:-0}" \
     -e BAS_NATIVE_SOURCES="${BAS_NATIVE_SOURCES:-}" \
     -e BAS_NATIVE_EXTERNAL_CONFIG="${BAS_NATIVE_EXTERNAL_CONFIG:-}" \
@@ -468,6 +478,8 @@ PY
   printf 'git_head=%s\n' "${BAS_SOURCE_HEAD:-$(git -C "$ROOT_DIR" rev-parse HEAD)}"
   printf 'source_dirty_paths=%s\n' "${BAS_SOURCE_DIRTY:-unknown}"
   printf 'wifi_topology=%s\n' "$WIFI_TOPOLOGY"
+  printf 'fault_profile=%s\nfault_master_id=%s\nfault_extra_loss_db=%s\n' \
+    "$FAULT_PROFILE" "$FAULT_MASTER_ID" "$FAULT_EXTRA_LOSS_DB"
   printf 'simulation_mode=%s\nlockstep_step_ms=%s\nlockstep_wall_timeout_s=%s\n' "$BAS_SIMULATION_MODE" "$BAS_LOCKSTEP_STEP_MS" "$BAS_LOCKSTEP_TIMEOUT_S"
   printf 'ns3_version=3.48\n'
   printf 'ns3_exact_sha=%s\n' "$(git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" rev-parse HEAD)"
@@ -872,6 +884,8 @@ setsid ip netns exec ams-ns3 env \
   --wifiChannelNumber="$WIFI_CHANNEL_NUMBER" \
   --wifiChannelWidthMhz="$WIFI_CHANNEL_WIDTH_MHZ" --wifiSsid="$WIFI_SSID" \
   --wifiTopology="$WIFI_TOPOLOGY" \
+  --faultProfile="$FAULT_PROFILE" --faultMasterId="$FAULT_MASTER_ID" \
+  --faultExtraLossDb="$FAULT_EXTRA_LOSS_DB" \
   --carrierHz="$CARRIER_HZ" --tapGcs=tap-gcs --tapUavs="$TAP_UAVS" \
   --propagationProfile="${BAS_NATIVE_PROPAGATION_PROFILE:-sionna}" \
   --scene="$SCENE" --positionFile="$NODE_STATE" --phaseFile="$PHASE_FILE" \
