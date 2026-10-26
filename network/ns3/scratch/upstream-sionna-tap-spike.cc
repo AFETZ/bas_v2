@@ -196,6 +196,7 @@ LogEvent(const std::string& event,
                              event == "phy_rx_abort" || event == "phy_rx_ok" ||
                              event == "phy_rx_error" || event == "phy_rx_drop" ||
                              event == "wifi_rx_power_dbm" || event == "wifi_monitor_rx" ||
+                             event == "spectrum_signal_arrival" || event == "wifi_data_retry" ||
                              event == "radio_queue_enqueue" || event == "radio_queue_dequeue" ||
                              event == "radio_queue_drop" || event.rfind("wifi_mac_queue_",0)==0;
     if (g_eventLogging == "metrics_only" && packetEvent)
@@ -393,12 +394,15 @@ void
 MacTx(uint32_t nodeIndex, Ptr<const Packet> packet)
 {
     ++g_nodeCounters.at(nodeIndex).macTx;
-    LogEvent("mac_tx",
-             g_nodeNames.at(nodeIndex),
-             "",
-             packet->GetSize(),
-             std::numeric_limits<double>::quiet_NaN(),
-             PacketTraceDetails(packet));
+    if (g_eventLogging != "metrics_only")
+    {
+        LogEvent("mac_tx",
+                 g_nodeNames.at(nodeIndex),
+                 "",
+                 packet->GetSize(),
+                 std::numeric_limits<double>::quiet_NaN(),
+                 PacketTraceDetails(packet));
+    }
     WriteRadioPcap(packet);
 }
 
@@ -406,6 +410,7 @@ void
 MacTxDrop(uint32_t nodeIndex, Ptr<const Packet> packet)
 {
     ++g_nodeCounters.at(nodeIndex).macTxDrop;
+    if (g_eventLogging == "metrics_only") return;
     LogEvent("mac_tx_drop", g_nodeNames.at(nodeIndex), "", packet->GetSize(),
              std::numeric_limits<double>::quiet_NaN(), PacketTraceDetails(packet));
 }
@@ -414,6 +419,7 @@ void
 PhyTxStart(uint32_t nodeIndex, Ptr<const Packet> packet)
 {
     ++g_nodeCounters.at(nodeIndex).phyTxStart;
+    if (g_eventLogging == "metrics_only") return;
     LogEvent("phy_tx_start", g_nodeNames.at(nodeIndex), "", packet->GetSize(),
              std::numeric_limits<double>::quiet_NaN(), PacketTraceDetails(packet));
 }
@@ -422,6 +428,7 @@ void
 PhyTxEnd(uint32_t nodeIndex, Ptr<const Packet> packet)
 {
     ++g_nodeCounters.at(nodeIndex).phyTxEnd;
+    if (g_eventLogging == "metrics_only") return;
     LogEvent("phy_tx_end", g_nodeNames.at(nodeIndex), "", packet->GetSize(),
              std::numeric_limits<double>::quiet_NaN(), PacketTraceDetails(packet));
 }
@@ -430,6 +437,7 @@ void
 PhyRxAbort(uint32_t nodeIndex, Ptr<const Packet> packet)
 {
     ++g_nodeCounters.at(nodeIndex).phyRxAbort;
+    if (g_eventLogging == "metrics_only") return;
     LogEvent("phy_rx_abort", g_nodeNames.at(nodeIndex), "", packet->GetSize(),
              std::numeric_limits<double>::quiet_NaN(), PacketTraceDetails(packet));
 }
@@ -442,6 +450,7 @@ QueueEnqueue(uint32_t nodeIndex, Ptr<const Packet> packet)
     const uint32_t depth = g_queues.at(nodeIndex)->GetNPackets();
     counters.queueMaxDepth = std::max(counters.queueMaxDepth, depth);
     g_queueEnqueueAt[packet->GetUid()] = Simulator::Now();
+    if (g_eventLogging == "metrics_only") return;
     LogEvent("radio_queue_enqueue", g_nodeNames.at(nodeIndex), "", packet->GetSize(), depth,
              PacketTraceDetails(packet));
 }
@@ -458,6 +467,7 @@ QueueDequeue(uint32_t nodeIndex, Ptr<const Packet> packet)
         residenceMs = (Simulator::Now() - found->second).GetSeconds() * 1000.0;
         g_queueEnqueueAt.erase(found);
     }
+    if (g_eventLogging == "metrics_only") return;
     LogEvent("radio_queue_dequeue", g_nodeNames.at(nodeIndex), "", packet->GetSize(), residenceMs,
              PacketTraceDetails(packet));
 }
@@ -466,6 +476,7 @@ void
 QueueDrop(uint32_t nodeIndex, Ptr<const Packet> packet)
 {
     ++g_nodeCounters.at(nodeIndex).queueDrop;
+    if (g_eventLogging == "metrics_only") return;
     LogEvent("radio_queue_drop", g_nodeNames.at(nodeIndex), "", packet->GetSize(),
              g_queues.at(nodeIndex)->GetNPackets(), PacketTraceDetails(packet));
 }
@@ -486,12 +497,15 @@ void
 PhyRxOk(uint32_t nodeIndex, Ptr<const Packet> packet)
 {
     ++g_nodeCounters.at(nodeIndex).phyRxOk;
-    LogEvent("phy_rx_ok",
-             g_nodeNames.at(nodeIndex),
-             "",
-             packet->GetSize(),
-             std::numeric_limits<double>::quiet_NaN(),
-             PacketTraceDetails(packet));
+    if (g_eventLogging != "metrics_only")
+    {
+        LogEvent("phy_rx_ok",
+                 g_nodeNames.at(nodeIndex),
+                 "",
+                 packet->GetSize(),
+                 std::numeric_limits<double>::quiet_NaN(),
+                 PacketTraceDetails(packet));
+    }
     WriteRadioPcap(packet);
 }
 
@@ -499,12 +513,15 @@ void
 PhyRxStart(uint32_t nodeIndex, Ptr<const Packet> packet)
 {
     ++g_nodeCounters.at(nodeIndex).phyRxStart;
-    LogEvent("phy_rx_start",
-             g_nodeNames.at(nodeIndex),
-             "",
-             packet->GetSize(),
-             std::numeric_limits<double>::quiet_NaN(),
-             PacketTraceDetails(packet));
+    if (g_eventLogging != "metrics_only")
+    {
+        LogEvent("phy_rx_start",
+                 g_nodeNames.at(nodeIndex),
+                 "",
+                 packet->GetSize(),
+                 std::numeric_limits<double>::quiet_NaN(),
+                 PacketTraceDetails(packet));
+    }
     if (g_radioBackend == "aloha")
     {
         ObserveReceivedPath(nodeIndex, packet);
@@ -515,6 +532,7 @@ void
 PhyRxError(uint32_t nodeIndex, Ptr<const Packet> packet)
 {
     ++g_nodeCounters.at(nodeIndex).phyRxError;
+    if (g_eventLogging == "metrics_only") return;
     LogEvent("phy_rx_error",
              g_nodeNames.at(nodeIndex),
              "",
@@ -535,6 +553,7 @@ WifiPhyRxStart(uint32_t nodeIndex,
                RxPowerWattPerChannelBand rxPowersW)
 {
     PhyRxStart(nodeIndex, packet);
+    if (g_eventLogging == "metrics_only") return;
 
     // SpectrumWifiPhy builds this map after the channel propagation model has
     // transformed the received PSD.  Reproduce SpectrumWifiPhy's total-power
@@ -575,6 +594,7 @@ void
 WifiSignalArrival(uint32_t receiver, Ptr<const SpectrumSignalParameters> signal,
                   uint32_t sender, double powerDbm, Time duration)
 {
+    if (g_eventLogging == "metrics_only") return;
     std::ostringstream details;
     details << "sender_node_id=" << sender << ";duration_s=" << std::setprecision(17)
             << duration.GetSeconds() << ";source=SpectrumWifiPhy.SignalArrival"
@@ -597,9 +617,10 @@ WifiMonitorRx(uint32_t nodeIndex,
     Ptr<Packet> payload = packet->Copy();
     WifiMacHeader header;
     payload->RemoveHeader(header);
+    ObserveWifiPath(nodeIndex, header.GetAddr2(), packet);
+    if (g_eventLogging == "metrics_only") return;
     std::ostringstream peer;
     peer << header.GetAddr2();
-    ObserveWifiPath(nodeIndex, header.GetAddr2(), packet);
     std::ostringstream details;
     details << (header.IsData() ? PacketTraceDetails(payload)
                                : "packet_uid=" + std::to_string(packet->GetUid()))
@@ -623,17 +644,20 @@ void WifiQueueObservation(uint32_t node, uint32_t ac, Ptr<WifiMacQueue> queue,
 {
     const auto uid=mpdu->GetPacket()->GetUid();
     const auto key=std::make_tuple(node,ac,uid);
-    std::ostringstream details;
-    details << "packet_uid=" << uid << ";ac=" << ac << ";queue_packets=" << queue->GetNPackets()
-            << ";queue_bytes=" << queue->GetNBytes() << ";source=WifiMacQueue." << event;
+    double residenceMs = std::numeric_limits<double>::quiet_NaN();
     if (event=="enqueue") g_queueEntered[key]=Simulator::Now();
     else {
         auto found=g_queueEntered.find(key);
         if (found!=g_queueEntered.end()) {
-            details << ";residence_ms=" << (Simulator::Now()-found->second).GetSeconds()*1000;
+            residenceMs = (Simulator::Now()-found->second).GetSeconds()*1000;
             g_queueEntered.erase(found);
         }
     }
+    if (g_eventLogging == "metrics_only") return;
+    std::ostringstream details;
+    details << "packet_uid=" << uid << ";ac=" << ac << ";queue_packets=" << queue->GetNPackets()
+            << ";queue_bytes=" << queue->GetNBytes() << ";source=WifiMacQueue." << event;
+    if (std::isfinite(residenceMs)) details << ";residence_ms=" << residenceMs;
     LogEvent("wifi_mac_queue_"+event,g_nodeNames.at(node),"",mpdu->GetPacket()->GetSize(),
              queue->GetNPackets(),details.str());
 }
@@ -642,6 +666,7 @@ void
 WifiPhyRxEnd(uint32_t nodeIndex, Ptr<const Packet> packet)
 {
     ++g_nodeCounters.at(nodeIndex).phyRxEnd;
+    if (g_eventLogging == "metrics_only") return;
     LogEvent("phy_rx_end",
              g_nodeNames.at(nodeIndex),
              "",
@@ -658,11 +683,14 @@ WifiPhyStateRxOk(uint32_t nodeIndex,
                  WifiPreamble preamble)
 {
     ++g_nodeCounters.at(nodeIndex).phyRxOk;
-    std::ostringstream details;
-    details << PacketTraceDetails(packet) << ";snr_linear=" << std::setprecision(17) << snr
-            << ";mode=" << mode << ";preamble=" << preamble
-            << ";source=WifiPhyStateHelper.RxOk";
-    LogEvent("phy_rx_ok", g_nodeNames.at(nodeIndex), "", packet->GetSize(), snr, details.str());
+    if (g_eventLogging != "metrics_only")
+    {
+        std::ostringstream details;
+        details << PacketTraceDetails(packet) << ";snr_linear=" << std::setprecision(17) << snr
+                << ";mode=" << mode << ";preamble=" << preamble
+                << ";source=WifiPhyStateHelper.RxOk";
+        LogEvent("phy_rx_ok", g_nodeNames.at(nodeIndex), "", packet->GetSize(), snr, details.str());
+    }
     WriteRadioPcap(packet);
 }
 
@@ -670,6 +698,7 @@ void
 WifiPhyStateRxError(uint32_t nodeIndex, Ptr<const Packet> packet, double snr)
 {
     ++g_nodeCounters.at(nodeIndex).phyRxError;
+    if (g_eventLogging == "metrics_only") return;
     std::ostringstream details;
     details << PacketTraceDetails(packet) << ";snr_linear=" << std::setprecision(17) << snr
             << ";source=WifiPhyStateHelper.RxError";
@@ -685,6 +714,7 @@ void
 WifiPhyRxDrop(uint32_t nodeIndex, Ptr<const Packet> packet, WifiPhyRxfailureReason reason)
 {
     ++g_nodeCounters.at(nodeIndex).phyRxDrop;
+    if (g_eventLogging == "metrics_only") return;
     std::ostringstream details;
     details << PacketTraceDetails(packet) << ";reason_code=" << static_cast<uint32_t>(reason)
             << ";source=WifiPhy.PhyRxDrop";
@@ -700,6 +730,7 @@ void
 WifiDataRetry(uint32_t nodeIndex, Mac48Address peer)
 {
     ++g_nodeCounters.at(nodeIndex).wifiDataRetries;
+    if (g_eventLogging == "metrics_only") return;
     std::ostringstream details;
     details << "peer_mac=" << peer;
     LogEvent("wifi_data_retry", g_nodeNames.at(nodeIndex), "", 0,
