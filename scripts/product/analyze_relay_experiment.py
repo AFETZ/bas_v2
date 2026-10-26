@@ -257,6 +257,7 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
                      "follower_receive": uav, "uart_admitted": uav}
         chain = all(any(stage(row) == name and row.get("node_id") == actor_for[name] for row in records)
                     for name in required)
+        policy_allowed = policy != "fixed" or leader == initial_master
         commands.append(dict(command_id=sent["command_id"], uav_id=uav, leader_id=leader,
             epoch=sent.get("epoch"), created_ns=created,
             sent_ns=stamp(sent), admitted_ns=write_end, admission_event_ns=stamp(admitted) if admitted else None,
@@ -266,7 +267,8 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
             admission_checked_ns=finite(admitted.get("admission_checked_host_monotonic_ns")) if admitted else None,
             latency_ms=latency, sent_to_uart_latency_ms=send_latency,
             timely=latency is not None and 0 <= latency <= deadline_ms
-                and lease_status == "valid" and lineage == "valid" and chain,
+                and lease_status == "valid" and lineage == "valid" and chain and policy_allowed,
+            policy_allowed=policy_allowed,
             lease_status=lease_status, lineage_status=lineage, application_chain_complete=chain,
             target_position_m=target(sent)))
     unique_commands = {}
@@ -307,7 +309,8 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
             sent_to_uart_latency_ms=distribution([row["sent_to_uart_latency_ms"] for row in sent if row["sent_to_uart_latency_ms"] is not None]))
     eligible = [row for row in commands if fault is not None and row["created_ns"] is not None
                 and row["created_ns"] >= fault and row["admitted_ns"] is not None and row["admitted_ns"] >= fault
-                and row["lease_status"] == "valid" and row["lineage_status"] == "valid" and row["application_chain_complete"]]
+                and row["lease_status"] == "valid" and row["lineage_status"] == "valid"
+                and row["application_chain_complete"] and row["policy_allowed"]]
 
     def group_points(rows):
         scopes: dict[tuple[int, int], dict[int, float]] = defaultdict(dict)
@@ -328,6 +331,10 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
     control = group_points(eligible)
     handover = group_points([row for row in eligible if preceding_leader is not None and preceding_epoch is not None
                             and row["leader_id"] != preceding_leader and row["epoch"] > preceding_epoch])
+    if applicable and policy == "fixed":
+        for row in handover.values():
+            row.update(status="not_applicable_fixed_policy", recovered=None, time_s=None, censor_time_s=None,
+                       restricted_unrecovered_time_s=None)
     per_uav = {str(i): recovery(min((r["admitted_ns"] for r in eligible if r["uav_id"] == i), default=None),
                 fault, end, applicable=applicable, restricted_s=restricted_s) for i in UAVS}
     completions = [row for row in events if stage(row) == "action_completed" and inside(stamp(row))]
@@ -355,7 +362,7 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
                 and (finite(row.get("max_vertical_displacement_m")) or 0) >= 1.
                 and (finite(row.get("dwell_s")) or 0) >= hold_s
                 and admission is not None and admission["lease_status"] == "valid"
-                and admission["lineage_status"] == "valid" and admission["application_chain_complete"]
+                and admission["lineage_status"] == "valid" and admission["application_chain_complete"] and admission["policy_allowed"]
                 and target(row) == admission["target_position_m"]
                 and admission["created_ns"] is not None and admission["created_ns"] >= created
                 and admission["admitted_ns"] is not None and admission["admitted_ns"] <= stamp(row))
@@ -377,6 +384,7 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
         first_role_grants.setdefault((row.get("leader_id"), row.get("epoch")), row)
     selected_during = [row for (leader, epoch), row in first_role_grants.items()
                        if during_fault(row) and (leader != initial_master or epoch != initial_epoch)]
+    fixed_role_changes = sum(leader != initial_master for leader, _epoch in first_role_grants) if policy == "fixed" else None
     held = set()
     for row in events:
         i = identifier(row.get("uav_id"))
@@ -395,6 +403,7 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
         observation_window=dict(start_host_monotonic_ns=start, end_host_monotonic_ns=end, complete=full_window),
         actual_fault=dict(start_host_monotonic_ns=fault, end_host_monotonic_ns=fault_end, events=fault_events),
         pre_fault_authority=dict(leader_id=preceding_leader, epoch=preceding_epoch, selective_target_uav=fault_target),
+        policy_audit=dict(fixed_policy_new_leader_appointments=fixed_role_changes),
         rates=rates, control_recovery=control, control_recovery_per_uav=per_uav, handover_recovery=handover,
         goal_recovery_per_uav=goal_recovery, completion_gap_s_per_uav=completion_gap,
         goal_recovery_all_five=recovery(group_goal_point, fault, end, applicable=applicable, restricted_s=restricted_s),
@@ -439,7 +448,7 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
             window_duration_s=distribution([float(row["wall_duration_s"]) for row in windows]))
     write_csv(output / "metrics/relay_commands.csv", commands, ["command_id", "uav_id", "leader_id", "epoch", "created_ns",
         "sent_ns", "admitted_ns", "admission_event_ns", "grant_sequence", "lease_valid_from_ns", "lease_valid_until_ns", "admission_checked_ns",
-        "latency_ms", "sent_to_uart_latency_ms", "timely", "lease_status", "lineage_status", "application_chain_complete", "target_position_m"])
+        "latency_ms", "sent_to_uart_latency_ms", "timely", "lease_status", "lineage_status", "application_chain_complete", "policy_allowed", "target_position_m"])
     write_csv(output / "metrics/relay_goals.csv", goals, ["uav_id", "goal_id", "created_ns", "completed_ns",
         "qualifies_postfault_recovery", "target_changed_from_prefault_admission", "maneuver_observed", "dwell_s"])
     recovery_rows = [dict(endpoint=f"uav{i}", **per_uav[str(i)]) for i in UAVS]
@@ -581,6 +590,8 @@ def campaign_record(plan_row: dict[str, Any], result: dict[str, Any] | None) -> 
         study_problem("pilot is not part of the confirmatory campaign")
     if result.get("policy") != plan_row["policy"] or result.get("fault_profile") != plan_row["fault_profile"]:
         study_problem("recorded policy/condition disagrees with frozen plan")
+    if service.get("policy") is not None and service["policy"] != result.get("policy"):
+        study_problem("effective GCS service policy disagrees with the recorded experiment policy")
     for key in ("rng_seed", "rng_run"):
         observed = finite(stats.get(key, env.get("ns3_" + key)))
         if observed != finite(plan_row[key]):

@@ -311,3 +311,17 @@ def test_unfinished_artifacts_are_neither_a_failed_result_nor_a_completed_run(tm
     assert record["has_artifacts"] is True
     assert record["recorded"] is False
     assert record["outcomes"]["run_completed"] is None
+
+
+def test_fixed_policy_cannot_credit_a_different_master_as_its_recovery(tmp_path):
+    run, _ = fixture(tmp_path)
+    for relative in ["metrics/relay_experiment_summary.json", "metrics/relay_experiment_config.json"]:
+        value = json.loads((run / relative).read_text())
+        value["policy"] = "fixed"
+        (run / relative).write_text(json.dumps(value))
+    result = analyze(run, tmp_path)
+    assert result["control_recovery"]["all_five"]["recovered"] is False
+    assert result["handover_recovery"]["all_five"]["recovered"] is None
+    assert result["policy_audit"]["fixed_policy_new_leader_appointments"] == 1
+    assert result["rates"]["all_five"]["timely"] == 0
+    assert result["goal_recovery_all_five"]["recovered"] is False
