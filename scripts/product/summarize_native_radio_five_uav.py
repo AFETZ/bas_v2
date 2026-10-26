@@ -3125,6 +3125,7 @@ def export_live_metrics(
         "scope": "all recorded time; startup included", "resolved_start_sim_time_s": None,
         "resolved_start_host_monotonic_ns": None,
     }
+    phase_host_cut = None
     if start_phase is not None:
         phases = [row for row in scenario_events if row.get("event") == "phase"
                   and row.get("phase", row.get("detail")) == start_phase]
@@ -3135,11 +3136,14 @@ def export_live_metrics(
             raise ValueError(f"phase has no usable declared clock: {start_phase}")
         analysis_window.update(phase_clock_resolution=method, phase_host_join_age_ms=age,
                                phase_event_host_monotonic_ns=phase_host)
+        phase_host_cut = phase_host
     host_cut = None
     if start_sim_time_s is not None:
-        selected = [row for row in clocks if row["source_sim_time_s"] >= start_sim_time_s]
+        selected = [row for row in clocks if row["source_sim_time_s"] >= start_sim_time_s
+                    and (phase_host_cut is None or row["host_monotonic_ns"] >= phase_host_cut)]
         host_cut = selected[0]["host_monotonic_ns"] if selected else None
-        trajectory = [row for row in trajectory if row["source_sim_time_s"] >= start_sim_time_s]
+        trajectory = [row for row in trajectory if row["source_sim_time_s"] >= start_sim_time_s
+                      and (phase_host_cut is None or (finite(row["host_monotonic_ns"]) or 0) >= phase_host_cut)]
         clocks = selected
         quality = Counter(row["quality"] for row in trajectory)
         analysis_window.update(scope="explicit post-start slice", resolved_start_sim_time_s=start_sim_time_s,

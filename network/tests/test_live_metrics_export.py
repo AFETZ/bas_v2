@@ -137,3 +137,18 @@ def test_ambiguous_phase_clock_cannot_select_a_warmup_window(tmp_path):
     ])
     with pytest.raises(ValueError, match="no usable declared clock"):
         REPORT.export_live_metrics(raw, tmp_path / "out", plots=False, start_phase="ready")
+
+
+def test_host_phase_during_a_model_pause_excludes_earlier_frozen_clock_samples(tmp_path):
+    raw = tmp_path / "raw"
+    first, paused, last = snapshot(1, 20), snapshot(1, 20), snapshot(2, 21)
+    paused["published_monotonic_ns"] = 102_000_000_000
+    last["published_monotonic_ns"] = 103_000_000_000
+    write_rows(raw / "logs/node_state.jsonl", [first, paused, last])
+    write_rows(raw / "logs/scenario_events.jsonl", [
+        {"event": "phase", "detail": "ready", "clock_domain": "host_monotonic",
+         "host_monotonic_ns": 101_900_000_000},
+    ])
+    result = REPORT.export_live_metrics(raw, tmp_path / "out", plots=False, start_phase="ready")
+    assert result["analysis_window"]["resolved_start_host_monotonic_ns"] == 102_000_000_000
+    assert result["end_to_end_clock_segments"][0]["integral_rtf"] == 1
