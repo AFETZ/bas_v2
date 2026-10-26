@@ -136,6 +136,11 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
     combined = run_dir / "logs/coordination_events.jsonl"
     paths = [combined] if combined.is_file() else sorted((run_dir / "logs").glob("coordination_*.jsonl"))
     events = [row for path in paths for row in read_jsonl(path, errors)]
+    expected_run = meta.get("run_id", run_dir.name)
+    foreign = [row for row in events if row.get("run_id") is not None and row["run_id"] != expected_run]
+    if foreign:
+        errors.append(f"{len(foreign)} foreign-run records excluded from this run's analysis")
+        events = [row for row in events if row.get("run_id") is None or row["run_id"] == expected_run]
     events.sort(key=lambda row: finite(row.get("host_monotonic_ns")) or 0)
     stage = lambda row: row.get("stage", row.get("event"))
     stamp = lambda row: finite(row.get("host_monotonic_ns"))
@@ -175,6 +180,18 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
     grants = {str(row.get("grant_sequence")): row for row in grant_rows if row.get("grant_sequence") is not None}
     initial_master = int(config.get("initial_master", 1))
     initial_epoch = next((row.get("epoch") for row in grant_rows if row.get("leader_id") == initial_master), 1)
+    before_fault_grants = [row for row in grant_rows if fault is not None
+        and finite(row.get("valid_from_ns")) is not None and finite(row.get("valid_until_ns")) is not None
+        and finite(row["valid_from_ns"]) <= fault < finite(row["valid_until_ns"])
+        and (finite(row.get("issued_ns", row.get("host_monotonic_ns"))) or 0) <= fault]
+    preceding = max(before_fault_grants, key=lambda row: (row.get("epoch", 0), row.get("grant_sequence", 0))) if before_fault_grants else None
+    preceding_leader = identifier(preceding.get("leader_id")) if preceding else None
+    preceding_epoch = preceding.get("epoch") if preceding else None
+    fault_target = identifier(next((row.get("peer") for row in fault_events if row["event"] == "fault_start"), None))
+    if applicable and fault is not None and preceding is None:
+        errors.append("active coordinator at actual fault is not established")
+    if condition == "selective" and fault is not None and fault_target != preceding_leader:
+        errors.append("native selective fault does not establish loss of the actual pre-fault coordinator link")
 
     admissions = [row for row in events if stage(row) == "uart_admitted"]
     audit = Counter()
@@ -286,7 +303,8 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
             timely_per_offered=timely_offers / len(offered) if offered else None,
             timely_per_sent=timely / len(sent) if sent else None,
             delivered_per_sent=delivered / len(sent) if sent else None,
-            sent_to_uart_latency_ms=distribution([row["latency_ms"] for row in sent if row["latency_ms"] is not None]))
+            created_to_uart_latency_ms=distribution([row["latency_ms"] for row in sent if row["latency_ms"] is not None]),
+            sent_to_uart_latency_ms=distribution([row["sent_to_uart_latency_ms"] for row in sent if row["sent_to_uart_latency_ms"] is not None]))
     eligible = [row for row in commands if fault is not None and row["created_ns"] is not None
                 and row["created_ns"] >= fault and row["admitted_ns"] is not None and row["admitted_ns"] >= fault
                 and row["lease_status"] == "valid" and row["lineage_status"] == "valid" and row["application_chain_complete"]]
@@ -308,7 +326,8 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
                 epoch=chosen[2] if chosen else None, members=chosen[3] if chosen else None)
         return result
     control = group_points(eligible)
-    handover = group_points([row for row in eligible if row["leader_id"] != initial_master and row["epoch"] != initial_epoch])
+    handover = group_points([row for row in eligible if preceding_leader is not None and preceding_epoch is not None
+                            and row["leader_id"] != preceding_leader and row["epoch"] > preceding_epoch])
     per_uav = {str(i): recovery(min((r["admitted_ns"] for r in eligible if r["uav_id"] == i), default=None),
                 fault, end, applicable=applicable, restricted_s=restricted_s) for i in UAVS}
     completions = [row for row in events if stage(row) == "action_completed" and inside(stamp(row))]
@@ -332,7 +351,9 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
             changed = reference is not None and target(row) is not None and math.dist(reference, target(row)) >= 1.
             admission = command_index.get(str(row.get("admitted_command_id", row.get("command_id"))))
             qualifies = bool(fault is not None and created is not None and created >= fault and stamp(row) >= fault
-                and changed and row.get("maneuver_observed") is True and (finite(row.get("dwell_s")) or 0) >= hold_s
+                and changed and row.get("maneuver_observed") is True
+                and (finite(row.get("max_vertical_displacement_m")) or 0) >= 1.
+                and (finite(row.get("dwell_s")) or 0) >= hold_s
                 and admission is not None and admission["lease_status"] == "valid"
                 and admission["lineage_status"] == "valid" and admission["application_chain_complete"]
                 and target(row) == admission["target_position_m"]
@@ -351,8 +372,11 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
     fault_limit = fault_end if fault_end is not None else end
     during_fault = lambda row: fault is not None and stamp(row) is not None and fault <= stamp(row) < (fault_limit or fault)
     issued_during = [row for row in grant_rows if during_fault(row)]
-    selected_during = [row for row in issued_during if row.get("reason") == "selection"
-                       and (row.get("leader_id") != initial_master or row.get("epoch") != initial_epoch)]
+    first_role_grants = {}
+    for row in grant_rows:
+        first_role_grants.setdefault((row.get("leader_id"), row.get("epoch")), row)
+    selected_during = [row for (leader, epoch), row in first_role_grants.items()
+                       if during_fault(row) and (leader != initial_master or epoch != initial_epoch)]
     held = set()
     for row in events:
         i = identifier(row.get("uav_id"))
@@ -365,10 +389,12 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
     completed_duration = finite(meta.get("measurement_duration_source_s"))
     full_window = requested_duration is not None and completed_duration is not None and completed_duration >= requested_duration
     result = dict(run_id=meta.get("run_id", run_dir.name), raw_run_dir=str(run_dir), output_dir=str(output),
+        analysis_version=2,
         policy=policy, fault_profile=condition, pilot=bool(meta.get("pilot", config.get("pilot", False))),
         run_status=meta.get("status", "not_recorded"), run_error=meta.get("error"),
         observation_window=dict(start_host_monotonic_ns=start, end_host_monotonic_ns=end, complete=full_window),
         actual_fault=dict(start_host_monotonic_ns=fault, end_host_monotonic_ns=fault_end, events=fault_events),
+        pre_fault_authority=dict(leader_id=preceding_leader, epoch=preceding_epoch, selective_target_uav=fault_target),
         rates=rates, control_recovery=control, control_recovery_per_uav=per_uav, handover_recovery=handover,
         goal_recovery_per_uav=goal_recovery, completion_gap_s_per_uav=completion_gap,
         goal_recovery_all_five=recovery(group_goal_point, fault, end, applicable=applicable, restricted_s=restricted_s),
@@ -379,16 +405,19 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
             new_leader_selection_grants_during_fault=len(selected_during), observed_hold_uavs=sorted(held),
             hold_all_five=len(held) == 5 if condition == "total_GCS" else None,
             no_new_leader_selection=len(selected_during) == 0 if condition == "total_GCS" and fault is not None else None),
-        criteria=meta.get("criteria", {}), metadata=dict(environment=environment, config=config),
+        criteria=meta.get("criteria", {}), metadata=dict(environment=environment, config=config, native_stats=stats,
+            configuration_snapshot=read_json(run_dir / "configuration/final/manifest.json") or read_json(run_dir / "configuration/initial/manifest.json"),
+            physics_runtime=read_json(run_dir / "logs/physics_runtime.json")),
         data_quality_errors=errors,
         definitions=dict(deadline_ms=deadline_ms, latency_clock="host monotonic; command creation to actual UART write end; send-event latency reported separately",
+            restricted_horizon_s=restricted_s,
             offered_denominator="all unique offered refresh requests, including unsent",
-            sent_denominator="all unique target-bearing GCS sends, including lost/late; timely requires verified lease/payload lineage",
+            sent_denominator="all unique target-bearing GCS sends, including lost/late; timely requires verified lease/payload lineage and complete application relay chain",
             group_recovery="first postfault-created refresh admitted to every member under one leader/epoch",
             goal_recovery="new postfault goal, target changed >=1m from last pre-fault admitted target, observed maneuver and dwell; not latest refresh creation",
             completion_gap="last pre-fault completed goal to first eligible new goal completion",
             censoring="right-censored time is never substituted as a successful recovery",
-            restricted_loss=f"unrecovered time restricted to {restricted_s}s; missing if horizon not observed",
+            restricted_loss=f"min(time to first recovery, {restricted_s}s); a bounded loss, not an imputed recovery; missing if horizon not observed",
             two_hop_evidence="application stage lineage; native PHY/PCAP proof remains a separate requirement",
             total_GCS="renewals before failure detection can be issued but lost; new leader selection must remain absent"))
     if not meta:
@@ -480,15 +509,294 @@ def plot_run(output, result, commands, events):
     plt.close(fig)
 
 
+def campaign_plan(*, repeats: int = 5, rng_seed: int = 1, order_seed: int = 20261026) -> list[dict[str, Any]]:
+    if repeats < 1 or rng_seed < 1:
+        raise ValueError("positive repeats and native RNG seed required")
+    generator = random.Random(order_seed)
+    pairs = [(condition, run) for condition in CONDITIONS for run in range(1, repeats + 1)]
+    generator.shuffle(pairs)
+    result = []
+    for condition, run in pairs:
+        policies = ["fixed", "failover"]
+        generator.shuffle(policies)
+        for policy in policies:
+            result.append(dict(order=len(result) + 1, pair_id=f"{condition}-seed{rng_seed}-run{run}",
+                rng_seed=rng_seed, rng_run=run, policy=policy, fault_profile=condition,
+                run_id=f"paper-relay-{condition.lower().replace('_', '-')}-{policy}-s{rng_seed}-r{run:02d}",
+                order_seed=order_seed, configuration_status="freeze_after_successful_pilots"))
+    return result
+
+
+def paired_interval(differences: list[float], *, seed: int = 20261026) -> dict[str, Any]:
+    n = len(differences)
+    result = dict(n_pairs=n, mean_difference=statistics.fmean(differences) if n else None,
+                  median_difference=statistics.median(differences) if n else None,
+                  interval_95=None, interval_method=None, differences=differences)
+    if n < 2:
+        return result
+    if n <= 6:
+        means = [sum(values) / n for values in itertools.product(differences, repeat=n)]
+        method = "exact ordered paired percentile bootstrap"
+    else:
+        generator = random.Random(seed)
+        means = [statistics.fmean(generator.choices(differences, k=n)) for _ in range(10000)]
+        method = "10000 paired percentile bootstrap resamples"
+    means.sort()
+    def quantile(p):
+        at = (len(means) - 1) * p
+        low, high = math.floor(at), math.ceil(at)
+        return means[low] + (means[high] - means[low]) * (at - low)
+    result.update(interval_95=[quantile(.025), quantile(.975)], interval_method=method,
+                  bootstrap_resamples=len(means))
+    return result
+
+
+MISSION_FIELDS = ("initial_master", "duration_s", "fault_start_s", "fault_end_s", "command_period_s", "task_period_s",
+    "base_altitude_m", "altitude_separation_m", "altitude_step_m", "hold_s", "z_tolerance_m",
+    "xy_tolerance_m", "hold_speed_mps", "ready_timeout_s", "arm_timeout_s", "takeoff_timeout_s", "land_timeout_s")
+SERVICE_FIELDS = ("port", "heartbeat_s", "lease_s", "renew_s", "detection_s", "skew_margin_s", "telemetry_max_age_ms")
+ENVIRONMENT_FIELDS = ("map_id", "scenario_key", "physics_profile", "gazebo_requested_rtf", "active_uart_channels",
+    "stack_cpuset", "radio_cpuset", "event_logging", "capture_images", "gui", "carrier_hz", "channel_number",
+    "channel_width_mhz", "tx_power_w", "phy_rate_bps", "channel_state_max_age_s", "readiness_lag_max_ms")
+
+
+def campaign_record(plan_row: dict[str, Any], result: dict[str, Any] | None) -> dict[str, Any]:
+    record = dict(plan_row, run_status="not_run", recorded=False, network_eligible=False,
+                  exclusion_reasons=["run not recorded"], outcomes={}, comparability={})
+    if result is None:
+        return record
+    metadata = result.get("metadata", {})
+    env, cfg, stats = metadata.get("environment", {}), metadata.get("config", {}), metadata.get("native_stats", {})
+    snapshot = metadata.get("configuration_snapshot", {})
+    source = snapshot.get("source", {})
+    head = env.get("git_head") or source.get("head")
+    image = snapshot.get("container_image_id")
+    service = cfg.get("effective_service_args", {})
+    reasons = []
+    study_reasons = []
+    def study_problem(reason):
+        reasons.append(reason)
+        study_reasons.append(reason)
+    if result.get("pilot"):
+        study_problem("pilot is not part of the confirmatory campaign")
+    if result.get("policy") != plan_row["policy"] or result.get("fault_profile") != plan_row["fault_profile"]:
+        study_problem("recorded policy/condition disagrees with frozen plan")
+    for key in ("rng_seed", "rng_run"):
+        observed = finite(stats.get(key, env.get("ns3_" + key)))
+        if observed != finite(plan_row[key]):
+            study_problem(f"actual {key} missing or different from plan")
+    if not head or not image:
+        study_problem("immutable source revision or image ID not recorded")
+    dirty = finite(env.get("source_dirty_paths", source.get("dirty_count")))
+    if dirty != 0:
+        study_problem("clean frozen source is not established")
+    if not result.get("observation_window", {}).get("complete"):
+        reasons.append("full measurement window not observed; outcome remains in failure counts")
+    if result.get("data_quality_errors"):
+        reasons.append("input recording/fault-window limitations: " + "; ".join(result["data_quality_errors"]))
+    if result.get("unverifiable_admissions", 0):
+        reasons.append("UART authority measurement is incomplete")
+    if any(key not in cfg for key in MISSION_FIELDS) or any(key not in service for key in SERVICE_FIELDS):
+        study_problem("frozen mission/service settings incomplete")
+    rates = result.get("rates", {}).get("all_five", {})
+    criteria = result.get("criteria", {})
+    horizon = float(result.get("definitions", {}).get("restricted_horizon_s", 30.))
+    terminal = result.get("run_status") in ("completed", "failed")
+    outcomes = dict(run_completed=float(result["run_status"] == "completed") if terminal else None,
+        lifecycle_success=float(criteria["five_uav_lifecycle"]) if "five_uav_lifecycle" in criteria else None,
+        offered_availability=rates.get("sent_per_offered"), timely_per_offered=rates.get("timely_per_offered"),
+        timely_per_sent=rates.get("timely_per_sent"),
+        integral_rtf=result.get("rtf", {}).get("integral"), p5_rtf=result.get("rtf", {}).get("windows", {}).get("p5"))
+    outcomes[f"control_unrecovered_time_{horizon:g}s"] = result.get("control_recovery", {}).get("all_five", {}).get("restricted_unrecovered_time_s")
+    outcomes[f"goal_unrecovered_time_{horizon:g}s"] = result.get("goal_recovery_all_five", {}).get("restricted_unrecovered_time_s")
+    signature = dict(source_head=head, image_id=image, ns3_exact_sha=env.get("ns3_exact_sha"),
+        environment={key: env.get(key) for key in ENVIRONMENT_FIELDS},
+        mission={key: cfg.get(key) for key in MISSION_FIELDS},
+        service={key: service.get(key) for key in SERVICE_FIELDS},
+        radio={key: stats.get(key) for key in ("propagation_profile", "wifi_topology", "fault_extra_loss_db",
+            "fault_master_id", "tx_power_w", "state_max_age_s")}, physics_runtime=metadata.get("physics_runtime", {}),
+        analysis=result.get("definitions", {}))
+    record.update(recorded=terminal, has_artifacts=True, run_status=result.get("run_status", "not_recorded"),
+        run_error=result.get("run_error"), raw_run_dir=result.get("raw_run_dir"),
+        analysis_path=str(Path(result["output_dir"]) / "metrics/relay_analysis.json"),
+        network_eligible=not reasons, exclusion_reasons=reasons, outcomes=outcomes, comparability=signature,
+        study_eligible=not study_reasons,
+        admission_audit=result.get("admission_audit", {}), criteria=criteria)
+    return record
+
+
+def aggregate_campaign(records: list[dict[str, Any]]) -> dict[str, Any]:
+    records = [dict(row, exclusion_reasons=list(row["exclusion_reasons"])) for row in records]
+    signatures = {json.dumps(row["comparability"], sort_keys=True) for row in records
+                  if row["recorded"] and row.get("study_eligible")}
+    if len(signatures) > 1:
+        for row in records:
+            if row["recorded"] and row.get("study_eligible"):
+                row["study_eligible"] = row["network_eligible"] = False
+                row["exclusion_reasons"].append("campaign source/configuration changed; do not pool implementations/settings")
+    grouped = defaultdict(dict)
+    for row in records:
+        grouped[row["pair_id"]][row["policy"]] = row
+    points, exclusions = [], []
+    for pair, policies in grouped.items():
+        fixed, failover = policies.get("fixed"), policies.get("failover")
+        if fixed is None or failover is None or not fixed["recorded"] or not failover["recorded"]:
+            exclusions.append(dict(pair_id=pair, reason="one or both runs not recorded"))
+            continue
+        same = fixed["comparability"] == failover["comparability"]
+        for metric in fixed["outcomes"]:
+            a, b = finite(fixed["outcomes"].get(metric)), finite(failover["outcomes"].get(metric))
+            is_completion = metric in ("run_completed", "lifecycle_success")
+            allowed = same and a is not None and b is not None and (
+                (is_completion and fixed["study_eligible"] and failover["study_eligible"])
+                or (not is_completion and fixed["network_eligible"] and failover["network_eligible"]))
+            if allowed:
+                points.append(dict(pair_id=pair, fault_profile=fixed["fault_profile"], metric=metric,
+                                   fixed=a, failover=b, difference=b - a))
+            else:
+                exclusions.append(dict(pair_id=pair, metric=metric,
+                    reason="settings differ" if not same else "missing outcome" if a is None or b is None
+                           else "conditional network endpoint: " + "; ".join(fixed["exclusion_reasons"] + failover["exclusion_reasons"])))
+    estimates = []
+    for condition in CONDITIONS:
+        metrics = sorted({row["metric"] for row in points if row["fault_profile"] == condition})
+        for metric in metrics:
+            values = [row["difference"] for row in points if row["fault_profile"] == condition and row["metric"] == metric]
+            estimates.append(dict(fault_profile=condition, metric=metric, difference_direction="failover minus fixed",
+                                  **paired_interval(values)))
+    return dict(planned_runs=len(records), recorded_runs=sum(row["recorded"] for row in records),
+        attempted_runs=sum(row.get("has_artifacts", row["recorded"]) for row in records),
+        run_status_counts=dict(Counter(row["run_status"] for row in records)),
+        records=records, paired_points=points, paired_estimates=estimates, pair_exclusions=exclusions,
+        global_configuration_signature_count=len(signatures),
+        global_frozen_configuration_consistent=len(signatures) == 1,
+        campaign_status=("all_recorded_comparable" if all(row["network_eligible"] for row in records)
+                         else "all_recorded_with_conditional_limits") if records and all(row["recorded"] for row in records) else "incomplete_campaign",
+        methods=["Independent repetition is a whole paired run, never a packet or UAV.",
+                 "All planned/missing/failed runs remain in the table and status counts.",
+                 "Completed/lifecycle outcomes include recorded failed runs; network estimates condition on a complete comparable measurement window.",
+                 "Changed source or frozen settings prevent pooling confirmatory pairs across a campaign; every affected run remains visible.",
+                 "Restricted unrecovered time is a bounded loss, not successful recovery imputed at a censoring limit.",
+                 "With five pairs, percentile bootstrap intervals are exploratory; all observed pairs are shown and no significance claim is made.",
+                 "A degenerate interval for identical observed effects does not establish population certainty."])
+
+
+def analyze_campaign(plan_path: Path, runs_root: Path, output: Path, *, plots: bool = True,
+                     live_export: bool = True, deadline_ms: float = 250., restricted_s: float = 30.) -> dict[str, Any]:
+    plan = read_csv(plan_path)
+    if not plan:
+        raise ValueError("campaign plan is empty or missing")
+    records = []
+    for row in plan:
+        run_dir = Path(row["run_dir"]) if row.get("run_dir") else runs_root / row["run_id"]
+        result = None
+        if run_dir.is_dir():
+            result = analyze_run(run_dir, output / "runs" / row["run_id"], plots=False, live_export=live_export,
+                                 deadline_ms=deadline_ms, restricted_s=restricted_s)
+        records.append(campaign_record(row, result))
+    result = aggregate_campaign(records)
+    result.update(plan_path=str(plan_path.resolve()), runs_root=str(runs_root.resolve()))
+    write_json(output / "metrics/relay_campaign_analysis.json", result)
+    flattened = [dict({key: row.get(key) for key in ("order", "pair_id", "run_id", "rng_seed", "rng_run", "policy", "fault_profile", "run_status", "recorded", "network_eligible")},
+                     **row["outcomes"], exclusion_reasons="; ".join(row["exclusion_reasons"])) for row in records]
+    endpoint_names = sorted({key for row in records for key in row["outcomes"]})
+    write_csv(output / "metrics/relay_campaign_runs.csv", flattened,
+        ["order", "pair_id", "run_id", "rng_seed", "rng_run", "policy", "fault_profile", "run_status", "recorded", "network_eligible", *endpoint_names, "exclusion_reasons"])
+    write_csv(output / "metrics/relay_campaign_pairs.csv", result["paired_points"],
+              ["pair_id", "fault_profile", "metric", "fixed", "failover", "difference"])
+    interval_rows = [dict(row, interval_low=row["interval_95"][0] if row["interval_95"] else None,
+                         interval_high=row["interval_95"][1] if row["interval_95"] else None) for row in result["paired_estimates"]]
+    write_csv(output / "metrics/relay_campaign_intervals.csv", interval_rows,
+              ["fault_profile", "metric", "n_pairs", "mean_difference", "median_difference", "interval_low", "interval_high", "interval_method"])
+    if plots:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        fig, axes = plt.subplots(2, 3, figsize=(12, 7))
+        for column, condition in enumerate(CONDITIONS):
+            axis = axes[0, column]
+            selected = [row for row in result["paired_points"] if row["fault_profile"] == condition and row["metric"] == "timely_per_offered"]
+            for row in selected:
+                pair_record = next(r for r in records if r["pair_id"] == row["pair_id"])
+                jitter = (int(pair_record["rng_run"]) - 3) * .025
+                axis.plot([jitter, 1 + jitter], [row["fixed"], row["failover"]], alpha=.45,
+                          color=f"C{(int(pair_record['rng_run']) - 1) % 10}")
+            visible = [row for row in records if row["fault_profile"] == condition]
+            for row in visible:
+                value = finite(row["outcomes"].get("timely_per_offered"))
+                if value is not None:
+                    at = (0 if row["policy"] == "fixed" else 1) + (int(row["rng_run"]) - 3) * .025
+                    axis.scatter(at, value, marker="o" if row["network_eligible"] else "x",
+                                 color=f"C{(int(row['rng_run']) - 1) % 10}" if row["network_eligible"] else "grey")
+            axis.set(title=f"{condition}: {len(selected)} comparable pairs", xticks=[0, 1], xticklabels=["fixed", "failover"],
+                     ylabel="timely / all offered requests", ylim=(-.02, 1.02))
+            missing = sum(finite(row["outcomes"].get("timely_per_offered")) is None for row in visible)
+            axis.text(.01, .02, f"Missing outcome: {missing}; grey x: excluded", transform=axis.transAxes, fontsize=7)
+            axis.grid(alpha=.2)
+            effect_axis = axes[1, column]
+            estimate = next((row for row in result["paired_estimates"] if row["fault_profile"] == condition and row["metric"] == "timely_per_offered"), None)
+            if estimate and estimate["mean_difference"] is not None:
+                mean, interval = estimate["mean_difference"], estimate["interval_95"]
+                error = [[max(0, mean - interval[0])], [max(0, interval[1] - mean)]] if interval else None
+                effect_axis.errorbar(mean, 0, xerr=error, fmt="o", capsize=4)
+                effect_axis.text(.02, .9, f"n={estimate['n_pairs']}; {'95% exploratory interval' if interval else 'CI unavailable'}",
+                                 transform=effect_axis.transAxes, fontsize=8)
+            else:
+                effect_axis.text(.5, .5, "No comparable observed pairs", ha="center", transform=effect_axis.transAxes)
+            effect_axis.axvline(0, color="grey", linestyle="--")
+            effect_axis.set(xlabel="paired mean effect: failover − fixed", yticks=[], ylim=(-1, 1), xlim=(-1.02, 1.02))
+            effect_axis.grid(alpha=.2)
+        fig.suptitle(f"Whole-run paired outcomes; {result['run_status_counts']}", fontsize=10)
+        fig.tight_layout()
+        (output / "plots").mkdir(parents=True, exist_ok=True)
+        for extension in ("png", "svg", "pdf"):
+            fig.savefig(output / f"plots/relay_campaign_pairs.{extension}", dpi=160)
+        plt.close(fig)
+    report = ["# Observed paired relay campaign", "", f"Status: `{result['campaign_status']}`.",
+        f"Recorded {result['recorded_runs']} of {result['planned_runs']} planned runs; statuses: `{result['run_status_counts']}`.",
+        "", "[All runs and exclusions](metrics/relay_campaign_runs.csv); [all paired points](metrics/relay_campaign_pairs.csv); "
+        "[exploratory intervals](metrics/relay_campaign_intervals.csv).", ""] + result["methods"]
+    if plots:
+        report += ["", "![Paired outcomes](plots/relay_campaign_pairs.png)"]
+    (output / "relay_campaign_analysis.md").write_text("\n".join(report) + "\n")
+    return result
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--run-dir", type=Path, required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--run-dir", type=Path)
+    mode.add_argument("--write-plan", type=Path, help="Write the randomized 30-row plan; no simulator is launched")
+    mode.add_argument("--campaign-plan", type=Path, help="Analyze all rows of an existing frozen plan")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--deadline-ms", type=float, default=250.)
     parser.add_argument("--restricted-horizon-s", type=float, default=30.)
     parser.add_argument("--no-plots", action="store_true")
     parser.add_argument("--skip-live-export", action="store_true")
+    parser.add_argument("--runs-root", type=Path)
     args = parser.parse_args(argv)
+    if not args.deadline_ms > 0 or not math.isfinite(args.deadline_ms) or not args.restricted_horizon_s > 0 or not math.isfinite(args.restricted_horizon_s):
+        parser.error("finite positive deadline and restricted horizon required")
+    if args.write_plan:
+        rows = campaign_plan()
+        fields = list(rows[0])
+        if args.write_plan.exists():
+            if read_csv(args.write_plan) != [{key: str(value) for key, value in row.items()} for row in rows]:
+                parser.error("existing plan differs; use a fresh plan path")
+        else:
+            write_csv(args.write_plan, rows, fields)
+        print(json.dumps(dict(plan=str(args.write_plan.resolve()), planned_runs=len(rows), executed_runs=0)))
+        return 0
+    if args.campaign_plan:
+        if args.runs_root is None or args.output_dir is None:
+            parser.error("--campaign-plan requires --runs-root and --output-dir")
+        result = analyze_campaign(args.campaign_plan, args.runs_root, args.output_dir,
+                                  plots=not args.no_plots, live_export=not args.skip_live_export,
+                                  deadline_ms=args.deadline_ms, restricted_s=args.restricted_horizon_s)
+        print(json.dumps(dict(status=result["campaign_status"], counts=result["run_status_counts"]), sort_keys=True))
+        return 0
+    if not args.run_dir.is_dir():
+        parser.error("run directory does not exist")
     result = analyze_run(args.run_dir, args.output_dir, deadline_ms=args.deadline_ms,
                          restricted_s=args.restricted_horizon_s, plots=not args.no_plots,
                          live_export=not args.skip_live_export)

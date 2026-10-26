@@ -1,6 +1,7 @@
 """Analysis fixtures are explicit synthetic logs, never integrated flight evidence."""
 
 import csv
+from copy import deepcopy
 import importlib.util
 import json
 from pathlib import Path
@@ -57,17 +58,18 @@ def fixture(tmp_path, condition="selective", missing_uav=None):
                            target_position_m=[i, 0, 10], target_frame="ENU", goal_id=f"before-{i}"))
         events.append(dict(body, event="action_completed", host_monotonic_ns=61 * NS, goal_id=f"after-{i}",
                            goal_created_host_monotonic_ns=57 * NS, maneuver_observed=True, dwell_s=2,
+                           max_vertical_displacement_m=4.,
                            admitted_command_id=body["command_id"]))
     (run / "logs/coordination_events.jsonl").write_text("".join(json.dumps(row) + "\n" for row in events))
     with (run / "metrics/relay_control_refresh.csv").open("w") as stream:
         writer = csv.DictWriter(stream, fieldnames=["request_id", "uav_id", "host_monotonic_ns", "command_id"])
         writer.writeheader(); writer.writerows(offers)
     with (run / "logs/native_radio_events.csv").open("w") as stream:
-        writer = csv.DictWriter(stream, fieldnames=["event", "wall_monotonic_ns", "time_s"])
+        writer = csv.DictWriter(stream, fieldnames=["event", "wall_monotonic_ns", "time_s", "peer"])
         writer.writeheader()
         if condition != "none":
-            writer.writerows([dict(event="fault_start", wall_monotonic_ns=55 * NS, time_s=55),
-                              dict(event="fault_end", wall_monotonic_ns=115 * NS, time_s=115)])
+            writer.writerows([dict(event="fault_start", wall_monotonic_ns=55 * NS, time_s=55, peer="uav1"),
+                              dict(event="fault_end", wall_monotonic_ns=115 * NS, time_s=115, peer="uav1")])
     return run, events
 
 
@@ -166,3 +168,146 @@ def test_missing_relay_stage_cannot_be_a_timely_success(tmp_path):
     (run / "logs/coordination_events.jsonl").write_text("".join(json.dumps(row) + "\n" for row in events))
     result = analyze(run, tmp_path)
     assert result["rates"]["uav1"]["timely"] == 0
+
+
+def test_total_isolation_counts_lost_renewals_separately_from_new_appointments(tmp_path):
+    run, events = fixture(tmp_path, condition="total_GCS")
+    events = [row for row in events if row.get("event") == "grant_issued" and row["epoch"] == 1]
+    events.append(dict(events[0], host_monotonic_ns=55.2 * NS, grant_sequence=3,
+                       valid_from_ns=55.2 * NS, valid_until_ns=57.2 * NS, reason="renewal"))
+    (run / "logs/coordination_events.jsonl").write_text("".join(json.dumps(row) + "\n" for row in events))
+    result = analyze(run, tmp_path)
+    assert result["total_GCS"]["all_grants_issued_during_fault"] == 1
+    assert result["total_GCS"]["new_leader_selection_grants_during_fault"] == 0
+    assert result["total_GCS"]["no_new_leader_selection"] is True
+    assert result["total_GCS"]["hold_all_five"] is False
+
+
+def test_frozen_plan_has_thirty_paired_rows_and_reproducible_random_order():
+    plan = REPORT.campaign_plan()
+    assert len(plan) == 30
+    assert plan == REPORT.campaign_plan()
+    assert {row["rng_seed"] for row in plan} == {1}
+    for condition in REPORT.CONDITIONS:
+        for run in range(1, 6):
+            rows = [row for row in plan if row["fault_profile"] == condition and row["rng_run"] == run]
+            assert {row["policy"] for row in rows} == {"fixed", "failover"}
+            assert abs(rows[0]["order"] - rows[1]["order"]) == 1
+    assert {plan[index]["policy"] for index in range(0, 30, 2)} == {"fixed", "failover"}
+
+
+def test_bootstrap_unit_is_a_pair_and_one_pair_does_not_get_an_interval():
+    result = REPORT.paired_interval([-4, -3, -2, -1, 0])
+    assert result["n_pairs"] == 5
+    assert result["mean_difference"] == -2
+    assert result["bootstrap_resamples"] == 3125
+    assert result["interval_95"][0] < -2 < result["interval_95"][1]
+    assert REPORT.paired_interval([-2])["interval_95"] is None
+
+
+def test_failed_run_remains_an_unconditional_outcome_when_network_window_is_incomplete(tmp_path):
+    run, _ = fixture(tmp_path)
+    base = analyze(run, tmp_path)
+    base["pilot"] = False
+    metadata = base["metadata"]
+    metadata["environment"].update(git_head="f" * 40, source_dirty_paths="0")
+    metadata["native_stats"].update(rng_seed=1, rng_run=1)
+    metadata["configuration_snapshot"] = {"container_image_id": "sha256:unit-fixture"}
+    metadata["config"].update({key: 1 for key in REPORT.MISSION_FIELDS})
+    metadata["config"]["effective_service_args"] = {key: 1 for key in REPORT.SERVICE_FIELDS}
+    pair = [row for row in REPORT.campaign_plan(repeats=1) if row["fault_profile"] == "selective"]
+    records = []
+    for planned in pair:
+        result = deepcopy(base)
+        result["policy"] = planned["policy"]
+        failed = planned["policy"] == "fixed"
+        result["run_status"] = "failed" if failed else "completed"
+        result["observation_window"]["complete"] = not failed
+        result["criteria"] = {"five_uav_lifecycle": not failed}
+        records.append(REPORT.campaign_record(planned, result))
+    aggregate = REPORT.aggregate_campaign(records)
+    assert aggregate["run_status_counts"] == {"failed": 1, "completed": 1}
+    status_effect = next(row for row in aggregate["paired_points"] if row["metric"] == "run_completed")
+    assert status_effect["difference"] == 1
+    assert not any(row["metric"] == "timely_per_offered" for row in aggregate["paired_points"])
+    assert aggregate["pair_exclusions"]
+
+
+def test_missing_campaign_runs_do_not_turn_into_zero_measurements(tmp_path):
+    rows = REPORT.campaign_plan(repeats=1)
+    plan = tmp_path / "plan.csv"
+    REPORT.write_csv(plan, rows, list(rows[0]))
+    out = tmp_path / "campaign"
+    result = REPORT.analyze_campaign(plan, tmp_path / "not-recorded", out, plots=True, live_export=False)
+    assert result["recorded_runs"] == 0
+    assert result["run_status_counts"] == {"not_run": 6}
+    assert result["paired_estimates"] == []
+    assert all(row["outcomes"] == {} for row in result["records"])
+    for extension in ("png", "svg", "pdf"):
+        assert (out / f"plots/relay_campaign_pairs.{extension}").stat().st_size > 0
+
+
+def test_single_run_vector_plots_preserve_a_censored_vehicle(tmp_path):
+    run, _ = fixture(tmp_path, missing_uav=2)
+    out = tmp_path / "out"
+    result = REPORT.analyze_run(run, out, plots=True, live_export=False)
+    assert result["control_recovery_per_uav"]["2"]["status"] == "right_censored"
+    for extension in ("png", "svg", "pdf"):
+        assert (out / f"plots/relay_outcomes.{extension}").stat().st_size > 0
+
+
+def test_changed_implementations_are_not_pooled_into_one_campaign_interval():
+    base = dict(recorded=True, run_status="completed", policy="fixed", fault_profile="selective",
+                network_eligible=True, study_eligible=True, exclusion_reasons=[],
+                outcomes={"run_completed": 1.}, comparability={"head": "one"})
+    records = [dict(base, pair_id="one"), dict(base, pair_id="one", policy="failover"),
+               dict(base, pair_id="two", comparability={"head": "two"}),
+               dict(base, pair_id="two", policy="failover", comparability={"head": "two"})]
+    result = REPORT.aggregate_campaign(records)
+    assert result["recorded_runs"] == 4
+    assert result["global_frozen_configuration_consistent"] is False
+    assert result["paired_estimates"] == []
+
+
+def test_foreign_run_cannot_supply_recovery_and_true_flag_requires_measured_displacement(tmp_path):
+    run, events = fixture(tmp_path)
+    for row in events:
+        if row.get("event") == "uart_admitted" and row.get("uav_id") == 1 and row.get("epoch") == 2:
+            row["run_id"] = "foreign-run"
+        if row.get("goal_id") == "after-3":
+            row["max_vertical_displacement_m"] = .5
+    (run / "logs/coordination_events.jsonl").write_text("".join(json.dumps(row) + "\n" for row in events))
+    result = analyze(run, tmp_path)
+    assert result["control_recovery_per_uav"]["1"]["recovered"] is False
+    assert result["goal_recovery_per_uav"]["3"]["recovered"] is False
+    assert any("foreign-run" in value for value in result["data_quality_errors"])
+
+
+def test_coordinator_selected_before_fault_is_not_a_postfault_handover(tmp_path):
+    run, events = fixture(tmp_path)
+    for row in events:
+        if row.get("event") == "grant_issued" and row["epoch"] == 1:
+            row["valid_until_ns"] = 54 * NS
+        elif row.get("event") == "grant_issued" and row["epoch"] == 2:
+            row["host_monotonic_ns"] = 54 * NS
+            row["valid_from_ns"] = 54 * NS
+        elif row.get("epoch") == 2:
+            row["valid_from_ns"] = 54 * NS
+        elif row.get("epoch") == 1:
+            row["valid_until_ns"] = 54 * NS
+    (run / "logs/coordination_events.jsonl").write_text("".join(json.dumps(row) + "\n" for row in events))
+    result = analyze(run, tmp_path)
+    assert result["pre_fault_authority"]["leader_id"] == 2
+    assert result["handover_recovery"]["all_five"]["recovered"] is False
+    assert any("actual pre-fault coordinator" in value for value in result["data_quality_errors"])
+
+
+def test_unfinished_artifacts_are_neither_a_failed_result_nor_a_completed_run(tmp_path):
+    run, _ = fixture(tmp_path)
+    result = analyze(run, tmp_path)
+    result["run_status"] = "not_recorded"
+    planned = next(row for row in REPORT.campaign_plan(repeats=1) if row["policy"] == "failover" and row["fault_profile"] == "selective")
+    record = REPORT.campaign_record(planned, result)
+    assert record["has_artifacts"] is True
+    assert record["recorded"] is False
+    assert record["outcomes"]["run_completed"] is None
