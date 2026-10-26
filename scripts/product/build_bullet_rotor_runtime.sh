@@ -34,6 +34,7 @@ docker run --rm --user 0:0 \
     set -Eeuo pipefail
     [[ "$(dpkg-query -W -f="\${Version}" libgz-physics7 2>/dev/null)" == 7.8.0-* ]]
     engine_dir="$PWD/.external/gz-physics7-rotor"
+    cd "$engine_dir"
     cmake -S "$engine_dir/source" -B "$engine_dir/build" \
       -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
     cmake --build "$engine_dir/build" \
