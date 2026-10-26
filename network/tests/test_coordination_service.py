@@ -102,7 +102,7 @@ class CoordinationServiceTests(unittest.TestCase):
         service.latest_message_received_ns = {3: {}}
         service.client_peers = {}
         message = SimpleNamespace(get_type=lambda: "HEARTBEAT", get_srcSystem=lambda: 3,
-                                  get_msgbuf=lambda: b"unit-frame")
+                                  get_msgbuf=lambda: b"unit-frame", custom_mode=4, base_mode=0)
         output = iter([[], [message]])
         service.uart_parsers = {3: SimpleNamespace(parse_buffer=lambda raw: next(output))}
         service.emit = lambda *args, **kw: None
@@ -124,7 +124,7 @@ class CoordinationServiceTests(unittest.TestCase):
         service.latest_message_received_ns = {3: {}}
         service.client_peers = {}
         message = SimpleNamespace(get_type=lambda: "HEARTBEAT", get_srcSystem=lambda: 3,
-                                  get_msgbuf=lambda: b"unit-frame")
+                                  get_msgbuf=lambda: b"unit-frame", custom_mode=4, base_mode=0)
         output = iter([[], [message]])
         service.uart_parsers = {3: SimpleNamespace(parse_buffer=lambda raw: next(output))}
         service.emit = lambda *args, **kw: None
@@ -215,10 +215,10 @@ class CoordinationServiceTests(unittest.TestCase):
         fresh = {str(i): now - 10 for i in range(1, 6)}
         stale = dict(fresh, **{"1": now - 2_000_000_000})
         service.heartbeat = {
-            1: (now - 2_000_000_000, dict(sent_ns=now - 2_000_000_000, peer_echo_ns=fresh)),
-            2: (now, dict(sent_ns=now, peer_echo_ns=fresh)),
-            3: (now, dict(sent_ns=now, peer_echo_ns=stale)),
-            4: (now, dict(sent_ns=now + 1, peer_echo_ns=fresh)),
+            1: (now - 2_000_000_000, dict(sent_ns=now - 2_000_000_000, echo_ns=now - 2_000_000_000, peer_echo_ns=fresh)),
+            2: (now, dict(sent_ns=now, echo_ns=now - 10, peer_echo_ns=fresh)),
+            3: (now, dict(sent_ns=now, echo_ns=now - 10, peer_echo_ns=stale)),
+            4: (now, dict(sent_ns=now + 1, echo_ns=now - 10, peer_echo_ns=fresh)),
         }
         service.peer_rtt_ns = {1: 1, 2: 10, 3: 2, 4: 1}
         self.assertEqual(service.available(now), [2])
@@ -237,12 +237,41 @@ class CoordinationServiceTests(unittest.TestCase):
         service.authority = Authority("run")
         service.authority.issue(1, 1000, 100)
         service.args = SimpleNamespace(initial_master=1, policy="fixed")
+        service.args.detection_s = 1
+        service.heartbeat = {}
         service.detected_unavailable_leader = None
         service.emit = lambda *args, **kw: None
         service.available = lambda now: [2]
         service.update_role(2000)
         self.assertEqual(service.authority.leader_id, 1)
         self.assertEqual(service.authority.epoch, 1)
+
+    def test_peer_report_gap_does_not_replace_master_with_live_direct_link(self):
+        now = 10_000_000_000
+        service = GCSService.__new__(GCSService)
+        service.args = SimpleNamespace(detection_s=1, initial_master=1,
+                                      policy="failover", renew_s=.5, lease_s=2)
+        service.authority = Authority("run")
+        old = service.authority.issue(1, now - 500_000_000, 2_000_000_000)
+        service.grants_by_epoch, service.issued_grants = {1: old}, {old.grant_sequence: old}
+        service.last_renew_ns, service.detected_unavailable_leader = now - 500_000_000, None
+        peer = {str(i): now - 390_000_000 for i in range(1, 6)}
+        service.heartbeat = {
+            1: (now - 187_000_000, dict(sent_ns=now - 191_788_000, echo_ns=now - 193_183_000,
+                                      peer_echo_ns=dict(peer, **{"4": now - 1_008_124_000}))),
+            2: (now - 10_000_000, dict(sent_ns=now - 11_000_000, echo_ns=now - 12_000_000,
+                                     peer_echo_ns=peer)),
+        }
+        service.peer_rtt_ns = {1: 2_000_000, 2: 1_000_000}
+        service.emit = lambda *args, **fields: None
+        service.send = lambda *args: True
+        self.assertNotIn(1, service.available(now))  # peer4 report really is too old
+        service.update_role(now)
+        self.assertEqual((service.authority.leader_id, service.authority.epoch), (1, 1))
+        # The same threshold now detects a genuinely stale direct GCS probe.
+        service.heartbeat[1][1]["echo_ns"] = now - 1_000_000_001
+        service.update_role(now)
+        self.assertEqual((service.authority.leader_id, service.authority.epoch), (2, 2))
 
 
 @unittest.skipUnless(importlib.util.find_spec("pymavlink"), "requires pinned runtime pymavlink")

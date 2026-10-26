@@ -343,12 +343,21 @@ class GCSService(Network):
             self.uart_parsers[i] = self.mavutil.mavlink.MAVLink(None)
             self.uart_parsers[i].robust_parsing = True
 
+    def direct_available(self, i: int, now: int) -> bool:
+        report = self.heartbeat.get(i)
+        if report is None:
+            return False
+        received, body = report
+        deadline = int(self.args.detection_s * 1e9)
+        return all(type(stamp) is int and 0 <= now - stamp <= deadline
+                   for stamp in (received, body.get("sent_ns"), body.get("echo_ns")))
+
     def available(self, now: int) -> list[int]:
         deadline = int(self.args.detection_s * 1e9)
         candidates = []
         for i, (received, body) in self.heartbeat.items():
             peer = body.get("peer_echo_ns", {})
-            if not 0 <= now - received <= deadline or not 0 <= now - body["sent_ns"] <= deadline:
+            if not self.direct_available(i, now):
                 continue
             if all(type(peer.get(str(j))) is int and 0 <= now - peer[str(j)] <= deadline
                    for j in UAV_IDS if j != i):
@@ -362,10 +371,10 @@ class GCSService(Network):
             if self.args.initial_master not in candidates:
                 return
             leader = self.args.initial_master
-        elif leader not in candidates:
+        elif not self.direct_available(leader, now):
             if self.detected_unavailable_leader != leader:
                 self.emit("link_failure_detected", leader_id=leader,
-                          reason="no_fresh_GCS_and_peer_probe_report")
+                          reason="direct_GCS_probe_timeout")
                 self.detected_unavailable_leader = leader
             if self.args.policy == "fixed" or not candidates:
                 return
@@ -514,6 +523,14 @@ class GCSService(Network):
                           mavlink_command=int(message.command), result=int(message.result),
                           producer_host_monotonic_ns=produced, received_host_monotonic_ns=now,
                           reason="MAVLink_ACK_has_no_application_command_id")
+            elif message.get_type() == "STATUSTEXT":
+                self.emit("autopilot_status_text", uav_id=i, severity=int(message.severity),
+                          text=str(message.text), producer_host_monotonic_ns=produced,
+                          received_host_monotonic_ns=now)
+            elif message.get_type() == "HEARTBEAT":
+                self.emit("autopilot_heartbeat_received", uav_id=i,
+                          custom_mode=int(message.custom_mode), base_mode=int(message.base_mode),
+                          producer_host_monotonic_ns=produced, received_host_monotonic_ns=now)
         if sum(len(part[0]) for part in self.stream_provenance[i]) > 8192:
             raise RuntimeError("MAVLink parser retained an unbounded UART prefix")
 
@@ -525,11 +542,16 @@ class GCSService(Network):
             now = time.monotonic_ns()
             peers = body.get("peer_echo_ns")
             if (sender not in UAV_IDS or type(body.get("sent_ns")) is not int
+                    or type(body.get("echo_ns")) is not int or not 0 <= body["echo_ns"] <= now
                     or not 0 <= body["sent_ns"] <= now or not isinstance(peers, dict)
                     or any(k not in {str(i) for i in (0, *UAV_IDS)} or type(v) is not int
                            or not 0 <= v <= now for k, v in peers.items())):
                 raise ProtocolError("invalid UAV heartbeat")
             self.heartbeat[sender] = (time.monotonic_ns(), body)
+            self.emit("gcs_probe_echo_received", uav_id=sender,
+                      probe_sent_host_monotonic_ns=body["echo_ns"],
+                      reply_sent_host_monotonic_ns=body["sent_ns"],
+                      peer_echo_ns=peers)
         elif kind == "telemetry":
             now = time.monotonic_ns()
             grant = self.issued_grants.get(body.get("grant_sequence"))
