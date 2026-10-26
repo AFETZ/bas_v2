@@ -1130,8 +1130,18 @@ class NativeFiveUavHarness(FlightHarness):
             20,
             f"uav{system_id}_global_position",
         )
-        deadline = clock.monotonic() + 15 * self.timeout_scale
+        # REQUEST_MESSAGE may return a zero coordinate before the GPS origin
+        # is ready. Ask again through the same radio until a real fix arrives.
+        deadline = clock.monotonic() + 60 * self.timeout_scale
+        next_request = clock.monotonic() + 1.0
         while clock.monotonic() < deadline:
+            if clock.monotonic() >= next_request:
+                self.send("control", system_id,
+                          self.transmitters[("control", system_id)].command_long_encode(
+                              system_id, 1, command, 0,
+                              float(self.mavutil.mavlink.MAVLINK_MSG_ID_GLOBAL_POSITION_INT),
+                              0, 0, 0, 0, 0, 0))
+                next_request = clock.monotonic() + 1.0
             received_ns = self.latest_at_ns.get(("control", system_id, "GLOBAL_POSITION_INT"), 0)
             message = self.latest.get(("control", system_id, "GLOBAL_POSITION_INT"))
             if received_ns >= sent_ns and message is not None:
