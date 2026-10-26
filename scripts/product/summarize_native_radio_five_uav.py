@@ -2876,6 +2876,9 @@ def write_latency_diagnostic_report(run_dir: Path, observer_reference: Path | No
                 report.extend(["", f"![{stem}](screenshots/{stem}.png)", "", f"[Unmodified live Gazebo frame](screenshots/{stem}.raw.png)"])
     plot_native_overview(run_dir,events)
     report.extend(["", "![Native radio, timing and movement](plots/native_overview.png)"])
+    if (run_dir / "logs/node_state.jsonl").is_file():
+        export_live_metrics(run_dir)
+        report.extend(["", "[Observed heights, trajectories and resources](live_metrics.md)"])
     (run_dir / "report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
     print(json.dumps({"run_dir": str(run_dir), "diagnostic": scenario.get("status")}, sort_keys=True))
     return 0 if scenario.get("status") == "diagnostic_complete" else 1
@@ -2986,6 +2989,352 @@ def plot_native_overview(run_dir: Path, events: list[dict[str, Any]]) -> None:
     fig.savefig(run_dir/'plots/native_overview.png',dpi=160);plt.close(fig)
 
 
+def export_live_metrics(
+    run_dir: Path, output_dir: Path | None = None, *, plots: bool = True,
+) -> dict[str, Any]:
+    """Export observed flight/timing data, optionally outside a read-only raw run.
+
+    Tracker publication time is wall time. Only the node's source_sim_time_s is
+    used for physical positions; stale/missing snapshots and clock resets break
+    lines. A configured mission is never promoted to an observed active target.
+    """
+    run_dir = run_dir.resolve()
+    output = (output_dir or run_dir).resolve()
+    metrics = output / "metrics"
+    metrics.mkdir(parents=True, exist_ok=True)
+
+    input_errors: Counter[str] = Counter()
+
+    def rows(path: Path) -> Iterable[dict[str, Any]]:
+        if not path.is_file():
+            return
+        with path.open(encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    value = json.loads(line)
+                except json.JSONDecodeError:
+                    input_errors[str(path.relative_to(run_dir)) + ":invalid_json"] += 1
+                    continue
+                if isinstance(value, dict):
+                    yield value
+                else:
+                    input_errors[str(path.relative_to(run_dir)) + ":non_object"] += 1
+
+    def finite(value: Any) -> float | None:
+        if isinstance(value, bool):
+            return None
+        try:
+            result = float(value)
+            return result if math.isfinite(result) else None
+        except (TypeError, ValueError):
+            return None
+
+    def table(name: str, records: list[dict[str, Any]], fields: list[str]) -> None:
+        with (metrics / name).open("w", encoding="utf-8", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(records)
+
+    trajectory: list[dict[str, Any]] = []
+    clocks: list[dict[str, Any]] = []
+    last: dict[str, tuple[Any, ...]] = {}
+    quality: Counter[str] = Counter()
+    for snapshot in rows(run_dir / "logs/node_state.jsonl"):
+        session = snapshot.get("session_id", "unrecorded")
+        snapshot_time = finite(snapshot.get("source_sim_time_s"))
+        nodes = {str(node.get("id")): node for node in snapshot.get("nodes", [])
+                 if isinstance(node, dict)}
+        host_time = finite(snapshot.get("published_monotonic_ns"))
+        if snapshot_time is not None and host_time is not None:
+            clocks.append({"session_id": session, "source_sim_time_s": snapshot_time,
+                           "host_monotonic_ns": int(host_time),
+                           "fresh_uavs": sum(bool(nodes.get(uav)) and not nodes[uav].get("stale", True)
+                                             for uav in UAVS)})
+        for uav in UAVS:
+            node = nodes.get(uav, {})
+            source_time = finite(node.get("source_sim_time_s"))
+            point = node.get("position_m")
+            reason = "observed"
+            if not node:
+                reason = "missing"
+            elif snapshot.get("fault"):
+                reason = "tracker_fault"
+            elif node.get("stale") or uav in snapshot.get("stale_nodes", []):
+                reason = "stale"
+            elif snapshot.get("coordinate_frame") != "ENU":
+                reason = "unsupported_coordinate_frame"
+            elif source_time is None:
+                reason = "missing_source_timestamp"
+            elif (not isinstance(point, list) or len(point) != 3
+                  or any(finite(value) is None for value in point)):
+                reason = "invalid_position"
+            at = source_time if reason == "observed" else snapshot_time
+            if at is None:
+                quality[reason + "_without_model_clock"] += 1
+                continue
+            key = (session, at, reason)
+            if last.get(uav) == key:
+                continue
+            last[uav] = key
+            quality[reason] += 1
+            trajectory.append({
+                "session_id": session, "uav": uav, "source_sim_time_s": at,
+                "timestamp_source": "node.source_sim_time_s" if reason == "observed"
+                                    else "snapshot.source_sim_time_s (gap marker)",
+                "host_monotonic_ns": snapshot.get("published_monotonic_ns"),
+                "x_m": finite(point[0]) if reason == "observed" else None,
+                "y_m": finite(point[1]) if reason == "observed" else None,
+                "z_m": finite(point[2]) if reason == "observed" else None,
+                "altitude_datum": "world_ENU_z", "quality": reason,
+                "sample_age_ms": finite(node.get("sample_age_ms")),
+                "source_topic": node.get("source_topic"),
+            })
+    table("uav_trajectories.csv", trajectory, [
+        "session_id", "uav", "source_sim_time_s", "timestamp_source", "host_monotonic_ns",
+        "x_m", "y_m", "z_m", "altitude_datum", "quality", "sample_age_ms", "source_topic",
+    ])
+    table("tracker_clock.csv", clocks, [
+        "session_id", "source_sim_time_s", "host_monotonic_ns", "fresh_uavs",
+    ])
+    # Gazebo's real_time/statistics can exclude externally paused intervals.
+    # The tracker pairs actual source model time with the host monotonic clock,
+    # so these intervals retain stalls/pauses rather than asserting live from
+    # a high Gazebo reported RTF alone. Resetting clocks starts a new segment.
+    clock_segments: list[list[dict[str, Any]]] = []
+    for row in clocks:
+        previous = clock_segments[-1][-1] if clock_segments else None
+        if (previous is None or row["session_id"] != previous["session_id"]
+                or row["source_sim_time_s"] < previous["source_sim_time_s"]
+                or row["host_monotonic_ns"] <= previous["host_monotonic_ns"]):
+            clock_segments.append([])
+        clock_segments[-1].append(row)
+    windows: list[dict[str, Any]] = []
+    clock_summary: list[dict[str, Any]] = []
+    for segment_id, segment in enumerate(clock_segments):
+        start = segment[0]
+        for row in segment[1:]:
+            wall = (row["host_monotonic_ns"] - start["host_monotonic_ns"]) / 1e9
+            if wall >= 1.0:
+                model = row["source_sim_time_s"] - start["source_sim_time_s"]
+                windows.append({"segment": segment_id, "session_id": row["session_id"],
+                                "source_sim_time_s": row["source_sim_time_s"],
+                                "host_monotonic_ns": row["host_monotonic_ns"],
+                                "wall_duration_s": wall, "model_duration_s": model,
+                                "end_to_end_rtf": model / wall,
+                                "fresh_uavs_at_end": row["fresh_uavs"]})
+                start = row
+        first, end = segment[0], segment[-1]
+        wall = (end["host_monotonic_ns"] - first["host_monotonic_ns"]) / 1e9
+        clock_summary.append({"segment": segment_id, "session_id": first["session_id"],
+                              "samples": len(segment), "model_start_s": first["source_sim_time_s"],
+                              "model_end_s": end["source_sim_time_s"], "wall_duration_s": wall,
+                              "integral_rtf": (end["source_sim_time_s"] - first["source_sim_time_s"]) / wall if wall > 0 else None})
+    table("end_to_end_rtf.csv", windows, [
+        "segment", "session_id", "source_sim_time_s", "host_monotonic_ns",
+        "wall_duration_s", "model_duration_s", "end_to_end_rtf", "fresh_uavs_at_end",
+    ])
+
+    # Services write one file each. Prefer the explicit combined stream, else
+    # merge those files for analysis; do not assume that an epoch event is flight.
+    coordination_path = run_dir / "logs/coordination_events.jsonl"
+    coordination_files = ([coordination_path] if coordination_path.is_file() else
+                          sorted((run_dir / "logs").glob("coordination_*.jsonl")))
+    coordination = [row for path in coordination_files for row in rows(path)]
+    coordination.sort(key=lambda row: finite(row.get("host_monotonic_ns")) or 0)
+    targets: list[dict[str, Any]] = []
+    for row in coordination:
+        if row.get("stage", row.get("event")) != "uart_admitted":
+            continue
+        point = row.get("target_position_m")
+        at = finite(row.get("source_sim_time_s"))
+        if (row.get("target_frame") != "ENU" or at is None
+                or not isinstance(point, list) or len(point) != 3
+                or any(finite(value) is None for value in point)):
+            continue
+        uav = str(row.get("uav_id", ""))
+        if uav.isdigit():
+            uav = "uav" + uav
+        if uav not in UAVS:
+            continue
+        targets.append({"uav": uav, "source_sim_time_s": at,
+                        "x_m": point[0], "y_m": point[1], "z_m": point[2],
+                        "altitude_datum": "world_ENU_z", "command_id": row.get("command_id"),
+                        "epoch": row.get("epoch"), "source": "uart_admitted.target_position_m"})
+    table("uav_admitted_targets.csv", targets, [
+        "uav", "source_sim_time_s", "x_m", "y_m", "z_m", "altitude_datum",
+        "command_id", "epoch", "source",
+    ])
+    with (metrics / "coordination_events.jsonl").open("w", encoding="utf-8") as stream:
+        for row in coordination:
+            stream.write(json.dumps(row, allow_nan=False, sort_keys=True) + "\n")
+
+    lag: list[dict[str, Any]] = []
+    native_path = run_dir / "logs/native_radio_events.csv"
+    if native_path.is_file():
+        with native_path.open(encoding="utf-8", newline="") as stream:
+            for row in csv.DictReader(stream):
+                if row.get("event") == "realtime_lag":
+                    at, value = finite(row.get("time_s")), finite(row.get("value"))
+                    if at is not None and value is not None:
+                        lag.append({"ns3_time_s": at, "scheduler_lag_ms": value,
+                                    "host_monotonic_ns": row.get("wall_monotonic_ns"),
+                                    "phase": row.get("phase")})
+    table("scheduler_lag.csv", lag, ["ns3_time_s", "scheduler_lag_ms", "host_monotonic_ns", "phase"])
+
+    gazebo: list[dict[str, Any]] = []
+    gazebo_path = run_dir / "logs/gazebo_stats.log"
+    if gazebo_path.is_file():
+        text = gazebo_path.read_text(encoding="utf-8", errors="replace")
+        for block in re.split(r"(?=\bsim_time\s*\{)", text):
+            def duration(field: str) -> float | None:
+                match = re.search(rf"\b{field}\s*\{{([^}}]*)\}}", block)
+                if not match:
+                    return None
+                seconds = re.search(r"\bsec:\s*(\d+)", match[1])
+                nanos = re.search(r"\bnsec:\s*(\d+)", match[1])
+                return (float(seconds[1]) if seconds else 0) + (float(nanos[1]) / 1e9 if nanos else 0)
+            model, wall = duration("sim_time"), duration("real_time")
+            rtf = re.search(r"\breal_time_factor:\s*([-+0-9.eE]+)", block)
+            if model is not None and wall is not None:
+                gazebo.append({"gazebo_sim_time_s": model, "gazebo_real_time_s": wall,
+                               "reported_rtf": finite(rtf[1]) if rtf else None})
+    table("gazebo_timing.csv", gazebo, ["gazebo_sim_time_s", "gazebo_real_time_s", "reported_rtf"])
+
+    grouped: dict[tuple[Any, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows(run_dir / "logs/runtime_resources.jsonl"):
+        grouped[(row.get("monotonic_ns"), str(row.get("component")))].append(row)
+    resources: list[dict[str, Any]] = []
+    for (stamp, component), samples in sorted(grouped.items(), key=lambda item: finite(item[0][0]) or 0):
+        cpu = [finite(sample.get("cpu_percent_one_core")) for sample in samples]
+        rss = [finite(sample.get("rss_bytes")) for sample in samples]
+        resources.append({"host_monotonic_ns": stamp, "component": component,
+                          "process_count": len(samples), "cpu_samples": sum(v is not None for v in cpu),
+                          "sum_cpu_percent_one_core": sum(cpu) if all(v is not None for v in cpu) else None,
+                          "sum_process_rss_bytes": sum(rss) if all(v is not None for v in rss) else None})
+    table("runtime_resources.csv", resources, [
+        "host_monotonic_ns", "component", "process_count", "cpu_samples",
+        "sum_cpu_percent_one_core", "sum_process_rss_bytes",
+    ])
+    integral_rtf = None
+    if len(gazebo) >= 2:
+        wall_span = gazebo[-1]["gazebo_real_time_s"] - gazebo[0]["gazebo_real_time_s"]
+        if wall_span > 0:
+            integral_rtf = (gazebo[-1]["gazebo_sim_time_s"] - gazebo[0]["gazebo_sim_time_s"]) / wall_span
+    summary = {
+        "raw_run_dir": str(run_dir), "output_dir": str(output),
+        "scenario_status": read_json(run_dir / "metrics/scenario_summary.json", {}).get("status"),
+        "trajectory_quality_rows": dict(quality),
+        "input_errors": dict(input_errors),
+        "trajectory_clock": "node.source_sim_time_s; gaps use snapshot source clock",
+        "altitude_datum": "world ENU z; neither AGL nor AMSL",
+        "uavs": {uav: {"position_samples": sum(r["uav"] == uav and r["quality"] == "observed" for r in trajectory),
+                       "world_z_m": distribution(r["z_m"] for r in trajectory
+                           if r["uav"] == uav and r["z_m"] is not None),
+                       "admitted_target_samples": sum(r["uav"] == uav for r in targets)} for uav in UAVS},
+        "target_status": "observed_admission_points" if targets else "unavailable_no_timestamped_ENU_admitted_targets",
+        "target_scope": "markers at UART admission; no inferred active target between events",
+        "coordination_events": len(coordination),
+        "scheduler_lag_ms": distribution(r["scheduler_lag_ms"] for r in lag),
+        "gazebo_integral_rtf_all_recorded_time": integral_rtf,
+        "gazebo_reported_rtf": distribution(r["reported_rtf"] for r in gazebo if r["reported_rtf"] is not None),
+        "end_to_end_clock_segments": clock_summary,
+        "end_to_end_window_rtf": distribution(r["end_to_end_rtf"] for r in windows),
+        "end_to_end_window_wall_duration_s": distribution(r["wall_duration_s"] for r in windows),
+        "resource_rows": len(resources),
+        "limits": ["No flight, command completion or handover verdict is inferred from these plots.",
+                   "All recorded timing includes startup; no warm-up window is silently removed.",
+                   "End-to-end RTF uses paired tracker source/host clocks, in non-overlapping observed windows >=1 s; Gazebo reported RTF alone can omit pauses.",
+                   "CPU is summed per component in percent of one core; summed process RSS can count shared pages repeatedly.",
+                   "Different clock domains occupy separate panels; unavailable values remain empty."],
+    }
+    write_json(metrics / "live_metrics_summary.json", summary)
+    if plots:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        plot_dir = output / "plots"
+        plot_dir.mkdir(parents=True, exist_ok=True)
+
+        def save(fig: Any, stem: str) -> None:
+            fig.tight_layout()
+            for extension in ("png", "svg", "pdf"):
+                fig.savefig(plot_dir / f"{stem}.{extension}", dpi=160)
+            plt.close(fig)
+
+        fig, axes = plt.subplots(2, 1, figsize=(12, 9))
+        for index, uav in enumerate(UAVS):
+            samples = [r for r in trajectory if r["uav"] == uav]
+            series: list[dict[str, Any]] = []
+            for row in samples:
+                if series and (row["session_id"] != series[-1]["session_id"] or
+                               not 0 <= row["source_sim_time_s"] - series[-1]["source_sim_time_s"] <= .5):
+                    series.append(dict(row, x_m=None, y_m=None, z_m=None))
+                series.append(row)
+            color = f"C{index}"
+            axes[0].plot([r["source_sim_time_s"] for r in series],
+                         [r["z_m"] for r in series], color=color, label=f"{uav} actual")
+            axes[1].plot([r["x_m"] for r in series], [r["y_m"] for r in series], color=color, label=uav)
+            selected = [r for r in targets if r["uav"] == uav]
+            if selected:
+                axes[0].scatter([r["source_sim_time_s"] for r in selected],
+                                [r["z_m"] for r in selected], color=color, marker="x", s=35,
+                                label=f"{uav} admitted target")
+        axes[0].set(title="Observed height; targets are admission markers when available",
+                    xlabel="Gazebo odometry source simulation time (s)", ylabel="world ENU z (m)")
+        if not targets:
+            axes[0].text(.01, .98, "Target unavailable: no timestamped ENU command admission",
+                         transform=axes[0].transAxes, va="top", fontsize=9)
+        axes[1].set(title="Observed XY trajectory (gaps retained)", xlabel="world ENU x (m)", ylabel="world ENU y (m)")
+        axes[1].set_aspect("equal", adjustable="datalim")
+        for axis in axes:
+            axis.grid(alpha=.25)
+            axis.legend(fontsize=8, ncol=3)
+        fig.suptitle(run_dir.name)
+        save(fig, "uav_height_trajectory")
+
+        fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+        axes[0, 0].plot([r["ns3_time_s"] for r in lag], [r["scheduler_lag_ms"] for r in lag], linewidth=.8)
+        axes[0, 0].set(title="Native scheduler lag", xlabel="ns-3 model time (s)", ylabel="lag (ms)")
+        if not lag:
+            axes[0, 0].text(.5, .5, "Unavailable: no native realtime_lag samples",
+                            transform=axes[0, 0].transAxes, ha="center", fontsize=9)
+        axes[0, 1].plot([r["gazebo_sim_time_s"] for r in gazebo], [r["reported_rtf"] for r in gazebo],
+                        linewidth=.6, alpha=.5, label="Gazebo reported")
+        axes[0, 1].plot([r["source_sim_time_s"] for r in windows], [r["end_to_end_rtf"] for r in windows],
+                        linewidth=.9, label="tracker model / host elapsed")
+        axes[0, 1].set(title="RTF with pauses (startup included)", xlabel="Gazebo model time (s)", ylabel="RTF")
+        if gazebo or windows:
+            axes[0, 1].legend(fontsize=7)
+        origin = min((finite(r["host_monotonic_ns"]) for r in resources if finite(r["host_monotonic_ns"]) is not None), default=0)
+        for component in sorted({r["component"] for r in resources}):
+            samples = [r for r in resources if r["component"] == component and finite(r["host_monotonic_ns"]) is not None]
+            at = [(float(r["host_monotonic_ns"]) - origin) / 1e9 for r in samples]
+            axes[1, 0].plot(at, [r["sum_cpu_percent_one_core"] for r in samples], label=component)
+            axes[1, 1].plot(at, [r["sum_process_rss_bytes"] / 2**20 if r["sum_process_rss_bytes"] is not None else None for r in samples], label=component)
+        axes[1, 0].set(title="CPU by component", xlabel="host seconds since first resource sample", ylabel="sum process CPU (% one core)")
+        axes[1, 1].set(title="Summed process RSS (shared pages may repeat)", xlabel="host seconds since first resource sample", ylabel="MiB")
+        for axis in axes.flat:
+            axis.grid(alpha=.25)
+        if resources:
+            axes[1, 0].legend(fontsize=7)
+            axes[1, 1].legend(fontsize=7)
+        fig.suptitle(run_dir.name)
+        save(fig, "live_timing_resources")
+    report = [f"# Observed live metrics: {run_dir.name}", "", f"Raw input: `{run_dir}`.",
+              f"Scenario status: `{summary['scenario_status']}` (missing remains unavailable).",
+              "", "![Height and trajectory](plots/uav_height_trajectory.png)",
+              "![Timing and resources](plots/live_timing_resources.png)", "",
+              f"Target coverage: `{summary['target_status']}`.",
+              "Height uses world ENU z; no terrain clearance or flight success is inferred.",
+              "[Measurements and limitations](metrics/live_metrics_summary.json); "
+              "[trajectory CSV](metrics/uav_trajectories.csv); "
+              "[admitted target CSV](metrics/uav_admitted_targets.csv)."]
+    if not plots:
+        report = [line for line in report if not line.startswith("![")]
+    (output / "live_metrics.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    return summary
+
+
 def summarize_native_sources(run_dir: Path, events: list[dict[str, Any]]) -> dict[str, Any]:
     switches=[dict(e, x=None, y=None, z=None, coordinate_reason="source switch has no mobility trace; position is configured in logs/native_sources.json") for e in events if e["event"] in {"jammer_on","jammer_off"}]
     result={"sources":switches,"configured_sources":read_json(run_dir/"logs/native_sources.json", {}),"windows":{},"measurement_scope":"native decoder/SignalArrival samples; application PDR needs distinct application offers",
@@ -3031,8 +3380,19 @@ def main() -> int:
     parser.add_argument("--one-uav-run", type=Path)
     parser.add_argument("--latency-diagnostic", action="store_true")
     parser.add_argument("--observer-reference-run", type=Path)
+    parser.add_argument("--live-metrics-only", action="store_true",
+                        help="Export observed trajectories/timing without requiring a completed scenario")
+    parser.add_argument("--output-dir", type=Path,
+                        help="Separate output directory for --live-metrics-only; raw input is read-only")
     args = parser.parse_args()
     run_dir = args.run_dir.resolve()
+    if args.live_metrics_only:
+        summary = export_live_metrics(run_dir, args.output_dir)
+        print(json.dumps({"raw_run_dir": str(run_dir), "output_dir": summary["output_dir"],
+                          "target_status": summary["target_status"]}, sort_keys=True))
+        return 0
+    if args.output_dir:
+        parser.error("--output-dir is only supported with --live-metrics-only")
     if args.latency_diagnostic:
         return write_latency_diagnostic_report(
             run_dir,
@@ -3238,11 +3598,14 @@ def main() -> int:
     write_json(metrics_dir / "shared_medium_summary.json", shared)
     write_json(metrics_dir / "realtime_summary.json", realtime)
     write_json(metrics_dir / "five_uav_native_summary.json", summary)
+    if (run_dir / "logs/node_state.jsonl").is_file():
+        export_live_metrics(run_dir)
     report = [
         f"# Native five-UAV radio run: {run_dir.name}",
         "",
         "- [Received energy, interval RSSI and J/S](metrics/received_energy.csv); [power timeline](metrics/receiver_power_timeline.csv); [origins, bounds and measured Wi-Fi airtime](metrics/received_energy_summary.json).",
         "- [P2P goodput/IPDV/PDR](metrics/p2p_summary.json); [P2MP per receiver](metrics/p2mp_summary.json); [shared uplink](metrics/shared_medium_summary.json).",
+        "- [Observed heights, trajectories, timing and resources](live_metrics.md).",
         f"- Functional five-UAV native path: **{functional_status}**",
         f"- Realtime readiness: **{realtime['realtime_readiness']}** (measured independently)",
         "- Topology: one ns-3 process, six native PHY/MAC devices, one shared Spectrum channel.",
