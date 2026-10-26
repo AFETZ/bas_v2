@@ -645,8 +645,14 @@ capture_effective_configuration() {
     config_args+=(--not-enabled physics_runtime_override)
   fi
   [[ ",$ACTIVE_UART_CHANNELS," == *,payload,* ]] || config_args+=(--not-enabled payload_network_adapter)
+  for ((inactive_uav=UAV_COUNT+1; inactive_uav<=5; ++inactive_uav)); do
+    config_args+=(--not-enabled "ardupilot_uav$inactive_uav")
+  done
   if [[ "$stage" == final ]]; then
-    config_args+=(--dataflash-params --observed-params "ns3_attributes=$RUN_DIR/logs/ns3_attributes.txt")
+    config_args+=(--dataflash-params
+      --observed-params "ns3_attributes=$RUN_DIR/logs/ns3_attributes.txt"
+      --observed-params "ros_topics=$RUN_DIR/logs/ros_topics.txt"
+      --observed-params "ros_qos=$RUN_DIR/logs/ros_qos.json")
   fi
   python3 "$ROOT_DIR/scripts/product/capture_effective_config.py" "${config_args[@]}"
 }
@@ -963,6 +969,27 @@ for index in "${UAV_INDICES[@]}"; do
     exit 1
   }
 done
+
+# Read upstream ROS discovery once outside the experimental measurement window.
+if timeout 15 ros2 topic list -t > "$RUN_DIR/logs/ros_topics.txt.tmp" \
+  2> "$RUN_DIR/logs/ros_topics_export.log"; then
+  mv "$RUN_DIR/logs/ros_topics.txt.tmp" "$RUN_DIR/logs/ros_topics.txt"
+else
+  mv "$RUN_DIR/logs/ros_topics.txt.tmp" "$RUN_DIR/logs/ros_topics_export_failed.txt"
+fi
+python3 - "$RUN_DIR" "$UAV_COUNT" <<'PYQOS'
+import json
+import sys
+from pathlib import Path
+run = Path(sys.argv[1])
+rows = [{"topic": f"/uav{i}/odometry",
+         "native_export": (run / f"logs/odometry_uav{i}.txt").read_text()}
+        for i in range(1, int(sys.argv[2]) + 1)]
+(run / "logs/ros_qos.json").write_text(json.dumps({
+    "provider": "ros2 topic info --verbose",
+    "scope": "active odometry publishers and subscriptions used by the tracker",
+    "topics": rows}, indent=2) + "\n")
+PYQOS
 
 if [[ "$CAPTURE_IMAGES" == 1 ]]; then
 for camera in overview obstacle uav_focus; do
