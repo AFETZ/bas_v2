@@ -581,7 +581,9 @@ SERVICE_FIELDS = ("role", "port", "initial_master", "duration_s", "watchdog_s", 
 ENVIRONMENT_FIELDS = ("map_id", "scenario_key", "physics_profile", "gazebo_requested_rtf", "active_uart_channels",
     "stack_cpuset", "radio_cpuset", "event_logging", "capture_images", "gui", "carrier_hz", "channel_number",
     "channel_width_mhz", "tx_power_w", "phy_rate_bps", "channel_state_max_age_s", "readiness_lag_max_ms",
-    "wifi_data_mode", "wifi_control_mode", "wifi_explicit_bar_after_missed_block_ack_requested", "wifi_aggregation_requested")
+    "wifi_data_mode", "wifi_control_mode", "wifi_explicit_bar_after_missed_block_ack_requested", "wifi_aggregation_requested",
+    "native_capture_storage_requested", "native_capture_storage_effective", "native_capture_tmpfs_limit_bytes",
+    "native_capture_mount_fstype", "native_capture_mount_total_bytes")
 RADIO_FIELDS = ("selected_propagation_profile", "rx_psd_propagation_model", "sionna_in_process", "sionna_drives_rx_psd",
     "wifi_topology", "fault_extra_loss_db", "fault_master_id", "tx_power_w",
     "state_max_age_s", "carrier_hz", "wifi_actual_channel_number", "wifi_actual_center_frequency_hz",

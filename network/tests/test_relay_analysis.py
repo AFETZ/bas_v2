@@ -396,3 +396,27 @@ def test_signature_excludes_run_paths_but_includes_mac_modes_and_effective_servi
     record = REPORT.campaign_record(planned, missing_effective)
     assert record["comparability"]["radio"]["wifi_aggregation_enabled"] is None
     assert record["study_eligible"] is False
+
+
+def test_capture_storage_signature_freezes_requested_actual_profile_and_capacity_but_not_output_paths(tmp_path):
+    run, _ = fixture(tmp_path)
+    base = analyze(run, tmp_path)
+    settings = dict(native_capture_storage_requested="tmpfs", native_capture_storage_effective="tmpfs",
+        native_capture_tmpfs_limit_bytes="4294967296", native_capture_mount_fstype="tmpfs",
+        native_capture_mount_total_bytes="4294967296")
+    base["metadata"]["environment"].update(settings)
+    planned = next(row for row in REPORT.campaign_plan(repeats=1)
+                   if row["policy"] == "failover" and row["fault_profile"] == "selective")
+    original = REPORT.campaign_record(planned, base)["comparability"]
+    alternatives = dict(native_capture_storage_requested="disk", native_capture_storage_effective="disk",
+        native_capture_tmpfs_limit_bytes="2147483648", native_capture_mount_fstype="ext4",
+        native_capture_mount_total_bytes="2147483648")
+    for field, value in alternatives.items():
+        changed = deepcopy(base)
+        changed["metadata"]["environment"][field] = value
+        assert REPORT.campaign_record(planned, changed)["comparability"] != original
+    paths = deepcopy(base)
+    paths["metadata"]["environment"].update(native_event_csv_path="/tmp/another-run/events.csv",
+        native_pcap_prefix_path="/tmp/another-run/pcap", native_capture_spool_path="/tmp/another-run",
+        native_capture_mount_available_bytes="123", native_capture_copy_wall_s="1.2")
+    assert REPORT.campaign_record(planned, paths)["comparability"] == original
