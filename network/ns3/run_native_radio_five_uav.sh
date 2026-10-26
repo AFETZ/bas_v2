@@ -7,6 +7,11 @@ CONTAINER_NAME="${BAS_NATIVE_FIVE_CONTAINER_NAME:-bas-v2-native-radio-five-uav}"
 SCENARIO_KEY="${BAS_NATIVE_FIVE_SCENARIO:-town01}"
 GUI="${BAS_NATIVE_FIVE_GUI:-0}"
 CAPTURE_IMAGES="${BAS_NATIVE_CAPTURE_IMAGES:-1}"
+RNG_SEED="${BAS_NATIVE_RNG_SEED:-1}"
+RNG_RUN="${BAS_NATIVE_RNG_RUN:-1}"
+[[ "$RNG_SEED" =~ ^[1-9][0-9]*$ && "$RNG_RUN" =~ ^[0-9]+$ ]] || {
+  printf 'RngSeed must be a positive integer and RngRun a nonnegative integer.\n' >&2; exit 2;
+}
 COORDINATION_POLICY="${BAS_NATIVE_COORDINATION_POLICY:-off}"
 case "$COORDINATION_POLICY" in
   off|fixed|failover) ;;
@@ -119,6 +124,7 @@ run_in_container() {
     -e BAS_NATIVE_CAPTURE_IMAGES="$CAPTURE_IMAGES" \
     -e BAS_NATIVE_PHYSICS_PROFILE="$PHYSICS_PROFILE" \
     -e BAS_NATIVE_COORDINATION_POLICY="$COORDINATION_POLICY" \
+    -e BAS_NATIVE_RNG_SEED="$RNG_SEED" -e BAS_NATIVE_RNG_RUN="$RNG_RUN" \
     -e BAS_NATIVE_EXPERIMENT_DURATION_S="${BAS_NATIVE_EXPERIMENT_DURATION_S:-180}" \
     -e BAS_NATIVE_TASK_PERIOD_S="${BAS_NATIVE_TASK_PERIOD_S:-20}" \
     -e BAS_NATIVE_COMMAND_PERIOD_S="${BAS_NATIVE_COMMAND_PERIOD_S:-1}" \
@@ -549,6 +555,7 @@ PY
     "$FAULT_PROFILE" "$FAULT_MASTER_ID" "$FAULT_EXTRA_LOSS_DB"
   printf 'simulation_mode=%s\nlockstep_step_ms=%s\nlockstep_wall_timeout_s=%s\n' "$BAS_SIMULATION_MODE" "$BAS_LOCKSTEP_STEP_MS" "$BAS_LOCKSTEP_TIMEOUT_S"
   printf 'ns3_version=3.48\n'
+  printf 'ns3_rng_seed=%s\nns3_rng_run=%s\n' "$RNG_SEED" "$RNG_RUN"
   printf 'ns3_exact_sha=%s\n' "$(git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" rev-parse HEAD)"
   printf 'ns3_compatibility_patch=true\n'
   printf 'python_version=%s\n' "$(python3 --version | awk '{print $2}')"
@@ -971,6 +978,7 @@ setsid ip netns exec ams-ns3 env \
   NS_LOG='SionnaRtChannelModel=level_debug|prefix_time' \
   taskset -c "$RADIO_CPUSET" stdbuf -oL -eL "$BINARY" \
   --uavCount="$UAV_COUNT" --radioBackend="$RADIO_BACKEND" \
+  --RngSeed="$RNG_SEED" --RngRun="$RNG_RUN" \
   --radioProfile="$RADIO_PROFILE" --technologySpecificModem="$TECHNOLOGY_SPECIFIC_MODEM" \
   --neighborDiscoveryMode="$NEIGHBOR_DISCOVERY_MODE" --radioReason="$RADIO_REASON" \
   --solverProfile="$SOLVER_PROFILE" \
