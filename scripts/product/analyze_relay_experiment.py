@@ -153,8 +153,11 @@ def decompose_goal(completion: dict[str, Any], commands: list[dict[str, Any]], f
     phases = [(created-fault_ns)/1e9, (first["admitted_ns"]-created)/1e9, (finished-first["admitted_ns"])/1e9]
     return dict(base, status="observed", first_admitted_goal_CID=first["command_id"],
         fault_host_ns=fault_ns, goal_created_host_ns=created, first_goal_uart_host_ns=first["admitted_ns"],
+        first_command_created_host_ns=first["created_ns"],
         completed_host_ns=finished, completion_refresh_uart_host_ns=latest["admitted_ns"],
         fault_to_goal_creation_s=phases[0], goal_creation_to_first_UART_s=phases[1], first_UART_to_completion_s=phases[2],
+        goal_creation_to_first_command_creation_s=(first["created_ns"]-created)/1e9,
+        first_command_creation_to_UART_s=(first["admitted_ns"]-first["created_ns"])/1e9,
         fault_to_completion_s=total, sum_error_s=sum(phases)-total,
         latest_CID_chain=dict(command_id=latest["command_id"], command_created_host_ns=latest["created_ns"],
             uart_host_ns=latest["admitted_ns"], fault_to_command_creation_s=(latest["created_ns"]-fault_ns)/1e9,
@@ -514,6 +517,7 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
             group_recovery="first postfault-created refresh admitted to every member under one leader/epoch",
             goal_recovery="new postfault goal, target changed >=1m from last pre-fault admitted target, observed maneuver and dwell; not latest refresh creation",
             goal_decomposition="critical last-finishing UAV under one assigned relay/epoch; first goal CID and latest completion-refresh CID are distinct explicit lineages; no continuous authority inferred",
+            goal_delivery_subphases="goal creation to first command creation includes refresh scheduling and issuer/authority availability; first command creation to UART is application delivery including processing/relay, not pure RF latency",
             completion_gap="last pre-fault completed goal to first eligible new goal completion",
             censoring="right-censored time is never substituted as a successful recovery",
             restricted_loss=f"min(time to first recovery, {restricted_s}s); a bounded loss, not an imputed recovery; missing if horizon not observed",
@@ -544,8 +548,9 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
     decomposition_rows = [dict(scope=name, **{key:value for key,value in row.items() if key != "latest_CID_chain"},
         latest_CID_chain=json.dumps(row.get("latest_CID_chain"))) for name,row in decomposition.items()]
     write_csv(output / "metrics/relay_goal_decomposition.csv", decomposition_rows, ["scope", "status", "critical_uav_id", "goal_id", "leader_id", "epoch", "members",
-        "first_admitted_goal_CID", "completion_refresh_CID", "goal_created_host_ns", "first_goal_uart_host_ns", "completion_refresh_uart_host_ns", "completed_host_ns",
-        "fault_to_goal_creation_s", "goal_creation_to_first_UART_s", "first_UART_to_completion_s", "fault_to_completion_s", "sum_error_s", "latest_CID_chain"])
+        "first_admitted_goal_CID", "completion_refresh_CID", "goal_created_host_ns", "first_command_created_host_ns", "first_goal_uart_host_ns", "completion_refresh_uart_host_ns", "completed_host_ns",
+        "fault_to_goal_creation_s", "goal_creation_to_first_UART_s", "goal_creation_to_first_command_creation_s", "first_command_creation_to_UART_s",
+        "first_UART_to_completion_s", "fault_to_completion_s", "sum_error_s", "latest_CID_chain"])
     recovery_rows = [dict(endpoint=f"uav{i}", **per_uav[str(i)]) for i in UAVS]
     recovery_rows += [dict(endpoint=name, **row) for name, row in control.items()]
     write_csv(output / "metrics/relay_recovery.csv", recovery_rows, ["endpoint", "status", "recovered", "time_s",

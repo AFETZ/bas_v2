@@ -1,5 +1,6 @@
 """Synthetic lineage fixtures, not flight evidence."""
 from copy import deepcopy
+import csv
 import importlib.util
 import json
 from pathlib import Path
@@ -61,6 +62,24 @@ def test_unknown_goal_metadata_or_mismatched_completion_epoch_is_unverifiable():
     assert REPORT.decompose_goal(completed[0], expired, 55*NS)["status"] == "unverifiable_goal_lineage"
 
 
+def test_refresh_wait_is_separate_from_first_command_delivery_and_keeps_the_same_cid():
+    commands,completed=commands_and_completions()
+    first=next(row for row in commands if row["command_id"]=="first-4")
+    first.update(created_ns=60_900_000_000,admitted_ns=60_903_000_000,
+        lease_valid_from_ns=60_800_000_000,lease_valid_until_ns=62_903_000_000)
+    result=REPORT.decompose_goal(next(row for row in completed if row["uav_id"]==4),commands,55*NS)
+    assert result["status"]=="observed" and result["first_admitted_goal_CID"]=="first-4"
+    assert result["completion_refresh_CID"]=="latest-4"
+    assert result["first_command_created_host_ns"]==60_900_000_000
+    assert result["goal_creation_to_first_command_creation_s"]==.9
+    assert result["first_command_creation_to_UART_s"]==.003
+    assert abs(result["goal_creation_to_first_UART_s"]-.903)<1e-12
+    assert abs(result["goal_creation_to_first_command_creation_s"]+result["first_command_creation_to_UART_s"]-result["goal_creation_to_first_UART_s"])<1e-12
+    assert result["fault_to_completion_s"]==18
+    assert abs(result["fault_to_goal_creation_s"]+result["goal_creation_to_first_UART_s"]+result["first_UART_to_completion_s"]-18)<1e-12
+    assert abs(result["latest_CID_chain"]["command_creation_to_UART_s"]-.05)<1e-8
+
+
 def test_missing_former_master_does_not_become_a_fourth_follower():
     commands, completed = commands_and_completions()
     result = REPORT.group_goal_decomposition([r for r in completed if r["uav_id"] != 1], commands, 55*NS)
@@ -90,3 +109,10 @@ def test_end_to_end_export_preserves_goal_and_completion_refresh_lineages(tmp_pa
     assert group["completion_refresh_CID"] == "2:5:5"
     assert group["fault_to_completion_s"] == result["goal_recovery_all_five"]["time_s"] == 6
     assert "early:5" in (tmp_path / "out/metrics/relay_goal_decomposition.csv").read_text()
+    with (tmp_path/"out/metrics/relay_goal_decomposition.csv").open() as stream:
+        rows=list(csv.DictReader(stream))
+    exported=next(row for row in rows if row["scope"]=="all_five")
+    assert float(exported["first_command_created_host_ns"])==57.5*NS
+    wait,delivery=(float(exported[key]) for key in ("goal_creation_to_first_command_creation_s","first_command_creation_to_UART_s"))
+    assert wait==.5 and delivery<.041
+    assert abs(wait+delivery-float(exported["goal_creation_to_first_UART_s"]))<1e-12
