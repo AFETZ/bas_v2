@@ -20,8 +20,10 @@
     },
     "decomposition.csv": {
       "source_relative_to_evidence_bundle": "decomposition-20261027/decomposition.csv",
-      "sha256": "6b8ede2f744b8cdf6cbaf576b1efe910d3df6e346696a65179a3719412f12143",
-      "source_sha256": "b3fc709816fec450a40981b780ba7906830c2611f21ccec6d385a80facaabccf"
+      "sha256": "fad577304987ddf04ee9d2d1c24746a9de9b408521418a6cc976bee2621613a9",
+      "source_sha256": "b3fc709816fec450a40981b780ba7906830c2611f21ccec6d385a80facaabccf",
+      "previous_base_paper_sha256": "6b8ede2f744b8cdf6cbaf576b1efe910d3df6e346696a65179a3719412f12143",
+      "extension_provenance": "followup_provenance.json"
     }
   },
   "hardware_source_relative": "paper-live-20261026/host-lscpu.json",

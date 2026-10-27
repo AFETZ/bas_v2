@@ -9,7 +9,7 @@
 - Интеграция: `/home/bas/bas_v2-paper-live`, ветка `paper/live-leader-20261026`.
 - Основная серия: 30 запусков на `8e16ec223e895c11891e6e7d7c39dff8cee39cac`; reviewed HEAD `4800d98` отличается только документацией. Результаты независимо проверены; raw не изменять.
 - Рабочий профиль: Town01, stock DART/Gazebo, пять ArduPilot SITL, native ns-3.48 ad-hoc/Friis, control UART, metrics_only, native capture в tmpfs с публикацией после остановки.
-- Реально доказаны пять физических циклов, relay с четырьмя follower, selective handover, HOLD при RF-изоляции и отдельные 600 model s. Полный путь make operator/make gcs и полнота live parameters — задачи нового этапа.
+- Реально доказаны пять физических циклов, relay с четырьмя follower, selective handover, HOLD при RF-изоляции и отдельные 600 model s. Новый этап завершил make operator/make gcs цикл UAV3 и полные pre/post-параметры; точные границы — `LIVE_LEADER_FOLLOWUP_RESULTS.md`.
 - Friis не даёт геометрического затенения; Sionna RT/GPU/OptiX, новая карта и ускорение не входят в этап. Rock/Bullet подъём не подтверждён.
 - Image: `sha256:89d78eff9914b1644a1b01b793612e9ee8b19916c5a7bf5f578ba6d8bfbfafe5`. Пересборка образа без изменения зависимостей не нужна.
 - Частные `.external/ns-3-sionna-native`, `.python-deps-py310`, build/install и Town01 assets находятся в интеграции. Worker не получает writable symlink на них.
@@ -61,5 +61,6 @@ flock --nonblock --conflict-exit-code 75 /tmp/bas-paper-runtime.lock <command>
 Выбирать новый RUN_ID; параметры выгружать через тот же сетевой путь до/после измерительного окна.
 Интерактивный timeout не выполняет LAND: сначала LAND, ground/disarm, затем остановка своего контейнера с grace120s.
 
-Новая серия отдельно: 0,5/2/10s selective × fixed/failover × три пары, заранее замороженные version/config/order/seeds и случайные начала40–60model s. Старую серию не объединять молча; failed runs и >4s сохранять.
-Не добавлять новый backend/CI/оркестратор. Статью и репозиторий автоматически не публиковать.
+Новая серия отдельно: 18 попыток на `e6453c8`, 15 completed/3 failed после полных окон; 0,5/2/10s selective × fixed/failover × три пары. Freeze/config/order/seeds сохранены, два handover >4s. До всех опытов полные пять таблиц; после — 15 полных снимков, два partial, один skipped. Старую серию не объединять; failures не повторять для замены результатов.
+GUI07: отдельное наземное окно 60,009wall s, RTF0,998871 и настоящий снимок Town01/пяти моделей; полёт с GUI не заявляется. Анонимный черновик 12 страниц — `paper/build/`; document image `bas-paper-doc-tools:20261027` не меняет runtime image.
+Не добавлять новый backend/CI/оркестратор. Последующий запрос пользователя явно разрешил GitHub commit/push рабочей ветки. Статью на конференцию не отправлять; full raw/assets/images остаются вне Git.

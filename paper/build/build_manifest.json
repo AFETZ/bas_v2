@@ -1,0 +1,33 @@
+{
+  "inputs_sha256": {
+    "src/manuscript.md": "2279ffe7570961fa1d2ba2a360b3a715802e915216637a8e97ef053d5f13b862",
+    "refs/references.txt": "db9bfaf11dff58aa8a33917a804b959961915c29b89d4a42b36c5a7e0b8119fd",
+    "template/official_russian_template.dotm": "5af4efa6b6b7220949935e84a514accf7fc5dc4d687a774b3d3fb8eb3b4f36cf",
+    "tools/build_docx.py": "aa7f8bbf1bdf982b6d2166934c67b65c2caf3b9a090731990708dedba8c9b50b",
+    "tools/make_figures.py": "6e29acea4476e7069ed6d46d2f209dbec316af1033584f0b02805027faca54cb",
+    "data/decomposition.csv": "fad577304987ddf04ee9d2d1c24746a9de9b408521418a6cc976bee2621613a9",
+    "data/selective_paired_estimates.csv": "643e5285d749135c7c5977338f4e1052c9c1db59234f37c77d15fcf76f7b6dfa",
+    "data/selective_paired_points.csv": "63631baa56e081269d3abcbd836bdbfe4aa042dffd83d3560447d286cf208049",
+    "data/sensitivity_actual_exposure.csv": "db220e256a9ea895c386b40709bf1c9b1241a46b503ca889d5bbe5c162eb4104",
+    "data/sensitivity_paired_estimates.csv": "4940d162ad2f144613841a4f97b8cc3dd10165e6ee464f3b02238aab5e7377af",
+    "data/sensitivity_paired_points.csv": "f585a5bfcff31115e00c384630d3ec159bbe7ee934bc757820b1990f5e56dd39",
+    "data/sensitivity_runs.csv": "9baec42f0b5cc84c34b38c879bcd64e901e425cc59c8203eee8223ae6834b83f",
+    "data/sensitivity_six_cells.csv": "829be9644bee3363b7e7d72edf252a41c0e4a4a584b486fa7af54fb4ecd3bab5",
+    "data/six_cells.csv": "b44a971bcad488992cf9567dde45659dd1555eabf6977ad222b0a033b6eed0c7",
+    "data/first_pair_provenance.json": "2f87cf7628d6603e1cba1e98609b7b6da649c7beb01125b73b7ca6189036399b",
+    "data/followup_provenance.json": "9a515ae690416ec337684e7f7dfee6bdb82f962a40b16f3acf751fda81a3350f",
+    "data/gui07_summary.json": "28129c3fd4c1c21c64893e7c0f4b33ed66167c92e81089e80421a5fb5693355f",
+    "data/measured_profile.json": "cadcab25680d9834bab3388583714cbdc527069769d288c8c14d625402bf685b",
+    "data/operator03_summary.json": "22eca408af1d0098c462dffc7a73efcc4f6df88a9a4038710c1e17a50e4c3ccc",
+    "data/parameter_parallel_pilot_summary.json": "0ea24726f4ce10d03e8564065b8d86c0a7c49e73a13dcad7b4c5fea3e846a138",
+    "data/provenance.json": "d039eaeaa9cb6c5b307b250614d91dede558c7e5abf42333da4322145f21760e",
+    "data/sensitivity_design.json": "91e6d1ce4a17a8f046c1d7aaa100cb04363f92f1dfdc033cd862f607239089bd",
+    "data/sensitivity_independent_summary.json": "0357f0e19361fb0b15565b744f963d79e021418c3d9a1b04abd4a588b0ca630c",
+    "figures/architecture.png": "dc07850f46c2857291ef8e64fbcb5aab3f2fad642a3e9834abcee1e8aa01cb9f",
+    "figures/decomposition.png": "0ad3d55b1abd0ce0a5a2b29b55e50f626e2f8d80a3af789bfceb0409bc6a6225",
+    "figures/first_pair.png": "a36d9696285a0a76158fe9fbac3a9be94e76de855dfb4194d2bd17d3f7876002",
+    "figures/paired.png": "d18ac0a0bee7c50da044b7ce02bb295f456f5d5f102d2373a3afa7a03e98aab4",
+    "figures/sensitivity.png": "027dcd2902e1239f7db30182cfa29e022f0131d4ac10b8ad41bc0db8a3bc7121"
+  },
+  "docx_sha256": "f7745eb7cc7dd1d6e372944b10bd2067ae33b62bdaffa9205abbbe841c99e2c5"
+}

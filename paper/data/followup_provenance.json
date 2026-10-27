@@ -1,0 +1,37 @@
+{
+  "runtime_source": "e6453c8e2a1ed4f6e4f9b16c224104e62e2df5d1",
+  "analysis_source": "de14d55",
+  "files": {
+    "sensitivity_runs.csv": {
+      "source": "runs/paper-followup-20261027/sensitivity/analysis/metrics/sensitivity_runs.csv",
+      "source_sha256": "9f3be3787a9079d9e477bf7a838e7f29e9371176909d5a4fc17461b5d3348296",
+      "paper_sha256": "9baec42f0b5cc84c34b38c879bcd64e901e425cc59c8203eee8223ae6834b83f"
+    },
+    "sensitivity_paired_points.csv": {
+      "source": "runs/paper-followup-20261027/sensitivity/analysis/metrics/paired_points.csv",
+      "source_sha256": "b7d027b2156b380c52cb9b58408da6d82e947fd539f931cbe4b2de4b25f6c46d",
+      "paper_sha256": "f585a5bfcff31115e00c384630d3ec159bbe7ee934bc757820b1990f5e56dd39"
+    },
+    "sensitivity_paired_estimates.csv": {
+      "source": "runs/paper-followup-20261027/sensitivity/analysis/metrics/paired_estimates.csv",
+      "source_sha256": "8d2666104b29412f0648b7f1a774e5d4abb12a788821749fefeb3ddf95379331",
+      "paper_sha256": "4940d162ad2f144613841a4f97b8cc3dd10165e6ee464f3b02238aab5e7377af"
+    },
+    "sensitivity_six_cells.csv": {
+      "source": "runs/paper-followup-20261027/sensitivity/figures/six-cells.csv",
+      "source_sha256": "fbfbc06b95218ba22ceb03b91bdb4eccab0e3a63c9f9e76753be027d4faea845",
+      "paper_sha256": "829be9644bee3363b7e7d72edf252a41c0e4a4a584b486fa7af54fb4ecd3bab5"
+    },
+    "sensitivity_actual_exposure.csv": {
+      "source": "runs/paper-followup-20261027/sensitivity/figures/paired-actual-RF-exposure.csv",
+      "source_sha256": "187855b6636f71b74b717a6c7c7f91e475d6f693983106e7e97dcf4cbcf0e280",
+      "paper_sha256": "db220e256a9ea895c386b40709bf1c9b1241a46b503ca889d5bbe5c162eb4104"
+    },
+    "decomposition.csv": {
+      "source": "runs/paper-followup-20261027/decomposition-old30-subphases/rows.csv",
+      "source_sha256": "c8534fe23fb2532eaa989b7df479205db7c077549878ad6331e46fc868d4f223",
+      "paper_sha256": "fad577304987ddf04ee9d2d1c24746a9de9b408521418a6cc976bee2621613a9",
+      "transform": "join only three independently replayed subphase fields by run_id/group; assert same critical UAV,goal,first CID,completion CID and unchanged interval sum"
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "action": "Resume remaining frozen rows only; never retry existing raw",
+  "host_monotonic_ns": 420023599242614,
+  "diagnosis": "Last three runs failed closed on native state_coupling_deadline, not command-recovery threshold. All observed180s windows completed; two full LAND cycles completed, third LAND incomplete. Root preserves failed statuses/partial post tables and does not change source/settings/thresholds.",
+  "failed": [
+    "paper-sensitivity-d00500ms-fixed-s1-r02",
+    "paper-sensitivity-d02000ms-failover-s1-r03",
+    "paper-sensitivity-d02000ms-fixed-s1-r03"
+  ],
+  "frozen_head": "e6453c8e2a1ed4f6e4f9b16c224104e62e2df5d1"
+}

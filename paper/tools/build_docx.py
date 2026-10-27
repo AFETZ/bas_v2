@@ -58,7 +58,7 @@ def configure(doc):
     normal.paragraph_format.line_spacing=1
     main=style(doc,'ispText_main','Times New Roman',10)
     main.paragraph_format.line_spacing=1
-    main.paragraph_format.space_before=Pt(1.5);main.paragraph_format.space_after=Pt(1.5)
+    main.paragraph_format.space_before=Pt(0);main.paragraph_format.space_after=Pt(0)
     main.paragraph_format.alignment=WD_ALIGN_PARAGRAPH.JUSTIFY
     main.paragraph_format.first_line_indent=Cm(0)
     main.paragraph_format.widow_control=True
@@ -166,7 +166,7 @@ def table(doc,name):
             rows.append([policy]+values)
     elif name=='sensitivity':
         caption='Табл. 4. Отдельная серия, три попытки на ячейку; средние допустимых сетевых окон с n, общий failed отдельно. Пропуск не равен нулю'
-        heads=['Номинал, с','Политика','Actual RF min–max, с','Timely, %','T_UART, с (n)','Censored / failed']
+        heads=['Ном., с','Режим','Actual RF min–max, с','Timely, %','T_UART, с (n)','Censored / failed']
         with (ROOT/'data/sensitivity_runs.csv').open(newline='') as f:source=list(csv.DictReader(f))
         assert len(source)==18
         rows=[]
@@ -278,6 +278,8 @@ def build():
         'template_style_source':'official_russian_template.dotm','main_font_pt':10,
         'page_size_cm':[16.5,24.0],'personal_template_parts_imported':False},indent=2)+'\n')
     inputs=[ROOT/'src/manuscript.md',ROOT/'refs/references.txt',ROOT/'template/official_russian_template.dotm',
+            ROOT/'tools/build_docx.py', ROOT/'tools/make_figures.py',
+            *sorted((ROOT/'data').glob('*.csv')), *sorted((ROOT/'data').glob('*.json')),
             *sorted((ROOT/'figures').glob('*.png'))]
     (BUILD/'build_manifest.json').write_text(json.dumps({
         'inputs_sha256':{str(path.relative_to(ROOT)):hashlib.sha256(path.read_bytes()).hexdigest() for path in inputs},

@@ -3,7 +3,7 @@ set -euo pipefail
 # Invoke under /tmp/bas-paper-runtime.lock from the integration worktree.
 task_paper_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 docker run --rm --user "$(id -u):$(id -g)" --cpus 1 \
-  -e MPLCONFIGDIR=/tmp/bas-paper-mpl \
+  -e XDG_CACHE_HOME=/tmp/bas-paper-cache -e MPLCONFIGDIR=/tmp/bas-paper-mpl \
   -v "$task_paper_root:/work/paper" bas-paper-doc-tools:20261027 \
   bash -eu -c '
 python3 /work/paper/tools/make_figures.py

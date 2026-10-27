@@ -1,7 +1,21 @@
 # Product Status
 
 Updated: 2026-10-27. This status describes the user-authorized paper/live worktree `/home/bas/bas_v2-paper-live`, not every historical BAS profile.
-Measured implementation: `8e16ec223e895c11891e6e7d7c39dff8cee39cac`, pinned image `sha256:89d78eff9914b1644a1b01b793612e9ee8b19916c5a7bf5f578ba6d8bfbfafe5`.
+Main30 measured implementation: `8e16ec223e895c11891e6e7d7c39dff8cee39cac`; separate sensitivity18: `e6453c8e2a1ed4f6e4f9b16c224104e62e2df5d1`. Pinned image `sha256:89d78eff9914b1644a1b01b793612e9ee8b19916c5a7bf5f578ba6d8bfbfafe5`.
+
+## Follow-up completed, separate cohort
+
+- [Follow-up report, files and exact start/stop commands](../doc/LIVE_LEADER_FOLLOWUP_RESULTS.md). The main30 was not repeated; source/config/order/seeds of sensitivity18 were frozen before measurement. Same native binary SHA; no physics/MAC/lease threshold retuning.
+- True `make operator` → `make gcs` selected UAV3 and completed takeoff16→altitude20→BRAKE→LAND/disarm through the radio/relay/UART path. Six exact-frame chains, observed physical z0.3405→20.3609→0.3405m; other four grounded. Launcher2 after explicit owned Docker stop0 remains recorded.
+- Operator pre/post: five complete1388-index tables per stage, independently replayed against upstream tlog/raw/JSONL/CSV;54 matched value changes, no PARAM_SET. Historical main30 DataFlash remains observed-only.
+- Sensitivity: nominal selective0.5/2/10s × fixed/failover ×3 pairs: **18 attempted,15 completed,3 failed after complete180s windows**. All18 network windows eligible; failures stay failed. Order10/11 fail during post-parameter reads, order12 during LAND; only UAV1 landing credited in12. No retry/overwrite.
+- Mean common UART fixed→failover:0.5s1.261→1.271s(no role change),2s3.602→3.943s,10s11.617→3.939s. At2s all3 activations follow RFend and fresh old-channel echo; potentially unnecessary changes. At10s paired UART effect−7.677s and timely effect+4.593pp, exploratory n=3.
+- **Two of six changed-relay recoveries exceed4s:4.123131166 and4.134810747s**; four satisfy the reference. Physical new-goal completion is separate and has no4s SLA. Actual RF exposure/heartbeat/renewal/command phase recorded; one nominal0.5s was0.450658483s.
+- All18 pre five-table snapshots complete; post15complete/2partial/1skipped. Independent indexed replay:165complete component tables,10partial,5unrecorded. Missing/unindexed/CSV-null values stay explicit; snapshots are not atomic and were outside measurement.
+- Main selective goal decomposition updated: failover14.972628s until goal creation+0.972830s to first command creation+0.010541s command-to-UART+5.346194s movement/hold=21.302193s. First CID differs from latest completion-refresh CID; none of these combined intervals is pure RF latency.
+- Separate grounded GUI07: actual Town01/five-model screenshot,960×480 after warmup,60.009wall-s observation,225/225 nonce responses; clock RTF0.998871,p5=0.997549,lag p95/max2.492/6.859ms. Viewer CPU mean74.63%onecore,quota0.75; RSS max2.027GB. No GUI-flight,FPS,graphics-GPU-memory or causal overhead claim.
+- Anonymous Russian **12-page DOCX/PDF** in official styles,11 primary sources, real graphs and all18 paired points in CSV; final artifact checks and36 focused analysis tests pass. PDF uses disclosed Liberation replacements for unavailable TNR/Arial.
+- [Compact evidence and commands](../paper/evidence/followup/), [data](../paper/data/), [manuscript](../paper/README.md). Full raw remains under `runs/native-radio-realtime/`; no conference submission. The later user instruction explicitly authorizes commit/push of this working branch to GitHub.
 
 ## Observed product
 
@@ -40,8 +54,8 @@ Measured implementation: `8e16ec223e895c11891e6e7d7c39dff8cee39cac`, pinned imag
 ## Scope and remaining limits
 
 - Result covers Town01, vertical missions, one host/shared monotonic clock, native Friis and declared symmetric link losses. No physical HitL, distributed-clock guarantee, hard real time or urban geometric radio shadowing is claimed.
-- Town01 collision geometry uses approximated building/surface boxes; vegetation has no collision. Rock/Bullet lift remains unverified; GUI/Sionna/accelerated batch are outside these measurements.
+- Town01 collision geometry uses approximated building/surface boxes; vegetation has no collision. Rock/Bullet lift remains unverified; main/sensitivity are headless. GUI has only the separate grounded observation above; Sionna/accelerated batch are outside the measurements.
 - Resource figures cover three simulator process categories, not all helpers. tmpfs raw files add memory outside RSS. DataFlash PARAM_COUNT completeness is unverified; optional native_sources has generic not_recorded coverage while disabled.
 - One de-duplicated publication contains four unique poses; it was not filled. Ten pair_exclusions are expected no-fault N/A recovery endpoints, not excluded runs.
 - Failed developmental runs are retained, including old rock takeoff failures, BAR starvation, logging overload and `paper-live600-01` jitter261.329 ms. Exact cause of that isolated stall was not measured; no causal HDD-overhead estimate is claimed.
-- Original `/home/bas/bas_v2-main` HEAD/status/diff and saved untracked bytes still match preparation. Its local changes were not reset. All owned simulators are stopped; no repository publication or paper submission was performed.
+- Original `/home/bas/bas_v2-main` HEAD/status/binary and cached diff and saved untracked SHA256 still match the follow-up start snapshot. Its local changes were not reset. All owned simulators are stopped. Paper submission remains unauthorized; the subsequent GitHub push request is authorized separately.

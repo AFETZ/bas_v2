@@ -1,5 +1,11 @@
 # BAS v2
 
+Проверенные live-результаты для статьи: [основные 30 запусков](doc/LIVE_LEADER_RESULTS.md),
+[параметры, оператор и отдельные 18 попыток чувствительности](doc/LIVE_LEADER_FOLLOWUP_RESULTS.md).
+[Анонимный черновик PDF, 12 страниц](paper/build/manuscript_anonymous.pdf),
+[DOCX](paper/build/manuscript_anonymous.docx), [CSV и графики](paper/README.md).
+Полные raw и assets хранятся вне Git; failed и неполные post-выгрузки сохранены в отчёте.
+
 Стенд для моделирования пяти БАС: ArduPilot SITL управляет полётом в Gazebo,
 ns-3 моделирует радиосеть, Sionna RT рассчитывает распространение сигнала.
 Один наземный пункт управления обменивается с пятью аппаратами реальными
@@ -171,7 +177,7 @@ BAS_NATIVE_FIVE_RUN_ID=baseline-town01 make demo-town01 DEMO_GUI=0
 BAS_NATIVE_FIVE_RUN_ID=latency BAS_NATIVE_LATENCY_MODE=1 make demo-town01 DEMO_GUI=0
 ```
 
-Для ручного управления запустите `make operator DEMO_SCENARIO=rock_demo DEMO_GUI=0`,
+Для проверенного ручного управления используйте профиль Town01 из [отчёта](doc/LIVE_LEADER_FOLLOWUP_RESULTS.md) и `make operator DEMO_SCENARIO=town01 DEMO_GUI=0`,
 затем во втором терминале — `make gcs`. Остановка из другого терминала: `make stop`.
 Customer-сцена, источники помех, карты и режимы исследования описаны в
 [руководстве оператора](doc/USER_GUIDE.md).

@@ -36,6 +36,13 @@ supersede conflicting older default-profile and one-agent statements below.
   operator cycle, separate 18-run sensitivity study and anonymous DOCX/PDF draft.
 - Coordinator means a GCS-appointed airborne command relay, not autonomous planning.
   RF-isolation HOLD assumes functioning sidecar/runtime. Intervals at n=5 are exploratory.
+- Follow-up completed: read `doc/LIVE_LEADER_FOLLOWUP_RESULTS.md`. The separate frozen
+  18-attempt study at `e6453c8` has 15 completed and 3 failed after complete windows;
+  keep the failures, two handovers >4 s, and incomplete/skipped post-parameter tables.
+  UAV3's full operator cycle is headless; GUI07 proves only a grounded 60 s observation.
+  The anonymous 12-page draft and compact evidence live in `paper/`; full raw stays in runs.
+  The user subsequently explicitly requested a commit/push to the existing GitHub remote;
+  that authorizes publishing this working branch, but not submitting the paper.
 
 # Product-First Repository Rules
 

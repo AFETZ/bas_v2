@@ -56,6 +56,18 @@ def main():
         assert all(c['distinct_valid_indices']==1388 and not c['missing_indices'] for c in stage['components'])
     assert len(operator['operator_commands'])==6 and operator['before_after_changes']==54
     assert all(c['all_five_stages_same_hash'] and c['uart_inside_lease'] for c in operator['operator_commands'])
+    sensitivity=rows('sensitivity_runs.csv')
+    assert len(sensitivity)==18 and len({r['run_id'] for r in sensitivity})==18
+    assert sum(r['run_status']=='failed' for r in sensitivity)==3
+    assert all(r['network_eligible']=='True' and r['measurement_window_complete']=='True' for r in sensitivity)
+    changed=[r for r in sensitivity if float(r['handover_changed'])==1]
+    assert len(changed)==6 and sum(float(r['handover_by4s_where_changed'])==1 for r in changed)==4
+    assert sorted(round(float(r['common_UART_recovery_s']),9) for r in changed if float(r['common_UART_recovery_s'])>4)==[4.123131166,4.134810747]
+    independent=json.loads((ROOT/'data/sensitivity_independent_summary.json').read_text())
+    assert independent['parameter_tables']=={'complete':165,'partial':10} and independent['unrecorded_tables']==5
+    assert independent['independent_UART_physical_RF_endpoints_match']
+    for name,record in json.loads((ROOT/'data/followup_provenance.json').read_text())['files'].items():
+        assert hashlib.sha256((ROOT/'data'/name).read_bytes()).hexdigest()==record['paper_sha256'],name
     document=ROOT/'build/manuscript_anonymous.docx'
     manifest=json.loads((ROOT/'build/build_manifest.json').read_text())
     for name,digest in manifest['inputs_sha256'].items():
@@ -92,6 +104,8 @@ def main():
     assert all(x not in text for x in ['/home/','Иванов','Петров','Степанянц','Зорошилов','Нархов'])
     assert all(x in text for x in ['32,511','21,302','3,963','14,973','разведоч'])
     result={'checks':'passed','pages':pages,'run_count':30,'offered':27000,'paired_n':5,
+            'sensitivity_attempted':18,'sensitivity_completed':15,'sensitivity_failed':3,
+            'sensitivity_pairs_per_nominal_duration':3,'changed_relay_by4s':4,'changed_relay_total':6,
             'technical_sources':sorted(cited),'anonymous_pdf_author_empty':True,
             'docx_macro_free':True,'font_substitution':'Liberation Serif/Sans in PDF; TNR/Arial names in DOCX',
             'pending_results':pending,

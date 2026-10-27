@@ -1,0 +1,32 @@
+{
+  "checks": "passed",
+  "pages": 12,
+  "run_count": 30,
+  "offered": 27000,
+  "paired_n": 5,
+  "sensitivity_attempted": 18,
+  "sensitivity_completed": 15,
+  "sensitivity_failed": 3,
+  "sensitivity_pairs_per_nominal_duration": 3,
+  "changed_relay_by4s": 4,
+  "changed_relay_total": 6,
+  "technical_sources": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11
+  ],
+  "anonymous_pdf_author_empty": true,
+  "docx_macro_free": true,
+  "font_substitution": "Liberation Serif/Sans in PDF; TNR/Arial names in DOCX",
+  "pending_results": [],
+  "docx_sha256": "f7745eb7cc7dd1d6e372944b10bd2067ae33b62bdaffa9205abbbe841c99e2c5",
+  "pdf_sha256": "f01ea0869d366341cbd69589f70d0d9f4de987556bd60e7edc58a5199e2f095b"
+}

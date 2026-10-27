@@ -1,0 +1,67 @@
+{
+  "runtime_head": "e6453c8e2a1ed4f6e4f9b16c224104e62e2df5d1",
+  "analysis_head": "de14d55",
+  "completed_attempts": 18,
+  "completed_successfully": 15,
+  "source_raw_mutated": false,
+  "raw_root_relative": "runs/native-radio-realtime",
+  "local_evidence_root": "runs/paper-followup-20261027",
+  "compact_copies": {
+    "freeze.json": {
+      "source": "runs/paper-followup-20261027/sensitivity/freeze.json",
+      "sha256": "af321c085d0f213f25ce167244a34a174cd49e8d55d7a31ae57257a992bf7afa"
+    },
+    "plan.csv": {
+      "source": "runs/paper-followup-20261027/sensitivity/plan.csv",
+      "sha256": "77f3b3b783bb19c98a848047310c15fe505f6e5b68e1869c509fb0d5db1846d1"
+    },
+    "controller_events.jsonl": {
+      "source": "runs/paper-followup-20261027/sensitivity/controller/controller_events.jsonl",
+      "sha256": "8f5a2ea5dc6d3410e6cf064d43fcef920e4f7fc234fb0399422504a4449248e1"
+    },
+    "resume-after-clock-failures.json": {
+      "source": "runs/paper-followup-20261027/sensitivity/resume-after-clock-failures.json",
+      "sha256": "3995bf00f22344b83a57327a8c554ae0fe4e8d9a43bd8ff7bbe6f5ebd70ba6df"
+    },
+    "sensitivity_analysis.json": {
+      "source": "runs/paper-followup-20261027/sensitivity/analysis/metrics/sensitivity_analysis.json",
+      "sha256": "ffc5c7802c8f9f32e8f331cd32407b0cd5ab8ba1ad4c8d91d8573d898789962a"
+    },
+    "table-and-caption.md": {
+      "source": "runs/paper-followup-20261027/sensitivity/figures/table-and-caption.md",
+      "sha256": "5b5ab8a0bb49aec08529a5d29e1a265567439b64c56575d1b6330985f160c82c"
+    },
+    "all18-independent.json": {
+      "source": "runs/paper-followup-20261027/sensitivity-independent-review/all18-independent.json",
+      "sha256": "07a39ad79c3e0570401b234487294ac674425f063fa82ce16f11ffd891c333cb"
+    },
+    "all18-upstream-parameters.json": {
+      "source": "runs/paper-followup-20261027/sensitivity-independent-review/all18-upstream-parameters.json",
+      "sha256": "d6150d8850ed4c6303cfc866a0bada7a632db8701250d7882457758df2185f14"
+    },
+    "failed10-12-review.md": {
+      "source": "runs/paper-followup-20261027/sensitivity-independent-review/failed10-12-review.md",
+      "sha256": "dd5c767f6d5aac5cf739981ee2252ed559fab3903a8f8585ed5ddd3f4d7ed353"
+    },
+    "failed10-12-timing-audit.json": {
+      "source": "runs/paper-followup-20261027/sensitivity-independent-review/failed10-12-timing-audit.json",
+      "sha256": "91f37c5d8714fab4627b3bd5338d33cfdcc4c2203eb2bddd2a5dccaa91c13be3"
+    },
+    "reproduce-one.env": {
+      "source": "runs/paper-followup-20261027/sensitivity/reproduce-one.env",
+      "sha256": "944f893421394d060ab012b40adc3723b1750344402d2bd7ca6a95fa77fd14b9"
+    },
+    "review_completed_method.py": {
+      "source": "runs/paper-followup-20261027/sensitivity-independent-review/review_completed_method.py",
+      "sha256": "0fb28a22c2eac78d76234f661d7885b0a1095bbcb0a71b1f93af7f33a962de2c"
+    },
+    "review_live_parameters_method.py": {
+      "source": "runs/paper-followup-20261027/sensitivity-independent-review/review_live_parameters_method.py",
+      "sha256": "856bd33a32c30cac94cabe646a28cdc1d7f1fd850af0dd2d37cb360f2b04c810"
+    },
+    "replay_all18_parameters_method.py": {
+      "source": "runs/paper-followup-20261027/sensitivity-independent-review/replay_all18_parameters_method.py",
+      "sha256": "9465a4584010d0d4e534f2ea9da4220fde9815ebca5b1a03117cbd84229864fc"
+    }
+  }
+}

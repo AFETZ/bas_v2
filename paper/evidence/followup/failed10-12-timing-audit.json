@@ -1,0 +1,1953 @@
+{
+  "method": "One-off independent RG-filtered raw role/command/UART recomputation, no production analyzer imports",
+  "complete18_cohort": false,
+  "endpoint_interpretation": "Physical goal duration has no4s SLA; common UART and changed-relay UART are separate endpoints.",
+  "records": [
+    {
+      "order": 10,
+      "run_id": "paper-sensitivity-d00500ms-fixed-s1-r02",
+      "planned": {
+        "order": "10",
+        "study_id": "relay_sensitivity_18_v1",
+        "experiment_profile": "sensitivity",
+        "pair_id": "sensitivity-d00500ms-seed1-run2",
+        "repeat": "2",
+        "rng_seed": "1",
+        "rng_run": "2",
+        "policy": "fixed",
+        "fault_profile": "selective",
+        "outage_duration_s": "0.500000",
+        "fault_start_s": "56.163750",
+        "fault_end_s": "56.663750",
+        "duration_s": "180.000000",
+        "run_id": "paper-sensitivity-d00500ms-fixed-s1-r02",
+        "start_seed": "20261027",
+        "order_seed": "20261028",
+        "configuration_status": "root_freeze_after_code_integration"
+      },
+      "exit_code": 1,
+      "status": "failed",
+      "criteria": {
+        "five_uav_lifecycle": true,
+        "two_completed_goals_each": true,
+        "two_completed_target_levels_each": true,
+        "live_integral_rtf_target": true,
+        "total_GCS_hold_all_five": null
+      },
+      "frozen_source_matches": true,
+      "source_dirty_paths": "0",
+      "config_fault_matches": true,
+      "parameter_workers": 5,
+      "parameters": [
+        {
+          "stage": "before",
+          "status": "complete",
+          "workers": 5,
+          "duration_s": 28.925812606,
+          "components": [
+            {
+              "sysid": 1,
+              "component_id": 1,
+              "complete": true,
+              "count": 1388,
+              "csv_count": 1388,
+              "csv_indices_complete": true,
+              "checks": {
+                "ARMING_SKIPCHK": 0,
+                "COMPASS_USE": 1,
+                "SIM_SPEEDUP": 1.0
+              }
+            },
+            {
+              "sysid": 2,
+              "component_id": 1,
+              "complete": true,
+              "count": 1388,
+              "csv_count": 1388,
+              "csv_indices_complete": true,
+              "checks": {
+                "ARMING_SKIPCHK": 0,
+                "COMPASS_USE": 1,
+                "SIM_SPEEDUP": 1.0
+              }
+            },
+            {
+              "sysid": 3,
+              "component_id": 1,
+              "complete": true,
+              "count": 1388,
+              "csv_count": 1388,
+              "csv_indices_complete": true,
+              "checks": {
+                "ARMING_SKIPCHK": 0,
+                "COMPASS_USE": 1,
+                "SIM_SPEEDUP": 1.0
+              }
+            },
+            {
+              "sysid": 4,
+              "component_id": 1,
+              "complete": true,
+              "count": 1388,
+              "csv_count": 1388,
+              "csv_indices_complete": true,
+              "checks": {
+                "ARMING_SKIPCHK": 0,
+                "COMPASS_USE": 1,
+                "SIM_SPEEDUP": 1.0
+              }
+            },
+            {
+              "sysid": 5,
+              "component_id": 1,
+              "complete": true,
+              "count": 1388,
+              "csv_count": 1388,
+              "csv_indices_complete": true,
+              "checks": {
+                "ARMING_SKIPCHK": 0,
+                "COMPASS_USE": 1,
+                "SIM_SPEEDUP": 1.0
+              }
+            }
+          ]
+        },
+        {
+          "stage": "after",
+          "status": "partial",
+          "workers": 5,
+          "duration_s": 0.115163526,
+          "components": [
+            {
+              "sysid": 1,
+              "component_id": 1,
+              "complete": false,
+              "count": null,
+              "csv_count": 0,
+              "csv_indices_complete": null,
+              "checks": {
+                "ARMING_SKIPCHK": null,
+                "COMPASS_USE": null,
+                "SIM_SPEEDUP": null
+              }
+            },
+            {
+              "sysid": 2,
+              "component_id": 1,
+              "complete": false,
+              "count": null,
+              "csv_count": 0,
+              "csv_indices_complete": null,
+              "checks": {
+                "ARMING_SKIPCHK": null,
+                "COMPASS_USE": null,
+                "SIM_SPEEDUP": null
+              }
+            },
+            {
+              "sysid": 3,
+              "component_id": 1,
+              "complete": false,
+              "count": null,
+              "csv_count": 0,
+              "csv_indices_complete": null,
+              "checks": {
+                "ARMING_SKIPCHK": null,
+                "COMPASS_USE": null,
+                "SIM_SPEEDUP": null
+              }
+            },
+            {
+              "sysid": 4,
+              "component_id": 1,
+              "complete": false,
+              "count": null,
+              "csv_count": 0,
+              "csv_indices_complete": null,
+              "checks": {
+                "ARMING_SKIPCHK": null,
+                "COMPASS_USE": null,
+                "SIM_SPEEDUP": null
+              }
+            },
+            {
+              "sysid": 5,
+              "component_id": 1,
+              "complete": false,
+              "count": 1388,
+              "csv_count": 1,
+              "csv_indices_complete": false,
+              "checks": {
+                "ARMING_SKIPCHK": null,
+                "COMPASS_USE": null,
+                "SIM_SPEEDUP": null
+              }
+            }
+          ]
+        }
+      ],
+      "native_rng_matches": true,
+      "image_matches": true,
+      "raw_publication_status": "copied",
+      "raw_publication_errors": [],
+      "raw_publication_file_sizes_match": true,
+      "measurement_duration_source_s": 180.011,
+      "measurement_host_ns": [
+        418095912143675,
+        418276142676947
+      ],
+      "actual_native_fault": [
+        {
+          "time_s": "169.050000",
+          "wall_monotonic_ns": "418152173279909",
+          "phase": "experiment_fault",
+          "event": "fault_start",
+          "node": "cp",
+          "peer": "uav1",
+          "bytes": "0",
+          "x": "5.000000",
+          "y": "0.000000",
+          "z": "2.000000",
+          "value": "200.000000",
+          "details": "provider=ns3::MatrixPropagationLossModel;profile=selective;symmetric=true;default_extra_loss_db=0;base_propagation=friis;trigger=phase_file;phase=experiment_fault"
+        },
+        {
+          "time_s": "169.550000",
+          "wall_monotonic_ns": "418152673261071",
+          "phase": "experiment_recovery",
+          "event": "fault_end",
+          "node": "cp",
+          "peer": "uav1",
+          "bytes": "0",
+          "x": "5.000000",
+          "y": "0.000000",
+          "z": "2.000000",
+          "value": "0.000000",
+          "details": "provider=ns3::MatrixPropagationLossModel;profile=selective;symmetric=true;default_extra_loss_db=0;base_propagation=friis;trigger=phase_file;phase=experiment_recovery"
+        }
+      ],
+      "actual_RF_duration_host_s": 0.499981162,
+      "fault_phase_source_elapsed_s": {
+        "experiment_fault": 56.167,
+        "experiment_recovery": 56.678
+      },
+      "prefault_scopes_all_raw": [
+        [
+          1,
+          1
+        ]
+      ],
+      "prefault_active_leader_epoch": [
+        1,
+        1
+      ],
+      "new_selections": [],
+      "new_own_activations": [],
+      "confirmed_old_channel_restored_after_fault_s": 0.629332126,
+      "lifecycle_small_raw": {
+        "1": {
+          "armed_radio_heartbeat_observed": true,
+          "takeoff_raw": {
+            "run_id": "paper-sensitivity-d00500ms-fixed-s1-r02",
+            "event": "takeoff_observed",
+            "stage": "takeoff_observed",
+            "host_monotonic_ns": 418033146939425,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": 51.6,
+            "uav_id": 1,
+            "node_id": 0,
+            "actual_position_m": [
+              20.002814561180976,
+              0.003402895705363956,
+              8.21878593831311
+            ],
+            "target_position_m": [
+              20.0,
+              4.672156572250801e-18,
+              8.448475748031944
+            ],
+            "target_frame": "ENU"
+          },
+          "landing_disarm_raw": {
+            "run_id": "paper-sensitivity-d00500ms-fixed-s1-r02",
+            "event": "landing_disarm_observed",
+            "stage": "landing_disarm_observed",
+            "host_monotonic_ns": 418301957843257,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": 320.08,
+            "uav_id": 1,
+            "node_id": 0,
+            "actual_position_m": [
+              19.986608894911363,
+              -0.011274456187050754,
+              0.34047624427054096
+            ],
+            "admitted_command_id": "1:1:2586",
+            "reason": null
+          },
+          "final_radio_heartbeat": {
+            "run_id": "paper-sensitivity-d00500ms-fixed-s1-r02",
+            "event": "autopilot_heartbeat_received",
+            "stage": "autopilot_heartbeat_received",
+            "host_monotonic_ns": 418311975742514,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": null,
+            "uav_id": 1,
+            "node_id": 0,
+            "custom_mode": 9,
+            "base_mode": 89,
+            "producer_host_monotonic_ns": 418311973097223,
+            "received_host_monotonic_ns": 418311975722797
+          },
+          "completed_distinct_target_levels": 2,
+          "ordered_lift_and_landing": true
+        },
+        "2": {
+          "armed_radio_heartbeat_observed": true,
+          "takeoff_raw": {
+            "run_id": "paper-sensitivity-d00500ms-fixed-s1-r02",
+            "event": "takeoff_observed",
+            "stage": "takeoff_observed",
+            "host_monotonic_ns": 418045239680388,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": 63.68,
+            "uav_id": 2,
+            "node_id": 0,
+            "actual_position_m": [
+              35.00871348407784,
+              0.011514334552750251,
+              13.057517932660577
+            ],
+            "target_position_m": [
+              35.0,
+              -3.06666903276745e-18,
+              12.387475748031944
+            ],
+            "target_frame": "ENU"
+          },
+          "landing_disarm_raw": {
+            "run_id": "paper-sensitivity-d00500ms-fixed-s1-r02",
+            "event": "landing_disarm_observed",
+            "stage": "landing_disarm_observed",
+            "host_monotonic_ns": 418304109534116,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": 322.22,
+            "uav_id": 2,
+            "node_id": 0,
+            "actual_position_m": [
+              34.97703455857993,
+              -0.02457346881540582,
+              0.34047650832597304
+            ],
+            "admitted_command_id": "1:2:2587",
+            "reason": null
+          },
+          "final_radio_heartbeat": {
+            "run_id": "paper-sensitivity-d00500ms-fixed-s1-r02",
+            "event": "autopilot_heartbeat_received",
+            "stage": "autopilot_heartbeat_received",
+            "host_monotonic_ns": 418312127689344,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": null,
+            "uav_id": 2,
+            "node_id": 0,
+            "custom_mode": 9,
+            "base_mode": 89,
+            "producer_host_monotonic_ns": 418312123123884,
+            "received_host_monotonic_ns": 418312127665520
+          },
+          "completed_distinct_target_levels": 2,
+          "ordered_lift_and_landing": true
+        },
+        "3": {
+          "armed_radio_heartbeat_observed": true,
+          "takeoff_raw": {
+            "run_id": "paper-sensitivity-d00500ms-fixed-s1-r02",
+            "event": "takeoff_observed",
+            "stage": "takeoff_observed",
+            "host_monotonic_ns": 418061283973145,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": 79.7,
+            "uav_id": 3,
+            "node_id": 0,
+            "actual_position_m": [
+              50.05365279100805,
+              0.052321760295892035,
+              16.235222681796145
+            ],
+            "target_position_m": [
+              50.0,
+              -3.322334089703249e-18,
+              16.463475748031943
+            ],
+            "target_frame": "ENU"
+          },
+          "landing_disarm_raw": {
+            "run_id": "paper-sensitivity-d00500ms-fixed-s1-r02",
+            "event": "landing_disarm_observed",
+            "stage": "landing_disarm_observed",
+            "host_monotonic_ns": 418307120693146,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": 325.22,
+            "uav_id": 3,
+            "node_id": 0,
+            "actual_position_m": [
+              49.98094600899065,
+              -0.02989051039106004,
+              0.3404763245495505
+            ],
+            "admitted_command_id": "1:3:2588",
+            "reason": null
+          },
+          "final_radio_heartbeat": {
+            "run_id": "paper-sensitivity-d00500ms-fixed-s1-r02",
+            "event": "autopilot_heartbeat_received",
+            "stage": "autopilot_heartbeat_received",
+            "host_monotonic_ns": 418312129649618,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": null,
+            "uav_id": 3,
+            "node_id": 0,
+            "custom_mode": 9,
+            "base_mode": 89,
+            "producer_host_monotonic_ns": 418312125197279,
+            "received_host_monotonic_ns": 418312129632787
+          },
+          "completed_distinct_target_levels": 2,
+          "ordered_lift_and_landing": true
+        },
+        "4": {
+          "armed_radio_heartbeat_observed": true,
+          "takeoff_raw": {
+            "run_id": "paper-sensitivity-d00500ms-fixed-s1-r02",
+            "event": "takeoff_observed",
+            "stage": "takeoff_observed",
+            "host_monotonic_ns": 418076567984532,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": 94.96,
+            "uav_id": 4,
+            "node_id": 0,
+            "actual_position_m": [
+              65.03640823451055,
+              0.02883475789750633,
+              21.06643367813985
+            ],
+            "target_position_m": [
+              65.0,
+              -3.232597326480591e-18,
+              20.387475748031946
+            ],
+            "target_frame": "ENU"
+          },
+          "landing_disarm_raw": {
+            "run_id": "paper-sensitivity-d00500ms-fixed-s1-r02",
+            "event": "landing_disarm_observed",
+            "stage": "landing_disarm_observed",
+            "host_monotonic_ns": 418310136927136,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": 328.22,
+            "uav_id": 4,
+            "node_id": 0,
+            "actual_position_m": [
+              64.97494833570717,
+              -0.03150971665936982,
+              0.34047601275173267
+            ],
+            "admitted_command_id": "1:4:2589",
+            "reason": null
+          },
+          "final_radio_heartbeat": {
+            "run_id": "paper-sensitivity-d00500ms-fixed-s1-r02",
+            "event": "autopilot_heartbeat_received",
+            "stage": "autopilot_heartbeat_received",
+            "host_monotonic_ns": 418312142781746,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": null,
+            "uav_id": 4,
+            "node_id": 0,
+            "custom_mode": 9,
+            "base_mode": 89,
+            "producer_host_monotonic_ns": 418312134150658,
+            "received_host_monotonic_ns": 418312142760557
+          },
+          "completed_distinct_target_levels": 2,
+          "ordered_lift_and_landing": true
+        },
+        "5": {
+          "armed_radio_heartbeat_observed": true,
+          "takeoff_raw": {
+            "run_id": "paper-sensitivity-d00500ms-fixed-s1-r02",
+            "event": "takeoff_observed",
+            "stage": "takeoff_observed",
+            "host_monotonic_ns": 418095912110643,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": 114.28,
+            "uav_id": 5,
+            "node_id": 0,
+            "actual_position_m": [
+              80.03947469605995,
+              0.0520420153858463,
+              24.258463701211486
+            ],
+            "target_position_m": [
+              80.0,
+              -3.640303513588245e-18,
+              24.407475748031946
+            ],
+            "target_frame": "ENU"
+          },
+          "landing_disarm_raw": {
+            "run_id": "paper-sensitivity-d00500ms-fixed-s1-r02",
+            "event": "landing_disarm_observed",
+            "stage": "landing_disarm_observed",
+            "host_monotonic_ns": 418312153814161,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": 330.24,
+            "uav_id": 5,
+            "node_id": 0,
+            "actual_position_m": [
+              79.96874362591277,
+              -0.03572564104757892,
+              0.34047645322001135
+            ],
+            "admitted_command_id": "1:5:2590",
+            "reason": null
+          },
+          "final_radio_heartbeat": {
+            "run_id": "paper-sensitivity-d00500ms-fixed-s1-r02",
+            "event": "autopilot_heartbeat_received",
+            "stage": "autopilot_heartbeat_received",
+            "host_monotonic_ns": 418312153077638,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": null,
+            "uav_id": 5,
+            "node_id": 0,
+            "custom_mode": 9,
+            "base_mode": 89,
+            "producer_host_monotonic_ns": 418312145362637,
+            "received_host_monotonic_ns": 418312153045588
+          },
+          "completed_distinct_target_levels": 2,
+          "ordered_lift_and_landing": true
+        }
+      },
+      "offered": 900,
+      "unique_offer_ids": 900,
+      "offers_by_uav": {
+        "1": 180,
+        "2": 180,
+        "3": 180,
+        "4": 180,
+        "5": 180
+      },
+      "target_commands_sent": 900,
+      "valid_target_commands": 884,
+      "invalid_admitted_commands": [],
+      "common_UART_all5": {
+        "recovered": true,
+        "time_s": 1.757323969,
+        "leader": 1,
+        "epoch": 1,
+        "members": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "first_cids": {
+          "1": "1:1:1366",
+          "2": "1:2:1367",
+          "3": "1:3:1368",
+          "4": "1:4:1369",
+          "5": "1:5:1370"
+        },
+        "over4s": false
+      },
+      "common_UART_followers": {
+        "recovered": true,
+        "time_s": 1.757323969,
+        "leader": 1,
+        "epoch": 1,
+        "members": [
+          2,
+          3,
+          4,
+          5
+        ],
+        "first_cids": {
+          "2": "1:2:1367",
+          "3": "1:3:1368",
+          "4": "1:4:1369",
+          "5": "1:5:1370"
+        },
+        "over4s": false
+      },
+      "new_relay_UART_all5": {
+        "status": "not_applicable_fixed_policy",
+        "time_s": null
+      },
+      "physical_goal_first_by_uav": {
+        "1": {
+          "command_id": "1:1:1446",
+          "leader": 1,
+          "epoch": 1,
+          "goal_id": "goal3:uav1",
+          "goal_created_ns": 418155973031806,
+          "completion_ns": 418162245230240,
+          "time_s": 10.071950331
+        },
+        "3": {
+          "command_id": "1:3:1448",
+          "leader": 1,
+          "epoch": 1,
+          "goal_id": "goal3:uav3",
+          "goal_created_ns": 418155973095464,
+          "completion_ns": 418162245291834,
+          "time_s": 10.072011925
+        },
+        "5": {
+          "command_id": "1:5:1450",
+          "leader": 1,
+          "epoch": 1,
+          "goal_id": "goal3:uav5",
+          "goal_created_ns": 418155973108488,
+          "completion_ns": 418162245308796,
+          "time_s": 10.072028887
+        },
+        "2": {
+          "command_id": "1:2:1447",
+          "leader": 1,
+          "epoch": 1,
+          "goal_id": "goal3:uav2",
+          "goal_created_ns": 418155973078473,
+          "completion_ns": 418162272470462,
+          "time_s": 10.099190553
+        },
+        "4": {
+          "command_id": "1:4:1449",
+          "leader": 1,
+          "epoch": 1,
+          "goal_id": "goal3:uav4",
+          "goal_created_ns": 418155973102447,
+          "completion_ns": 418162272534421,
+          "time_s": 10.099254512
+        }
+      },
+      "physical_goal_all5_s": 10.099254512,
+      "physical_goal_all5_over4s": true,
+      "note": "Independent terminal-case records (completed or explicitlyfailed); not a completed18 cohort or a new PCAP/trajectory replay.",
+      "terminal_audit": {
+        "overall_failed": true,
+        "run_completed_outcome": 0,
+        "lifecycle_complete_uav_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "lifecycle_success_outcome": 1,
+        "native_rejection": {
+          "time_s": "329.160000",
+          "wall_monotonic_ns": "418312284958946",
+          "phase": "experiment_parameters_after",
+          "event": "position_snapshot_rejected",
+          "node": "tracker",
+          "peer": "",
+          "bytes": "0",
+          "x": "0.000000",
+          "y": "0.000000",
+          "z": "0.000000",
+          "value": "",
+          "details": "Gazebo/ns-3 clock drift exceeds state budget"
+        },
+        "last_native_lag_ms": 0.304751,
+        "failure_after_measurement_end_s": 36.142281999,
+        "failure_after_last_observed_disarm_s": 0.131144785,
+        "source_minus_ns3_offset_first_s": 1.7,
+        "source_minus_ns3_offset_last_s": 1.1999999999999886,
+        "source_offset_loss_s": 0.5000000000000113,
+        "post_parent_record": {
+          "returncode": 2,
+          "directory": "/workspace/multiagent_simulation/runs/native-radio-realtime/paper-sensitivity-d00500ms-fixed-s1-r02/configuration/parameters-after",
+          "started_host_monotonic_ns": 418312154037387,
+          "ended_host_monotonic_ns": 418312450413697,
+          "error": "RuntimeError: native radio watchdog expired or disappeared after readiness"
+        },
+        "network_window_observed": true,
+        "network_eligibility_reason": "All180s observed; actual fault/endpoints precede failure; source/image/RNG/config/900offers/issuedUART boundaries intact. Full parser-quality check remains final analysis responsibility.",
+        "no_overall_success_inferred_from_network_eligibility": true
+      }
+    },
+    {
+      "order": 11,
+      "run_id": "paper-sensitivity-d02000ms-failover-s1-r03",
+      "planned": {
+        "order": "11",
+        "study_id": "relay_sensitivity_18_v1",
+        "experiment_profile": "sensitivity",
+        "pair_id": "sensitivity-d02000ms-seed1-run3",
+        "repeat": "3",
+        "rng_seed": "1",
+        "rng_run": "3",
+        "policy": "failover",
+        "fault_profile": "selective",
+        "outage_duration_s": "2.000000",
+        "fault_start_s": "43.813252",
+        "fault_end_s": "45.813252",
+        "duration_s": "180.000000",
+        "run_id": "paper-sensitivity-d02000ms-failover-s1-r03",
+        "start_seed": "20261027",
+        "order_seed": "20261028",
+        "configuration_status": "root_freeze_after_code_integration"
+      },
+      "exit_code": 1,
+      "status": "failed",
+      "criteria": {
+        "five_uav_lifecycle": true,
+        "two_completed_goals_each": true,
+        "two_completed_target_levels_each": true,
+        "live_integral_rtf_target": true,
+        "total_GCS_hold_all_five": null
+      },
+      "frozen_source_matches": true,
+      "source_dirty_paths": "0",
+      "config_fault_matches": true,
+      "parameter_workers": 5,
+      "parameters": [
+        {
+          "stage": "before",
+          "status": "complete",
+          "workers": 5,
+          "duration_s": 28.930777191,
+          "components": [
+            {
+              "sysid": 1,
+              "component_id": 1,
+              "complete": true,
+              "count": 1388,
+              "csv_count": 1388,
+              "csv_indices_complete": true,
+              "checks": {
+                "ARMING_SKIPCHK": 0,
+                "COMPASS_USE": 1,
+                "SIM_SPEEDUP": 1.0
+              }
+            },
+            {
+              "sysid": 2,
+              "component_id": 1,
+              "complete": true,
+              "count": 1388,
+              "csv_count": 1388,
+              "csv_indices_complete": true,
+              "checks": {
+                "ARMING_SKIPCHK": 0,
+                "COMPASS_USE": 1,
+                "SIM_SPEEDUP": 1.0
+              }
+            },
+            {
+              "sysid": 3,
+              "component_id": 1,
+              "complete": true,
+              "count": 1388,
+              "csv_count": 1388,
+              "csv_indices_complete": true,
+              "checks": {
+                "ARMING_SKIPCHK": 0,
+                "COMPASS_USE": 1,
+                "SIM_SPEEDUP": 1.0
+              }
+            },
+            {
+              "sysid": 4,
+              "component_id": 1,
+              "complete": true,
+              "count": 1388,
+              "csv_count": 1388,
+              "csv_indices_complete": true,
+              "checks": {
+                "ARMING_SKIPCHK": 0,
+                "COMPASS_USE": 1,
+                "SIM_SPEEDUP": 1.0
+              }
+            },
+            {
+              "sysid": 5,
+              "component_id": 1,
+              "complete": true,
+              "count": 1388,
+              "csv_count": 1388,
+              "csv_indices_complete": true,
+              "checks": {
+                "ARMING_SKIPCHK": 0,
+                "COMPASS_USE": 1,
+                "SIM_SPEEDUP": 1.0
+              }
+            }
+          ]
+        },
+        {
+          "stage": "after",
+          "status": "partial",
+          "workers": 5,
+          "duration_s": 25.538537872,
+          "components": [
+            {
+              "sysid": 1,
+              "component_id": 1,
+              "complete": false,
+              "count": 1388,
+              "csv_count": 1271,
+              "csv_indices_complete": false,
+              "checks": {
+                "ARMING_SKIPCHK": 0,
+                "COMPASS_USE": 1,
+                "SIM_SPEEDUP": 1.0
+              }
+            },
+            {
+              "sysid": 2,
+              "component_id": 1,
+              "complete": false,
+              "count": 1388,
+              "csv_count": 1271,
+              "csv_indices_complete": false,
+              "checks": {
+                "ARMING_SKIPCHK": 0,
+                "COMPASS_USE": 1,
+                "SIM_SPEEDUP": 1.0
+              }
+            },
+            {
+              "sysid": 3,
+              "component_id": 1,
+              "complete": false,
+              "count": 1388,
+              "csv_count": 1271,
+              "csv_indices_complete": false,
+              "checks": {
+                "ARMING_SKIPCHK": 0,
+                "COMPASS_USE": 1,
+                "SIM_SPEEDUP": 1.0
+              }
+            },
+            {
+              "sysid": 4,
+              "component_id": 1,
+              "complete": false,
+              "count": 1388,
+              "csv_count": 1265,
+              "csv_indices_complete": false,
+              "checks": {
+                "ARMING_SKIPCHK": 0,
+                "COMPASS_USE": 1,
+                "SIM_SPEEDUP": 1.0
+              }
+            },
+            {
+              "sysid": 5,
+              "component_id": 1,
+              "complete": false,
+              "count": 1388,
+              "csv_count": 1265,
+              "csv_indices_complete": false,
+              "checks": {
+                "ARMING_SKIPCHK": 0,
+                "COMPASS_USE": 1,
+                "SIM_SPEEDUP": 1.0
+              }
+            }
+          ]
+        }
+      ],
+      "native_rng_matches": true,
+      "image_matches": true,
+      "raw_publication_status": "copied",
+      "raw_publication_errors": [],
+      "raw_publication_file_sizes_match": true,
+      "measurement_duration_source_s": 180.018,
+      "measurement_host_ns": [
+        418443808051352,
+        418624036523919
+      ],
+      "actual_native_fault": [
+        {
+          "time_s": "155.950000",
+          "wall_monotonic_ns": "418487713516712",
+          "phase": "experiment_fault",
+          "event": "fault_start",
+          "node": "cp",
+          "peer": "uav1",
+          "bytes": "0",
+          "x": "5.000000",
+          "y": "0.000000",
+          "z": "2.000000",
+          "value": "200.000000",
+          "details": "provider=ns3::MatrixPropagationLossModel;profile=selective;symmetric=true;default_extra_loss_db=0;base_propagation=friis;trigger=phase_file;phase=experiment_fault"
+        },
+        {
+          "time_s": "157.950000",
+          "wall_monotonic_ns": "418489713451627",
+          "phase": "experiment_recovery",
+          "event": "fault_end",
+          "node": "cp",
+          "peer": "uav1",
+          "bytes": "0",
+          "x": "5.000000",
+          "y": "0.000000",
+          "z": "2.000000",
+          "value": "0.000000",
+          "details": "provider=ns3::MatrixPropagationLossModel;profile=selective;symmetric=true;default_extra_loss_db=0;base_propagation=friis;trigger=phase_file;phase=experiment_recovery"
+        }
+      ],
+      "actual_RF_duration_host_s": 1.999934915,
+      "fault_phase_source_elapsed_s": {
+        "experiment_fault": 43.83500000000001,
+        "experiment_recovery": 45.82599999999999
+      },
+      "prefault_scopes_all_raw": [
+        [
+          1,
+          1
+        ]
+      ],
+      "prefault_active_leader_epoch": [
+        1,
+        1
+      ],
+      "new_selections": [
+        {
+          "leader": 4,
+          "epoch": 2,
+          "host_ns": 418488611269416,
+          "after_fault_s": 0.897752704,
+          "after_RFend_s": -1.102182211,
+          "inside_RFfault": true,
+          "valid_from_ns": 418490501024183
+        }
+      ],
+      "new_own_activations": [
+        {
+          "leader": 4,
+          "epoch": 2,
+          "host_ns": 418490505269257,
+          "after_fault_s": 2.791752545,
+          "after_RFend_s": 0.79181763,
+          "inside_RFfault": false,
+          "valid_from_ns": null
+        }
+      ],
+      "confirmed_old_channel_restored_after_fault_s": 2.149589797,
+      "lifecycle_small_raw": {
+        "1": {
+          "armed_radio_heartbeat_observed": true,
+          "takeoff_raw": {
+            "run_id": "paper-sensitivity-d02000ms-failover-s1-r03",
+            "event": "takeoff_observed",
+            "stage": "takeoff_observed",
+            "host_monotonic_ns": 418381630241439,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": 51.54,
+            "uav_id": 1,
+            "node_id": 0,
+            "actual_position_m": [
+              20.001538599714593,
+              0.0013319071987680522,
+              8.18812133447529
+            ],
+            "target_position_m": [
+              20.0,
+              4.875083988072873e-18,
+              8.387475748031944
+            ],
+            "target_frame": "ENU"
+          },
+          "landing_disarm_raw": {
+            "run_id": "paper-sensitivity-d02000ms-failover-s1-r03",
+            "event": "landing_disarm_observed",
+            "stage": "landing_disarm_observed",
+            "host_monotonic_ns": 418649623974042,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": 319.22,
+            "uav_id": 1,
+            "node_id": 0,
+            "actual_position_m": [
+              19.98733974822277,
+              -0.007027476518032263,
+              0.3404764151160829
+            ],
+            "admitted_command_id": "2:1:2560",
+            "reason": null
+          },
+          "final_radio_heartbeat": {
+            "run_id": "paper-sensitivity-d02000ms-failover-s1-r03",
+            "event": "autopilot_heartbeat_received",
+            "stage": "autopilot_heartbeat_received",
+            "host_monotonic_ns": 418685720188195,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": null,
+            "uav_id": 1,
+            "node_id": 0,
+            "custom_mode": 9,
+            "base_mode": 89,
+            "producer_host_monotonic_ns": 418685711923035,
+            "received_host_monotonic_ns": 418685720144834
+          },
+          "completed_distinct_target_levels": 2,
+          "ordered_lift_and_landing": true
+        },
+        "2": {
+          "armed_radio_heartbeat_observed": true,
+          "takeoff_raw": {
+            "run_id": "paper-sensitivity-d02000ms-failover-s1-r03",
+            "event": "takeoff_observed",
+            "stage": "takeoff_observed",
+            "host_monotonic_ns": 418393700176859,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": 63.58,
+            "uav_id": 2,
+            "node_id": 0,
+            "actual_position_m": [
+              35.00956831024791,
+              0.00935236722988268,
+              13.091385680233268
+            ],
+            "target_position_m": [
+              35.0,
+              -3.100524901155661e-18,
+              12.546475748031945
+            ],
+            "target_frame": "ENU"
+          },
+          "landing_disarm_raw": {
+            "run_id": "paper-sensitivity-d02000ms-failover-s1-r03",
+            "event": "landing_disarm_observed",
+            "stage": "landing_disarm_observed",
+            "host_monotonic_ns": 418652631273072,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": 322.22,
+            "uav_id": 2,
+            "node_id": 0,
+            "actual_position_m": [
+              34.97832716305471,
+              -0.011300013774354072,
+              0.34047611528471006
+            ],
+            "admitted_command_id": "2:2:2561",
+            "reason": null
+          },
+          "final_radio_heartbeat": {
+            "run_id": "paper-sensitivity-d02000ms-failover-s1-r03",
+            "event": "autopilot_heartbeat_received",
+            "stage": "autopilot_heartbeat_received",
+            "host_monotonic_ns": 418685718946684,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": null,
+            "uav_id": 2,
+            "node_id": 0,
+            "custom_mode": 9,
+            "base_mode": 89,
+            "producer_host_monotonic_ns": 418685711923286,
+            "received_host_monotonic_ns": 418685718908493
+          },
+          "completed_distinct_target_levels": 2,
+          "ordered_lift_and_landing": true
+        },
+        "3": {
+          "armed_radio_heartbeat_observed": true,
+          "takeoff_raw": {
+            "run_id": "paper-sensitivity-d02000ms-failover-s1-r03",
+            "event": "takeoff_observed",
+            "stage": "takeoff_observed",
+            "host_monotonic_ns": 418409801810170,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": 79.68,
+            "uav_id": 3,
+            "node_id": 0,
+            "actual_position_m": [
+              50.05311469047232,
+              0.049342861396001046,
+              16.309990411841767
+            ],
+            "target_position_m": [
+              50.0,
+              -3.658565539851087e-18,
+              16.252475748031944
+            ],
+            "target_frame": "ENU"
+          },
+          "landing_disarm_raw": {
+            "run_id": "paper-sensitivity-d02000ms-failover-s1-r03",
+            "event": "landing_disarm_observed",
+            "stage": "landing_disarm_observed",
+            "host_monotonic_ns": 418654483565826,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": 324.06,
+            "uav_id": 3,
+            "node_id": 0,
+            "actual_position_m": [
+              49.98447201282356,
+              -0.028715066307254896,
+              0.34047588904324083
+            ],
+            "admitted_command_id": "2:3:2562",
+            "reason": null
+          },
+          "final_radio_heartbeat": {
+            "run_id": "paper-sensitivity-d02000ms-failover-s1-r03",
+            "event": "autopilot_heartbeat_received",
+            "stage": "autopilot_heartbeat_received",
+            "host_monotonic_ns": 418685571164843,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": null,
+            "uav_id": 3,
+            "node_id": 0,
+            "custom_mode": 9,
+            "base_mode": 89,
+            "producer_host_monotonic_ns": 418685565930208,
+            "received_host_monotonic_ns": 418685571148712
+          },
+          "completed_distinct_target_levels": 2,
+          "ordered_lift_and_landing": true
+        },
+        "4": {
+          "armed_radio_heartbeat_observed": true,
+          "takeoff_raw": {
+            "run_id": "paper-sensitivity-d02000ms-failover-s1-r03",
+            "event": "takeoff_observed",
+            "stage": "takeoff_observed",
+            "host_monotonic_ns": 418427468573405,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": 97.32,
+            "uav_id": 4,
+            "node_id": 0,
+            "actual_position_m": [
+              65.04867660208062,
+              0.030457876270917755,
+              20.28111947942571
+            ],
+            "target_position_m": [
+              65.0,
+              -2.0001021765611646e-18,
+              20.546475748031945
+            ],
+            "target_frame": "ENU"
+          },
+          "landing_disarm_raw": {
+            "run_id": "paper-sensitivity-d02000ms-failover-s1-r03",
+            "event": "landing_disarm_observed",
+            "stage": "landing_disarm_observed",
+            "host_monotonic_ns": 418658648638019,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": 328.24,
+            "uav_id": 4,
+            "node_id": 0,
+            "actual_position_m": [
+              64.97541162353451,
+              -0.030316898356310476,
+              0.3404761980177853
+            ],
+            "admitted_command_id": "2:4:2563",
+            "reason": null
+          },
+          "final_radio_heartbeat": {
+            "run_id": "paper-sensitivity-d02000ms-failover-s1-r03",
+            "event": "autopilot_heartbeat_received",
+            "stage": "autopilot_heartbeat_received",
+            "host_monotonic_ns": 418685728528014,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": null,
+            "uav_id": 4,
+            "node_id": 0,
+            "custom_mode": 9,
+            "base_mode": 89,
+            "producer_host_monotonic_ns": 418685725975613,
+            "received_host_monotonic_ns": 418685728513236
+          },
+          "completed_distinct_target_levels": 2,
+          "ordered_lift_and_landing": true
+        },
+        "5": {
+          "armed_radio_heartbeat_observed": true,
+          "takeoff_raw": {
+            "run_id": "paper-sensitivity-d02000ms-failover-s1-r03",
+            "event": "takeoff_observed",
+            "stage": "takeoff_observed",
+            "host_monotonic_ns": 418443808032637,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": 113.64,
+            "uav_id": 5,
+            "node_id": 0,
+            "actual_position_m": [
+              80.03239360794326,
+              0.02262878612243994,
+              24.199970527003668
+            ],
+            "target_position_m": [
+              80.0,
+              -2.540344757743707e-18,
+              24.387475748031946
+            ],
+            "target_frame": "ENU"
+          },
+          "landing_disarm_raw": {
+            "run_id": "paper-sensitivity-d02000ms-failover-s1-r03",
+            "event": "landing_disarm_observed",
+            "stage": "landing_disarm_observed",
+            "host_monotonic_ns": 418660672629271,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": 330.26,
+            "uav_id": 5,
+            "node_id": 0,
+            "actual_position_m": [
+              79.96814344219565,
+              -0.03552093261489568,
+              0.3404760283165989
+            ],
+            "admitted_command_id": "2:5:2564",
+            "reason": null
+          },
+          "final_radio_heartbeat": {
+            "run_id": "paper-sensitivity-d02000ms-failover-s1-r03",
+            "event": "autopilot_heartbeat_received",
+            "stage": "autopilot_heartbeat_received",
+            "host_monotonic_ns": 418685746691696,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": null,
+            "uav_id": 5,
+            "node_id": 0,
+            "custom_mode": 9,
+            "base_mode": 89,
+            "producer_host_monotonic_ns": 418685735030579,
+            "received_host_monotonic_ns": 418685746677369
+          },
+          "completed_distinct_target_levels": 2,
+          "ordered_lift_and_landing": true
+        }
+      },
+      "offered": 900,
+      "unique_offer_ids": 900,
+      "offers_by_uav": {
+        "1": 180,
+        "2": 180,
+        "3": 180,
+        "4": 180,
+        "5": 180
+      },
+      "target_commands_sent": 885,
+      "valid_target_commands": 878,
+      "invalid_admitted_commands": [],
+      "common_UART_all5": {
+        "recovered": true,
+        "time_s": 4.123131166,
+        "leader": 4,
+        "epoch": 2,
+        "members": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "first_cids": {
+          "1": "2:1:1245",
+          "2": "2:2:1246",
+          "3": "2:3:1247",
+          "4": "2:4:1248",
+          "5": "2:5:1249"
+        },
+        "over4s": true
+      },
+      "common_UART_followers": {
+        "recovered": true,
+        "time_s": 4.123131166,
+        "leader": 4,
+        "epoch": 2,
+        "members": [
+          1,
+          2,
+          3,
+          5
+        ],
+        "first_cids": {
+          "1": "2:1:1245",
+          "2": "2:2:1246",
+          "3": "2:3:1247",
+          "5": "2:5:1249"
+        },
+        "over4s": true
+      },
+      "new_relay_UART_all5": {
+        "recovered": true,
+        "time_s": 4.123131166,
+        "leader": 4,
+        "epoch": 2,
+        "members": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "first_cids": {
+          "1": "2:1:1245",
+          "2": "2:2:1246",
+          "3": "2:3:1247",
+          "4": "2:4:1248",
+          "5": "2:5:1249"
+        },
+        "over4s": true
+      },
+      "physical_goal_first_by_uav": {
+        "1": {
+          "command_id": "2:1:1425",
+          "leader": 4,
+          "epoch": 2,
+          "goal_id": "goal3:uav1",
+          "goal_created_ns": 418503888984514,
+          "completion_ns": 418510150727342,
+          "time_s": 22.43721063
+        },
+        "3": {
+          "command_id": "2:3:1427",
+          "leader": 4,
+          "epoch": 2,
+          "goal_id": "goal3:uav3",
+          "goal_created_ns": 418503889026462,
+          "completion_ns": 418510150789027,
+          "time_s": 22.437272315
+        },
+        "4": {
+          "command_id": "2:4:1428",
+          "leader": 4,
+          "epoch": 2,
+          "goal_id": "goal3:uav4",
+          "goal_created_ns": 418503889033675,
+          "completion_ns": 418510150804716,
+          "time_s": 22.437288004
+        },
+        "5": {
+          "command_id": "2:5:1429",
+          "leader": 4,
+          "epoch": 2,
+          "goal_id": "goal3:uav5",
+          "goal_created_ns": 418503889039957,
+          "completion_ns": 418510150816718,
+          "time_s": 22.437300006
+        },
+        "2": {
+          "command_id": "2:2:1426",
+          "leader": 4,
+          "epoch": 2,
+          "goal_id": "goal3:uav2",
+          "goal_created_ns": 418503889016323,
+          "completion_ns": 418510150827559,
+          "time_s": 22.437310847
+        }
+      },
+      "physical_goal_all5_s": 22.437310847,
+      "physical_goal_all5_over4s": true,
+      "note": "Independent terminal-case records (completed or explicitlyfailed); not a completed18 cohort or a new PCAP/trajectory replay.",
+      "terminal_audit": {
+        "overall_failed": true,
+        "run_completed_outcome": 0,
+        "lifecycle_complete_uav_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "lifecycle_success_outcome": 1,
+        "native_rejection": {
+          "time_s": "354.460000",
+          "wall_monotonic_ns": "418686224752372",
+          "phase": "experiment_parameters_after",
+          "event": "position_snapshot_rejected",
+          "node": "tracker",
+          "peer": "",
+          "bytes": "0",
+          "x": "0.000000",
+          "y": "0.000000",
+          "z": "0.000000",
+          "value": "",
+          "details": "Gazebo/ns-3 clock drift exceeds state budget"
+        },
+        "last_native_lag_ms": 0.174107,
+        "failure_after_measurement_end_s": 62.188228453,
+        "failure_after_last_observed_disarm_s": 25.552123101,
+        "source_minus_ns3_offset_first_s": 1.76,
+        "source_minus_ns3_offset_last_s": 1.259999999999991,
+        "source_offset_loss_s": 0.5000000000000091,
+        "post_parent_record": {
+          "returncode": 2,
+          "directory": "/workspace/multiagent_simulation/runs/native-radio-realtime/paper-sensitivity-d02000ms-failover-s1-r03/configuration/parameters-after",
+          "started_host_monotonic_ns": 418660672873638,
+          "ended_host_monotonic_ns": 418686392940739,
+          "error": "RuntimeError: native radio watchdog expired or disappeared after readiness"
+        },
+        "network_window_observed": true,
+        "network_eligibility_reason": "All180s observed; actual fault/endpoints precede failure; source/image/RNG/config/900offers/issuedUART boundaries intact. Full parser-quality check remains final analysis responsibility.",
+        "no_overall_success_inferred_from_network_eligibility": true
+      }
+    },
+    {
+      "order": 12,
+      "run_id": "paper-sensitivity-d02000ms-fixed-s1-r03",
+      "planned": {
+        "order": "12",
+        "study_id": "relay_sensitivity_18_v1",
+        "experiment_profile": "sensitivity",
+        "pair_id": "sensitivity-d02000ms-seed1-run3",
+        "repeat": "3",
+        "rng_seed": "1",
+        "rng_run": "3",
+        "policy": "fixed",
+        "fault_profile": "selective",
+        "outage_duration_s": "2.000000",
+        "fault_start_s": "43.813252",
+        "fault_end_s": "45.813252",
+        "duration_s": "180.000000",
+        "run_id": "paper-sensitivity-d02000ms-fixed-s1-r03",
+        "start_seed": "20261027",
+        "order_seed": "20261028",
+        "configuration_status": "root_freeze_after_code_integration"
+      },
+      "exit_code": 1,
+      "status": "failed",
+      "criteria": {
+        "five_uav_lifecycle": false,
+        "two_completed_goals_each": true,
+        "two_completed_target_levels_each": true,
+        "live_integral_rtf_target": true,
+        "total_GCS_hold_all_five": null
+      },
+      "frozen_source_matches": true,
+      "source_dirty_paths": "0",
+      "config_fault_matches": true,
+      "parameter_workers": 5,
+      "parameters": [
+        {
+          "stage": "before",
+          "status": "complete",
+          "workers": 5,
+          "duration_s": 29.932863126,
+          "components": [
+            {
+              "sysid": 1,
+              "component_id": 1,
+              "complete": true,
+              "count": 1388,
+              "csv_count": 1388,
+              "csv_indices_complete": true,
+              "checks": {
+                "ARMING_SKIPCHK": 0,
+                "COMPASS_USE": 1,
+                "SIM_SPEEDUP": 1.0
+              }
+            },
+            {
+              "sysid": 2,
+              "component_id": 1,
+              "complete": true,
+              "count": 1388,
+              "csv_count": 1388,
+              "csv_indices_complete": true,
+              "checks": {
+                "ARMING_SKIPCHK": 0,
+                "COMPASS_USE": 1,
+                "SIM_SPEEDUP": 1.0
+              }
+            },
+            {
+              "sysid": 3,
+              "component_id": 1,
+              "complete": true,
+              "count": 1388,
+              "csv_count": 1388,
+              "csv_indices_complete": true,
+              "checks": {
+                "ARMING_SKIPCHK": 0,
+                "COMPASS_USE": 1,
+                "SIM_SPEEDUP": 1.0
+              }
+            },
+            {
+              "sysid": 4,
+              "component_id": 1,
+              "complete": true,
+              "count": 1388,
+              "csv_count": 1388,
+              "csv_indices_complete": true,
+              "checks": {
+                "ARMING_SKIPCHK": 0,
+                "COMPASS_USE": 1,
+                "SIM_SPEEDUP": 1.0
+              }
+            },
+            {
+              "sysid": 5,
+              "component_id": 1,
+              "complete": true,
+              "count": 1388,
+              "csv_count": 1388,
+              "csv_indices_complete": true,
+              "checks": {
+                "ARMING_SKIPCHK": 0,
+                "COMPASS_USE": 1,
+                "SIM_SPEEDUP": 1.0
+              }
+            }
+          ]
+        },
+        {
+          "stage": "after",
+          "status": "not_recorded",
+          "parent_record": {
+            "status": "skipped",
+            "reason": "controlled LAND/disarm was not completed"
+          },
+          "components": []
+        }
+      ],
+      "native_rng_matches": true,
+      "image_matches": true,
+      "raw_publication_status": "copied",
+      "raw_publication_errors": [],
+      "raw_publication_file_sizes_match": true,
+      "measurement_duration_source_s": 180.014,
+      "measurement_host_ns": [
+        418815288714659,
+        418995573269240
+      ],
+      "actual_native_fault": [
+        {
+          "time_s": "153.050000",
+          "wall_monotonic_ns": "418859189649008",
+          "phase": "experiment_fault",
+          "event": "fault_start",
+          "node": "cp",
+          "peer": "uav1",
+          "bytes": "0",
+          "x": "5.000000",
+          "y": "0.000000",
+          "z": "2.000000",
+          "value": "200.000000",
+          "details": "provider=ns3::MatrixPropagationLossModel;profile=selective;symmetric=true;default_extra_loss_db=0;base_propagation=friis;trigger=phase_file;phase=experiment_fault"
+        },
+        {
+          "time_s": "155.050000",
+          "wall_monotonic_ns": "418861189595342",
+          "phase": "experiment_recovery",
+          "event": "fault_end",
+          "node": "cp",
+          "peer": "uav1",
+          "bytes": "0",
+          "x": "5.000000",
+          "y": "0.000000",
+          "z": "2.000000",
+          "value": "0.000000",
+          "details": "provider=ns3::MatrixPropagationLossModel;profile=selective;symmetric=true;default_extra_loss_db=0;base_propagation=friis;trigger=phase_file;phase=experiment_recovery"
+        }
+      ],
+      "actual_RF_duration_host_s": 1.999946334,
+      "fault_phase_source_elapsed_s": {
+        "experiment_fault": 43.83100000000002,
+        "experiment_recovery": 45.82599999999999
+      },
+      "prefault_scopes_all_raw": [
+        [
+          1,
+          1
+        ]
+      ],
+      "prefault_active_leader_epoch": [
+        1,
+        1
+      ],
+      "new_selections": [],
+      "new_own_activations": [],
+      "confirmed_old_channel_restored_after_fault_s": 2.092787448,
+      "lifecycle_small_raw": {
+        "1": {
+          "armed_radio_heartbeat_observed": true,
+          "takeoff_raw": {
+            "run_id": "paper-sensitivity-d02000ms-fixed-s1-r03",
+            "event": "takeoff_observed",
+            "stage": "takeoff_observed",
+            "host_monotonic_ns": 418755957161102,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": 51.44,
+            "uav_id": 1,
+            "node_id": 0,
+            "actual_position_m": [
+              20.00104980571181,
+              0.0016901548108758536,
+              8.253564051196909
+            ],
+            "target_position_m": [
+              20.0,
+              4.745848455369828e-18,
+              8.481475748031945
+            ],
+            "target_frame": "ENU"
+          },
+          "landing_disarm_raw": {
+            "run_id": "paper-sensitivity-d02000ms-fixed-s1-r03",
+            "event": "landing_disarm_observed",
+            "stage": "landing_disarm_observed",
+            "host_monotonic_ns": 419021089959070,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": 316.2,
+            "uav_id": 1,
+            "node_id": 0,
+            "actual_position_m": [
+              19.99178799799813,
+              -0.00020815598026487179,
+              0.3404763634066527
+            ],
+            "admitted_command_id": "1:1:2565",
+            "reason": null
+          },
+          "final_radio_heartbeat": {
+            "run_id": "paper-sensitivity-d02000ms-fixed-s1-r03",
+            "event": "autopilot_heartbeat_received",
+            "stage": "autopilot_heartbeat_received",
+            "host_monotonic_ns": 419021089180944,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": null,
+            "uav_id": 1,
+            "node_id": 0,
+            "custom_mode": 9,
+            "base_mode": 89,
+            "producer_host_monotonic_ns": 419021085594812,
+            "received_host_monotonic_ns": 419021089159734
+          },
+          "completed_distinct_target_levels": 2,
+          "ordered_lift_and_landing": true
+        },
+        "2": {
+          "armed_radio_heartbeat_observed": true,
+          "takeoff_raw": {
+            "run_id": "paper-sensitivity-d02000ms-fixed-s1-r03",
+            "event": "takeoff_observed",
+            "stage": "takeoff_observed",
+            "host_monotonic_ns": 418767529056550,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": 63.0,
+            "uav_id": 2,
+            "node_id": 0,
+            "actual_position_m": [
+              35.00885272996545,
+              0.01099488723436106,
+              12.217688591134822
+            ],
+            "target_position_m": [
+              35.0,
+              -2.949582655042842e-18,
+              12.481475748031945
+            ],
+            "target_frame": "ENU"
+          },
+          "landing_disarm_raw": null,
+          "final_radio_heartbeat": {
+            "run_id": "paper-sensitivity-d02000ms-fixed-s1-r03",
+            "event": "autopilot_heartbeat_received",
+            "stage": "autopilot_heartbeat_received",
+            "host_monotonic_ns": 419021099832449,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": null,
+            "uav_id": 2,
+            "node_id": 0,
+            "custom_mode": 9,
+            "base_mode": 217,
+            "producer_host_monotonic_ns": 419021086566711,
+            "received_host_monotonic_ns": 419021099798525
+          },
+          "completed_distinct_target_levels": 2,
+          "ordered_lift_and_landing": false
+        },
+        "3": {
+          "armed_radio_heartbeat_observed": true,
+          "takeoff_raw": {
+            "run_id": "paper-sensitivity-d02000ms-fixed-s1-r03",
+            "event": "takeoff_observed",
+            "stage": "takeoff_observed",
+            "host_monotonic_ns": 418781217490772,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": 76.68,
+            "uav_id": 3,
+            "node_id": 0,
+            "actual_position_m": [
+              50.03131287934987,
+              0.028711881703896058,
+              17.07600373495611
+            ],
+            "target_position_m": [
+              50.0,
+              -2.9894523742173626e-18,
+              16.481475748031944
+            ],
+            "target_frame": "ENU"
+          },
+          "landing_disarm_raw": null,
+          "final_radio_heartbeat": {
+            "run_id": "paper-sensitivity-d02000ms-fixed-s1-r03",
+            "event": "autopilot_heartbeat_received",
+            "stage": "autopilot_heartbeat_received",
+            "host_monotonic_ns": 419021104145221,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": null,
+            "uav_id": 3,
+            "node_id": 0,
+            "custom_mode": 9,
+            "base_mode": 217,
+            "producer_host_monotonic_ns": 419021093516007,
+            "received_host_monotonic_ns": 419021104123169
+          },
+          "completed_distinct_target_levels": 2,
+          "ordered_lift_and_landing": false
+        },
+        "4": {
+          "armed_radio_heartbeat_observed": true,
+          "takeoff_raw": {
+            "run_id": "paper-sensitivity-d02000ms-fixed-s1-r03",
+            "event": "takeoff_observed",
+            "stage": "takeoff_observed",
+            "host_monotonic_ns": 418798884686731,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": 94.32,
+            "uav_id": 4,
+            "node_id": 0,
+            "actual_position_m": [
+              65.04964537711997,
+              0.034215546861095104,
+              20.258341486128934
+            ],
+            "target_position_m": [
+              65.0,
+              -2.0001021765611646e-18,
+              20.276475748031945
+            ],
+            "target_frame": "ENU"
+          },
+          "landing_disarm_raw": null,
+          "final_radio_heartbeat": {
+            "run_id": "paper-sensitivity-d02000ms-fixed-s1-r03",
+            "event": "autopilot_heartbeat_received",
+            "stage": "autopilot_heartbeat_received",
+            "host_monotonic_ns": 419020943856325,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": null,
+            "uav_id": 4,
+            "node_id": 0,
+            "custom_mode": 9,
+            "base_mode": 217,
+            "producer_host_monotonic_ns": 419020941257993,
+            "received_host_monotonic_ns": 419020943832230
+          },
+          "completed_distinct_target_levels": 2,
+          "ordered_lift_and_landing": false
+        },
+        "5": {
+          "armed_radio_heartbeat_observed": true,
+          "takeoff_raw": {
+            "run_id": "paper-sensitivity-d02000ms-fixed-s1-r03",
+            "event": "takeoff_observed",
+            "stage": "takeoff_observed",
+            "host_monotonic_ns": 418815288667091,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": 110.7,
+            "uav_id": 5,
+            "node_id": 0,
+            "actual_position_m": [
+              80.03256373408097,
+              0.027742092783425203,
+              24.262787914523376
+            ],
+            "target_position_m": [
+              80.0,
+              -2.540344757743707e-18,
+              24.243475748031944
+            ],
+            "target_frame": "ENU"
+          },
+          "landing_disarm_raw": null,
+          "final_radio_heartbeat": {
+            "run_id": "paper-sensitivity-d02000ms-fixed-s1-r03",
+            "event": "autopilot_heartbeat_received",
+            "stage": "autopilot_heartbeat_received",
+            "host_monotonic_ns": 419021115310798,
+            "clock_domain": "host_monotonic",
+            "source_sim_time_s": null,
+            "uav_id": 5,
+            "node_id": 0,
+            "custom_mode": 9,
+            "base_mode": 217,
+            "producer_host_monotonic_ns": 419021112609252,
+            "received_host_monotonic_ns": 419021115289528
+          },
+          "completed_distinct_target_levels": 2,
+          "ordered_lift_and_landing": false
+        }
+      },
+      "offered": 900,
+      "unique_offer_ids": 900,
+      "offers_by_uav": {
+        "1": 180,
+        "2": 180,
+        "3": 180,
+        "4": 180,
+        "5": 180
+      },
+      "target_commands_sent": 898,
+      "valid_target_commands": 882,
+      "invalid_admitted_commands": [],
+      "common_UART_all5": {
+        "recovered": true,
+        "time_s": 3.122017145,
+        "leader": 1,
+        "epoch": 1,
+        "members": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "first_cids": {
+          "1": "1:1:1230",
+          "2": "1:2:1231",
+          "3": "1:3:1232",
+          "4": "1:4:1243",
+          "5": "1:5:1234"
+        },
+        "over4s": false
+      },
+      "common_UART_followers": {
+        "recovered": true,
+        "time_s": 3.122017145,
+        "leader": 1,
+        "epoch": 1,
+        "members": [
+          2,
+          3,
+          4,
+          5
+        ],
+        "first_cids": {
+          "2": "1:2:1231",
+          "3": "1:3:1232",
+          "4": "1:4:1243",
+          "5": "1:5:1234"
+        },
+        "over4s": false
+      },
+      "new_relay_UART_all5": {
+        "status": "not_applicable_fixed_policy",
+        "time_s": null
+      },
+      "physical_goal_first_by_uav": {
+        "1": {
+          "command_id": "1:1:1430",
+          "leader": 1,
+          "epoch": 1,
+          "goal_id": "goal3:uav1",
+          "goal_created_ns": 418875369161738,
+          "completion_ns": 418881633726565,
+          "time_s": 22.444077557
+        },
+        "2": {
+          "command_id": "1:2:1431",
+          "leader": 1,
+          "epoch": 1,
+          "goal_id": "goal3:uav2",
+          "goal_created_ns": 418875369201663,
+          "completion_ns": 418881684505462,
+          "time_s": 22.494856454
+        },
+        "3": {
+          "command_id": "1:3:1432",
+          "leader": 1,
+          "epoch": 1,
+          "goal_id": "goal3:uav3",
+          "goal_created_ns": 418875369218094,
+          "completion_ns": 418881684550326,
+          "time_s": 22.494901318
+        },
+        "5": {
+          "command_id": "1:5:1434",
+          "leader": 1,
+          "epoch": 1,
+          "goal_id": "goal3:uav5",
+          "goal_created_ns": 418875369231289,
+          "completion_ns": 418881684569311,
+          "time_s": 22.494920303
+        },
+        "4": {
+          "command_id": "1:4:1443",
+          "leader": 1,
+          "epoch": 1,
+          "goal_id": "goal3:uav4",
+          "goal_created_ns": 418875369225337,
+          "completion_ns": 418883292986475,
+          "time_s": 24.103337467
+        }
+      },
+      "physical_goal_all5_s": 24.103337467,
+      "physical_goal_all5_over4s": true,
+      "note": "Independent terminal-case records (completed or explicitlyfailed); not a completed18 cohort or a new PCAP/trajectory replay.",
+      "terminal_audit": {
+        "overall_failed": true,
+        "run_completed_outcome": 0,
+        "lifecycle_complete_uav_ids": [
+          1
+        ],
+        "lifecycle_success_outcome": 0,
+        "native_rejection": {
+          "time_s": "315.160000",
+          "wall_monotonic_ns": "419021302584928",
+          "phase": "experiment_landing",
+          "event": "position_snapshot_rejected",
+          "node": "tracker",
+          "peer": "",
+          "bytes": "0",
+          "x": "0.000000",
+          "y": "0.000000",
+          "z": "0.000000",
+          "value": "",
+          "details": "Gazebo/ns-3 clock drift exceeds state budget"
+        },
+        "last_native_lag_ms": 1.491768,
+        "failure_after_measurement_end_s": 25.729315688,
+        "failure_after_last_observed_disarm_s": 0.212625858,
+        "source_minus_ns3_offset_first_s": 1.72,
+        "source_minus_ns3_offset_last_s": 1.259999999999991,
+        "source_offset_loss_s": 0.46000000000000907,
+        "post_parent_record": {
+          "status": "skipped",
+          "reason": "controlled LAND/disarm was not completed"
+        },
+        "network_window_observed": true,
+        "network_eligibility_reason": "All180s observed; actual fault/endpoints precede failure; source/image/RNG/config/900offers/issuedUART boundaries intact. Full parser-quality check remains final analysis responsibility.",
+        "no_overall_success_inferred_from_network_eligibility": true
+      }
+    }
+  ],
+  "controller_snapshot": {
+    "captured_host_monotonic_ns": 420307321100997,
+    "planned18": 18,
+    "finished_unique": 12,
+    "failed_unique": 3,
+    "completed_exit0": 9,
+    "failed_run_ids": [
+      "paper-sensitivity-d00500ms-fixed-s1-r02",
+      "paper-sensitivity-d02000ms-failover-s1-r03",
+      "paper-sensitivity-d02000ms-fixed-s1-r03"
+    ],
+    "note": "Snapshot while remaining runs may still be active; no retry counts or final18 claim."
+  }
+}

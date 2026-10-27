@@ -1,0 +1,11 @@
+{
+  "head": true,
+  "status": true,
+  "diff": true,
+  "cached": true,
+  "untracked": {
+    "network/ns3/patches/mr2608-lockstep-tap-read.patch": true,
+    "network/ns3/scratch/native-tap-boundary-test.cc": true
+  },
+  "all_match": true
+}

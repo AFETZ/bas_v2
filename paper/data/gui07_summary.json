@@ -1,0 +1,58 @@
+{
+  "run_id": "paper-gui-overhead-07",
+  "status": "completed_grounded_GUI_observation",
+  "requested_window_wall_s": 60.00941876,
+  "clock_samples": 2614,
+  "observed_clock_model_s": 59.897000000000006,
+  "observed_clock_wall_s": 59.964691869,
+  "integral_rtf": 0.9988711378831417,
+  "window_rtf": {
+    "max": 1.0006923134559202,
+    "mean": 0.9988946202368691,
+    "min": 0.9777818003398192,
+    "n": 59,
+    "p5": 0.997548875964231,
+    "p50": 0.9992152674285731,
+    "p95": 1.0006245974805812
+  },
+  "native_ns3_lag_ms": {
+    "max": 6.858521,
+    "mean": 0.39830793166666667,
+    "min": 0.016185,
+    "n": 1200,
+    "p5": 0.0546208,
+    "p50": 0.0755745,
+    "p95": 2.4919172499999998
+  },
+  "viewer_CPU_percent_one_core": {
+    "max": 80.26895236254404,
+    "mean": 74.63271931725666,
+    "min": 70.62319699764112,
+    "n": 58,
+    "p5": 71.53151286238536,
+    "p50": 73.51447726575164,
+    "p95": 78.45760732355866
+  },
+  "viewer_RSS_bytes": {
+    "max": 2027003904.0,
+    "mean": 2026987873.1034484,
+    "min": 2026962944.0,
+    "n": 58,
+    "p5": 2026966425.6,
+    "p50": 2026991616.0,
+    "p95": 2027003904.0
+  },
+  "viewer_CPU_quota_cores": 0.75,
+  "viewport_pixels": [
+    960,
+    480
+  ],
+  "graphics_GPU_memory_bytes": null,
+  "flight_demonstrated": false,
+  "probes": 225,
+  "replies": 225,
+  "fresh_five_clock_samples": {
+    "5": 2614
+  },
+  "caveat": "One grounded observation after45s viewer warmup, not flight or a causal headless/GUI comparison; graphics GPU memory/FPS unavailable."
+}
