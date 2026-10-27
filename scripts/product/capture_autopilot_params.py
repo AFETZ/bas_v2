@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 import csv
 import json
 import math
+import os
 from pathlib import Path
 import signal
 import struct
@@ -199,13 +201,31 @@ def event(stream, kind, **fields):
                                  unix_ns=time.time_ns(), **fields), allow_nan=False) + "\n")
 
 
-def capture_one(args, system_id, running):
+def close_link(link):
+    for attribute in ("logfile", "logfile_raw"):
+        handle = getattr(link, attribute, None)
+        if handle:
+            handle.close()
+    link.close()
+
+
+def open_link(args, system_id):
     from pymavlink import mavutil
     endpoint = f"udpout:127.0.0.1:{args.port_base + system_id}"
     link = mavutil.mavlink_connection(endpoint, source_system=255, source_component=195,
                                      dialect="ardupilotmega")
-    link.setup_logfile(str(args.output_dir / f"uav{system_id}.tlog"))
-    link.setup_logfile_raw(str(args.output_dir / f"uav{system_id}.raw"))
+    try:
+        link.setup_logfile(str(args.output_dir / f"uav{system_id}.tlog"))
+        link.setup_logfile_raw(str(args.output_dir / f"uav{system_id}.raw"))
+    except Exception:
+        close_link(link)
+        raise
+    return link
+
+
+def capture_one(args, system_id, running, link):
+    from pymavlink import mavutil
+    endpoint = f"udpout:127.0.0.1:{args.port_base + system_id}"
     table = ParameterTable(system_id, args.component_id, args.encoding)
     requests = Requests(args.read_rate_hz, args.retry_s, args.retries, args.list_idle_s)
     started, last_value_ns, heartbeat_ns, reason = time.monotonic_ns(), None, None, "timeout"
@@ -252,15 +272,46 @@ def capture_one(args, system_id, running):
         event(stream, "capture_error", reason=reason)
     finally:
         stream.close()
-        for attribute in ("logfile", "logfile_raw"):
-            handle = getattr(link, attribute, None)
-            if handle:
-                handle.close()
-        link.close()
+        close_link(link)
     return dict(**table.report(), endpoint=endpoint, stop_reason=reason,
                 duration_wall_s=(time.monotonic_ns() - started) / 1e9,
                 list_requests=requests.list_attempts,
                 read_requests=sum(attempts for attempts, _ in requests.read_attempts.values()))
+
+
+def capture_all(args, running):
+    # Pinned pymavlink changes a global dialect during protocol auto-detection.
+    # Its native v2 parser accepts FE and FD without those global switches.
+    # Initialize every parser/socket sequentially, before any worker receives.
+    os.environ["MAVLINK20"] = "1"
+    from pymavlink import mavutil
+    mavutil.set_dialect("ardupilotmega")
+    links, failures = {}, {}
+    for system_id in args.sysids:
+        try:
+            links[system_id] = open_link(args, system_id)
+        except Exception as error:
+            failures[system_id] = f"{type(error).__name__}: {error}"
+
+    def attempt(system_id):
+        empty = lambda reason: dict(**ParameterTable(system_id, args.component_id, args.encoding).report(),
+                                    stop_reason=reason)
+        if system_id in failures:
+            return empty(failures[system_id])
+        link = links[system_id]
+        if not running[0]:
+            close_link(link)
+            return empty("not_attempted_after_signal")
+        try:
+            return capture_one(args, system_id, running, link)
+        except Exception as error:
+            close_link(link)
+            return empty(f"{type(error).__name__}: {error}")
+
+    # One socket, parser, parameter table and set of raw files per worker.
+    # Queued components do not send requests until a worker is available.
+    with ThreadPoolExecutor(max_workers=min(args.workers, len(args.sysids))) as pool:
+        return list(pool.map(attempt, args.sysids))
 
 
 def compare(before: dict, after: dict):
@@ -295,6 +346,8 @@ def main(argv=None):
     parser.add_argument("--run-id")
     parser.add_argument("--sysids", default="1,2,3,4,5")
     parser.add_argument("--component-id", type=int, default=1)
+    parser.add_argument("--workers", type=int, choices=range(1, 6), default=1,
+                        help="Concurrent UAV readouts on separate GCS ports; default sequential")
     parser.add_argument("--port-base", type=int, default=14550)
     parser.add_argument("--timeout-s", type=float, default=90)
     parser.add_argument("--read-rate-hz", type=float, default=10)
@@ -326,18 +379,13 @@ def main(argv=None):
                    settings={k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
                    limits=["Completeness means stable indexed identity/count coverage for the targeted SYSID/COMPID, not all possible components or an atomic snapshot. Observed value changes remain explicit and do not erase valid index coverage.",
                            "C-cast is the explicit pinned ArduPilot encoding; integer wire values may already have float32 precision loss. Original four value bytes are retained.",
-                           "No PARAM_SET or flight-parameter modification is sent. A read-all stream is paced by upstream ArduPilot; requests are sequential across UAVs.",
+                           "No PARAM_SET or flight-parameter modification is sent. Read-all streams are paced by upstream ArduPilot; at most workers component streams run concurrently, each with bounded read repairs.",
+                           "MAVLink2 ardupilotmega parsers accept both FE and FD frames. All connections initialize sequentially before threaded I/O, preventing global dialect auto-switch races.",
                            "tlog/raw contain received frames/bytes via upstream pymavlink; JSONL also retains outgoing request bytes.",
                            "GCSService has one local UDP subscriber per UAV. MAVProxy and other clients must be closed during this capture."])
-    for system_id in args.sysids:
-        if not running[0]:
-            summary["components"].append(dict(**ParameterTable(system_id, args.component_id, args.encoding).report(), stop_reason="not_attempted_after_signal"))
-        else:
-            try:
-                summary["components"].append(capture_one(args, system_id, running))
-            except Exception as error:
-                summary["components"].append(dict(**ParameterTable(system_id, args.component_id, args.encoding).report(),
-                                                   stop_reason=f"{type(error).__name__}: {error}"))
+    summary["effective_workers"] = min(args.workers, len(args.sysids))
+    summary["mavlink_parser_protocol"] = "2.0"
+    summary["components"] = capture_all(args, running)
     summary.update(finished_unix_ns=time.time_ns(), finished_host_monotonic_ns=time.monotonic_ns())
     summary["status"] = "complete" if all(c["complete"] for c in summary["components"]) else "partial"
     if args.compare_before:

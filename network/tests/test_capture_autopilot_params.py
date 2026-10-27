@@ -1,13 +1,15 @@
 """Protocol fixtures only; no simulator, UART or real autopilot is started."""
 import struct
 import socket
+import json
+import threading
 import time
 
 from pymavlink import mavutil
 from pymavlink.dialects.v10 import ardupilotmega as mav1
 from pymavlink.dialects.v20 import ardupilotmega as mav2
 
-from scripts.product.capture_autopilot_params import ParameterTable, Requests, compare, decode_value, receive_logged, value_wire_bytes
+from scripts.product.capture_autopilot_params import ParameterTable, Requests, compare, decode_value, main, receive_logged, value_wire_bytes
 
 
 def param(name, count, index, value=1, param_type=6, system=1, component=1, dialect=None):
@@ -136,3 +138,116 @@ def test_upstream_udp_receive_really_writes_tlog_and_raw(tmp_path):
         assert observed is not None and observed.param_id == "VALUE" and observed.param_value == 42
     finally:
         replay.close()
+
+
+def test_five_real_udp_workers_isolate_mixed_frames_and_bounded_partial_repairs(tmp_path):
+    # Isolated protocol peers, not autopilot/SITL flight substitutes. All five
+    # must receive their LIST before any sends its table, proving concurrency.
+    for _ in range(30):
+        servers = []
+        try:
+            first = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            first.bind(("127.0.0.1", 0)); servers.append(first)
+            base = first.getsockname()[1] - 1
+            if base > 65530:
+                raise OSError("need five contiguous ports")
+            for sid in range(2, 6):
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                servers.append(sock); sock.bind(("127.0.0.1", base + sid))
+            break
+        except OSError:
+            for sock in servers:
+                sock.close()
+    else:
+        raise AssertionError("could not reserve five isolated local UDP ports")
+    barrier, stop = threading.Barrier(5), threading.Event()
+    sent, reads, request_types, errors = {}, {}, {}, []
+
+    def serve(sid, sock):
+        sent[sid], reads[sid], request_types[sid] = [], [], []
+        parser = mav2.MAVLink(None)
+        sock.settimeout(.025)
+        try:
+            while not stop.is_set():
+                try:
+                    data, peer = sock.recvfrom(65535)
+                except socket.timeout:
+                    continue
+                for message in parser.parse_buffer(data) or []:
+                    kind = message.get_type(); request_types[sid].append(kind)
+                    if kind == "PARAM_REQUEST_LIST":
+                        assert (message.target_system, message.target_component) == (sid, 1)
+                        barrier.wait(timeout=2)
+                        frames = [param("FOREIGN", 3, 1, system=99),
+                                  param("FOREIGN_COMP", 3, 1, system=sid, component=2, dialect=mav2),
+                                  param(f"U{sid}_A", 3, 0, sid * 100, system=sid),
+                                  param(f"U{sid}_C", 3, 2, sid * 100 + 2, system=sid, dialect=mav2)]
+                        for message in frames:
+                            frame = bytes(message.get_msgbuf()); sock.sendto(frame, peer); sent[sid].append(frame)
+                    elif kind == "PARAM_REQUEST_READ":
+                        assert (message.target_system, message.target_component, message.param_index) == (sid, 1, 1)
+                        reads[sid].append(time.monotonic())
+                        if sid != 5:  # Honest partial coverage for one nonresponding index.
+                            frame = bytes(param(f"U{sid}_B", 3, 1, sid * 100 + 1, system=sid,
+                                                dialect=mav2 if sid % 2 else mav1).get_msgbuf())
+                            sock.sendto(frame, peer); sent[sid].append(frame)
+        except Exception as error:
+            errors.append(error)
+
+    threads = [threading.Thread(target=serve, args=(sid, sock)) for sid, sock in enumerate(servers, 1)]
+    for thread in threads:
+        thread.start()
+    output = tmp_path / "five"
+    try:
+        assert main(["--output-dir", str(output), "--run-id", "udp-only",
+                     "--workers", "5", "--port-base", str(base), "--timeout-s", ".8",
+                     "--read-rate-hz", "20", "--retry-s", ".07", "--list-idle-s", ".08",
+                     "--settle-s", ".04", "--retries", "3"]) == 2
+    finally:
+        stop.set()
+        for thread in threads:
+            thread.join(timeout=3)
+        for sock in servers:
+            sock.close()
+    assert not errors and not any(t.is_alive() for t in threads)
+    result = json.loads((output / "summary.json").read_text())
+    assert result["settings"]["workers"] == result["effective_workers"] == 5
+    assert result["mavlink_parser_protocol"] == "2.0" and result["status"] == "partial"
+    for sid, component in enumerate(result["components"], 1):
+        assert component["system_id"] == sid and component["component_id"] == 1
+        assert component["complete"] is (sid != 5)
+        assert component["missing_indices"] == ([1] if sid == 5 else [])
+        assert component["list_requests"] == 1 and component["read_requests"] == (3 if sid == 5 else 1)
+        assert component["rejected_messages"]["foreign_system_or_component"] == 2
+        assert {p["param_id"] for p in component["parameters"]} == {f"U{sid}_{x}" for x in ("AC" if sid == 5 else "ABC")}
+        assert all(json.loads(p["value_json"]) == sid * 100 + p["param_index"] for p in component["parameters"])
+        assert set(request_types[sid]) <= {"HEARTBEAT", "PARAM_REQUEST_LIST", "PARAM_REQUEST_READ"}
+        assert len(reads[sid]) <= 3 and all(b - a >= .065 for a, b in zip(reads[sid], reads[sid][1:]))
+        assert (output / f"uav{sid}.raw").read_bytes() == b"".join(sent[sid])
+        replay = mavutil.mavlink_connection(str(output / f"uav{sid}.tlog"))
+        frames = []
+        try:
+            while True:
+                m = replay.recv_match(blocking=False)
+                if m is None:
+                    break
+                frames.append(bytes(m.get_msgbuf()))
+        finally:
+            replay.close()
+        assert frames == sent[sid] and {frame[0] for frame in frames} == {0xFE, 0xFD}
+
+
+def test_workers_default_is_sequential_and_out_of_range_is_rejected(tmp_path):
+    import pytest
+    from unittest.mock import patch
+    from scripts.product import capture_autopilot_params as module
+    seen = []
+    def empty(args, running):
+        seen.append(args.workers)
+        return [dict(**ParameterTable(sid, 1, "c-cast").report(), stop_reason="unit-only") for sid in args.sysids]
+    with patch.object(module, "capture_all", side_effect=empty):
+        assert main(["--output-dir", str(tmp_path / "default")]) == 2
+    assert seen == [1]
+    for value in ("0", "6"):
+        with pytest.raises(SystemExit):
+            main(["--output-dir", str(tmp_path / value), "--workers", value])
