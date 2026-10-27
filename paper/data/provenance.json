@@ -1,0 +1,24 @@
+{
+  "measured_source": "8e16ec223e895c11891e6e7d7c39dff8cee39cac",
+  "decomposition_analyzer_commit": "dcbe857",
+  "raw_mutated": false,
+  "files": {
+    "six_cells.csv": {
+      "source_relative_to_evidence_bundle": "paper-live-20261026/campaign-final-review/six_cells.csv",
+      "sha256": "cd21fdb37cbad86b39fc9e41cb5d96ee84752df697e98fb39a6851fa35eaf2e3"
+    },
+    "selective_paired_points.csv": {
+      "source_relative_to_evidence_bundle": "paper-live-20261026/selective-primary-review/paired_points.csv",
+      "sha256": "8a9650db0c66a7305861fbabd487e4c2e2f8f9ee2f077f0797534ee6be19a326"
+    },
+    "selective_paired_estimates.csv": {
+      "source_relative_to_evidence_bundle": "paper-live-20261026/selective-primary-review/paired_estimates.csv",
+      "sha256": "5cfbcdf8ecc25965079cd703705670a44a840635faec37f4b1bfa1ba2c60474c"
+    },
+    "decomposition.csv": {
+      "source_relative_to_evidence_bundle": "decomposition-20261027/decomposition.csv",
+      "sha256": "b3fc709816fec450a40981b780ba7906830c2611f21ccec6d385a80facaabccf"
+    }
+  },
+  "hardware_source_relative": "paper-live-20261026/host-lscpu.json"
+}

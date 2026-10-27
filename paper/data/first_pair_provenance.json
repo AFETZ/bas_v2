@@ -1,0 +1,48 @@
+{
+  "evidence_loader": "plot_first_planned_pair.py",
+  "evidence_loader_sha256": "12aa0359aa6bee10b42f577565f71178b75d2ef543ab2e8fb28990904f0ae343",
+  "plan_sha256": "e09c3d5df4969f8176b6007ca39d4d19d5418af07dd304d0c8ed99ae5298b63f",
+  "selection": "First frozen pair, plan orders 1 and 2; RngSeed1/RngRun4",
+  "altitude_datum": "world_ENU_z",
+  "clock": "host-monotonic seconds from each measurement start",
+  "missing": "None; gap separators preserved; no imputation",
+  "target": "Only actual UART write-end points; no active-state interpolation",
+  "runs": {
+    "fixed": {
+      "run_id": "paper-relay-selective-fixed-s1-r04",
+      "policy": "fixed",
+      "planned_order": 2,
+      "status": "completed",
+      "quality": {
+        "observed": 39205
+      },
+      "gap_s": 0.5,
+      "duration_s": 180.064821166,
+      "fault_s": [
+        45.070706172,
+        105.0706871
+      ],
+      "target_rows_without_command": 0,
+      "deadline_ms": 250.0,
+      "errors": []
+    },
+    "failover": {
+      "run_id": "paper-relay-selective-failover-s1-r04",
+      "policy": "failover",
+      "planned_order": 1,
+      "status": "completed",
+      "quality": {
+        "observed": 39220
+      },
+      "gap_s": 0.5,
+      "duration_s": 180.069891645,
+      "fault_s": [
+        45.089528532,
+        105.089630414
+      ],
+      "target_rows_without_command": 0,
+      "deadline_ms": 250.0,
+      "errors": []
+    }
+  }
+}

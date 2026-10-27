@@ -1,0 +1,46 @@
+{
+  "measured_source": "8e16ec223e895c11891e6e7d7c39dff8cee39cac",
+  "image_id": "sha256:89d78eff9914b1644a1b01b793612e9ee8b19916c5a7bf5f578ba6d8bfbfafe5",
+  "cpu": "AMD Ryzen 9 9950X, 16 physical cores, 32 threads",
+  "hardware_source_relative": "paper-live-20261026/host-lscpu.json",
+  "environment_source_relative": "native-radio-realtime/paper-relay-selective-failover-s1-r04/environment.txt",
+  "environment_sha256": "f7e268454b0366d41fcfb2ccca4bee0a6e7a3997b98c520256e338e6ec6bd6c4",
+  "runtime_environment": {
+    "ns3_version": "3.48",
+    "ns3_exact_sha": "d2add90b452d600cfb4859baed8e9ea633519447",
+    "ns3_compatibility_patch": "true",
+    "python_version": "3.10.12",
+    "compiler_version": "c++ (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+    "cmake_version": "3.31.6",
+    "simulation_mode": "realtime",
+    "physics_profile": "stock",
+    "wifi_topology": "adhoc",
+    "scenario_key": "town01"
+  },
+  "actual_native_radio": {
+    "uav_count": 5,
+    "radio_node_count": 6,
+    "radio_backend": "wifi",
+    "tx_power_w": 0.01,
+    "carrier_hz": 2412000000.0,
+    "wifi_channel_width_mhz": 20,
+    "wifi_data_mode": "HtMcs0",
+    "wifi_control_mode": "ErpOfdmRate6Mbps",
+    "wifi_topology": "adhoc",
+    "wifi_actual_channel_number": 1,
+    "wifi_actual_center_frequency_hz": 2412000000.0,
+    "wifi_explicit_bar_after_missed_block_ack": false,
+    "wifi_aggregation_enabled": false
+  },
+  "limits": {
+    "command_deadline_ms": 250,
+    "lease_s": 2,
+    "renewal_s": 0.5,
+    "probe_period_s": 0.2,
+    "detection_s": 1,
+    "native_lag_limit_ms": 250,
+    "pose_age_limit_ms": 500,
+    "cross_source_skew_ms": 100
+  },
+  "raw_not_mutated": true
+}

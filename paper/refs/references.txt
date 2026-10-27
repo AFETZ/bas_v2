@@ -1,5 +1,5 @@
-[1] Baidya S., Shaikh Z., Levorato M. FlyNetSim: An Open Source Synchronized UAV Network Simulator based on ns-3 and Ardupilot. ACM MSWiM, 2018. Author version: arXiv:1808.04967. DOI: 10.48550/arXiv.1808.04967.
-[2] Calvo-Fullana M., Mox D., Pyattaev A., Fink J., Kumar V., Ribeiro A. ROS-NetSim: A Framework for the Integration of Robotic and Network Simulators. 2021. arXiv:2101.10113. DOI: 10.48550/arXiv.2101.10113.
+[1] Baidya S., Shaikh Z., Levorato M. FlyNetSim: An Open Source Synchronized UAV Network Simulator based on ns-3 and Ardupilot. Proceedings of the 21st ACM International Conference on Modeling, Analysis and Simulation of Wireless and Mobile Systems, 2018, pp. 37–45. Author version: https://arxiv.org/abs/1808.04967 .
+[2] Calvo-Fullana M., Mox D., Pyattaev A., Fink J., Kumar V., Ribeiro A. ROS-NetSim: A Framework for the Integration of Robotic and Network Simulators. 2021. DOI: 10.48550/arXiv.2101.10113.
 [3] Song Y., Naji S., Kaufmann E., Loquercio A., Scaramuzza D. Flightmare: A Flexible Quadrotor Simulator. Proceedings of the 2020 Conference on Robot Learning. PMLR, vol. 155, 2021, pp. 1147–1157. https://proceedings.mlr.press/v155/song21a.html .
 [4] ArduPilot Development Team. Using SITL with Gazebo. https://ardupilot.org/dev/docs/sitl-with-gazebo.html (accessed 27.10.2026).
 [5] Lee J., Grey M. X., Ha S., Kunz T., Jain S., Ye Y., Srinivasa S. S., Stilman M., Liu C. K. DART: Dynamic Animation and Robotics Toolkit. Journal of Open Source Software, vol. 3, no. 22, 2018, article 500. DOI: 10.21105/joss.00500.
