@@ -1,0 +1,44 @@
+{
+  "run_id": "paper-parameter-parallel-pilot-01",
+  "measured_source": "e6453c8e2a1ed4f6e4f9b16c224104e62e2df5d1",
+  "returncode": 0,
+  "status": "completed",
+  "criteria": {
+    "five_uav_lifecycle": true,
+    "two_completed_goals_each": true,
+    "two_completed_target_levels_each": true,
+    "live_integral_rtf_target": true,
+    "total_GCS_hold_all_five": null
+  },
+  "measurement_model_s": 30.013000000000005,
+  "measurement_wall_s": 30.025807767,
+  "measurement_RTF": 0.9995734413841791,
+  "completed_goal_count": 10,
+  "parameter_stages": {
+    "before": {
+      "duration_wall_s": 29.044193378,
+      "effective_workers": 5,
+      "complete_component_count": 5,
+      "indices_per_component": 1388,
+      "missing_indices": 0,
+      "source_sha256": "7d2b52e328b393bac0e801d787742b1f5dec0df3a535276f4e08ad46050f490a"
+    },
+    "after": {
+      "duration_wall_s": 29.086294275,
+      "effective_workers": 5,
+      "complete_component_count": 5,
+      "indices_per_component": 1388,
+      "missing_indices": 0,
+      "source_sha256": "c716e89fd8b79b8e7a145588e53d52aa99b565c78792513fc494727986e70d77"
+    }
+  },
+  "role": "engineering pilot, not a study row or independent new native-path proof",
+  "source_files": {
+    "summary.json": {
+      "sha256": "b7b96e543312bcc687488958010d60a77e989dc903b97c9eaee625a73cdf7efd"
+    },
+    "relay_experiment_summary.json": {
+      "sha256": "8f2515a6cfbef7eed7ec463475efd1dc43c07fcbe64a3804dee247bfcf9f397b"
+    }
+  }
+}
