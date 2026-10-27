@@ -144,3 +144,56 @@ def test_freeze_matches_only_explicit_source_image_and_plan_bytes(tmp_path):
     try:S.verify_freeze(freeze,path,"abc",False,"sha256:actual")
     except ValueError:pass
     else:raise AssertionError("changed plan was accepted")
+
+
+def test_failed_after_full_window_keeps_network_outcome_and_exposes_partial_post_capture(tmp_path):
+    planned,result=prepared(tmp_path)
+    raw=Path(result["raw_run_dir"])
+    parent=dict(before=dict(returncode=0,started_host_monotonic_ns=NS,ended_host_monotonic_ns=5*NS),
+        after=dict(returncode=2,error="synthetic after-window watchdog",started_host_monotonic_ns=200*NS,ended_host_monotonic_ns=210*NS))
+    metadata_path=raw/"metrics/relay_experiment_summary.json"
+    metadata=json.loads(metadata_path.read_text());metadata["parameter_snapshots"]=parent
+    metadata_path.write_text(json.dumps(metadata))
+    for stage in ("before","after"):
+        directory=raw/f"configuration/parameters-{stage}";directory.mkdir(parents=True)
+        payload=dict(status="complete" if stage=="before" else "partial",settings=dict(workers=5),effective_workers=5,
+            components=[dict(system_id=i,component_id=1,complete=stage=="before" or i!=5) for i in range(1,6)])
+        (directory/"summary.json").write_text(json.dumps(payload))
+    result.update(run_status="failed",run_error="synthetic after-window watchdog")
+    result["criteria"]["five_uav_lifecycle"]=False
+    result["control_recovery"]["all_five"].update(status="observed",recovered=True,time_s=4.2)
+    result["handover_recovery"]["all_five"].update(status="observed",recovered=True,time_s=4.2)
+    record=S.sensitivity_record(planned,result,[],[])
+    assert record["recorded"] and record["network_eligible"] and record["study_eligible"]
+    assert record["run_status"]=="failed" and record["outcomes"]["run_completed"]==0
+    assert record["outcomes"]["lifecycle_success"]==0 and record["measurement_window"]["complete"] is True
+    assert record["outcomes"]["timely_per_offered"]==result["rates"]["all_five"]["timely_per_offered"]
+    assert record["outcomes"]["common_UART_recovery_s"]==4.2
+    assert record["outcomes"]["common_UART_over4_or_not_recovered"]==1
+    assert record["outcomes"]["handover_by4s_where_changed"]==0
+    capture=record["parameter_capture"]
+    assert capture["before"]["all_five_tables_complete"] is True
+    assert capture["after"]["status"]=="partial" and capture["after"]["all_five_tables_complete"] is False
+    assert capture["after"]["complete_component_count"]==4 and capture["after"]["process_returncode"]==2
+    assert capture["before"]["overlaps_measurement_host_interval"] is False
+    assert capture["after"]["overlaps_measurement_host_interval"] is False
+    result["observation_window"]["complete"]=False
+    incomplete=S.sensitivity_record(planned,result,[],[])
+    assert not incomplete["network_eligible"] and incomplete["outcomes"]["run_completed"]==0
+    assert incomplete["parameter_capture"]["after"]["status"]=="partial"
+
+
+def test_skipped_or_absent_parameter_dump_is_reported_without_a_zero_table_count(tmp_path):
+    planned,result=prepared(tmp_path)
+    path=Path(result["raw_run_dir"])/"metrics/relay_experiment_summary.json"
+    metadata=json.loads(path.read_text())
+    metadata["parameter_snapshots"]=dict(after=dict(status="skipped",reason="LAND did not complete"))
+    path.write_text(json.dumps(metadata))
+    result.update(run_status="failed",run_error="synthetic LAND failure")
+    record=S.sensitivity_record(planned,result,[],[])
+    assert record["network_eligible"]
+    assert record["parameter_capture"]["before"]["status"]=="not_recorded"
+    after=record["parameter_capture"]["after"]
+    assert after["status"]=="skipped" and after["all_five_tables_complete"] is None
+    assert after["complete_component_count"] is None and after["observed_component_count"] is None
+    assert after["parent_stage_record"]["reason"]=="LAND did not complete"

@@ -144,6 +144,40 @@ def outcome_by_four(recovery: dict) -> float | None:
     return 0. if horizon is not None and horizon >= 4 else None
 
 
+def parameter_capture_report(raw: Path, requested: bool | None, window: dict) -> dict:
+    """Report capture completeness independently of run/network eligibility.
+
+    These are recorded exporter verdicts, not a second wire/index validation.
+    Absent summaries are unknown; a skipped post-LAND capture stays skipped.
+    """
+    metadata=A.read_json(raw/"metrics/relay_experiment_summary.json").get("parameter_snapshots",{})
+    result=dict(requested=requested,completeness_source="recorded parameter exporter summaries; independent raw audit remains separate")
+    expected={(i,1) for i in range(1,6)}
+    for stage in ("before","after"):
+        path=raw/f"configuration/parameters-{stage}/summary.json"
+        exported=A.read_json(path)
+        components=exported.get("components",[])
+        parent=metadata.get(stage,{})
+        targets={(c.get("system_id"),c.get("component_id")) for c in components}
+        complete=(len(components)==5 and targets==expected and all(c.get("complete") is True for c in components)) if exported else None
+        start,end=(A.finite(parent.get(k)) for k in ("started_host_monotonic_ns","ended_host_monotonic_ns"))
+        low,high=(A.finite(window.get(k)) for k in ("start_host_monotonic_ns","end_host_monotonic_ns"))
+        overlap=max(start,low)<min(end,high) if None not in (start,end,low,high) else None
+        if exported:status=exported.get("status","unclassified_exporter_summary")
+        elif path.is_file():status="unreadable_or_empty_summary"
+        elif parent:status=parent.get("status") or "missing_table_summary"
+        else:status="not_recorded" if requested is True else "not_requested" if requested is False else "request_not_recorded"
+        result[stage]=dict(status=status,all_five_tables_complete=complete,
+            observed_component_count=len(components) if exported else None,
+            complete_component_count=sum(c.get("complete") is True for c in components) if exported else None,
+            expected_component_count=5,observed_target_components=sorted(targets,key=lambda pair:tuple(map(str,pair))),
+            requested_workers=exported.get("settings",{}).get("workers"),effective_workers=exported.get("effective_workers"),
+            process_returncode=parent.get("returncode"),parent_stage_record=parent,
+            overlaps_measurement_host_interval=overlap,exporter_summary_path=str(path),
+            exporter_summary_present=path.is_file(),exporter_summary_readable=bool(exported))
+    return result
+
+
 def sensitivity_record(planned: dict, result: dict, events: list[dict], offers: list[dict]) -> dict:
     record = A.campaign_record(planned,result)
     cfg = result["metadata"]["config"]
@@ -177,6 +211,8 @@ def sensitivity_record(planned: dict, result: dict, events: list[dict], offers: 
     behavior["native_fault_end_ns3_time_s"] = next((A.finite(r.get("time_s")) for r in result["actual_fault"]["events"] if r["event"] == "fault_end"),None)
     behavior["actual_RF_duration_s"] = (end-fault)/1e9 if fault is not None and end is not None else None
     record["fault_phase_and_selections"] = behavior
+    record["measurement_window"]=dict(result["observation_window"])
+    record["parameter_capture"]=parameter_capture_report(Path(result["raw_run_dir"]),cfg.get("parameter_snapshots"),result["observation_window"])
     control = result["control_recovery"]["all_five"]
     record["endpoint_status"] = dict(common_UART=control, handover=result["handover_recovery"]["all_five"],
         physical_goal=result["goal_recovery_all_five"])
@@ -244,13 +280,17 @@ def analyze(rows: list[dict], raw_root: Path, output: Path, live_export: bool) -
             "Do not pool old30 with new18 or average the three duration factors into one policy effect."])
     A.write_json(output/"metrics/sensitivity_analysis.json",result)
     A.write_csv(output/"metrics/paired_points.csv",points,list(points[0]) if points else ["pair_id","metric","difference"])
-    flat = [dict({k:r.get(k) for k in ("order","run_id","pair_id","repeat","policy","outage_duration_s","fault_start_s","fault_end_s","run_status","recorded","study_eligible","network_eligible")},
+    flat = [dict({k:r.get(k) for k in ("order","run_id","pair_id","repeat","policy","outage_duration_s","fault_start_s","fault_end_s","run_status","run_error","recorded","study_eligible","network_eligible")},
         **r["outcomes"], exclusion_reasons="; ".join(r["exclusion_reasons"]),
+        measurement_window_complete=r.get("measurement_window",{}).get("complete"),
+        **{f"parameter_{stage}_{field}":r.get("parameter_capture",{}).get(stage,{}).get(field)
+            for stage in ("before","after") for field in ("status","all_five_tables_complete","observed_component_count","complete_component_count","process_returncode","overlaps_measurement_host_interval")},
         **{f"{name}_{field}":r.get("endpoint_status",{}).get(name,{}).get(field) for name in ("common_UART","handover","physical_goal") for field in ("status","censor_time_s")},
         actual_RF_duration_s=r.get("fault_phase_and_selections",{}).get("actual_RF_duration_s"),
         fault_phase_and_selections=json.dumps(r.get("fault_phase_and_selections"))) for r in records]
     A.write_csv(output/"metrics/sensitivity_runs.csv",flat,
-        ["order","run_id","pair_id","repeat","policy","outage_duration_s","fault_start_s","fault_end_s","actual_RF_duration_s","run_status","recorded","study_eligible","network_eligible",
+        ["order","run_id","pair_id","repeat","policy","outage_duration_s","fault_start_s","fault_end_s","actual_RF_duration_s","run_status","run_error","recorded","study_eligible","network_eligible","measurement_window_complete",
+         *[f"parameter_{stage}_{field}" for stage in ("before","after") for field in ("status","all_five_tables_complete","observed_component_count","complete_component_count","process_returncode","overlaps_measurement_host_interval")],
          *sorted(set(METRICS)|{k for r in records for k in r["outcomes"]}),
          *[f"{name}_{field}" for name in ("common_UART","handover","physical_goal") for field in ("status","censor_time_s")],"exclusion_reasons","fault_phase_and_selections"])
     A.write_csv(output/"metrics/paired_estimates.csv",estimates,list(dict.fromkeys(k for r in estimates for k in r)) if estimates else ["outage_duration_s","metric","n_pairs"])
