@@ -1,6 +1,8 @@
-# Active live/leader task — user-authorized scope, 2026-10-26
+# Active paper follow-up — user-authorized scope, 2026-10-27
 
-For this prepared worktree the current task is `doc/LIVE_LEADER_PLAN.md`.
+For this worktree the current task is `NEXT_STEP_PROMPT.txt` and the current user request.
+Read `doc/LIVE_LEADER_REVIEW_20261027.md` and `doc/LIVE_LEADER_RESULTS.md`;
+`doc/LIVE_LEADER_PLAN.md` preserves the original implementation plan, not current status.
 Read `doc/DEV_ENVIRONMENT.md` before starting agents or a simulator.
 The user explicitly authorized multi-agent development and a lightweight native
 propagation model in place of mandatory Sionna. These task-specific choices
@@ -11,8 +13,8 @@ supersede conflicting older default-profile and one-agent statements below.
   effective configuration logs, and plots of actual behavior for a paper.
 - Use the explicit native Friis baseline; Sionna and accelerated batch are optional.
   No hidden propagation fallback, fabricated ACK/PER/positions, or custom MAC.
-- Current BSS routes peer traffic through GCS AP. Add a native ad-hoc profile and
-  on-link peer routes before claiming independent master-to-follower radio relay.
+- Measured baseline `8e16ec2` uses native ad-hoc/direct peer routes. The old BSS
+  profile remains separate; it cannot establish an independent peer radio path.
 - Root + at most three active workers; each owns disjoint files/worktrees.
   Shared native scratch/runner changes have one runtime owner and sequential integration.
 - Full-stack runs and mutable native builds use the integration worktree under
@@ -20,7 +22,8 @@ supersede conflicting older default-profile and one-agent statements below.
   Do not share writable .external/build/install or stop another agent's runtime.
 - Reuse existing upstream tooling and reports. New code is limited to necessary
   adapters, GCS role/lease policy, measurements and small launch/config changes.
-- Current flight is unproved. ACK accepted is not lift or task completion.
+- Town01/DART five-UAV physical cycles and 30 frozen runs are independently reviewed.
+  Do not repeat that series without a concrete reason. ACK is not lift or task completion.
   Never disable all arming checks or relax timing thresholds to manufacture PASS.
 - The GCS is the sole grant authority. No overlapping leases at final command
   admission; complete GCS isolation cannot produce a new GCS-issued appointment.
@@ -28,7 +31,11 @@ supersede conflicting older default-profile and one-agent statements below.
   Keep the excluded legacy paths below excluded, including network/swarm/**.
 - Preserve /home/bas/bas_v2-main and its dirty state. All work goes to assigned copies.
   Existing historical evidence stays tied to its version and configuration.
-- This setup contains no completed new product experiment. Report observed facts.
+- Main series: 30 measured runs at `8e16ec2`; preserve raw and observed-only
+  DataFlash parameter coverage. Follow-up: full MAVLink parameter snapshots, actual
+  operator cycle, separate 18-run sensitivity study and anonymous DOCX/PDF draft.
+- Coordinator means a GCS-appointed airborne command relay, not autonomous planning.
+  RF-isolation HOLD assumes functioning sidecar/runtime. Intervals at n=5 are exploratory.
 
 # Product-First Repository Rules
 
@@ -117,10 +124,11 @@ Keep active documents short:
 
 ## Current delivery
 
-Use `main` as the canonical development branch and immutable `test-baseline-*`
-tags for repeatable tests. Historical RC1 scope is in `doc/DELIVERY_SCOPE.md`;
+For this authorized paper task use `paper/live-leader-20261026`; keep measured
+versions and configuration snapshots immutable. Other delivery branches are historical. Historical RC1 scope is in `doc/DELIVERY_SCOPE.md`;
 record actual results and remaining blockers in `network/STATUS.md`. Preserve user edits.
-Keep native ns-3.48 Wi-Fi PHY/MAC with in-process Sionna RT as the default.
+For this task use measured native ns-3.48 Wi-Fi PHY/MAC with explicit Friis;
+Sionna RT is optional and outside this follow-up.
 No custom PER/ACK/MAC, direct SITL bypass, or silent propagation fallback.
 Dependencies remain pinned; use upstream APIs and thin adapters. Full traces
 and external scene assets stay outside Git. Physical flight-control hardware
