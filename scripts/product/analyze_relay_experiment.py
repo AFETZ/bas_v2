@@ -122,6 +122,68 @@ def distribution(values: list[float]) -> dict[str, Any]:
                 min=min(values) if values else None, max=max(values) if values else None)
 
 
+def decompose_goal(completion: dict[str, Any], commands: list[dict[str, Any]], fault_ns: float | None) -> dict[str, Any]:
+    """A goal spans refreshes; its first CID is not its completion-refresh CID."""
+    base = dict(status="unverifiable_goal_lineage", uav_id=identifier(completion.get("uav_id")),
+        goal_id=completion.get("goal_id"), leader_id=identifier(completion.get("leader_id")),
+        epoch=completion.get("admitted_epoch", completion.get("epoch")),
+        completion_refresh_CID=completion.get("admitted_command_id", completion.get("command_id")))
+    created, finished = finite(completion.get("goal_created_host_monotonic_ns")), finite(completion.get("host_monotonic_ns"))
+    if fault_ns is None or created is None or finished is None or not fault_ns <= created <= finished:
+        return base
+    unlabelled = [r for r in commands if r.get("goal_id") is None and r.get("uav_id") == base["uav_id"]
+        and r.get("leader_id") == base["leader_id"] and r.get("epoch") == base["epoch"]
+        and r.get("target_position_m") == target(completion) and r.get("admitted_ns") is not None
+        and r.get("created_ns") is not None and created <= r["created_ns"] <= r["admitted_ns"] <= finished]
+    if unlabelled:
+        return dict(base, reason="unlabelled same-target admissions could precede the first goal-labelled CID")
+    eligible = [r for r in commands if r.get("goal_id") == base["goal_id"] and r.get("goal_created_ns") == created
+        and r.get("uav_id") == base["uav_id"] and r.get("leader_id") == base["leader_id"] and r.get("epoch") == base["epoch"]
+        and r.get("target_position_m") == target(completion) and r.get("lease_status") == "valid"
+        and r.get("lineage_status") == "valid" and r.get("application_chain_complete") and r.get("policy_allowed")
+        and r.get("created_ns") is not None and r.get("admitted_ns") is not None
+        and r.get("lease_valid_from_ns") is not None and r.get("lease_valid_until_ns") is not None
+        and r["lease_valid_from_ns"] <= r["admitted_ns"] < r["lease_valid_until_ns"]
+        and created <= r["created_ns"] <= r["admitted_ns"] <= finished]
+    latest = next((r for r in eligible if r["command_id"] == base["completion_refresh_CID"]), None)
+    if not eligible or latest is None or latest.get("lease_valid_until_ns") is None or finished >= latest["lease_valid_until_ns"]:
+        return base
+    first = min(eligible, key=lambda r: r["admitted_ns"])
+    total = (finished-fault_ns)/1e9
+    phases = [(created-fault_ns)/1e9, (first["admitted_ns"]-created)/1e9, (finished-first["admitted_ns"])/1e9]
+    return dict(base, status="observed", first_admitted_goal_CID=first["command_id"],
+        fault_host_ns=fault_ns, goal_created_host_ns=created, first_goal_uart_host_ns=first["admitted_ns"],
+        completed_host_ns=finished, completion_refresh_uart_host_ns=latest["admitted_ns"],
+        fault_to_goal_creation_s=phases[0], goal_creation_to_first_UART_s=phases[1], first_UART_to_completion_s=phases[2],
+        fault_to_completion_s=total, sum_error_s=sum(phases)-total,
+        latest_CID_chain=dict(command_id=latest["command_id"], command_created_host_ns=latest["created_ns"],
+            uart_host_ns=latest["admitted_ns"], fault_to_command_creation_s=(latest["created_ns"]-fault_ns)/1e9,
+            command_creation_to_UART_s=(latest["admitted_ns"]-latest["created_ns"])/1e9,
+            UART_to_completion_s=(finished-latest["admitted_ns"])/1e9, fault_to_completion_s=total),
+        first_grant_sequence=first.get("grant_sequence"), completion_grant_sequence=latest.get("grant_sequence"),
+        lease_scope="Both admissions verified; completion before completion-refresh expiry. Continuous received authority between refreshes is not inferred.",
+        target_position_m=target(completion))
+
+
+def group_goal_decomposition(completions: list[dict[str, Any]], commands: list[dict[str, Any]], fault_ns: float | None) -> dict[str, Any]:
+    scopes: dict[tuple[int, int], dict[int, dict[str, Any]]] = defaultdict(dict)
+    for row in sorted(completions, key=lambda r: r["host_monotonic_ns"]):
+        scopes[(row["leader_id"], row.get("admitted_epoch", row.get("epoch")))].setdefault(row["uav_id"], row)
+    result = {}
+    for name in ("all_five", "four_followers"):
+        candidates = []
+        for (leader, epoch), firsts in scopes.items():
+            required = set(UAVS) - ({leader} if name == "four_followers" else set())
+            if required <= set(firsts):
+                critical = max((firsts[i] for i in required), key=lambda r: (r["host_monotonic_ns"], r["uav_id"]))
+                candidates.append((critical["host_monotonic_ns"], leader, epoch, sorted(required), critical))
+        chosen = min(candidates, key=lambda row: row[:3]) if candidates else None
+        result[name] = (dict(decompose_goal(chosen[4], commands, fault_ns), members=chosen[3],
+            critical_uav_id=chosen[4]["uav_id"], selection="last-finishing UAV among first eligible completions under one assigned relay/epoch")
+            if chosen else dict(status="not_observed", members=None, critical_uav_id=None))
+    return result
+
+
 def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: float = 250.,
                 restricted_s: float = 30., plots: bool = True, live_export: bool = True) -> dict[str, Any]:
     run_dir = run_dir.resolve()
@@ -267,9 +329,14 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
                      "follower_receive": uav, "uart_admitted": uav}
         chain = all(any(stage(row) == name and row.get("node_id") == actor_for[name] for row in records)
                     for name in required)
+        goal_metadata = {(row["goal_id"], finite(row.get("goal_created_host_monotonic_ns")))
+            for row in records if row.get("goal_id") is not None and finite(row.get("goal_created_host_monotonic_ns")) is not None}
+        if len(goal_metadata) > 1:
+            errors.append(f"conflicting goal metadata for {sent['command_id']}")
+        goal_id, goal_created = next(iter(goal_metadata)) if len(goal_metadata) == 1 else (None, None)
         policy_allowed = policy != "fixed" or leader == initial_master
         commands.append(dict(command_id=sent["command_id"], uav_id=uav, leader_id=leader,
-            epoch=sent.get("epoch"), created_ns=created,
+            epoch=sent.get("epoch"), created_ns=created, goal_id=goal_id, goal_created_ns=goal_created,
             sent_ns=stamp(sent), admitted_ns=write_end, admission_event_ns=stamp(admitted) if admitted else None,
             grant_sequence=admitted.get("grant_sequence") if admitted else None,
             lease_valid_from_ns=finite(admitted.get("valid_from_ns")) if admitted else None,
@@ -302,6 +369,10 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
             audit["duplicate_offer_ids"] += 1
         unique_offers.setdefault(key, row)
     offers = list(unique_offers.values())
+    for offered in offers:
+        command = command_index.get(str(offered.get("command_id")))
+        if command is not None and command["goal_id"] is None and offered.get("goal_id"):
+            command.update(goal_id=offered["goal_id"], goal_created_ns=finite(offered.get("goal_created_host_monotonic_ns")))
     rates = {}
     for name, uavs in [("all_five", set(UAVS)), *((f"uav{i}", {i}) for i in UAVS)]:
         offered = [row for row in offers if identifier(row.get("uav_id")) in uavs]
@@ -348,7 +419,7 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
     per_uav = {str(i): recovery(min((r["admitted_ns"] for r in eligible if r["uav_id"] == i), default=None),
                 fault, end, applicable=applicable, restricted_s=restricted_s) for i in UAVS}
     completions = [row for row in events if stage(row) == "action_completed" and inside(stamp(row))]
-    goals = []
+    goals, eligible_completions = [], []
     goal_recovery, completion_gap = {}, {}
     hold_s = float(config.get("hold_s", 2.))
     for i in UAVS:
@@ -381,11 +452,16 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
                 maneuver_observed=row.get("maneuver_observed"), dwell_s=row.get("dwell_s")))
             if qualifies:
                 choices.append(stamp(row))
+                eligible_completions.append(row)
         point = min(choices) if choices else None
         goal_recovery[str(i)] = recovery(point, fault, end, applicable=applicable, restricted_s=restricted_s)
         completion_gap[str(i)] = ((point - stamp(previous)) / 1e9 if point is not None and previous else None)
     group_goal_point = (fault + max(row["time_s"] for row in goal_recovery.values()) * 1e9
                         if fault is not None and all(row["recovered"] is True for row in goal_recovery.values()) else None)
+    decomposition = group_goal_decomposition(eligible_completions, commands, fault)
+    if not applicable:
+        for row in decomposition.values():
+            row["status"] = "not_applicable_no_fault"
     fault_limit = fault_end if fault_end is not None else end
     during_fault = lambda row: fault is not None and stamp(row) is not None and fault <= stamp(row) < (fault_limit or fault)
     issued_during = [row for row in grant_rows if during_fault(row)]
@@ -417,6 +493,7 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
         rates=rates, control_recovery=control, control_recovery_per_uav=per_uav, handover_recovery=handover,
         goal_recovery_per_uav=goal_recovery, completion_gap_s_per_uav=completion_gap,
         goal_recovery_all_five=recovery(group_goal_point, fault, end, applicable=applicable, restricted_s=restricted_s),
+        goal_decomposition=decomposition,
         admission_audit=dict(audit), unverifiable_admissions=sum(value for key, value in audit.items() if key.startswith("unverifiable")),
         admission_audit_settings=dict(command_max_age_ms=admission_age_limit_ms,
             source="recorded effective_service_args.command_max_age_ms; missing is unverifiable"),
@@ -436,6 +513,7 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
             sent_denominator="all unique target-bearing GCS sends, including lost/late; timely requires verified lease/payload lineage and complete application relay chain",
             group_recovery="first postfault-created refresh admitted to every member under one leader/epoch",
             goal_recovery="new postfault goal, target changed >=1m from last pre-fault admitted target, observed maneuver and dwell; not latest refresh creation",
+            goal_decomposition="critical last-finishing UAV under one assigned relay/epoch; first goal CID and latest completion-refresh CID are distinct explicit lineages; no continuous authority inferred",
             completion_gap="last pre-fault completed goal to first eligible new goal completion",
             censoring="right-censored time is never substituted as a successful recovery",
             restricted_loss=f"min(time to first recovery, {restricted_s}s); a bounded loss, not an imputed recovery; missing if horizon not observed",
@@ -458,11 +536,16 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
             windows=distribution([float(row["end_to_end_rtf"]) for row in windows]),
             source="existing live exporter; tracker/host samples filtered to measurement host interval",
             window_duration_s=distribution([float(row["wall_duration_s"]) for row in windows]))
-    write_csv(output / "metrics/relay_commands.csv", commands, ["command_id", "uav_id", "leader_id", "epoch", "created_ns",
+    write_csv(output / "metrics/relay_commands.csv", commands, ["command_id", "uav_id", "leader_id", "epoch", "created_ns", "goal_id", "goal_created_ns",
         "sent_ns", "admitted_ns", "admission_event_ns", "grant_sequence", "lease_valid_from_ns", "lease_valid_until_ns", "admission_checked_ns",
         "latency_ms", "sent_to_uart_latency_ms", "timely", "lease_status", "lineage_status", "application_chain_complete", "policy_allowed", "target_position_m"])
     write_csv(output / "metrics/relay_goals.csv", goals, ["uav_id", "goal_id", "created_ns", "completed_ns",
         "qualifies_postfault_recovery", "target_changed_from_prefault_admission", "maneuver_observed", "dwell_s"])
+    decomposition_rows = [dict(scope=name, **{key:value for key,value in row.items() if key != "latest_CID_chain"},
+        latest_CID_chain=json.dumps(row.get("latest_CID_chain"))) for name,row in decomposition.items()]
+    write_csv(output / "metrics/relay_goal_decomposition.csv", decomposition_rows, ["scope", "status", "critical_uav_id", "goal_id", "leader_id", "epoch", "members",
+        "first_admitted_goal_CID", "completion_refresh_CID", "goal_created_host_ns", "first_goal_uart_host_ns", "completion_refresh_uart_host_ns", "completed_host_ns",
+        "fault_to_goal_creation_s", "goal_creation_to_first_UART_s", "first_UART_to_completion_s", "fault_to_completion_s", "sum_error_s", "latest_CID_chain"])
     recovery_rows = [dict(endpoint=f"uav{i}", **per_uav[str(i)]) for i in UAVS]
     recovery_rows += [dict(endpoint=name, **row) for name, row in control.items()]
     write_csv(output / "metrics/relay_recovery.csv", recovery_rows, ["endpoint", "status", "recovered", "time_s",
