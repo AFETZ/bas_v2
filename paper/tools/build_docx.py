@@ -29,7 +29,7 @@ TABLE_EN_CAPTIONS={
     'related':'Scope of related work; comparison does not establish absence of unlisted capabilities.',
     'six_cells':'Main 30-run study, five runs per cell. Means; times start at actual RF fault. Dashes mean not applicable.',
     'decomposition':'Mean T_goal for the last-finishing UAV, five runs per policy. Goal-to-UART includes waiting for a periodic refresh, not only command delivery.',
-    'sensitivity':'Separate nominal-outage study, three planned runs per cell. Observed UART means include n; censored or missing outcomes are not zero.',
+    'sensitivity':'Separate nominal-outage study, three attempts per cell. Network-eligible means include n; overall failed runs are counted separately. Missing is not zero.',
     'operator':'Separate console experiment: complete parameter coverage for all five vehicles; only UAV3 flew.'}
 
 def style(doc,name,font,size,bold=False,italic=False):
@@ -117,8 +117,14 @@ def figure_caption(doc,text,english=False):
     pf.keep_with_next=not english
     return para
 
+def network_eligible(row):
+    if 'network_eligible' not in row:
+        raise ValueError('Final reviewed network eligibility is required for sensitivity display')
+    return row['network_eligible'].strip().lower()=='true'
+
 def table(doc,name):
     TABLE_SEQUENCE.append(name)
+    caption_en_extra=''
     if name=='related':
         caption='Табл. 1. Сопоставление фокуса работ; наличие возможностей не опровергается по их отсутствию в кратком описании'
         heads=['Работа','Основной подход','Отношение к данной работе']
@@ -139,14 +145,27 @@ def table(doc,name):
         caption='Табл. 3. Среднее T_goal по последнему UAV (n=5); цель→UART включает ожидание обновления, не только доставку команды'
         heads=['Политика','До создания цели, с','Цель→первый UART, с','Движение + hold, с','Сумма, с']
         with (ROOT/'data/decomposition.csv').open(newline='') as f:source=list(csv.DictReader(f))
+        split_keys=['goal_creation_to_first_command_creation_s','first_command_creation_to_UART_s']
+        all_five=[r for r in source if r['group']=='all_five']
+        has_split=len(all_five)==10 and all(all(r.get(k) not in ('',None) for k in split_keys) for r in all_five)
+        if has_split:
+            for row in all_five:
+                if abs(sum(float(row[k]) for k in split_keys)-float(row['goal_creation_to_first_UART_s']))>1e-8:
+                    raise ValueError('Goal-to-UART subphases must preserve the original interval')
+            caption+='; в скобках: до создания команды + от создания команды до UART, включая обработку и relay'
+            caption_en_extra=' Parentheses split waiting for command creation and application-command-to-UART processing, including relay; neither denotes pure RF airtime.'
         keys=['fault_to_goal_creation_s','goal_creation_to_first_UART_s','first_UART_to_completion_s','fault_to_completion_s']
         rows=[]
         for policy in ('fixed','failover'):
             selected=[r for r in source if r['policy']==policy and r['group']=='all_five']
             assert len(selected)==5
-            rows.append([policy]+[f"{sum(float(r[k]) for r in selected)/5:.3f}".replace('.',',') for k in keys])
+            values=[f"{sum(float(r[k]) for r in selected)/5:.3f}".replace('.',',') for k in keys]
+            if has_split:
+                parts=[f"{sum(float(r[k]) for r in selected)/5:.3f}".replace('.',',') for k in split_keys]
+                values[1]+='\n('+' + '.join(parts)+')'
+            rows.append([policy]+values)
     elif name=='sensitivity':
-        caption='Табл. 4. Отдельная серия чувствительности; по три запланированных запуска. T_UART — среднее наблюдений с их числом n; пропуски и цензурирование не равны нулю'
+        caption='Табл. 4. Отдельная серия, три попытки на ячейку; средние допустимых сетевых окон с n, общий failed отдельно. Пропуск не равен нулю'
         heads=['Номинал, с','Политика','Actual RF min–max, с','Timely, %','T_UART, с (n)','Censored / failed']
         with (ROOT/'data/sensitivity_runs.csv').open(newline='') as f:source=list(csv.DictReader(f))
         assert len(source)==18
@@ -155,10 +174,10 @@ def table(doc,name):
             for policy in ('fixed','failover'):
                 selected=[r for r in source if float(r['outage_duration_s'])==duration and r['policy']==policy]
                 assert len(selected)==3
-                timely=[float(r['timely_per_offered'])*100 for r in selected if r['timely_per_offered']]
+                timely=[float(r['timely_per_offered'])*100 for r in selected if network_eligible(r) and r['timely_per_offered']]
                 uart=[float(r['common_UART_recovery_s']) for r in selected
-                      if r['common_UART_status']=='observed' and r['common_UART_recovery_s']]
-                cen=sum(r['common_UART_status']!='observed' and bool(r['common_UART_censor_time_s']) for r in selected)
+                      if network_eligible(r) and r['common_UART_status']=='observed' and r['common_UART_recovery_s']]
+                cen=sum(network_eligible(r) and r['common_UART_status']!='observed' and bool(r['common_UART_censor_time_s']) for r in selected)
                 failed=sum(r['run_status']!='completed' for r in selected)
                 rf=[float(r['actual_RF_duration_s']) for r in selected if r['actual_RF_duration_s']]
                 fmt=lambda vals:f"{sum(vals)/len(vals):.3f}".replace('.',',') if vals else '—'
@@ -179,7 +198,7 @@ def table(doc,name):
               ['Полёт / удержание','16→20 м relative-alt, BRAKE 7,1 с, LAND/disarm; позы отдельно']]
     else:raise ValueError(name)
     caption=re.sub(r'^Табл\. \d+\.',f'Табл. {len(TABLE_SEQUENCE)}.',caption).rstrip('.')+'.'
-    caption_en=f'Table {len(TABLE_SEQUENCE)}. '+TABLE_EN_CAPTIONS[name]
+    caption_en=f'Table {len(TABLE_SEQUENCE)}. '+TABLE_EN_CAPTIONS[name]+caption_en_extra
     for english,text in [(False,caption),(True,caption_en)]:
         para=p(doc,text,'ispPicture_sign')
         para.alignment=WD_ALIGN_PARAGRAPH.LEFT

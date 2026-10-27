@@ -21,6 +21,11 @@ def table(name):
     with (ROOT / 'data' / name).open(newline='') as f:
         return list(csv.DictReader(f))
 
+def network_eligible(row):
+    if 'network_eligible' not in row:
+        raise ValueError('Final reviewed network eligibility is required for sensitivity display')
+    return row['network_eligible'].strip().lower()=='true'
+
 def save(fig, name):
     for ext in ('png', 'pdf', 'svg'):
         fig.savefig(OUT / f'{name}.{ext}', dpi=400, bbox_inches='tight',
@@ -156,12 +161,13 @@ def sensitivity():
                 values=[]
                 for x,policy in enumerate(('fixed','failover')):
                     row=pair[policy];raw=row[key]
-                    observed=(status_key is None or row[status_key]=='observed')
+                    observed=network_eligible(row) and (status_key is None or row[status_key]=='observed')
                     if raw and observed:
                         val=float(raw)*(100 if status_key is None else 1)
-                        axes[index,col].scatter(x+offset,val,color=color,s=14,zorder=3)
+                        marker='o' if row['run_status']=='completed' else 'x'
+                        axes[index,col].scatter(x+offset,val,color=color,s=18,marker=marker,zorder=3)
                         values.append((x+offset,val))
-                    elif status_key and row.get('common_UART_censor_time_s'):
+                    elif network_eligible(row) and status_key and row.get('common_UART_censor_time_s'):
                         val=float(row['common_UART_censor_time_s'])
                         axes[index,col].scatter(x+offset,val,marker='^',facecolors='none',edgecolors=[color],s=22,zorder=3)
                     else:
@@ -174,7 +180,7 @@ def sensitivity():
             ax.set_xticks([0,1],['fixed','failover']);ax.set_xlim(-.25,1.25);ax.grid(axis='y',alpha=.25)
             ax.tick_params(labelsize=7)
     axes[0,0].set_ylabel('T_UART, с');axes[1,0].set_ylabel('Timely / offered, %')
-    fig.text(.5,.005,'Кружок: наблюдение; △: цензурирование; пропуск не равен нулю',ha='center',fontsize=7)
+    fig.text(.5,.005,'○: completed; ×: failed с допустимым окном; △: censor; пропуск ≠ 0',ha='center',fontsize=7)
     fig.tight_layout(rect=(0,.035,1,1),w_pad=1)
     save(fig,'sensitivity')
 
