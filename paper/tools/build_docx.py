@@ -28,7 +28,7 @@ TABLE_SEQUENCE=[]
 TABLE_EN_CAPTIONS={
     'related':'Scope of related work; comparison does not establish absence of unlisted capabilities.',
     'six_cells':'Main 30-run study, five runs per cell. Means; times start at actual RF fault. Dashes mean not applicable.',
-    'decomposition':'Mean T_goal for the actual last-finishing UAV, five runs per policy; first UART differs from the latest completion refresh.',
+    'decomposition':'Mean T_goal for the last-finishing UAV, five runs per policy. Goal-to-UART includes waiting for a periodic refresh, not only command delivery.',
     'sensitivity':'Separate nominal-outage study, three planned runs per cell. Observed UART means include n; censored or missing outcomes are not zero.',
     'operator':'Separate console experiment: complete parameter coverage for all five vehicles; only UAV3 flew.'}
 
@@ -136,8 +136,8 @@ def table(doc,name):
             rows.append([r['condition'],r['policy'],f"{100*float(r['mean_timely_per_offered']):.3f}%".replace('.',','),
                         fmt('mean_actual_control_s'),fmt('mean_actual_goal_s')])
     elif name=='decomposition':
-        caption='Табл. 3. Среднее T_goal по последнему завершившему UAV (n=5); первый UART той же цели, не последний refresh CID'
-        heads=['Политика','До создания, с','До первого UART, с','Движение + hold, с','Сумма, с']
+        caption='Табл. 3. Среднее T_goal по последнему UAV (n=5); цель→UART включает ожидание обновления, не только доставку команды'
+        heads=['Политика','До создания цели, с','Цель→первый UART, с','Движение + hold, с','Сумма, с']
         with (ROOT/'data/decomposition.csv').open(newline='') as f:source=list(csv.DictReader(f))
         keys=['fault_to_goal_creation_s','goal_creation_to_first_UART_s','first_UART_to_completion_s','fault_to_completion_s']
         rows=[]
