@@ -113,7 +113,10 @@ class Network:
             values = self.probes.setdefault(peer, [])
             values.append(now)
             del values[:-16]
-            self.send("probe", dict(run_id=self.args.run_id, sent_ns=now), peer)
+            sent = self.send("probe", dict(run_id=self.args.run_id, sent_ns=now), peer)
+            if self.index == 0:
+                self.emit("gcs_probe_issued", destination_id=peer,
+                          probe_sent_host_monotonic_ns=now, send_ok=sent)
 
     def receive(self):
         raw, source = self.udp.recvfrom(MAX_DATAGRAM_BYTES + 1)

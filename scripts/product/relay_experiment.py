@@ -17,6 +17,7 @@ import json
 import math
 import os
 from pathlib import Path
+import subprocess
 import sys
 import time
 from typing import Any
@@ -413,6 +414,8 @@ class RelayExperiment:
                 measured_relative_alt_m=gpi.relative_alt / 1000., world_position_m=self.poses[i].position,
                 host_monotonic_ns=time.monotonic_ns(), source_sim_time_s=self.source_s)
         self.summary["anchors"] = self.anchors
+        if self.args.parameter_snapshots:
+            self.capture_parameters("before")
         for i in UAV_IDS:
             self.phase(f"experiment_takeoff_uav{i}")
             self.wait(lambda i=i: self.guided_ready(i), 30, f"uav{i} actual GUIDED")
@@ -446,6 +449,49 @@ class RelayExperiment:
             self.summary["uavs"][str(i)]["takeoff"] = True
             self.emit("takeoff_observed", uav_id=i, actual_position_m=self.poses[i].position,
                       source_sim_time_s=self.poses[i].source_s, target_position_m=target, target_frame="ENU")
+
+    def capture_parameters(self, stage):
+        """Read the real parameter protocol outside the measurement window.
+
+        A sole local UDP client uses the same running GCS dispatcher and radio;
+        the parent keeps the single issuer/event loop alive while it reads.
+        """
+        self.phase(f"experiment_parameters_{stage}")
+        directory = self.args.run_dir / "configuration" / f"parameters-{stage}"
+        command = [sys.executable, str(ROOT / "scripts/product/capture_autopilot_params.py"),
+                   "--output-dir", str(directory), "--run-id", self.args.run_id]
+        if stage == "after":
+            command += ["--compare-before", str(directory.parent / "parameters-before")]
+        begin = time.monotonic_ns()
+        self.emit("parameter_capture_started", capture_stage=stage, argv=command)
+        failure = None
+        with (self.args.run_dir / "logs" / f"parameters-{stage}.log").open("x") as output:
+            child = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT)
+            try:
+                while child.poll() is None:
+                    self.pump(strict_pose=False, observe=False)
+                    if time.monotonic_ns() - begin > 600_000_000_000:
+                        raise ScenarioError(f"parameter capture {stage} timed out")
+            except Exception as exc:
+                failure = exc
+            finally:
+                if child.poll() is None:
+                    child.terminate()
+                    try:
+                        child.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        child.kill()
+                        child.wait()
+        record = dict(returncode=child.returncode, directory=str(directory),
+                      started_host_monotonic_ns=begin, ended_host_monotonic_ns=time.monotonic_ns())
+        if failure is not None:
+            record["error"] = f"{type(failure).__name__}: {failure}"
+        self.summary.setdefault("parameter_snapshots", {})[stage] = record
+        self.emit("parameter_capture_finished", capture_stage=stage, **record)
+        if failure is not None:
+            raise failure
+        if child.returncode:
+            raise ScenarioError(f"parameter capture {stage} incomplete, rc={child.returncode}")
 
     def armed(self, i):
         heartbeat = self.fresh(i, "HEARTBEAT")
@@ -609,6 +655,7 @@ class RelayExperiment:
 
     def run(self):
         error = None
+        landed = False
         try:
             self.prepare()
             self.measure()
@@ -617,8 +664,17 @@ class RelayExperiment:
             self.emit("experiment_failed", reason=error)
         try:
             self.land()
+            landed = True
         except Exception as exc:
             error = (error + "; " if error else "") + f"cleanup {type(exc).__name__}: {exc}"
+        if self.args.parameter_snapshots and landed:
+            try:
+                self.capture_parameters("after")
+            except Exception as exc:
+                error = (error + "; " if error else "") + f"parameters {type(exc).__name__}: {exc}"
+        elif self.args.parameter_snapshots:
+            self.summary.setdefault("parameter_snapshots", {})["after"] = dict(
+                status="skipped", reason="controlled LAND/disarm was not completed")
         self.summary["completed_goals"] = list(self.observer.completed.values())
         self.summary["error"] = error
         self.summary["status"] = "completed" if error is None else "failed"
@@ -678,6 +734,7 @@ def main(argv=None):
     parser.add_argument("--task-period-s", type=float, default=20)
     parser.add_argument("--pilot", action="store_true")
     parser.add_argument("--experiment-profile", choices=("main", "sensitivity"), default="main")
+    parser.add_argument("--parameter-snapshots", action="store_true")
     parser.add_argument("--base-altitude-m", type=float, default=8)
     parser.add_argument("--altitude-separation-m", type=float, default=4)
     parser.add_argument("--altitude-step-m", type=float, default=4)

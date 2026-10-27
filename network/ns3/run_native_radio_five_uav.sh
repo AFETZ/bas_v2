@@ -154,6 +154,7 @@ run_in_container() {
     -e BAS_NATIVE_COMMAND_PERIOD_S="${BAS_NATIVE_COMMAND_PERIOD_S:-1}" \
     -e BAS_NATIVE_EXPERIMENT_PILOT="${BAS_NATIVE_EXPERIMENT_PILOT:-0}" \
     -e BAS_NATIVE_EXPERIMENT_PROFILE="${BAS_NATIVE_EXPERIMENT_PROFILE:-main}" \
+    -e BAS_NATIVE_PARAMETER_SNAPSHOTS="${BAS_NATIVE_PARAMETER_SNAPSHOTS:-0}" \
     -e BAS_NATIVE_FAULT_START_S="${BAS_NATIVE_FAULT_START_S:-45}" \
     -e BAS_NATIVE_FAULT_END_S="${BAS_NATIVE_FAULT_END_S:-105}" \
     -e BAS_NATIVE_FIVE_SKIP_BUILD="${BAS_NATIVE_FIVE_SKIP_BUILD:-0}" \
@@ -1233,6 +1234,7 @@ if [[ "$COORDINATION_POLICY" != off ]]; then
     --experiment-profile "${BAS_NATIVE_EXPERIMENT_PROFILE:-main}"
   )
   [[ "${BAS_NATIVE_EXPERIMENT_PILOT:-0}" != 1 ]] || experiment_args+=(--pilot)
+  [[ "${BAS_NATIVE_PARAMETER_SNAPSHOTS:-0}" != 1 ]] || experiment_args+=(--parameter-snapshots)
   run_with_native_watchdog ip netns exec ams-gcs env PYTHONPATH="$ROOT_DIR:${PYTHONPATH:-}" \
     python3 -u "$ROOT_DIR/scripts/product/relay_experiment.py" "${experiment_args[@]}" \
     > "$RUN_DIR/logs/flight_scenario.log" 2>&1
