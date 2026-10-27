@@ -23,12 +23,12 @@ def table(name):
 
 def save(fig, name):
     for ext in ('png', 'pdf', 'svg'):
-        fig.savefig(OUT / f'{name}.{ext}', dpi=300, bbox_inches='tight',
+        fig.savefig(OUT / f'{name}.{ext}', dpi=400, bbox_inches='tight',
                     metadata={'Creator': 'Anonymous manuscript figure generator'})
     plt.close(fig)
 
 def architecture():
-    fig, ax = plt.subplots(figsize=(5.5, 3.5))
+    fig, ax = plt.subplots(figsize=(5.5, 2.8))
     ax.set_xlim(0, 10); ax.set_ylim(0, 6.5); ax.axis('off')
     def box(x,y,w,h,text,colour='#eef2f5'):
         ax.add_patch(FancyBboxPatch((x,y),w,h,boxstyle='round,pad=0.08',
@@ -66,7 +66,8 @@ def paired():
         selected=sorted((r for r in rows if r['metric']==metric),key=lambda r:int(r['rng_run']))
         assert len(selected)==5
         for i,r in enumerate(selected):
-            ax.plot([0,1],[float(r['fixed'])*scale,float(r['failover'])*scale],
+            offset=(i-2)*.04
+            ax.plot([offset,1+offset],[float(r['fixed'])*scale,float(r['failover'])*scale],
                     marker='o',ms=3,lw=.8,color=colors[i],label=f"RngRun {r['rng_run']}")
         ax.set_xticks([0,1],['fixed','failover']);ax.set_ylabel(label)
         ax.grid(axis='y',alpha=.25);ax.set_xlim(-.18,1.18)
@@ -79,7 +80,7 @@ def paired():
 def first_pair():
     from matplotlib.lines import Line2D
     with gzip.open(ROOT/'data/first_pair.json.gz','rt') as f:runs=json.load(f)
-    fig,axes=plt.subplots(3,1,figsize=(5.5,5.5),sharex=True,
+    fig,axes=plt.subplots(3,1,figsize=(5.5,4.5),sharex=True,
                           gridspec_kw={'height_ratios':[1,1,.65]})
     colors=plt.get_cmap('tab10').colors[:5]
     for ax,policy in zip(axes[:2],('fixed','failover')):
@@ -168,7 +169,7 @@ def sensitivity():
                             ha='center',va='bottom',transform=axes[index,col].get_xaxis_transform())
                 if len(values)==2:
                     xx,yy=zip(*values);axes[index,col].plot(xx,yy,color=color,lw=.7,alpha=.8)
-        axes[0,col].set_title(f'{duration:g} с: n_pair=3')
+        axes[0,col].set_title(f'Номинал / nominal {duration:g} s\nn_pair=3',fontsize=8)
         for ax in axes[:,col]:
             ax.set_xticks([0,1],['fixed','failover']);ax.set_xlim(-.25,1.25);ax.grid(axis='y',alpha=.25)
             ax.tick_params(labelsize=7)

@@ -25,6 +25,12 @@ ROOT=Path(__file__).resolve().parents[1]
 BUILD=ROOT/'build'
 W='http://schemas.openxmlformats.org/wordprocessingml/2006/main'
 TABLE_SEQUENCE=[]
+TABLE_EN_CAPTIONS={
+    'related':'Scope of related work; comparison does not establish absence of unlisted capabilities.',
+    'six_cells':'Main 30-run study, five runs per cell. Means; times start at actual RF fault. Dashes mean not applicable.',
+    'decomposition':'Mean T_goal for the actual last-finishing UAV, five runs per policy; first UART differs from the latest completion refresh.',
+    'sensitivity':'Separate nominal-outage study, three planned runs per cell. Observed UART means include n; censored or missing outcomes are not zero.',
+    'operator':'Separate console experiment: complete parameter coverage for all five vehicles; only UAV3 flew.'}
 
 def style(doc,name,font,size,bold=False,italic=False):
     s=doc.styles[name]
@@ -102,6 +108,15 @@ def p(doc,text,sty='ispText_main'):
         para._p.get_or_add_pPr().append(np)
     return para
 
+def figure_caption(doc,text,english=False):
+    para=p(doc,text,'ispPicture_sign')
+    para.alignment=WD_ALIGN_PARAGRAPH.CENTER
+    pf=para.paragraph_format
+    pf.space_before=Pt(0 if english else 6)
+    pf.space_after=Pt(6 if english else 0)
+    pf.keep_with_next=not english
+    return para
+
 def table(doc,name):
     TABLE_SEQUENCE.append(name)
     if name=='related':
@@ -132,7 +147,7 @@ def table(doc,name):
             rows.append([policy]+[f"{sum(float(r[k]) for r in selected)/5:.3f}".replace('.',',') for k in keys])
     elif name=='sensitivity':
         caption='Табл. 4. Отдельная серия чувствительности; по три запланированных запуска. T_UART — среднее наблюдений с их числом n; пропуски и цензурирование не равны нулю'
-        heads=['Отказ, с','Политика','Timely, %','T_UART, с (n)','Censored / failed']
+        heads=['Номинал, с','Политика','Actual RF min–max, с','Timely, %','T_UART, с (n)','Censored / failed']
         with (ROOT/'data/sensitivity_runs.csv').open(newline='') as f:source=list(csv.DictReader(f))
         assert len(source)==18
         rows=[]
@@ -145,9 +160,11 @@ def table(doc,name):
                       if r['common_UART_status']=='observed' and r['common_UART_recovery_s']]
                 cen=sum(r['common_UART_status']!='observed' and bool(r['common_UART_censor_time_s']) for r in selected)
                 failed=sum(r['run_status']!='completed' for r in selected)
+                rf=[float(r['actual_RF_duration_s']) for r in selected if r['actual_RF_duration_s']]
                 fmt=lambda vals:f"{sum(vals)/len(vals):.3f}".replace('.',',') if vals else '—'
+                rf_range=f'{min(rf):.6f}–{max(rf):.6f}'.replace('.',',') if rf else '—'
                 rows.append([str(duration).replace('.',','),policy,
-                    f'{fmt(timely)} ({len(timely)})',f'{fmt(uart)} ({len(uart)})',f'{cen} / {failed}'])
+                    rf_range,f'{fmt(timely)} ({len(timely)})',f'{fmt(uart)} ({len(uart)})',f'{cen} / {failed}'])
     elif name=='operator':
         caption='Табл. 5. Отдельный операторский опыт: полные индексированные снимки всех пяти, физический полёт только UAV3'
         heads=['Проверка','Фактический результат']
@@ -161,9 +178,16 @@ def table(doc,name):
               ['Командная цепочка','6/6 одинаковых SHA256 на всех пяти этапах; UART внутри lease'],
               ['Полёт / удержание','16→20 м relative-alt, BRAKE 7,1 с, LAND/disarm; позы отдельно']]
     else:raise ValueError(name)
-    caption=re.sub(r'^Табл\. \d+\.',f'Табл. {len(TABLE_SEQUENCE)}.',caption)
-    p(doc,caption,'ispPicture_sign')
+    caption=re.sub(r'^Табл\. \d+\.',f'Табл. {len(TABLE_SEQUENCE)}.',caption).rstrip('.')+'.'
+    caption_en=f'Table {len(TABLE_SEQUENCE)}. '+TABLE_EN_CAPTIONS[name]
+    for english,text in [(False,caption),(True,caption_en)]:
+        para=p(doc,text,'ispPicture_sign')
+        para.alignment=WD_ALIGN_PARAGRAPH.LEFT
+        para.paragraph_format.keep_with_next=True
+        para.paragraph_format.space_before=Pt(0 if english else 6)
+        para.paragraph_format.space_after=Pt(6 if english else 0)
     t=doc.add_table(rows=1,cols=len(heads));t.style='Table Grid'
+    t.autofit=False
     for c,txt in zip(t.rows[0].cells,heads):c.text=txt
     for row in rows:
         for c,txt in zip(t.add_row().cells,row):c.text=txt
@@ -174,12 +198,12 @@ def table(doc,name):
                 para.paragraph_format.space_before=Pt(2);para.paragraph_format.space_after=Pt(2)
                 para.paragraph_format.line_spacing=1
                 for run in para.runs:run.font.name='Times New Roman';run.font.size=Pt(9);run.bold=i==0
-    if name=='operator':
-        for col,w in zip(t.columns,[3.9,10.0]):col.width=Cm(w)
-    elif name=='related':
-        for col,w in zip(t.columns,[2.6,5.0,6.3]):col.width=Cm(w)
-    else:
-        for col,w in zip(t.columns,[2.5,2.2,3.3,2.9,3.0]):col.width=Cm(w)
+    widths=([3.9,10.0] if name=='operator' else [2.6,5.0,6.3] if name=='related'
+            else [1.5,1.6,3.0,2.2,3.2,2.4] if name=='sensitivity' else [2.5,2.2,3.3,2.9,3.0])
+    assert sum(widths)<=14
+    for index,w in enumerate(widths):
+        t.columns[index].width=Cm(w)
+        for row in t.rows:row.cells[index].width=Cm(w)
 
 def build():
     TABLE_SEQUENCE.clear()
@@ -199,10 +223,12 @@ def build():
         elif line.startswith('# '):p(doc,line[2:],'ispSubHeader-2 level')
         elif line.startswith('@figure '):
             _,name,width=line.split()
+            if float(width)>14:raise ValueError('Official template figure width cap is 14 cm')
             para=doc.add_paragraph();para.alignment=WD_ALIGN_PARAGRAPH.CENTER
             para.paragraph_format.keep_with_next=True
             para.add_run().add_picture(str(ROOT/'figures'/f'{name}.png'),width=Cm(float(width)))
-        elif line.startswith('@caption '):p(doc,line[9:],'ispPicture_sign')
+        elif line.startswith('@caption '):figure_caption(doc,line[9:])
+        elif line.startswith('@caption_en '):figure_caption(doc,line[12:],english=True)
         elif line.startswith('@table '):table(doc,line[7:])
         elif line.startswith('@pending '):
             _,key,text=line.split(' ',2)

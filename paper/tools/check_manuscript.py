@@ -2,12 +2,14 @@
 """Small artifact checks; no simulator, no invented scientific validation."""
 from pathlib import Path
 from zipfile import ZipFile
+from PIL import Image
 import csv
 import re
 import json
 import hashlib
 import subprocess
 import argparse
+from xml.etree import ElementTree as ET
 
 ROOT=Path(__file__).resolve().parents[1]
 def rows(name):
@@ -24,6 +26,14 @@ def main():
     assert len(keys[0])==len(keys[1]) and len(keys[0])<=10
     pending=re.findall(r'^@pending (\S+)',source,re.M)
     if args.final:assert not pending,('Results still pending',pending)
+    figure_blocks=re.findall(r'^@figure (\S+) ([\d.]+)\n@caption (.+)\n@caption_en (.+)$',source,re.M)
+    assert len(figure_blocks)==len(re.findall(r'^@figure ',source,re.M)),'Bilingual figure caption missing'
+    for name,width,ru,en in figure_blocks:
+        assert float(width)<=14 and ru.startswith('Рис. ') and en.startswith('Fig. ')
+        assert ru.endswith('.') and en.endswith('.')
+        with Image.open(ROOT/'figures'/f'{name}.png') as img:
+            dpi=img.info.get('dpi',(0,0));effective_dpi=img.width/(float(width)/2.54)
+            assert min(dpi)>=299 and effective_dpi>=300,(name,dpi,effective_dpi)
     cited={int(n) for group in re.findall(r'\[([\d, ]+)\]',source) for n in group.split(',')}
     bibliography={int(n) for n in re.findall(r'^\[(\d+)\]',(ROOT/'refs/references.txt').read_text(),re.M)}
     assert cited==bibliography,(cited,bibliography)
@@ -56,6 +66,22 @@ def main():
         xml=b'\n'.join(z.read(n) for n in z.namelist() if n.endswith(('.xml','.rels')))
         assert not any(token in xml for token in [b'/home/',b'file:///home/',b'Ivanov',b'Petrov',
                    'Иванов'.encode(),'Петров'.encode(),b'attachedTemplate'])
+        ns={'w':'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
+        body=list(ET.fromstring(z.read('word/document.xml')).find('w:body',ns))
+        ptext=lambda node:''.join(t.text or '' for t in node.findall('.//w:t',ns))
+        figures=tables=0
+        for index,node in enumerate(body):
+            if node.tag.endswith('}tbl'):
+                tables+=1
+                assert ptext(body[index-2]).startswith(f'Табл. {tables}.')
+                assert ptext(body[index-1]).startswith(f'Table {tables}.')
+                assert body[index-1].find('w:pPr/w:jc',ns).get('{'+ns['w']+'}val')=='left'
+            elif node.find('.//w:drawing',ns) is not None:
+                figures+=1
+                assert ptext(body[index+1]).startswith(f'Рис. {figures}.')
+                assert ptext(body[index+2]).startswith(f'Fig. {figures}.')
+        assert figures==len(figure_blocks)
+        assert tables==len(re.findall(r'^@table ',source,re.M))
     pdf=ROOT/'build/manuscript_anonymous.pdf'
     assert pdf.stat().st_mtime_ns>=document.stat().st_mtime_ns,'PDF predates DOCX'
     info=subprocess.check_output(['pdfinfo',str(pdf)],text=True)
