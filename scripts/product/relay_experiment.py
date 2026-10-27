@@ -459,7 +459,8 @@ class RelayExperiment:
         self.phase(f"experiment_parameters_{stage}")
         directory = self.args.run_dir / "configuration" / f"parameters-{stage}"
         command = [sys.executable, str(ROOT / "scripts/product/capture_autopilot_params.py"),
-                   "--output-dir", str(directory), "--run-id", self.args.run_id]
+                   "--output-dir", str(directory), "--run-id", self.args.run_id,
+                   "--workers", str(self.args.parameter_workers)]
         if stage == "after":
             command += ["--compare-before", str(directory.parent / "parameters-before")]
         begin = time.monotonic_ns()
@@ -735,6 +736,7 @@ def main(argv=None):
     parser.add_argument("--pilot", action="store_true")
     parser.add_argument("--experiment-profile", choices=("main", "sensitivity"), default="main")
     parser.add_argument("--parameter-snapshots", action="store_true")
+    parser.add_argument("--parameter-workers", type=int, choices=range(1, 6), default=1)
     parser.add_argument("--base-altitude-m", type=float, default=8)
     parser.add_argument("--altitude-separation-m", type=float, default=4)
     parser.add_argument("--altitude-step-m", type=float, default=4)
