@@ -24,7 +24,7 @@ def prepared(tmp_path):
     meta["configuration_snapshot"]={"container_image_id":"sha256:fixture"}
     cfg=meta["config"]
     cfg.update({k:1 for k in S.A.MISSION_FIELDS})
-    cfg.update(initial_master=1,experiment_profile="sensitivity",parameter_snapshots=True,
+    cfg.update(initial_master=1,experiment_profile="sensitivity",parameter_snapshots=True,parameter_workers=5,
         **{k:float(planned[k]) for k in ("duration_s","fault_start_s","fault_end_s")})
     cfg["effective_service_args"]={k:1 for k in S.A.SERVICE_FIELDS}
     return planned,result
@@ -105,6 +105,19 @@ def test_planned_windows_can_differ_but_profile_snapshot_or_unplanned_changes_ca
     assert S.sensitivity_record(planned,changed,[],[])["comparability"]!=good["comparability"]
 
 
+def test_parameter_workers_is_an_explicit_study_factor_not_a_defaulted_observation(tmp_path):
+    planned,r=prepared(tmp_path)
+    good=S.sensitivity_record(planned,r,[],[])
+    assert good["comparability"]["parameter_workers"]==5
+    changed=deepcopy(r);changed["metadata"]["config"]["parameter_workers"]=1
+    assert S.sensitivity_record(planned,changed,[],[])["comparability"]!=good["comparability"]
+    for invalid in (None,True,0,6,1.0,"5"):
+        changed=deepcopy(r);changed["metadata"]["config"]["parameter_workers"]=invalid
+        checked=S.sensitivity_record(planned,changed,[],[])
+        assert not checked["study_eligible"] and not checked["network_eligible"]
+        assert any("parameter_workers" in issue for issue in checked["exclusion_reasons"])
+
+
 def test_missing_runs_leave_every_pair_point_missing_not_zero(tmp_path):
     r=S.analyze(S.plan(),tmp_path/"missing",tmp_path/"out",False)
     assert len(r["records"])==18
@@ -116,8 +129,13 @@ def test_missing_runs_leave_every_pair_point_missing_not_zero(tmp_path):
 def test_freeze_matches_only_explicit_source_image_and_plan_bytes(tmp_path):
     path=tmp_path/"plan.csv";path.write_text("fixed bytes")
     freeze=dict(study_id=S.STUDY,frozen_head="abc",container_image_id="sha256:actual",
-        plan_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),base_environment={"BAS_NATIVE_PARAMETER_SNAPSHOTS":"1"})
+        plan_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),base_environment={"BAS_NATIVE_PARAMETER_SNAPSHOTS":"1","BAS_NATIVE_PARAMETER_WORKERS":"5"})
     S.verify_freeze(freeze,path,"abc",False,"sha256:actual")
+    for invalid in (None,0,6,"0","6","1.0"):
+        changed=deepcopy(freeze);changed["base_environment"]["BAS_NATIVE_PARAMETER_WORKERS"]=invalid
+        try:S.verify_freeze(changed,path,"abc",False,"sha256:actual")
+        except ValueError:pass
+        else:raise AssertionError("missing/invalid worker freeze was accepted")
     for head,dirty,image in (("changed",False,"sha256:actual"),("abc",True,"sha256:actual"),("abc",False,"sha256:other")):
         try:S.verify_freeze(freeze,path,head,dirty,image)
         except ValueError:pass

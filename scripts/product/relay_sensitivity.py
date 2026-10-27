@@ -152,6 +152,8 @@ def sensitivity_record(planned: dict, result: dict, events: list[dict], offers: 
         issues.append("explicit nonpilot sensitivity profile not recorded")
     if type(cfg.get("parameter_snapshots")) is not bool:
         issues.append("effective parameter_snapshots flag not recorded")
+    if type(cfg.get("parameter_workers")) is not int or not 1 <= cfg["parameter_workers"] <= 5:
+        issues.append("effective parameter_workers integer 1..5 not recorded")
     for key in ("duration_s","fault_start_s","fault_end_s"):
         actual, expected = A.finite(cfg.get(key)), A.finite(planned[key])
         if actual is None or abs(actual-expected) > 1e-6:
@@ -162,6 +164,7 @@ def sensitivity_record(planned: dict, result: dict, events: list[dict], offers: 
         record["comparability"]["mission"].pop(key,None)
     record["comparability"]["experiment_profile"] = cfg.get("experiment_profile")
     record["comparability"]["parameter_snapshots"] = cfg.get("parameter_snapshots")
+    record["comparability"]["parameter_workers"] = cfg.get("parameter_workers")
     record["comparability"]["study_id"] = STUDY
     record["study_eligible"] = record["study_eligible"] and not issues
     record["network_eligible"] = record["network_eligible"] and not issues
@@ -262,6 +265,8 @@ def verify_freeze(frozen: dict, plan_path: Path, head: str, dirty: bool, image_i
     env=frozen.get("base_environment",{})
     if not isinstance(env,dict) or env.get("BAS_NATIVE_PARAMETER_SNAPSHOTS") not in ("0","1"):
         raise ValueError("Root freeze must declare base_environment and parameter snapshot flag explicitly")
+    if env.get("BAS_NATIVE_PARAMETER_WORKERS") not in tuple(str(i) for i in range(1,6)):
+        raise ValueError("Root freeze must declare parameter workers explicitly as an integer 1..5")
 
 
 def execute(rows: list[dict], plan_path: Path, frozen_path: Path, raw_root: Path, output: Path, resume: bool) -> int:
