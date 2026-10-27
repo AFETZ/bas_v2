@@ -28,6 +28,25 @@ CSV_FIELDS = ["system_id", "component_id", "param_index", "param_count", "param_
               "wire_value_hex", "decoding_issue", "last_received_monotonic_ns"]
 
 
+def value_wire_bytes(message) -> bytes:
+    """Use the CRC-validated frame: pinned get_payload() assumes a v1 header."""
+    frame = bytes(message.get_msgbuf())
+    offset = 10 if frame[:1] == b"\xfd" else 6 if frame[:1] == b"\xfe" else None
+    if offset is None or len(frame) < offset + 6 or frame[1] < 4:
+        raise ValueError("unsupported/truncated PARAM_VALUE frame")
+    return frame[offset:offset + 4]
+
+
+def receive_logged(link):
+    """Upstream nonblocking receiver with its raw/tlog writers enabled.
+
+    Pinned mavudp.recv_msg overrides the common receiver without the logging
+    calls. Use the inherited public mavfile implementation on this UDP object.
+    """
+    from pymavlink import mavutil
+    return mavutil.mavfile.recv_msg(link)
+
+
 def decode_value(raw: bytes, param_type: int, encoding: str) -> tuple[object, str | None]:
     """Decode the original four wire bytes, including bytewise NaN bit patterns."""
     if len(raw) != 4 or param_type not in TYPES:
@@ -92,7 +111,7 @@ class ParameterTable:
             self.counts.append(count)
         if len(self.counts) > 1:
             self.conflicts.append(dict(reason="param_count_changed", counts=list(self.counts), time_ns=now_ns))
-        raw = bytes(message.get_payload()[:4])
+        raw = value_wire_bytes(message)
         value, issue = decode_value(raw, param_type, self.encoding)
         previous = self.parameters.get(name)
         indexed = index != 65535
@@ -106,8 +125,6 @@ class ParameterTable:
             if previous is not None and previous["param_index"] not in (None, index):
                 self.conflicts.append(dict(reason="name_index_changed", name=name, previous=previous["param_index"], current=index))
             self.by_index[index] = name
-        elif previous is None:
-            self.conflicts.append(dict(reason="unindexed_parameter_not_in_requested_table", name=name))
         entry = dict(system_id=self.system_id, component_id=self.component_id,
                      param_index=index if indexed else (previous["param_index"] if previous else None),
                      param_count=count, param_id=name, param_type=param_type,
@@ -130,10 +147,12 @@ class ParameterTable:
         missing = self.missing()
         indexed_complete = missing == [] and len(set(self.by_index.values())) == self.count
         issues = [row for row in self.parameters.values() if row["decoding_issue"]]
-        complete = indexed_complete and len(self.counts) == 1 and not self.conflicts and not self.changes and not issues and not any(self.rejected[k] for k in ("invalid_param_id", "invalid_param_count"))
+        unindexed = [row["param_id"] for row in self.parameters.values() if row["param_index"] is None]
+        complete = indexed_complete and len(self.counts) == 1 and not self.conflicts and not unindexed and not issues and not any(self.rejected[k] for k in ("invalid_param_id", "invalid_param_count"))
         return dict(system_id=self.system_id, component_id=self.component_id,
-                    status="complete_indexed_readout" if complete else "partial_or_unstable",
+                    status=("complete_indexed_readout_with_observed_changes" if self.changes else "complete_indexed_readout") if complete else "partial_or_unstable",
                     complete=complete, index_coverage_complete=indexed_complete,
+                    stable_values_observed=not self.changes, unresolved_unindexed_parameters=unindexed,
                     param_counts_observed=self.counts, expected_count=self.count,
                     received_index_count=len(self.by_index), missing_indices=missing,
                     missing_indices_not_addressable_by_int16_read=None if missing is None else [i for i in missing if i > 32767],
@@ -206,7 +225,7 @@ def capture_one(args, system_id, running):
                 link.mav.send(message)
                 event(stream, "request_sent", request_type=message.get_type(), target_system=system_id,
                       target_component=args.component_id, param_index=index, frame_hex=bytes(message.get_msgbuf()).hex())
-            message = link.recv_match(blocking=True, timeout=.05)
+            message = receive_logged(link)
             if message is not None:
                 accepted = table.accept(message, time.monotonic_ns())
                 if accepted:
@@ -217,8 +236,10 @@ def capture_one(args, system_id, running):
                 if message.get_type() == "PARAM_VALUE":
                     fields.update(param_id=str(message.param_id), param_count=int(message.param_count),
                                   param_index=int(message.param_index), param_type=int(message.param_type),
-                                  wire_value_hex=bytes(message.get_payload()[:4]).hex())
+                                  wire_value_hex=value_wire_bytes(message).hex())
                 event(stream, "frame_received", **fields)
+            else:
+                time.sleep(.005)
             if (table.count is not None and len(table.by_index) == table.count
                     and last_value_ns is not None and time.monotonic_ns() - last_value_ns >= int(args.settle_s * 1e9)
                     and table.report()["complete"]):
@@ -303,7 +324,7 @@ def main(argv=None):
     summary = dict(run_id=args.run_id, started_unix_ns=time.time_ns(),
                    started_host_monotonic_ns=time.monotonic_ns(), components=[],
                    settings={k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
-                   limits=["Completeness means one stable indexed readout of the explicitly targeted SYSID/COMPID, not all possible MAVLink components or an atomic snapshot.",
+                   limits=["Completeness means stable indexed identity/count coverage for the targeted SYSID/COMPID, not all possible components or an atomic snapshot. Observed value changes remain explicit and do not erase valid index coverage.",
                            "C-cast is the explicit pinned ArduPilot encoding; integer wire values may already have float32 precision loss. Original four value bytes are retained.",
                            "No PARAM_SET or flight-parameter modification is sent. A read-all stream is paced by upstream ArduPilot; requests are sequential across UAVs.",
                            "tlog/raw contain received frames/bytes via upstream pymavlink; JSONL also retains outgoing request bytes.",

@@ -1,15 +1,20 @@
 """Protocol fixtures only; no simulator, UART or real autopilot is started."""
 import struct
+import socket
+import time
 
 from pymavlink import mavutil
+from pymavlink.dialects.v10 import ardupilotmega as mav1
+from pymavlink.dialects.v20 import ardupilotmega as mav2
 
-from scripts.product.capture_autopilot_params import ParameterTable, Requests, compare, decode_value
+from scripts.product.capture_autopilot_params import ParameterTable, Requests, compare, decode_value, receive_logged, value_wire_bytes
 
 
-def param(name, count, index, value=1, param_type=6, system=1, component=1):
-    sender = mavutil.mavlink.MAVLink(None, srcSystem=system, srcComponent=component)
+def param(name, count, index, value=1, param_type=6, system=1, component=1, dialect=None):
+    dialect = dialect or mav1
+    sender = dialect.MAVLink(None, srcSystem=system, srcComponent=component)
     frame = sender.param_value_encode(name.encode(), value, param_type, count, index).pack(sender)
-    parser = mavutil.mavlink.MAVLink(None)
+    parser = dialect.MAVLink(None)
     return parser.parse_char(frame)
 
 
@@ -81,3 +86,53 @@ def test_partial_after_read_does_not_claim_parameter_removal():
     changes = compare({"components": [before.report()]}, {"components": [after.report()]})
     assert {row["param_id"]: row["change"] for row in changes} == {
         "A": "value_type_or_index_changed", "B": "not_observed_after"}
+
+
+def test_actual_v1_and_v2_frame_value_bytes_not_the_legacy_payload_accessor():
+    for dialect, marker in [(mav1, 0xFE), (mav2, 0xFD)]:
+        message = param("BARO1_GND_PRESS", 1388, 100, 101325., 9, dialect=dialect)
+        assert message.get_msgbuf()[0] == marker
+        assert value_wire_bytes(message) == struct.pack("<f", 101325.)
+        table = ParameterTable(1, 1, "c-cast")
+        table.accept(message, 1)
+        assert table.parameters["BARO1_GND_PRESS"]["value_json"] == "101325.0"
+
+
+def test_unindexed_broadcast_can_resolve_to_later_index_and_changes_remain_visible():
+    table = ParameterTable(1, 1, "c-cast")
+    table.accept(param("STAT_RUNTIME", 1, 65535, 10, dialect=mav2), 1)
+    assert not table.report()["complete"]
+    table.accept(param("STAT_RUNTIME", 1, 0, 11, dialect=mav2), 2)
+    result = table.report()
+    assert result["complete"] and result["index_coverage_complete"]
+    assert result["unresolved_unindexed_parameters"] == []
+    assert not result["stable_values_observed"] and result["value_changes_during_readout"]
+
+
+def test_upstream_udp_receive_really_writes_tlog_and_raw(tmp_path):
+    server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    server.bind(("127.0.0.1", 0))
+    server.settimeout(1)
+    link = mavutil.mavlink_connection(f"udpout:127.0.0.1:{server.getsockname()[1]}", source_system=255)
+    tlog, raw = tmp_path / "actual.tlog", tmp_path / "actual.raw"
+    link.setup_logfile(str(tlog)); link.setup_logfile_raw(str(raw))
+    frame = bytes(param("VALUE", 1, 0, 42, dialect=mav2).get_msgbuf())
+    try:
+        link.mav.heartbeat_send(6, 8, 0, 0, 0)
+        _, peer = server.recvfrom(4096)
+        server.sendto(frame, peer)
+        received = None
+        until = time.monotonic() + 1
+        while received is None and time.monotonic() < until:
+            received = receive_logged(link)
+        assert received is not None and received.get_type() == "PARAM_VALUE"
+    finally:
+        link.logfile.close(); link.logfile_raw.close(); link.close(); server.close()
+    assert raw.read_bytes() == frame
+    assert len(tlog.read_bytes()) == 8 + len(frame)
+    replay = mavutil.mavlink_connection(str(tlog))
+    try:
+        observed = replay.recv_match(type="PARAM_VALUE")
+        assert observed is not None and observed.param_id == "VALUE" and observed.param_value == 42
+    finally:
+        replay.close()
