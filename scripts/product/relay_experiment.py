@@ -284,7 +284,8 @@ class RelayExperiment:
         self.observation_end_source_s = None
         self.phase_name = None
         self.summary = dict(status="failed", run_id=args.run_id, policy=args.policy,
-                fault_profile=args.fault_profile, pilot=args.pilot, phase_clock_domain="source_sim_time",
+                fault_profile=args.fault_profile, pilot=args.pilot,
+                experiment_profile=args.experiment_profile, phase_clock_domain="source_sim_time",
                 lease_clock_domain="host_monotonic", phase_requests=[],
                 uavs={str(i): dict(armed=False, takeoff=False, landed=False, auto_disarm=False) for i in UAV_IDS},
                 mode_observations=[], failsafe_holds={}, command_refresh_period_s=args.command_period_s,
@@ -643,6 +644,21 @@ class RelayExperiment:
         return self.summary
 
 
+def validate_experiment_profile(args):
+    """Keep the reviewed main mission and the separate sensitivity design explicit."""
+    if args.experiment_profile == "sensitivity":
+        if args.pilot:
+            raise ValueError("sensitivity is a separate frozen study, not --pilot")
+        duration = args.fault_end_s - args.fault_start_s
+        if (args.fault_profile != "selective" or args.duration_s != 180
+                or not 40 <= args.fault_start_s <= 60
+                or not any(math.isclose(duration, value, rel_tol=0, abs_tol=1e-9)
+                           for value in (.5, 2., 10.))):
+            raise ValueError("sensitivity requires selective, 180 s, start 40..60 s, loss 0.5/2/10 s")
+    elif not args.pilot and (args.duration_s, args.fault_start_s, args.fault_end_s) != (180, 45, 105):
+        raise ValueError("changed phase windows require --pilot; main series is 45/105/180 s")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
@@ -661,6 +677,7 @@ def main(argv=None):
     parser.add_argument("--command-period-s", type=float, default=1)
     parser.add_argument("--task-period-s", type=float, default=20)
     parser.add_argument("--pilot", action="store_true")
+    parser.add_argument("--experiment-profile", choices=("main", "sensitivity"), default="main")
     parser.add_argument("--base-altitude-m", type=float, default=8)
     parser.add_argument("--altitude-separation-m", type=float, default=4)
     parser.add_argument("--altitude-step-m", type=float, default=4)
@@ -678,8 +695,10 @@ def main(argv=None):
     args.run_id = args.run_id or args.run_dir.name
     if not 0 < args.fault_start_s < args.fault_end_s < args.duration_s:
         parser.error("require 0 < fault-start < fault-end < duration")
-    if not args.pilot and (args.duration_s, args.fault_start_s, args.fault_end_s) != (180, 45, 105):
-        parser.error("changed phase windows require --pilot; main series is 45/105/180 s")
+    try:
+        validate_experiment_profile(args)
+    except ValueError as exc:
+        parser.error(str(exc))
     if min(args.command_period_s, args.task_period_s, args.hold_s, args.z_tolerance_m,
            args.xy_tolerance_m, args.hold_speed_mps, args.base_altitude_m) <= 0:
         parser.error("periods, altitudes and hold tolerances must be positive")

@@ -14,7 +14,7 @@ from unittest.mock import patch
 from network.coordination.policy import Authority, make_command
 from scripts.product.relay_experiment import (EventTail, Goal, GoalObserver,
                                               LandingTrace, Pose, PoseReader, RegionHold, ScenarioError, main)
-from scripts.product.relay_experiment import RelayExperiment
+from scripts.product.relay_experiment import RelayExperiment, validate_experiment_profile
 
 
 def pose(source, z=12., host=1000, velocity=(0., 0., 0.)):
@@ -287,6 +287,18 @@ class RelayExperimentTests(unittest.TestCase):
                       "--phase-file", "/tmp/unused.phase", "--policy", "fixed",
                       "--duration-s", "30", "--fault-start-s", "10", "--fault-end-s", "20"])
         self.assertEqual(raised.exception.code, 2)
+
+    def test_sensitivity_accepts_only_the_declared_separate_design(self):
+        args = SimpleNamespace(experiment_profile="sensitivity", pilot=False,
+            fault_profile="selective", duration_s=180, fault_start_s=47.123, fault_end_s=47.623)
+        for duration in (.5, 2., 10.):
+            args.fault_end_s = args.fault_start_s + duration
+            validate_experiment_profile(args)
+        for change in (dict(pilot=True), dict(fault_profile="none"), dict(duration_s=90),
+                       dict(fault_start_s=39), dict(fault_end_s=50.123)):
+            invalid = SimpleNamespace(**(vars(args) | change))
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                validate_experiment_profile(invalid)
 
 
 if __name__ == "__main__":
