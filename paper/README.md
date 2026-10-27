@@ -50,7 +50,7 @@ python3 paper/tools/check_manuscript.py
 
 ## Данные рисунков
 
-`data/six_cells.csv`, `selective_paired_points.csv`, `selective_paired_estimates.csv` скопированы из завершённых анализов основной серии, `decomposition.csv` — из отдельного raw-пересчёта. `data/provenance.json` фиксирует источники относительно evidence bundle и SHA256. Исходные raw не изменялись. `first_pair.json.gz` содержит данные первой заранее выбранной пары с исходными пропусками. Текст/оси используют относительное host-monotonic время; личные пути и имена отсутствуют.
+`data/six_cells.csv`, `selective_paired_points.csv`, `selective_paired_estimates.csv` скопированы из завершённых анализов основной серии, `decomposition.csv` — из отдельного raw-пересчёта. В бумажных копиях CSV нормализованы только окончания строк до LF для переноса через Git; числовые записи не менялись. `data/provenance.json` фиксирует источники относительно evidence bundle, SHA256 исходных байтов и нормализованных копий. Исходные raw не изменялись. `first_pair.json.gz` содержит данные первой заранее выбранной пары с исходными пропусками. Текст/оси используют относительное host-monotonic время; личные пути и имена отсутствуют.
 
 Повторное извлечение первой пары **читает** существующий research loader из сохранённого evidence bundle; симуляторы не запускаются:
 
