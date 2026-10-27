@@ -24,6 +24,7 @@ from docx.oxml.ns import qn
 ROOT=Path(__file__).resolve().parents[1]
 BUILD=ROOT/'build'
 W='http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+TABLE_SEQUENCE=[]
 
 def style(doc,name,font,size,bold=False,italic=False):
     s=doc.styles[name]
@@ -102,6 +103,7 @@ def p(doc,text,sty='ispText_main'):
     return para
 
 def table(doc,name):
+    TABLE_SEQUENCE.append(name)
     if name=='related':
         caption='Табл. 1. Сопоставление фокуса работ; наличие возможностей не опровергается по их отсутствию в кратком описании'
         heads=['Работа','Основной подход','Отношение к данной работе']
@@ -146,7 +148,20 @@ def table(doc,name):
                 fmt=lambda vals:f"{sum(vals)/len(vals):.3f}".replace('.',',') if vals else '—'
                 rows.append([str(duration).replace('.',','),policy,
                     f'{fmt(timely)} ({len(timely)})',f'{fmt(uart)} ({len(uart)})',f'{cen} / {failed}'])
+    elif name=='operator':
+        caption='Табл. 5. Отдельный операторский опыт: полные индексированные снимки всех пяти, физический полёт только UAV3'
+        heads=['Проверка','Фактический результат']
+        source=json.loads((ROOT/'data/operator03_summary.json').read_text())
+        before=source['parameters']['before'];after=source['parameters']['after']
+        fmt=lambda x:f'{x:.3f}'.replace('.',',')
+        rows=[['Версия / режим','568e8ef / headless; UAV3, остальные на земле'],
+              ['Параметры до',f"5 × 1388 индексов, 0 missing; {fmt(before['duration_wall_s'])} внешних с"],
+              ['Параметры после',f"5 × 1388 индексов, 0 missing; {fmt(after['duration_wall_s'])} внешних с"],
+              ['Изменения / запись',f"{source['before_after_changes']} совпавших изменений; 0 PARAM_SET"],
+              ['Командная цепочка','6/6 одинаковых SHA256 на всех пяти этапах; UART внутри lease'],
+              ['Полёт / удержание','16→20 м relative-alt, BRAKE 7,1 с, LAND/disarm; позы отдельно']]
     else:raise ValueError(name)
+    caption=re.sub(r'^Табл\. \d+\.',f'Табл. {len(TABLE_SEQUENCE)}.',caption)
     p(doc,caption,'ispPicture_sign')
     t=doc.add_table(rows=1,cols=len(heads));t.style='Table Grid'
     for c,txt in zip(t.rows[0].cells,heads):c.text=txt
@@ -159,12 +174,15 @@ def table(doc,name):
                 para.paragraph_format.space_before=Pt(2);para.paragraph_format.space_after=Pt(2)
                 para.paragraph_format.line_spacing=1
                 for run in para.runs:run.font.name='Times New Roman';run.font.size=Pt(9);run.bold=i==0
-    if name=='related':
+    if name=='operator':
+        for col,w in zip(t.columns,[3.9,10.0]):col.width=Cm(w)
+    elif name=='related':
         for col,w in zip(t.columns,[2.6,5.0,6.3]):col.width=Cm(w)
     else:
         for col,w in zip(t.columns,[2.5,2.2,3.3,2.9,3.0]):col.width=Cm(w)
 
 def build():
+    TABLE_SEQUENCE.clear()
     BUILD.mkdir(exist_ok=True)
     doc=Document();configure(doc)
     for line in (ROOT/'src/manuscript.md').read_text().splitlines():

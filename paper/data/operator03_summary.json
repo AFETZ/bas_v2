@@ -1,0 +1,316 @@
+{
+  "run_id": "paper-operator-headless-03",
+  "measured_source": "568e8eff8cbf883fd17c49210713aaf75747a5c5",
+  "headless": true,
+  "flight_uav_ids": [
+    3
+  ],
+  "other_four_grounded": true,
+  "parameters": {
+    "before": {
+      "duration_wall_s": 145.042714273,
+      "components": [
+        {
+          "system_id": 1,
+          "component_id": 1,
+          "count": [
+            1388
+          ],
+          "distinct_valid_indices": 1388,
+          "missing_indices": [],
+          "requests_by_type": {
+            "PARAM_REQUEST_LIST": 1
+          },
+          "checks": {
+            "ARMING_SKIPCHK": 0.0,
+            "COMPASS_USE": 1.0,
+            "SIM_SPEEDUP": 1.0
+          }
+        },
+        {
+          "system_id": 2,
+          "component_id": 1,
+          "count": [
+            1388
+          ],
+          "distinct_valid_indices": 1388,
+          "missing_indices": [],
+          "requests_by_type": {
+            "PARAM_REQUEST_LIST": 1
+          },
+          "checks": {
+            "ARMING_SKIPCHK": 0.0,
+            "COMPASS_USE": 1.0,
+            "SIM_SPEEDUP": 1.0
+          }
+        },
+        {
+          "system_id": 3,
+          "component_id": 1,
+          "count": [
+            1388
+          ],
+          "distinct_valid_indices": 1388,
+          "missing_indices": [],
+          "requests_by_type": {
+            "PARAM_REQUEST_LIST": 1
+          },
+          "checks": {
+            "ARMING_SKIPCHK": 0.0,
+            "COMPASS_USE": 1.0,
+            "SIM_SPEEDUP": 1.0
+          }
+        },
+        {
+          "system_id": 4,
+          "component_id": 1,
+          "count": [
+            1388
+          ],
+          "distinct_valid_indices": 1388,
+          "missing_indices": [],
+          "requests_by_type": {
+            "PARAM_REQUEST_LIST": 1
+          },
+          "checks": {
+            "ARMING_SKIPCHK": 0.0,
+            "COMPASS_USE": 1.0,
+            "SIM_SPEEDUP": 1.0
+          }
+        },
+        {
+          "system_id": 5,
+          "component_id": 1,
+          "count": [
+            1388
+          ],
+          "distinct_valid_indices": 1388,
+          "missing_indices": [],
+          "requests_by_type": {
+            "PARAM_REQUEST_LIST": 1
+          },
+          "checks": {
+            "ARMING_SKIPCHK": 0.0,
+            "COMPASS_USE": 1.0,
+            "SIM_SPEEDUP": 1.0
+          }
+        }
+      ]
+    },
+    "after": {
+      "duration_wall_s": 144.114988095,
+      "components": [
+        {
+          "system_id": 1,
+          "component_id": 1,
+          "count": [
+            1388
+          ],
+          "distinct_valid_indices": 1388,
+          "missing_indices": [],
+          "requests_by_type": {
+            "PARAM_REQUEST_LIST": 1
+          },
+          "checks": {
+            "ARMING_SKIPCHK": 0.0,
+            "COMPASS_USE": 1.0,
+            "SIM_SPEEDUP": 1.0
+          }
+        },
+        {
+          "system_id": 2,
+          "component_id": 1,
+          "count": [
+            1388
+          ],
+          "distinct_valid_indices": 1388,
+          "missing_indices": [],
+          "requests_by_type": {
+            "PARAM_REQUEST_LIST": 1
+          },
+          "checks": {
+            "ARMING_SKIPCHK": 0.0,
+            "COMPASS_USE": 1.0,
+            "SIM_SPEEDUP": 1.0
+          }
+        },
+        {
+          "system_id": 3,
+          "component_id": 1,
+          "count": [
+            1388
+          ],
+          "distinct_valid_indices": 1388,
+          "missing_indices": [],
+          "requests_by_type": {
+            "PARAM_REQUEST_LIST": 1
+          },
+          "checks": {
+            "ARMING_SKIPCHK": 0.0,
+            "COMPASS_USE": 1.0,
+            "SIM_SPEEDUP": 1.0
+          }
+        },
+        {
+          "system_id": 4,
+          "component_id": 1,
+          "count": [
+            1388
+          ],
+          "distinct_valid_indices": 1388,
+          "missing_indices": [],
+          "requests_by_type": {
+            "PARAM_REQUEST_LIST": 1
+          },
+          "checks": {
+            "ARMING_SKIPCHK": 0.0,
+            "COMPASS_USE": 1.0,
+            "SIM_SPEEDUP": 1.0
+          }
+        },
+        {
+          "system_id": 5,
+          "component_id": 1,
+          "count": [
+            1388
+          ],
+          "distinct_valid_indices": 1388,
+          "missing_indices": [],
+          "requests_by_type": {
+            "PARAM_REQUEST_LIST": 1
+          },
+          "checks": {
+            "ARMING_SKIPCHK": 0.0,
+            "COMPASS_USE": 1.0,
+            "SIM_SPEEDUP": 1.0
+          }
+        }
+      ]
+    }
+  },
+  "before_after_changes": 54,
+  "all_change_names_match": true,
+  "atomic_parameter_snapshot": false,
+  "exporter_PARAM_SET_count": 0,
+  "operator_commands": [
+    {
+      "command_id": "1:3:260",
+      "payload_sha256": "37b3d8640939dd6e467881e0ddb05ec7177ae35f6c5fcf2232e06d0d32cad4fb",
+      "message_type": "COMMAND_LONG",
+      "command": 176,
+      "all_five_stages_same_hash": true,
+      "uart_inside_lease": true
+    },
+    {
+      "command_id": "1:3:271",
+      "payload_sha256": "0bbcc42a7a0c579715449dbebfbef202fe0a2fcd45175b9ea222ecd749ae33e9",
+      "message_type": "COMMAND_LONG",
+      "command": 400,
+      "all_five_stages_same_hash": true,
+      "uart_inside_lease": true
+    },
+    {
+      "command_id": "1:3:287",
+      "payload_sha256": "1a488cf0195de85cd7cb828149ad29d68c50ab530c36afa043d328b81645f0c1",
+      "message_type": "COMMAND_LONG",
+      "command": 22,
+      "all_five_stages_same_hash": true,
+      "uart_inside_lease": true
+    },
+    {
+      "command_id": "1:3:353",
+      "payload_sha256": "8ee4c3f55fcae9fd98bb7b658fa6a7b116f54a932879c10490fea254d09a5986",
+      "message_type": "COMMAND_INT",
+      "command": 192,
+      "all_five_stages_same_hash": true,
+      "uart_inside_lease": true
+    },
+    {
+      "command_id": "1:3:379",
+      "payload_sha256": "f2884b629124f13828c09b851f802ccc3a89eb41ec5f8c71b272a67976de9fc0",
+      "message_type": "COMMAND_LONG",
+      "command": 176,
+      "all_five_stages_same_hash": true,
+      "uart_inside_lease": true
+    },
+    {
+      "command_id": "1:3:425",
+      "payload_sha256": "23fa4176b45a90a924d47f471af2ed9f4bd84b0376bf2e297e715d5e43f48156",
+      "message_type": "COMMAND_LONG",
+      "command": 176,
+      "all_five_stages_same_hash": true,
+      "uart_inside_lease": true
+    }
+  ],
+  "window": {
+    "model_s": 75.191,
+    "wall_s": 75.320445978,
+    "RTF": 0.99828139655416,
+    "scope": "operator measurement window only; parameter dumps outside"
+  },
+  "uav3_pose": {
+    "samples": 3251,
+    "first": {
+      "published_host_ns": 411774824610661,
+      "source_sim_time_s": 165.66,
+      "xyz_m": [
+        50.0,
+        -2.8973005055442875e-18,
+        0.3404757480319446
+      ],
+      "velocity_mps": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "last": {
+      "published_host_ns": 411850126682886,
+      "source_sim_time_s": 240.84,
+      "xyz_m": [
+        49.999292362513394,
+        0.004531562343818569,
+        0.3404765533652265
+      ],
+      "velocity_mps": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "min_world_enu_z_m": 0.34031165305045474,
+    "max_world_enu_z_m": 20.360856269474436,
+    "max_horizontal_displacement_from_first_m": 0.06681291165488763
+  },
+  "BRAKE_hold": {
+    "raw_samples": 309,
+    "source_duration_s": 7.099999999999994,
+    "all_within_1p5m_of_takeoff_ground_plus20": true,
+    "max_speed_mps": 0.026774064640760483
+  },
+  "max_snapshot_gap_s": 0.187557574,
+  "missing_snapshot_count": 0,
+  "stale_snapshot_count": 0,
+  "launcher_returncode": 2,
+  "owned_docker_stop_returncode": 0,
+  "exit_scope": "intentional owned runtime stop; do not relabel launcher as automatic clean exit0",
+  "review_scope": "Independent upstream tlog/JSONL/CSV checks and Gazebo poses; no new independent radiotap replay",
+  "source_files": {
+    "operator03-independent-review.md": {
+      "relative_to_evidence_bundle": "paper-followup-20261027/operator03-independent-review.md",
+      "sha256": "5245e5af6868e3ba8c9dc35dfd5d0cfa569de99c504bc69d44e54d7fe8a8324e"
+    },
+    "operator03-independent-parameters.json": {
+      "relative_to_evidence_bundle": "paper-followup-20261027/operator03-independent-parameters.json",
+      "sha256": "523e1e4f8dd5605989cf33cd55774a46ec5d80cac44db7d63c8316aad3f0664c"
+    },
+    "operator03-independent-parameters.csv": {
+      "relative_to_evidence_bundle": "paper-followup-20261027/operator03-independent-parameters.csv",
+      "sha256": "799956079441960d4764090802c41e7b48b6eb6ac84392652bb847f80d90fc63"
+    },
+    "operator03-independent-flight.json": {
+      "relative_to_evidence_bundle": "paper-followup-20261027/operator03-independent-flight.json",
+      "sha256": "04065f8743532a72253cd2a5e3df6e37d1cb5b177c4a5a335b9b6eef30d0e570"
+    }
+  }
+}

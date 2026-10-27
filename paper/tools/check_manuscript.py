@@ -39,6 +39,13 @@ def main():
         for r in selected:
             assert abs(sum(float(r[k]) for k in ['fault_to_goal_creation_s','goal_creation_to_first_UART_s',
                         'first_UART_to_completion_s'])-float(r['fault_to_completion_s']))<1e-8
+    operator=json.loads((ROOT/'data/operator03_summary.json').read_text())
+    assert operator['flight_uav_ids']==[3] and operator['other_four_grounded']
+    for stage in operator['parameters'].values():
+        assert len(stage['components'])==5
+        assert all(c['distinct_valid_indices']==1388 and not c['missing_indices'] for c in stage['components'])
+    assert len(operator['operator_commands'])==6 and operator['before_after_changes']==54
+    assert all(c['all_five_stages_same_hash'] and c['uart_inside_lease'] for c in operator['operator_commands'])
     document=ROOT/'build/manuscript_anonymous.docx'
     manifest=json.loads((ROOT/'build/build_manifest.json').read_text())
     for name,digest in manifest['inputs_sha256'].items():
