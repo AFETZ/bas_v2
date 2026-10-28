@@ -180,6 +180,7 @@ run_in_container() {
     -e BAS_NATIVE_EXPERIMENT_PROFILE="${BAS_NATIVE_EXPERIMENT_PROFILE:-main}" \
     -e BAS_NATIVE_PARAMETER_SNAPSHOTS="${BAS_NATIVE_PARAMETER_SNAPSHOTS:-0}" \
     -e BAS_NATIVE_PARAMETER_WORKERS="${BAS_NATIVE_PARAMETER_WORKERS:-1}" \
+    -e BAS_NATIVE_LAND_TIMEOUT_S="${BAS_NATIVE_LAND_TIMEOUT_S:-180}" \
     -e BAS_NATIVE_FAULT_START_S="${BAS_NATIVE_FAULT_START_S:-45}" \
     -e BAS_NATIVE_FAULT_END_S="${BAS_NATIVE_FAULT_END_S:-105}" \
     -e BAS_NATIVE_FIVE_SKIP_BUILD="${BAS_NATIVE_FIVE_SKIP_BUILD:-0}" \
@@ -1285,6 +1286,7 @@ if [[ "$COORDINATION_POLICY" != off ]]; then
     --fault-end-s "${BAS_NATIVE_FAULT_END_S:-105}"
     --experiment-profile "${BAS_NATIVE_EXPERIMENT_PROFILE:-main}"
     --parameter-workers "${BAS_NATIVE_PARAMETER_WORKERS:-1}"
+    --land-timeout-s "${BAS_NATIVE_LAND_TIMEOUT_S:-180}"
   )
   [[ "$SCENARIO_KEY" != urban ]] || experiment_args+=(--urban-scenario "$RUN_DIR/logs/urban_scenario.json")
   [[ "${BAS_NATIVE_EXPERIMENT_PILOT:-0}" != 1 ]] || experiment_args+=(--pilot)
