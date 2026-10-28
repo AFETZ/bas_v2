@@ -1,0 +1,1009 @@
+{
+  "run_id": "urban-axes-pilot01",
+  "raw_directory": "/home/bas/bas_v2-paper-live/runs/native-radio-realtime/urban-axes-pilot01",
+  "source": [
+    "run_id=urban-axes-pilot01",
+    "started_utc=2026-10-28T12:36:37Z",
+    "git_head=829e4d1751eb3ba4a2773747eea017d67a398094",
+    "source_dirty_paths=0"
+  ],
+  "scope": "independent raw replay of LOS-only five-UAV axes pilot, not building-NLOS validation",
+  "geometry_radio_mode": "los_only",
+  "input_sha256": {
+    "logs/coordination_gcs.jsonl": "7f8c87c2240a1e3bb01ef6180e315c39588ae4fc07eb0f5a50acfe9dfb4124c0",
+    "logs/node_state.jsonl": "a90cf534644392ac873e68f8217965ba39dff1b74417bcb6ff54b303a7792b49",
+    "logs/native_radio_events.csv": "583332e5f973e72ce19c703d17d267fa22dd210fecf6340c5077698c205fd48f",
+    "logs/geometry_links.csv": "c2659595a6ca4480471b4b65470ffe4a00ea4198a77988f1c29339976e951487",
+    "environment.txt": "da15fe9497ad1f05dc8d1cf6497bafa41b6a3f1ce2a9773b0736225b0e852c44",
+    "logs/urban_scenario.json": "18562e652c51082fae843625096e94543802e5af3232b6f44319a58a49d4f6cd",
+    "logs/coordination_uav1.jsonl": "bbc29781838f40f977561dd197d71f1d66fe0a4a8e95b2e965310640ff37c727",
+    "logs/coordination_uav2.jsonl": "3373a0ace93146b14f0bb8385c3764dfe1d7016bda3c9cc617a409e3c3cc7194",
+    "logs/coordination_uav3.jsonl": "0a7b85741643c15dd0edac3ba914509a6a9d4fd9d6f24ade513ad906dcec1773",
+    "logs/coordination_uav4.jsonl": "0eef9033fb5b28ac3e79b59ff813894234e2ba929774242273c98624ee7a51d8",
+    "logs/coordination_uav5.jsonl": "12916fb007d382615bc666a1f6b95087aa6e1bb8f1831575444709d8ea8aa407"
+  },
+  "review_script_sha256": "8cde4763f5f9a66c242215fcbf6f062f3b3d5b6f9247239ad0f08cfc6f2e26a0",
+  "offers": 450,
+  "created_refreshes": 450,
+  "uart": {
+    "all_admissions": 2139,
+    "duplicate_cids": [],
+    "anomalies": [],
+    "all_issued_grants": 477,
+    "conflicting_grants": [],
+    "target_refresh_admitted": 446,
+    "timely": 446,
+    "timely_offered": 0.9911111111111112,
+    "latency_ms": {
+      "n": 446,
+      "mean": 7.049209952914798,
+      "p50": 6.871708,
+      "p95": 14.26619275,
+      "max": 32.214228
+    }
+  },
+  "frame": {
+    "reconstructed_mapping_errors": [],
+    "matched_pose_age_ms": {
+      "n": 2251,
+      "mean": 6.433383770768547,
+      "p50": 5.867532,
+      "p95": 16.9736445,
+      "max": 20.384005
+    },
+    "telemetry_estimate_minus_nearest_actual_m": {
+      "1": {
+        "mean_signed": [
+          0.004653459626601268,
+          0.016282207680988148,
+          0.017735170817931203
+        ],
+        "euclidean": {
+          "n": 451,
+          "mean": 0.0373491937934515,
+          "p50": 0.03230337043433045,
+          "p95": 0.07009236771299396,
+          "max": 0.11263100412903315
+        },
+        "n": 451
+      },
+      "2": {
+        "mean_signed": [
+          0.006172967332900012,
+          0.014540757776893372,
+          0.01804954929065777
+        ],
+        "euclidean": {
+          "n": 450,
+          "mean": 0.03623633814841043,
+          "p50": 0.032982249569553306,
+          "p95": 0.0630943290832778,
+          "max": 0.15125648512503317
+        },
+        "n": 450
+      },
+      "3": {
+        "mean_signed": [
+          0.004166178162991656,
+          0.015062274578401114,
+          0.018094010380761402
+        ],
+        "euclidean": {
+          "n": 450,
+          "mean": 0.03817211219045197,
+          "p50": 0.03194090974067662,
+          "p95": 0.07673172999885103,
+          "max": 0.1207056058172504
+        },
+        "n": 450
+      },
+      "4": {
+        "mean_signed": [
+          0.006121653391889924,
+          0.014509780445183496,
+          0.019909976430662085
+        ],
+        "euclidean": {
+          "n": 450,
+          "mean": 0.035959345873431414,
+          "p50": 0.032210376583809305,
+          "p95": 0.05903045182802922,
+          "max": 0.12117185060882903
+        },
+        "n": 450
+      },
+      "5": {
+        "mean_signed": [
+          0.01306826922499637,
+          0.01849464032889271,
+          -0.0014782518456496756
+        ],
+        "euclidean": {
+          "n": 450,
+          "mean": 0.035173300813164936,
+          "p50": 0.03514233341955862,
+          "p95": 0.04959231339245298,
+          "max": 0.11315443335101874
+        },
+        "n": 450
+      }
+    },
+    "alignment_limit": "Nearest Gazebo producer-host timestamp to sidecar UART producer-host timestamp; residual includes estimator/delay error, not pure coordinate-transform error."
+  },
+  "physical_goals": [
+    {
+      "uav_id": 1,
+      "goal_id": "waypoint0:uav1",
+      "waypoint_index": 0,
+      "start_position": [
+        20.020212994349993,
+        0.027070020085099934,
+        11.976726244636827
+      ],
+      "end_position": [
+        20.027276971043264,
+        0.015459257210204117,
+        11.97277171687796
+      ],
+      "target": [
+        20.0,
+        0.0,
+        12.0
+      ],
+      "delta": [
+        0.007063976693270746,
+        -0.011610762874895817,
+        -0.003954527758867954
+      ],
+      "horizontal_displacement_m": 0.013590790310358382,
+      "independent_dwell_pass": true,
+      "max_source_gap_s": 0.04000000000000625,
+      "first_admitted_cid": "1:1:916",
+      "completion_cid": "1:1:936"
+    },
+    {
+      "uav_id": 2,
+      "goal_id": "waypoint0:uav2",
+      "waypoint_index": 0,
+      "start_position": [
+        35.02800803133513,
+        0.01808065857982405,
+        13.975103542644593
+      ],
+      "end_position": [
+        35.02410982881264,
+        0.02359227316386239,
+        13.970666605492916
+      ],
+      "target": [
+        35.0,
+        0.0,
+        14.0
+      ],
+      "delta": [
+        -0.003898202522492511,
+        0.00551161458403834,
+        -0.004436937151677256
+      ],
+      "horizontal_displacement_m": 0.006750842779190691,
+      "independent_dwell_pass": true,
+      "max_source_gap_s": 0.04000000000000625,
+      "first_admitted_cid": "1:2:917",
+      "completion_cid": "1:2:937"
+    },
+    {
+      "uav_id": 3,
+      "goal_id": "waypoint0:uav3",
+      "waypoint_index": 0,
+      "start_position": [
+        50.03346215947252,
+        0.03443396603362255,
+        15.974241224767605
+      ],
+      "end_position": [
+        50.02867059540256,
+        0.03554414558958091,
+        15.970120143341019
+      ],
+      "target": [
+        50.0,
+        0.0,
+        16.0
+      ],
+      "delta": [
+        -0.004791564069961396,
+        0.0011101795559583585,
+        -0.00412108142658596
+      ],
+      "horizontal_displacement_m": 0.004918494168240206,
+      "independent_dwell_pass": true,
+      "max_source_gap_s": 0.04000000000000625,
+      "first_admitted_cid": "1:3:918",
+      "completion_cid": "1:3:938"
+    },
+    {
+      "uav_id": 4,
+      "goal_id": "waypoint0:uav4",
+      "waypoint_index": 0,
+      "start_position": [
+        65.01917055442759,
+        0.03445488295158361,
+        17.971718255053453
+      ],
+      "end_position": [
+        65.02355527222709,
+        0.036239957915442864,
+        17.985092127454973
+      ],
+      "target": [
+        65.0,
+        0.0,
+        18.0
+      ],
+      "delta": [
+        0.004384717799496229,
+        0.001785074963859254,
+        0.013373872401519549
+      ],
+      "horizontal_displacement_m": 0.004734157032441591,
+      "independent_dwell_pass": true,
+      "max_source_gap_s": 0.04000000000000625,
+      "first_admitted_cid": "1:4:919",
+      "completion_cid": "1:4:939"
+    },
+    {
+      "uav_id": 5,
+      "goal_id": "waypoint0:uav5",
+      "waypoint_index": 0,
+      "start_position": [
+        80.04649566615713,
+        0.04455260558238088,
+        19.96635073893483
+      ],
+      "end_position": [
+        80.03737207881318,
+        0.03808072034953913,
+        19.98748115496607
+      ],
+      "target": [
+        80.0,
+        0.0,
+        20.0
+      ],
+      "delta": [
+        -0.009123587343950135,
+        -0.0064718852328417495,
+        0.021130416031240884
+      ],
+      "horizontal_displacement_m": 0.01118593511914682,
+      "independent_dwell_pass": true,
+      "max_source_gap_s": 0.04000000000000625,
+      "first_admitted_cid": "1:5:920",
+      "completion_cid": "1:5:940"
+    },
+    {
+      "uav_id": 1,
+      "goal_id": "waypoint1:uav1",
+      "waypoint_index": 1,
+      "start_position": [
+        20.030981994664568,
+        0.02039735750523255,
+        11.975765653391765
+      ],
+      "end_position": [
+        29.85499386430917,
+        0.039087224638560916,
+        11.987213173570131
+      ],
+      "target": [
+        30.0,
+        0.0,
+        12.0
+      ],
+      "delta": [
+        9.8240118696446,
+        0.018689867133328365,
+        0.011447520178366588
+      ],
+      "horizontal_displacement_m": 9.824029648064558,
+      "independent_dwell_pass": true,
+      "max_source_gap_s": 0.04000000000000625,
+      "first_admitted_cid": "1:1:946",
+      "completion_cid": "1:1:996"
+    },
+    {
+      "uav_id": 2,
+      "goal_id": "waypoint1:uav2",
+      "waypoint_index": 1,
+      "start_position": [
+        35.02209700205039,
+        0.028938179584582426,
+        13.974337815211458
+      ],
+      "end_position": [
+        44.84992443381898,
+        0.03687835732169961,
+        13.986080191767591
+      ],
+      "target": [
+        45.0,
+        0.0,
+        14.0
+      ],
+      "delta": [
+        9.82782743176859,
+        0.007940177737117186,
+        0.011742376556133749
+      ],
+      "horizontal_displacement_m": 9.827830639314339,
+      "independent_dwell_pass": true,
+      "max_source_gap_s": 0.04000000000000625,
+      "first_admitted_cid": "1:2:947",
+      "completion_cid": "1:2:997"
+    },
+    {
+      "uav_id": 4,
+      "goal_id": "waypoint1:uav4",
+      "waypoint_index": 1,
+      "start_position": [
+        65.02614083481068,
+        0.030557430776544575,
+        17.981688392773627
+      ],
+      "end_position": [
+        74.85263969452016,
+        0.032601796642779936,
+        17.964979700430593
+      ],
+      "target": [
+        75.0,
+        0.0,
+        18.0
+      ],
+      "delta": [
+        9.826498859709488,
+        0.0020443658662353606,
+        -0.01670869234303396
+      ],
+      "horizontal_displacement_m": 9.826499072370774,
+      "independent_dwell_pass": true,
+      "max_source_gap_s": 0.04000000000000625,
+      "first_admitted_cid": "1:4:949",
+      "completion_cid": "1:4:999"
+    },
+    {
+      "uav_id": 3,
+      "goal_id": "waypoint1:uav3",
+      "waypoint_index": 1,
+      "start_position": [
+        50.02631955696766,
+        0.029279913872871256,
+        15.974055495744395
+      ],
+      "end_position": [
+        59.86257803964714,
+        0.031121178907987945,
+        15.985909039740338
+      ],
+      "target": [
+        60.0,
+        0.0,
+        16.0
+      ],
+      "delta": [
+        9.836258482679483,
+        0.001841265035116689,
+        0.011853543995943738
+      ],
+      "horizontal_displacement_m": 9.836258655014163,
+      "independent_dwell_pass": true,
+      "max_source_gap_s": 0.04000000000000625,
+      "first_admitted_cid": "1:3:948",
+      "completion_cid": "1:3:998"
+    },
+    {
+      "uav_id": 5,
+      "goal_id": "waypoint1:uav5",
+      "waypoint_index": 1,
+      "start_position": [
+        80.03149546853649,
+        0.026638852945921217,
+        20.008166134288654
+      ],
+      "end_position": [
+        89.86076051294563,
+        0.03625396602383559,
+        20.003406024104176
+      ],
+      "target": [
+        90.0,
+        0.0,
+        20.0
+      ],
+      "delta": [
+        9.82926504440914,
+        0.009615113077914374,
+        -0.0047601101844776395
+      ],
+      "horizontal_displacement_m": 9.829269747221455,
+      "independent_dwell_pass": true,
+      "max_source_gap_s": 0.04000000000000625,
+      "first_admitted_cid": "1:5:950",
+      "completion_cid": "1:5:1000"
+    },
+    {
+      "uav_id": 1,
+      "goal_id": "waypoint2:uav1",
+      "waypoint_index": 2,
+      "start_position": [
+        29.91840993724754,
+        0.03362920506491487,
+        11.98746345633821
+      ],
+      "end_position": [
+        30.024326988752193,
+        -9.80830815453295,
+        11.961122892879207
+      ],
+      "target": [
+        30.0,
+        -10.0,
+        12.0
+      ],
+      "delta": [
+        0.10591705150465458,
+        -9.841937359597866,
+        -0.026340563459003263
+      ],
+      "horizontal_displacement_m": 9.842507272643878,
+      "independent_dwell_pass": true,
+      "max_source_gap_s": 0.040000000000020464,
+      "first_admitted_cid": "1:1:1006",
+      "completion_cid": "1:1:1056"
+    },
+    {
+      "uav_id": 2,
+      "goal_id": "waypoint2:uav2",
+      "waypoint_index": 2,
+      "start_position": [
+        44.91313973290479,
+        0.0332835632704537,
+        13.986332792120516
+      ],
+      "end_position": [
+        45.023229320819475,
+        -9.796385511572325,
+        13.96022536620876
+      ],
+      "target": [
+        45.0,
+        -10.0,
+        14.0
+      ],
+      "delta": [
+        0.11008958791468615,
+        -9.829669074842778,
+        -0.0261074259117553
+      ],
+      "horizontal_displacement_m": 9.830285542052566,
+      "independent_dwell_pass": true,
+      "max_source_gap_s": 0.040000000000020464,
+      "first_admitted_cid": "1:2:1007",
+      "completion_cid": "1:2:1057"
+    },
+    {
+      "uav_id": 3,
+      "goal_id": "waypoint2:uav3",
+      "waypoint_index": 2,
+      "start_position": [
+        59.92255109725121,
+        0.031032509238540375,
+        15.986262758807333
+      ],
+      "end_position": [
+        60.02390767928075,
+        -9.814162416289752,
+        15.96138067769266
+      ],
+      "target": [
+        60.0,
+        -10.0,
+        16.0
+      ],
+      "delta": [
+        0.10135658202953834,
+        -9.845194925528293,
+        -0.024882081114673937
+      ],
+      "horizontal_displacement_m": 9.845716646256319,
+      "independent_dwell_pass": true,
+      "max_source_gap_s": 0.040000000000020464,
+      "first_admitted_cid": "1:3:1008",
+      "completion_cid": "1:3:1058"
+    },
+    {
+      "uav_id": 4,
+      "goal_id": "waypoint2:uav4",
+      "waypoint_index": 2,
+      "start_position": [
+        74.91732146949498,
+        0.032920882383459124,
+        17.966192161677476
+      ],
+      "end_position": [
+        75.01644469443443,
+        -9.803776136472692,
+        17.96279409737735
+      ],
+      "target": [
+        75.0,
+        -10.0,
+        18.0
+      ],
+      "delta": [
+        0.09912322493944714,
+        -9.836697018856151,
+        -0.0033980643001250144
+      ],
+      "horizontal_displacement_m": 9.837196432647662,
+      "independent_dwell_pass": true,
+      "max_source_gap_s": 0.040000000000020464,
+      "first_admitted_cid": "1:4:1009",
+      "completion_cid": "1:4:1059"
+    },
+    {
+      "uav_id": 5,
+      "goal_id": "waypoint2:uav5",
+      "waypoint_index": 2,
+      "start_position": [
+        89.92270946824145,
+        0.03331580880066222,
+        20.003136556339477
+      ],
+      "end_position": [
+        90.01044909618355,
+        -9.815247157147047,
+        19.977368951088163
+      ],
+      "target": [
+        90.0,
+        -10.0,
+        20.0
+      ],
+      "delta": [
+        0.08773962794209922,
+        -9.848562965947709,
+        -0.025767605251314052
+      ],
+      "horizontal_displacement_m": 9.84895378893353,
+      "independent_dwell_pass": true,
+      "max_source_gap_s": 0.040000000000020464,
+      "first_admitted_cid": "1:5:1010",
+      "completion_cid": "1:5:1060"
+    },
+    {
+      "uav_id": 1,
+      "goal_id": "waypoint3:uav1",
+      "waypoint_index": 3,
+      "start_position": [
+        30.028829649232204,
+        -9.866812412871344,
+        11.961860013778004
+      ],
+      "end_position": [
+        30.04818388510315,
+        -10.031234697182043,
+        15.935694174191793
+      ],
+      "target": [
+        30.0,
+        -10.0,
+        16.0
+      ],
+      "delta": [
+        0.019354235870945757,
+        -0.1644222843106995,
+        3.973834160413789
+      ],
+      "horizontal_displacement_m": 0.16555746441672964,
+      "independent_dwell_pass": true,
+      "max_source_gap_s": 0.040000000000020464,
+      "first_admitted_cid": "1:1:1066",
+      "completion_cid": "1:1:1116"
+    },
+    {
+      "uav_id": 2,
+      "goal_id": "waypoint3:uav2",
+      "waypoint_index": 3,
+      "start_position": [
+        45.02778351565687,
+        -9.854378440526286,
+        13.960941047257899
+      ],
+      "end_position": [
+        45.03815451270188,
+        -10.034300595101996,
+        17.949134618782345
+      ],
+      "target": [
+        45.0,
+        -10.0,
+        18.0
+      ],
+      "delta": [
+        0.010370997045008323,
+        -0.17992215457570992,
+        3.9881935715244463
+      ],
+      "horizontal_displacement_m": 0.180220807030912,
+      "independent_dwell_pass": true,
+      "max_source_gap_s": 0.040000000000020464,
+      "first_admitted_cid": "1:2:1067",
+      "completion_cid": "1:2:1117"
+    },
+    {
+      "uav_id": 3,
+      "goal_id": "waypoint3:uav3",
+      "waypoint_index": 3,
+      "start_position": [
+        60.02924334206084,
+        -9.873202516003113,
+        15.961910962584017
+      ],
+      "end_position": [
+        60.04349427900127,
+        -10.03327024610641,
+        19.929052558761356
+      ],
+      "target": [
+        60.0,
+        -10.0,
+        20.0
+      ],
+      "delta": [
+        0.01425093694043511,
+        -0.16006773010329667,
+        3.9671415961773384
+      ],
+      "horizontal_displacement_m": 0.16070086317161486,
+      "independent_dwell_pass": true,
+      "max_source_gap_s": 0.040000000000020464,
+      "first_admitted_cid": "1:3:1068",
+      "completion_cid": "1:3:1118"
+    },
+    {
+      "uav_id": 4,
+      "goal_id": "waypoint3:uav4",
+      "waypoint_index": 3,
+      "start_position": [
+        75.0231224487587,
+        -9.863731120347287,
+        17.964094106347574
+      ],
+      "end_position": [
+        75.03882215307397,
+        -10.030962361802416,
+        21.954983747655742
+      ],
+      "target": [
+        75.0,
+        -10.0,
+        22.0
+      ],
+      "delta": [
+        0.015699704315267127,
+        -0.1672312414551289,
+        3.9908896413081685
+      ],
+      "horizontal_displacement_m": 0.16796657058537107,
+      "independent_dwell_pass": true,
+      "max_source_gap_s": 0.040000000000020464,
+      "first_admitted_cid": "1:4:1069",
+      "completion_cid": "1:4:1119"
+    },
+    {
+      "uav_id": 5,
+      "goal_id": "waypoint3:uav5",
+      "waypoint_index": 3,
+      "start_position": [
+        90.01655556462502,
+        -9.877956188919837,
+        19.979228350708237
+      ],
+      "end_position": [
+        90.03441359302552,
+        -10.03782579277426,
+        23.965001688692567
+      ],
+      "target": [
+        90.0,
+        -10.0,
+        24.0
+      ],
+      "delta": [
+        0.01785802840049655,
+        -0.15986960385442295,
+        3.9857733379843303
+      ],
+      "horizontal_displacement_m": 0.16086391582615123,
+      "independent_dwell_pass": true,
+      "max_source_gap_s": 0.040000000000020464,
+      "first_admitted_cid": "1:5:1070",
+      "completion_cid": "1:5:1120"
+    },
+    {
+      "uav_id": 1,
+      "goal_id": "waypoint4:uav1",
+      "waypoint_index": 4,
+      "start_position": [
+        30.045505943699172,
+        -10.037277831665145,
+        15.93379144174105
+      ],
+      "end_position": [
+        20.168479138711472,
+        -9.998110321174256,
+        15.979718992389278
+      ],
+      "target": [
+        20.0,
+        -10.0,
+        16.0
+      ],
+      "delta": [
+        -9.8770268049877,
+        0.03916751049088951,
+        0.04592755064822818
+      ],
+      "horizontal_displacement_m": 9.877104464382443,
+      "independent_dwell_pass": true,
+      "max_source_gap_s": 0.040000000000020464,
+      "first_admitted_cid": "1:1:1126",
+      "completion_cid": "1:1:1176"
+    },
+    {
+      "uav_id": 2,
+      "goal_id": "waypoint4:uav2",
+      "waypoint_index": 4,
+      "start_position": [
+        45.034909635201664,
+        -10.040672954092475,
+        17.948011171992682
+      ],
+      "end_position": [
+        35.16983500204269,
+        -9.99782026408275,
+        17.981998809593232
+      ],
+      "target": [
+        35.0,
+        -10.0,
+        18.0
+      ],
+      "delta": [
+        -9.865074633158976,
+        0.04285269000972569,
+        0.0339876376005499
+      ],
+      "horizontal_displacement_m": 9.8651677061689,
+      "independent_dwell_pass": true,
+      "max_source_gap_s": 0.040000000000020464,
+      "first_admitted_cid": "1:2:1127",
+      "completion_cid": "1:2:1177"
+    },
+    {
+      "uav_id": 3,
+      "goal_id": "waypoint4:uav3",
+      "waypoint_index": 4,
+      "start_position": [
+        60.04029213305878,
+        -10.039078758835931,
+        19.9274208599751
+      ],
+      "end_position": [
+        50.19406454537124,
+        -9.997428693891198,
+        19.982028699108298
+      ],
+      "target": [
+        50.0,
+        -10.0,
+        20.0
+      ],
+      "delta": [
+        -9.846227587687537,
+        0.04165006494473289,
+        0.054607839133197444
+      ],
+      "horizontal_displacement_m": 9.846315678285407,
+      "independent_dwell_pass": true,
+      "max_source_gap_s": 0.040000000000020464,
+      "first_admitted_cid": "1:3:1128",
+      "completion_cid": "1:3:1178"
+    },
+    {
+      "uav_id": 4,
+      "goal_id": "waypoint4:uav4",
+      "waypoint_index": 4,
+      "start_position": [
+        75.036940209354,
+        -10.036818182294246,
+        21.951173194291073
+      ],
+      "end_position": [
+        65.16548203144181,
+        -9.995365631934057,
+        21.979975954134662
+      ],
+      "target": [
+        65.0,
+        -10.0,
+        22.0
+      ],
+      "delta": [
+        -9.871458177912189,
+        0.04145255036018902,
+        0.028802759843589598
+      ],
+      "horizontal_displacement_m": 9.8715452119818,
+      "independent_dwell_pass": true,
+      "max_source_gap_s": 0.040000000000020464,
+      "first_admitted_cid": "1:4:1129",
+      "completion_cid": "1:4:1179"
+    },
+    {
+      "uav_id": 5,
+      "goal_id": "waypoint4:uav5",
+      "waypoint_index": 4,
+      "start_position": [
+        90.03359631398573,
+        -10.045321064537728,
+        23.957062863593393
+      ],
+      "end_position": [
+        80.16866442423519,
+        -9.990308126700693,
+        23.99657942557109
+      ],
+      "target": [
+        80.0,
+        -10.0,
+        24.0
+      ],
+      "delta": [
+        -9.864931889750537,
+        0.055012937837034315,
+        0.039516561977695375
+      ],
+      "horizontal_displacement_m": 9.865085281574942,
+      "independent_dwell_pass": true,
+      "max_source_gap_s": 0.040000000000020464,
+      "first_admitted_cid": "1:5:1130",
+      "completion_cid": "1:5:1180"
+    }
+  ],
+  "lifecycle_raw_replay": {
+    "1": {
+      "first_armed_heartbeat_ns": 514606244372045,
+      "armed_heartbeat_count": 196,
+      "land_mode_event_count": 34,
+      "first_disarmed_land_heartbeat_ns": 514801407986198,
+      "min_z_between_ARM_and_LAND_m": 0.19499919604584384,
+      "max_z_between_ARM_and_LAND_m": 16.023178749403446,
+      "disarm_actual_position_m": [
+        19.960352586505785,
+        -10.039158137483001,
+        0.1949991964078904
+      ],
+      "disarm_actual_speed_mps": 0.0
+    },
+    "2": {
+      "first_armed_heartbeat_ns": 514621248549215,
+      "armed_heartbeat_count": 182,
+      "land_mode_event_count": 34,
+      "first_disarmed_land_heartbeat_ns": 514802430187663,
+      "min_z_between_ARM_and_LAND_m": 0.19499919604584384,
+      "max_z_between_ARM_and_LAND_m": 18.022405731375173,
+      "disarm_actual_position_m": [
+        34.970827140494976,
+        -10.035757641349608,
+        0.19499991202385134
+      ],
+      "disarm_actual_speed_mps": 0.0
+    },
+    "3": {
+      "first_armed_heartbeat_ns": 514633265132894,
+      "armed_heartbeat_count": 172,
+      "land_mode_event_count": 34,
+      "first_disarmed_land_heartbeat_ns": 514804410736345,
+      "min_z_between_ARM_and_LAND_m": 0.19499919604584384,
+      "max_z_between_ARM_and_LAND_m": 20.023592356325473,
+      "disarm_actual_position_m": [
+        49.96153095124863,
+        -10.028752960044693,
+        0.19499908943492097
+      ],
+      "disarm_actual_speed_mps": 0.0
+    },
+    "4": {
+      "first_armed_heartbeat_ns": 514649278693489,
+      "armed_heartbeat_count": 157,
+      "land_mode_event_count": 34,
+      "first_disarmed_land_heartbeat_ns": 514805424336335,
+      "min_z_between_ARM_and_LAND_m": 0.19499919604584384,
+      "max_z_between_ARM_and_LAND_m": 22.02731976586751,
+      "disarm_actual_position_m": [
+        64.97038922525202,
+        -10.02660859671623,
+        0.19499944927503013
+      ],
+      "disarm_actual_speed_mps": 0.0
+    },
+    "5": {
+      "first_armed_heartbeat_ns": 514666124046624,
+      "armed_heartbeat_count": 142,
+      "land_mode_event_count": 35,
+      "first_disarmed_land_heartbeat_ns": 514807254447464,
+      "min_z_between_ARM_and_LAND_m": 0.19499919604584384,
+      "max_z_between_ARM_and_LAND_m": 24.062471706534808,
+      "disarm_actual_position_m": [
+        79.9586877814698,
+        -10.03904115584593,
+        0.1949992789214799
+      ],
+      "disarm_actual_speed_mps": 0.0
+    }
+  },
+  "conflicting_duplicate_poses": [],
+  "geometry_record_counts": {
+    "geom_los=1,radio=LOS": 36090
+  },
+  "tested_axes": "+X, -Y, +Z, -X; +Y not flown by this route",
+  "live": {
+    "observed_window_source_s": 90.01400000000001,
+    "observed_window_wall_s": 90.06883046,
+    "observed_rtf": 0.9993912382372463,
+    "uav1_window_samples": 89,
+    "rtf_approximately_1s_p5": 0.9976473933607708,
+    "rtf_approximately_1s_min": 0.9952689710313609,
+    "native_lag_ms": {
+      "n": 1801,
+      "mean": 0.33100819766796225,
+      "p50": 0.075273,
+      "p95": 2.019619,
+      "max": 5.849444
+    }
+  },
+  "service_failure_events": [
+    {
+      "uav_id": 1,
+      "host_monotonic_ns": 514807327387734,
+      "reason": "RuntimeError: native radio watchdog expired or disappeared after readiness"
+    },
+    {
+      "uav_id": 2,
+      "host_monotonic_ns": 514807323619957,
+      "reason": "RuntimeError: native radio watchdog expired or disappeared after readiness"
+    },
+    {
+      "uav_id": 3,
+      "host_monotonic_ns": 514807324007583,
+      "reason": "RuntimeError: native radio watchdog expired or disappeared after readiness"
+    },
+    {
+      "uav_id": 4,
+      "host_monotonic_ns": 514807325731542,
+      "reason": "RuntimeError: native radio watchdog expired or disappeared after readiness"
+    },
+    {
+      "uav_id": 5,
+      "host_monotonic_ns": 514807326508157,
+      "reason": "RuntimeError: native radio watchdog expired or disappeared after readiness"
+    }
+  ],
+  "limitations": [
+    "No independent tlog/MAVLink payload decoding or full PCAP hop replay in this narrow check.",
+    "Service failures are listed with raw timestamps: after-window watchdog teardown is not a measurement crash.",
+    "Physical completion is checked against actual Gazebo poses; native UART admission is not assumed to prove physical execution."
+  ]
+}
