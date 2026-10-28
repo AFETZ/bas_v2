@@ -1,0 +1,262 @@
+{
+  "status": "planned_not_implemented_not_measured",
+  "source_commit": "bb026a052a2474df29bee3603cc98af27592e207",
+  "scenario": "industrial_two_building_inspection",
+  "map_relation": "new idealized site; NOT Town01 coordinates",
+  "frame": "proposed world ENU metres; verify alignment before use",
+  "gcs": [
+    0,
+    0,
+    2
+  ],
+  "buildings": [
+    {
+      "id": "A",
+      "min": [
+        40,
+        20,
+        0
+      ],
+      "max": [
+        70,
+        65,
+        30
+      ]
+    },
+    {
+      "id": "B",
+      "min": [
+        95,
+        20,
+        0
+      ],
+      "max": [
+        125,
+        65,
+        25
+      ]
+    }
+  ],
+  "initial_relay": 1,
+  "planned_target_release_s": [
+    0,
+    30,
+    60,
+    90,
+    120
+  ],
+  "time_interpretation": "planned earliest releases, not arrival/LOS transition observations",
+  "route_speed_mps": 3,
+  "routes": {
+    "1": [
+      [
+        20,
+        0,
+        12
+      ],
+      [
+        85,
+        0,
+        12
+      ],
+      [
+        85,
+        80,
+        12
+      ],
+      [
+        20,
+        80,
+        12
+      ],
+      [
+        20,
+        0,
+        12
+      ]
+    ],
+    "2": [
+      [
+        35,
+        0,
+        14
+      ],
+      [
+        80,
+        0,
+        14
+      ],
+      [
+        80,
+        85,
+        14
+      ],
+      [
+        35,
+        85,
+        14
+      ],
+      [
+        35,
+        0,
+        14
+      ]
+    ],
+    "3": [
+      [
+        50,
+        0,
+        16
+      ],
+      [
+        20,
+        -10,
+        16
+      ],
+      [
+        20,
+        90,
+        16
+      ],
+      [
+        15,
+        90,
+        16
+      ],
+      [
+        15,
+        0,
+        16
+      ]
+    ],
+    "4": [
+      [
+        65,
+        0,
+        18
+      ],
+      [
+        15,
+        -20,
+        18
+      ],
+      [
+        15,
+        65,
+        18
+      ],
+      [
+        10,
+        65,
+        18
+      ],
+      [
+        10,
+        0,
+        18
+      ]
+    ],
+    "5": [
+      [
+        80,
+        0,
+        20
+      ],
+      [
+        135,
+        0,
+        20
+      ],
+      [
+        135,
+        85,
+        20
+      ],
+      [
+        130,
+        85,
+        20
+      ],
+      [
+        130,
+        0,
+        20
+      ]
+    ]
+  },
+  "planned_geometric_checks": [
+    {
+      "from": [
+        0,
+        0,
+        2
+      ],
+      "to": [
+        85,
+        80,
+        12
+      ],
+      "expected": "NLOS",
+      "blocker": "A"
+    },
+    {
+      "from": [
+        0,
+        0,
+        2
+      ],
+      "to": [
+        15,
+        90,
+        16
+      ],
+      "expected": "LOS"
+    },
+    {
+      "from": [
+        15,
+        90,
+        16
+      ],
+      "to": [
+        85,
+        80,
+        12
+      ],
+      "expected": "LOS"
+    },
+    {
+      "from": [
+        0,
+        0,
+        2
+      ],
+      "to": [
+        135,
+        85,
+        20
+      ],
+      "expected": "NLOS",
+      "blocker": "B"
+    },
+    {
+      "from": [
+        15,
+        90,
+        16
+      ],
+      "to": [
+        135,
+        85,
+        20
+      ],
+      "expected": "LOS"
+    }
+  ],
+  "radio": "not yet selected/validated; reuse genuine upstream obstacle-aware provider, not Friis labels",
+  "randomness": "freeze before runs; pair policies with identical mobility/seed; do not reuse old cohort IDs",
+  "actual_NLOS_events": null,
+  "actual_handover_events": null,
+  "actual_results": null,
+  "important_limit": "BRAKE may prevent exiting shadow under fixed policy; preserve censoring; no forced motion/recovery"
+}
