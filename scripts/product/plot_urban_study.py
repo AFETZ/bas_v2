@@ -21,8 +21,8 @@ NS=1_000_000_000
 PRIMARY=("timely_per_offered","completed_waypoint_fraction")
 CAPTIONS={
  "urban_first_pair":(
-  "Первая заранее запланированная geometry-пара: фактические XY/высоты пяти БПЛА, корпуса и геометрический LOS/NLOS исходного канала. Пунктирные высоты — запросы НПУ, а не подтверждение UART. Подготовка relay70м, горизонтальный сегмент60м, фасадный этап12м; при критическом событии followers преимущественно удерживают точки. Разрывы не соединяются.",
-  "First preplanned geometry pair: actual five-UAV XY/altitude, buildings and initial-link geometric LOS/NLOS. Dashed altitude is GCS intent, not UART evidence. Relay preparation70m, horizontal segment60m and facade stage12m; followers mostly hold at the critical event. Gaps remain disconnected."),
+  "Первая заранее запланированная geometry-пара: фактические XY/высоты пяти БПЛА, корпуса и геометрический LOS/NLOS исходного канала. Пунктир — последнее известное намерение НПУ до конца окна, не подтверждение UART и не интерполяция физики. Подготовка relay70м, горизонтальный сегмент60м, фасадный этап12м; при критическом событии followers преимущественно удерживают точки. Разрывы фактических данных не соединяются.",
+  "First preplanned geometry pair: actual five-UAV XY/altitude, buildings and initial-link geometric LOS/NLOS. Dashed altitude carries last-known GCS intent to window end, not UART evidence or physical interpolation. Relay preparation70m, horizontal segment60m and facade stage12m; followers mostly hold at the critical event. Actual-data gaps remain disconnected."),
  "urban_primary_effects":(
   "Все заранее запланированные основные пары: timely/offered и доля физически подтверждённых waypoint. Крестик — failed attempt с наблюдённым исходом; отсутствующие исходы указаны счётчиком. Интервалы взяты из агрегатора по целым парам; interaction использует полные четырёхслучайные блоки.",
   "All preplanned main pairs: timely/offered and verified waypoint fraction. Crosses mark failed attempts with observed outcomes; missing outcomes are counted, never plotted at zero. Stored whole-pair intervals and complete four-case interaction are reported."),
@@ -159,6 +159,43 @@ def batch_complete(aggregate):
     return planned>0 and len(rows)==planned and all(r.get("controller_returncode") is not None for r in rows)
 
 
+def requested_altitude_series(events,uav,begin,end):
+    """Carry the last recorded GCS intent, never an observed physical altitude."""
+    if begin is None or end is None or end<begin:
+        return []
+    valid=[]
+    for row in events:
+        point=row.get("target_position_m");at=host(row)
+        if (event_name(row)=="goal_created" and str(row.get("uav_id"))==str(uav)
+                and row.get("target_frame")=="ENU" and isinstance(point,list) and len(point)==3
+                and all(finite(v) is not None for v in point) and at is not None and at<=end):
+            valid.append((at,float(point[2])))
+    valid.sort(key=lambda r:r[0])
+    prior=[r for r in valid if r[0]<=begin]
+    points=([(begin,prior[-1][1])] if prior else [])+[r for r in valid if begin<r[0]<=end]
+    if points and points[-1][0]<end:
+        points.append((end,points[-1][1]))
+    return [((at-begin)/NS,z) for at,z in points]
+
+
+def common_critical_command(group,stage_rows):
+    """Latest UART among the exact CIDs of the common all-five relay/epoch."""
+    IDs=group.get("command_ids") or {}
+    if finite(group.get("epoch")) is None or finite(group.get("leader_id")) is None:
+        return None
+    matched=[]
+    for uav,CID in IDs.items():
+        rows=[r for r in stage_rows if r.get("command_id")==CID and str(r.get("uav_id"))==str(uav)
+              and finite(r.get("epoch"))==finite(group.get("epoch"))
+              and finite(r.get("leader_id"))==finite(group.get("leader_id"))
+              and finite(r.get("UART_write_end_host_ns")) is not None]
+        if not rows:
+            return None
+        # Exact-CID deduplication does not substitute another epoch or member.
+        matched.append(min(rows,key=lambda r:finite(r["UART_write_end_host_ns"])))
+    return max(matched,key=lambda r:(finite(r["UART_write_end_host_ns"]),int(r["uav_id"]))) if matched else None
+
+
 def chronology_data(data,inputs):
     result=data["result"];begin,end=data["begin"],data["end"]
     if begin is None or end is None:
@@ -182,18 +219,19 @@ def chronology_data(data,inputs):
             append("selection",at,"GCS issued grant",epoch=row.get("epoch"),leader_id=row.get("leader_id"))
             append("valid_from",finite(row.get("valid_from_ns")),"issued grant absolute host time",epoch=row.get("epoch"))
     group=result.get("uart_after_NLOS",{}).get("all_five",{})
-    IDs=group.get("command_ids") or {}
-    critical=max(IDs,key=lambda i:result["uart_after_NLOS"]["uav"+i].get("event_host_ns",-1)) if IDs else None
-    CID=IDs.get(critical)
     stages=inputs.csv(data["export"]/"metrics/urban_target_CID_stages.csv")
-    command=next((r for r in stages if r.get("command_id")==CID),None)
+    command=common_critical_command(group,stages)
     if command:
+        critical=str(command["uav_id"]);CID=command["command_id"]
         for label,key in (("command created","command_created_host_ns"),("master receive","master_receive_host_ns"),
                           ("master forward","master_forward_host_ns"),("app receipt","follower_receive_host_ns"),("UART","UART_write_end_host_ns")):
-            append(label,finite(command.get(key)),"target CID stage CSV",command_id=CID,uav_id=critical)
+            append(label,finite(command.get(key)),"common all-five target CID stage CSV",command_id=CID,uav_id=critical,
+                   common_epoch=group.get("epoch"),common_leader_id=group.get("leader_id"))
         for row in inputs.jsonl(data["raw"]/f"logs/coordination_uav{critical}.jsonl"):
-            if event_name(row)=="leader_activated" and row.get("epoch")==group.get("epoch"):
-                append("activation",host(row),"critical endpoint event",uav_id=critical)
+            if (event_name(row)=="leader_activated" and row.get("epoch")==group.get("epoch")
+                    and row.get("leader_id")==group.get("leader_id")):
+                append("activation",host(row),"critical common-epoch endpoint event",uav_id=critical,
+                       common_epoch=group.get("epoch"),common_leader_id=group.get("leader_id"))
     new_goal=result.get("new_goal_after_NLOS",{}).get("all_five",{})
     i=new_goal.get("critical_uav_id")
     if i is not None:
@@ -229,7 +267,11 @@ def figure_pair(plt,pair):
         for b in data["scenario"].get("buildings",[]):
             low,high=b["min"],b["max"]
             axes[0,col].add_patch(Rectangle(low[:2],high[0]-low[0],high[1]-low[1],fc=".65",ec=".3",alpha=.5))
-            axes[0,col].text(low[0],low[1],b.get("id",""),fontsize=8)
+            axes[0,col].text(low[0],low[1],f"{b.get('id','')}\nh={high[2]-low[2]:g} m",fontsize=7)
+        gcs=data["scenario"].get("gcs")
+        if isinstance(gcs,list) and len(gcs)==3 and all(finite(v) is not None for v in gcs):
+            axes[0,col].scatter([gcs[0]],[gcs[1]],marker="*",s=85,color="black",label=f"GCS (ENU z={gcs[2]:g} m)",zorder=5)
+            axes[0,col].annotate("GCS",(gcs[0],gcs[1]),xytext=(4,-10),textcoords="offset points",fontsize=7)
         if begin is None:
             axes[0,col].text(.5,.5,"No recorded measurement window",ha="center",transform=axes[0,col].transAxes)
         for i in range(1,6):
@@ -241,16 +283,18 @@ def figure_pair(plt,pair):
                     axes[0,col].annotate("",xy=(xs[j],ys[j]),xytext=(xs[k],ys[k]),arrowprops=dict(arrowstyle="->",color=f"C{i-1}",lw=.8))
                 if begin is not None:
                     axes[1,col].plot([(host(r)-begin)/NS for r in part],[float(r["z_m"]) for r in part],color=f"C{i-1}",lw=1)
-            requested=[r for r in data["gcs"] if event_name(r)=="goal_created" and r.get("uav_id")==i
-                and r.get("target_frame")=="ENU" and isinstance(r.get("target_position_m"),list)
-                and begin is not None and end is not None and host(r) is not None and begin<=host(r)<=end]
+            requested=requested_altitude_series(data["gcs"],i,begin,end)
             if requested:
-                axes[1,col].step([(host(r)-begin)/NS for r in requested],[r["target_position_m"][2] for r in requested],
+                axes[1,col].step([r[0] for r in requested],[r[1] for r in requested],
                     where="post",ls="--",lw=.8,color=f"C{i-1}",alpha=.6)
         nlos=[r for r in data["geometry"] if not r["geom_los"]]
         if nlos:
             axes[0,col].scatter([float(r["to_x"]) if r["to_id"]=="1" else float(r["from_x"]) for r in nlos[::10]],
                 [float(r["to_y"]) if r["to_id"]=="1" else float(r["from_y"]) for r in nlos[::10]],s=3,c="crimson",label="UAV1 geometric NLOS",zorder=4)
+            initial=nlos[0]
+            axes[0,col].plot([float(initial["from_x"]),float(initial["to_x"])],
+                             [float(initial["from_y"]),float(initial["to_y"])],ls=":",lw=.8,color="crimson",
+                             label="First NLOS 3D link: XY projection")
         if begin is not None:
             draw_geometry(axes[2,col],data)
         axes[0,col].set(title=f"{policy}: {data['result'].get('recorded_status','missing')}",xlabel="ENU X, m",ylabel="ENU Y, m",aspect="equal")
@@ -324,6 +368,8 @@ def figure_chronology(plt,pair,inputs):
                 axes[1,col].annotate(f"{item['elapsed_host_s']:.3f}",(item["elapsed_host_s"],y),xytext=(4,2),textcoords="offset points",fontsize=6)
         if not any(r["event"]=="selection" for r in timeline):
             axes[0,col].text(.98,.8,"No post-NLOS selection observed",ha="right",transform=axes[0,col].transAxes,fontsize=7)
+        if data["result"].get("uart_after_NLOS",{}).get("all_five",{}).get("status")=="observed" and not any(r["event"]=="UART" for r in timeline):
+            axes[0,col].text(.02,.05,"Summary UART observed; matching common-CID stages unavailable",transform=axes[0,col].transAxes,fontsize=7)
         if not any(r["event"]=="goal physical completion" for r in timeline):
             axes[1,col].text(.02,.5,"No completed new post-NLOS goal of all five",transform=axes[1,col].transAxes,fontsize=7)
         for i in range(1,6):

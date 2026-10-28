@@ -25,7 +25,12 @@ false for final manuscript use. The default refuses an unfinished batch.
 The geometry pair is selected from the first frozen main block, independent of
 success or presence of later files. Failed/missing cases cannot be substituted.
 Trajectory stale/source/session gaps are disconnected. Dashed requested altitude
-is GCS goal intent; no assumed UART/physical target feedback is manufactured.
+is last-known GCS goal intent carried to window end, not an interpolated physical
+measurement or assumed UART/autopilot target feedback. A pre-window initial
+intent is used only when an actual recorded ENU goal establishes it.
+The XY view marks the configured GCS and building heights. A dotted segment is
+the XY projection of the first actual NLOS3D link from the native sampler; the
+projection itself does not define the LOS/NLOS classification.
 
 Main pair CI and four-case interaction are read from the stored aggregate.
 Missing outcomes remain absent, with explicit counts; failed observed attempts
@@ -36,7 +41,10 @@ imputed. Native PHY packet proof stays separate from application event lanes.
 Chronology uses observed host-monotonic fields only; ns-3 PCAP timestamps are not
 mixed into the axis. `follower_receive` is application receipt. Selected new-goal
 creation/first successful refresh/UART/completion are different event lanes;
-actual speed comes from trajectory samples, not ACK or commanded speed.
+actual speed comes from trajectory samples, not ACK or commanded speed. Critical
+UART is chosen from the exact common all-five CID set and its stage-CSV write
+ends; independent per-UAV first admissions may belong to earlier epochs and are
+never substituted into that common relay/epoch chronology.
 
 Existing exports supply required XY/Z, geometry, stages, new-goal and resources.
 Raw coordination logs are needed for timeout/selection/valid_from and endpoint

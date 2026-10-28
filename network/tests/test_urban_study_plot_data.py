@@ -51,12 +51,12 @@ def test_chronology_uses_host_clock_not_ns3_time_and_filters_old_selection(tmp_p
     export=tmp_path/"export";(export/"metrics").mkdir(parents=True)
     raw=tmp_path/"raw";(raw/"logs").mkdir(parents=True)
     with (export/"metrics/urban_target_CID_stages.csv").open("w") as stream:
-        writer=csv.DictWriter(stream,fieldnames=["command_id","command_created_host_ns","follower_receive_host_ns","UART_write_end_host_ns"])
-        writer.writeheader();writer.writerow(dict(command_id="2:1:1",command_created_host_ns=14*NS,
+        writer=csv.DictWriter(stream,fieldnames=["command_id","uav_id","epoch","leader_id","command_created_host_ns","follower_receive_host_ns","UART_write_end_host_ns"])
+        writer.writeheader();writer.writerow(dict(command_id="2:1:1",uav_id=1,epoch=2,leader_id=2,command_created_host_ns=14*NS,
                                                    follower_receive_host_ns=14.1*NS,UART_write_end_host_ns=14.2*NS))
-    (raw/"logs/coordination_uav1.jsonl").write_text(json.dumps(dict(event="leader_activated",epoch=2,host_monotonic_ns=13.8*NS))+"\n")
+    (raw/"logs/coordination_uav1.jsonl").write_text(json.dumps(dict(event="leader_activated",epoch=2,leader_id=2,host_monotonic_ns=13.8*NS))+"\n")
     result=dict(trigger=dict(event=dict(host_monotonic_ns=12*NS,ns3_time_s=999)),
-        uart_after_NLOS=dict(all_five=dict(command_ids={"1":"2:1:1"},epoch=2),uav1=dict(event_host_ns=14.2*NS)))
+        uart_after_NLOS=dict(all_five=dict(command_ids={"1":"2:1:1"},epoch=2,leader_id=2),uav1=dict(event_host_ns=14.2*NS)))
     gcs=[dict(event="grant_issued",reason="selection",host_monotonic_ns=9*NS,valid_from_ns=9*NS),
          dict(event="grant_issued",reason="selection",host_monotonic_ns=13*NS,valid_from_ns=13.5*NS,epoch=2)]
     data=dict(result=result,begin=10*NS,end=20*NS,gcs=gcs,raw=raw,export=export)
@@ -78,3 +78,34 @@ def test_running_last_attempt_cannot_be_mistaken_for_finished_batch():
         dict(controller_returncode=0),dict(controller_returncode=None)]))
     assert P.batch_complete(dict(planned_attempts=2,observed_attempts=2,runs=[
         dict(controller_returncode=0),dict(controller_returncode=2)]))
+
+
+def test_common_CID_critical_member_does_not_use_earlier_per_UAV_epochs(tmp_path):
+    export=tmp_path/"export";(export/"metrics").mkdir(parents=True)
+    raw=tmp_path/"raw";(raw/"logs").mkdir(parents=True)
+    stages=[dict(command_id=f"3:{i}:1",uav_id=i,epoch=3,leader_id=4,
+                 command_created_host_ns=14*NS,UART_write_end_host_ns=(19-i)*NS) for i in range(1,6)]
+    with (export/"metrics/urban_target_CID_stages.csv").open("w") as stream:
+        writer=csv.DictWriter(stream,fieldnames=list(stages[0]));writer.writeheader();writer.writerows(stages)
+    (raw/"logs/coordination_uav1.jsonl").write_text(json.dumps(dict(event="leader_activated",epoch=3,leader_id=4,host_monotonic_ns=13*NS))+"\n")
+    uart=dict(all_five=dict(command_ids={str(i):f"3:{i}:1" for i in range(1,6)},epoch=3,leader_id=4))
+    # These individually first admissions can belong to older epochs and would
+    # choose UAV2, whose common-epoch CID is NOT the last of the five.
+    uart.update(uav1=dict(event_host_ns=11*NS,epoch=1),uav2=dict(event_host_ns=19*NS,epoch=2),
+                **{f"uav{i}":dict(event_host_ns=12*NS,epoch=1) for i in (3,4,5)})
+    data=dict(result=dict(trigger=dict(event=dict(host_monotonic_ns=12*NS)),uart_after_NLOS=uart),
+              begin=10*NS,end=20*NS,gcs=[],raw=raw,export=export)
+    timeline=P.chronology_data(data,P.Inputs())
+    chosen=next(r for r in timeline if r["event"]=="UART")
+    assert chosen["command_id"]=="3:1:1" and chosen["uav_id"]=="1" and chosen["elapsed_host_s"]==8
+    assert (chosen["common_epoch"],chosen["common_leader_id"])==(3,4)
+
+
+def test_requested_altitude_carries_known_ENU_intent_without_filling_physics():
+    def goal(at,z,frame="ENU",uav=1):
+        return dict(event="goal_created",uav_id=uav,host_monotonic_ns=at*NS,
+                    target_position_m=[0,0,z],target_frame=frame)
+    events=[goal(5,70),goal(9,-12,"NED"),goal(12,60),goal(13,20,uav=2),goal(25,12)]
+    assert P.requested_altitude_series(events,1,10*NS,20*NS)==[(0,70),(2,60),(10,60)]
+    assert P.requested_altitude_series([goal(12,60)],1,10*NS,20*NS)==[(2,60),(10,60)]
+    assert P.requested_altitude_series([goal(5,-12,"NED")],1,10*NS,20*NS)==[]
