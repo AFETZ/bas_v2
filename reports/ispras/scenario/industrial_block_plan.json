@@ -40,12 +40,12 @@
   "initial_relay": 1,
   "planned_target_release_s": [
     0,
-    30,
-    60,
+    45,
     90,
-    120
+    135,
+    180
   ],
-  "time_interpretation": "planned earliest releases, not arrival/LOS transition observations",
+  "time_interpretation": "planned earliest releases, with at least45s per stage; not actual arrival/LOS transitions; preserve incomplete/censored goals",
   "route_speed_mps": 3,
   "routes": {
     "1": [
