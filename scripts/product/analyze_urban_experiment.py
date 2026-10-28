@@ -564,10 +564,19 @@ def plot_run(out, result, poses, scenario, geometry, events):
                 ts.append((row["host_monotonic_ns"]-origin)/NS); zs.append(row["z_m"])
             previous = row
         axes[0, 0].plot(xs, ys, label=f"UAV{i}", color=f"C{i-1}")
-        axes[0, 1].plot(ts, zs, label=f"UAV{i}", color=f"C{i-1}")
+        axes[0, 1].plot(ts, zs, label=f"UAV{i} actual", color=f"C{i-1}")
+        requested = [r for r in events if stage(r) == "goal_created" and node_id(r.get("uav_id")) == i
+                     and RELAY.target(r) is not None and origin is not None and end is not None
+                     and stamp(r) is not None and origin <= stamp(r) <= end]
+        if requested:
+            axes[0, 1].step([(stamp(r)-origin)/NS for r in requested],
+                            [RELAY.target(r)[2] for r in requested],where="post",linestyle="--",
+                            marker=".",markersize=3,color=f"C{i-1}",alpha=.7,label=f"UAV{i} requested")
     axes[0, 0].set(xlabel="world ENU X (m)", ylabel="world ENU Y (m)", title="Actual trajectories; gaps retained", aspect="equal")
     axes[0, 0].legend(fontsize=8)
-    axes[0, 1].set(xlabel="host seconds since measurement", ylabel="world ENU Z (m)", title="Actual altitude (not AGL)")
+    axes[0, 1].set(xlabel="host seconds since measurement", ylabel="world ENU Z (m)",
+                  title="Actual / GCS-requested altitude (intent, not UART proof)")
+    axes[0, 1].legend(fontsize=6,ncol=2)
     for row in geometry:
         if (row["pair"] == result["trigger"]["pair"] and origin is not None and end is not None
                 and origin <= stamp(row) <= end):
