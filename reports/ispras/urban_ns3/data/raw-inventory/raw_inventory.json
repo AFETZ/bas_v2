@@ -1,0 +1,11 @@
+{
+  "freeze_sha256": "8590f67b3acd2ce536e06eacfa518da65f024da4d73b02435aafc87c0945daed",
+  "script_sha256": "db3ee7727be113db72012d9fc03de6a7ae37a912b4d8df52cca029789f477f5d",
+  "files_manifest_sha256": "5e692a61055f6316baa0110a43b5738c9cb0b431f9d174c69f71773d1fa3ed60",
+  "runs": 56,
+  "files": 10798,
+  "bytes": 57325606769,
+  "symlinks": 0,
+  "errors": [],
+  "scope": "Every regular file of the 56 frozen raw directories. Symlink targets are recorded, never followed. No runtime/analysis claims derived from checksums."
+}

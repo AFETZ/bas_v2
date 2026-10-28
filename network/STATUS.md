@@ -1,6 +1,48 @@
 # Product Status
 
-## Article audit, 2026-10-28
+## Measured urban follow-up, 2026-10-29
+
+- [Results, exact effects and scope](../reports/ispras/urban_ns3/RESULTS.md),
+  [independent624 numerical checks](../reports/ispras/urban_ns3/INDEPENDENT_STUDY_REVIEW.md),
+  [independent system/12-page PDF review](../reports/ispras/urban_ns3/FINAL_SYSTEM_REVIEW.md).
+  This is a new cohort, not a reinterpretation/repeat of main30 or sensitivity18.
+- Frozen runtime `4d96d196e29792e8fd508f97994b78251efaee12`: five actual ArduPilot
+  SITL, Gazebo/DART, native ns-3.48 ad-hoc/direct peers, shared building boxes and
+  upstream BuildingsChannelConditionModel-selected LogDistance. Scalar loss once;
+  no custom physics/MAC/PER or injected Matrix/filter outage in this series.
+  Sionna RT is not instantiated; installed old image/fork build packages remain.
+- Nominal27 configured points, horizontal facade routes, relay70→60m horizontal
+  NLOS entry→12m; all five have real XY movement. Route progression/barriers use
+  fresh radio-delivered SITL telemetry. Critical followers mostly hold positions;
+  no simultaneous-five maneuver or sensory inspection quality is claimed.
+- All56 planned attempts processed: main40+sensitivity12+boundary4. **36 completed,
+  20 failed,55 eligible complete240-model-s windows**. Nineteen failures are
+  post-window LAND/disarm failures. Order29 main geometry failover interrupted
+  with native hard realtime jitter31.790s; host-stall cause unknown. No replacement.
+- Main geometry9 complete pairs: failover−fixed timely **+61.833pp**95% exploratory
+  interval[61.463,62.139]; verified-waypoint effect **+44.856pp**[43.621,46.091].
+  LOS-only10 pairs and interaction9 four-case blocks remain distinct. Missing
+  primary outcomes get explicit range bounds; interrupted trigger applicability
+  is unknown, never successful recovery or full-window N/A.
+- Main geometry failover first-post-NLOS all-five UART mean4.234s, all9 >4s;
+  after actual probe detection mean3.322s. Conditional new-goal mean53.825s is
+  separate. BRAKE→GUIDED was observed, but full physical stop is not established
+  in the selected handover. No-candidate and policy-dependent short-occlusion
+  boundaries retained; no generic four-second guarantee or calibrated RF map.
+- Parameter read-all:280 complete pre+180 complete post tables,1388indices each,
+  all460 outside measurement; WP_SPD3/ARMING_SKIPCHK0. Missing100post tables
+  stay missing. Overall196290 UART admissions include service/out-of-window frames.
+- Full-window RTF0.999763–0.999931; max recorded lag129.271ms. Incomplete29 has
+  its own RTF0.648974/31.790s fatal jitter. Headless process CPU/RSS only; GPU
+  costs, GUI-flight, distributed clocks and hard real time are not established.
+- [Anonymous12-page DOCX/PDF](../paper/urban/README.md), four measured figures and
+  compact CSV/JSON in `reports/ispras/urban_ns3/`. Full raw stays local:
+  57,325,606,769bytes/10,798files, [inventory/transfer commands](../reports/ispras/urban_ns3/reproduction/PACKAGING.md).
+  Original raw/per-run analyses/results retained; analysis v3 only clarifies labels,
+  with identical point estimates/CIs. No conference submission. GitHub branch push
+  is explicitly user-authorized; original `bas_v2-main` is preserved.
+
+## Article audit, 2026-10-28 — historical baseline
 
 - [Six requested audit reports, raw-derived CSV and timelines](../reports/ispras/README.md). Main30/sensitivity18 were not rerun or rewritten. Algorithm/runtime code unchanged; main selective UART mean independently reproduced as3.9633874144s; all published table means/paired intervals agree.
 - Main27000offers=22472sentCID+4528unsent;75058uniqueUART=22254target/window+636target/outside+22335non-target/window+29833non-target/outside.1350created goals/1200sent-admitted-completed; selected-goal creation delay is conditional, not a silent generator. Timely origin is command.created, not offer timestamp.

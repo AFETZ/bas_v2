@@ -1,0 +1,185 @@
+{
+  "operation": "byte-identical artifact copies, not new experimental data",
+  "sources": [
+    {
+      "source": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/results-final/interaction_blocks.csv",
+      "archive": "reports/ispras/urban_ns3/data/interaction_blocks.csv",
+      "bytes": 6353,
+      "sha256": "08a32153101083f45ac985753989c0cb47e53fe603d41e2edee93cbb2e771179"
+    },
+    {
+      "source": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/results-final/pairs.csv",
+      "archive": "reports/ispras/urban_ns3/data/pairs.csv",
+      "bytes": 39616,
+      "sha256": "f80e5b5abd0a0d3075d1437826459eddb266e5df69d56207891e1106d630e04d"
+    },
+    {
+      "source": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/results-final/runs.csv",
+      "archive": "reports/ispras/urban_ns3/data/runs.csv",
+      "bytes": 123385,
+      "sha256": "7746d8b3decd39ee7b1f1aaba4b46ea0d92fcefb02a6cd582bb386af2b47cc4b"
+    },
+    {
+      "source": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/results-final/unplanned_attempts.csv",
+      "archive": "reports/ispras/urban_ns3/data/unplanned_attempts.csv",
+      "bytes": 55,
+      "sha256": "94df4e53112971a93929b901f978ef41aa3a918b47247f9ea157a95f39500806"
+    },
+    {
+      "source": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/results-final/urban_study.json",
+      "archive": "reports/ispras/urban_ns3/data/urban_study.json",
+      "bytes": 304089,
+      "sha256": "428dd7d149f13f4e021c7e225cd3ce4a97881aa017c4521a5241ccbb97fe02d1"
+    },
+    {
+      "source": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/results-final/tables/descriptive_runs.csv",
+      "archive": "reports/ispras/urban_ns3/data/tables/descriptive_runs.csv",
+      "bytes": 59990,
+      "sha256": "2a1445a54062bba21c6968851219cfbcca42d681ee2b64e33875e22c6439837d"
+    },
+    {
+      "source": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/results-final/tables/endpoints.csv",
+      "archive": "reports/ispras/urban_ns3/data/tables/endpoints.csv",
+      "bytes": 631113,
+      "sha256": "543a6a2f3ad7ec4dc5c62b6c423682c14ef004a1785320a33f0a03d47dc5c5af"
+    },
+    {
+      "source": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/results-final/tables/parameter_changes.csv",
+      "archive": "reports/ispras/urban_ns3/data/tables/parameter_changes.csv",
+      "bytes": 264671,
+      "sha256": "d8e4593175405a72fad5db1be96e0f8f0feb1c8cbbb34115d5fad38e7f6bc2ac"
+    },
+    {
+      "source": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/results-final/tables/parameter_coverage.csv",
+      "archive": "reports/ispras/urban_ns3/data/tables/parameter_coverage.csv",
+      "bytes": 129672,
+      "sha256": "86c8c6fc4e8ef80125b002c9ce472e0cf4a5c93efb6aaea5b4cc1383a4897be7"
+    },
+    {
+      "source": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/results-final/tables/table_sources.json",
+      "archive": "reports/ispras/urban_ns3/data/tables/table_sources.json",
+      "bytes": 44679,
+      "sha256": "b5ab7ac6f9e712e5c35249ad24ef6e32dc58f01e5948db97ecc5de95cca2dadc"
+    },
+    {
+      "source": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/publication-figures/figure_manifest.json",
+      "archive": "reports/ispras/urban_ns3/figures/figure_manifest.json",
+      "bytes": 46519,
+      "sha256": "55d62dc17395f779c0b6c52f94ff1a5e14ac565930ffc464481acf9021a469c8"
+    },
+    {
+      "source": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/publication-figures/urban_chronology.data.json",
+      "archive": "reports/ispras/urban_ns3/figures/urban_chronology.data.json",
+      "bytes": 3701,
+      "sha256": "e9cf9a90d4044684b9d7fd691fbf6b8f3a2ae04aad6b4d619a09bd475449d11c"
+    },
+    {
+      "source": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/publication-figures/urban_chronology.pdf",
+      "archive": "reports/ispras/urban_ns3/figures/urban_chronology.pdf",
+      "bytes": 54244,
+      "sha256": "472ddf9ff6437b3740dc36aaeb11948d99e8093810869e73e69e3bfdd6cfb5cc"
+    },
+    {
+      "source": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/publication-figures/urban_chronology.png",
+      "archive": "reports/ispras/urban_ns3/figures/urban_chronology.png",
+      "bytes": 299046,
+      "sha256": "6133b368303ef144539a7195f62e9674a893a178ce12bf5be42670fefffe20bf"
+    },
+    {
+      "source": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/publication-figures/urban_chronology.svg",
+      "archive": "reports/ispras/urban_ns3/figures/urban_chronology.svg",
+      "bytes": 140404,
+      "sha256": "456d6d79491e20fb64915c985398c38ae64181ea717b25ab0481ecc7a7e40311"
+    },
+    {
+      "source": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/publication-figures/urban_first_pair.data.json",
+      "archive": "reports/ispras/urban_ns3/figures/urban_first_pair.data.json",
+      "bytes": 171,
+      "sha256": "d1b238c2eea90186431a558e735ec5926c2409367f52f58108e4959bad4647c1"
+    },
+    {
+      "source": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/publication-figures/urban_first_pair.pdf",
+      "archive": "reports/ispras/urban_ns3/figures/urban_first_pair.pdf",
+      "bytes": 31609,
+      "sha256": "fe39010f26948cc9583d086cbda268e2f8286f700980a1561b3845cf6a20cc2f"
+    },
+    {
+      "source": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/publication-figures/urban_first_pair.png",
+      "archive": "reports/ispras/urban_ns3/figures/urban_first_pair.png",
+      "bytes": 213406,
+      "sha256": "fb9c7126435a5404ee00ab924f56ebaf58c2c8558386558a16be62b2bb396c67"
+    },
+    {
+      "source": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/publication-figures/urban_first_pair.svg",
+      "archive": "reports/ispras/urban_ns3/figures/urban_first_pair.svg",
+      "bytes": 94973,
+      "sha256": "e9a99d0a2aa4e14d240f6e1f990a170dd740c5d7e3f6fe4672fdd47f12e2ddb3"
+    },
+    {
+      "source": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/publication-figures/urban_primary_effects.data.json",
+      "archive": "reports/ispras/urban_ns3/figures/urban_primary_effects.data.json",
+      "bytes": 19103,
+      "sha256": "52ed6d651139f7b0e04ebba7ba15c89d6a4d499023c203b75b2e1322b327dfeb"
+    },
+    {
+      "source": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/publication-figures/urban_primary_effects.pdf",
+      "archive": "reports/ispras/urban_ns3/figures/urban_primary_effects.pdf",
+      "bytes": 30521,
+      "sha256": "1c221aeae680ec17419c24e561b2d10b26f0bae64b068b9792f9256ea5960e24"
+    },
+    {
+      "source": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/publication-figures/urban_primary_effects.png",
+      "archive": "reports/ispras/urban_ns3/figures/urban_primary_effects.png",
+      "bytes": 317426,
+      "sha256": "26c378b16cf7bdee715665c5caa21fb2ccb87898d8f0b5a14e279348bdd33f1e"
+    },
+    {
+      "source": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/publication-figures/urban_primary_effects.svg",
+      "archive": "reports/ispras/urban_ns3/figures/urban_primary_effects.svg",
+      "bytes": 58839,
+      "sha256": "faa5f6c8d993cbdd14d0d2e6d1e28e82e1284e54e60f834faf0dd107f6bcda36"
+    },
+    {
+      "source": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/publication-figures/urban_sensitivity_resources.data.json",
+      "archive": "reports/ispras/urban_ns3/figures/urban_sensitivity_resources.data.json",
+      "bytes": 69459,
+      "sha256": "97bf44fef46148834c9113c2fa5e8e034849d497c4d2593e19cc480587f8fa8f"
+    },
+    {
+      "source": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/publication-figures/urban_sensitivity_resources.pdf",
+      "archive": "reports/ispras/urban_ns3/figures/urban_sensitivity_resources.pdf",
+      "bytes": 41212,
+      "sha256": "77988e21641606a77b7b33632f5a4d2d10aada3a6065e07684ff8dad506e8424"
+    },
+    {
+      "source": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/publication-figures/urban_sensitivity_resources.png",
+      "archive": "reports/ispras/urban_ns3/figures/urban_sensitivity_resources.png",
+      "bytes": 304565,
+      "sha256": "2e4e533b670fd946baf36f439441e748d991d100da57c460f17673c554ecda64"
+    },
+    {
+      "source": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/publication-figures/urban_sensitivity_resources.svg",
+      "archive": "reports/ispras/urban_ns3/figures/urban_sensitivity_resources.svg",
+      "bytes": 120701,
+      "sha256": "8797d25538ec9598333735c852f9c99e29ec6b38dbca685cc59f01450483e31f"
+    },
+    {
+      "source": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/raw-inventory/raw_files.csv",
+      "archive": "reports/ispras/urban_ns3/data/raw-inventory/raw_files.csv",
+      "bytes": 1898685,
+      "sha256": "5e692a61055f6316baa0110a43b5738c9cb0b431f9d174c69f71773d1fa3ed60"
+    },
+    {
+      "source": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/raw-inventory/raw_inventory.json",
+      "archive": "reports/ispras/urban_ns3/data/raw-inventory/raw_inventory.json",
+      "bytes": 525,
+      "sha256": "0ce94b7b430f17c75cc1fb904fba662f3fb0178232a7915e1700e3e20484abd2"
+    },
+    {
+      "source": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/raw-inventory/raw_runs.csv",
+      "archive": "reports/ispras/urban_ns3/data/raw-inventory/raw_runs.csv",
+      "bytes": 4365,
+      "sha256": "957fa1dd4ace41a1c77fe3c7f217bf6ce3959462162410b90e6d137e826735b4"
+    }
+  ]
+}

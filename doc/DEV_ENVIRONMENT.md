@@ -1,8 +1,24 @@
 # BAS paper: текущая среда разработки
 
+Обновлено29.10.2026: городской follow-up измерен отдельно на `4d96d19`;
+56 попыток,55 полных окон,36 completed/20 failed. Сводка и границы —
+`reports/ispras/urban_ns3/RESULTS.md`, raw — `runs/native-radio-realtime/urban20261028-*`.
+Новая сцена генерируется из JSON: общие объёмы Gazebo/ns-3, native Buildings/
+LogDistance, WP_SPD3, настоящие пять SITL. Sionna RT не вызывается; pinned image
+сохраняет старые build-пакеты. Town01/main30 ниже остаётся исторической базой.
+
+Городские копии: `bas-urban-runtime` (native), `bas-urban-mission` (миссия/текст),
+`bas-urban-metrics` (анализ/рисунки), `bas-urban-report` (root reproduction inputs).
+После56 по прямому указанию пользователя созданы `bas-urban-astra-{analysis,review,text}`
+с GPT-6 Astra Ultra; reviewers не являются авторами проверяемой части.
+Heavy builds/runs/render/hash идут только из интеграции последовательно под
+прежним runtime lock. Worker не получает writable external/build и не повторяет
+опыты. Исходная `bas_v2-main` и прежние raw сохранены.
+
 Аудит 28.10.2026 завершён в `reports/ispras/README.md`: восемь новых вертикальных
 диагностических запусков, два preflight failed сохранены; никаких runtime/algorithm
-изменений. Obstacle-aware горизонтальный сценарий пока planned, blockers описаны явно.
+изменений. Слова planned/blockers этого аудита относятся к состоянию до отдельного
+городского расширения; прежние измерения не становятся obstacle-aware задним числом.
 Новые audit worktrees: `/home/bas/bas-audit-{algorithm,metrics,obstacles}` от `bb026a0`;
 они не содержат собственных writable native builds/assets и не заменяют интеграцию.
 

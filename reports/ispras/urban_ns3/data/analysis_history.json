@@ -1,0 +1,25 @@
+{
+  "native_runtime_version": "4d96d196e29792e8fd508f97994b78251efaee12",
+  "history": [
+    {
+      "path": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/results/urban_study.json",
+      "analysis_version": 1,
+      "sha256": "019e72ede04274fc08fb46a8f9fc263eed40a15fd8c0664c699e8f7b383b813e",
+      "analyzer_sha256": "1dcef1f6eb0bda92df92219d984b54625069b0cb31f20034e64338161e85cae8"
+    },
+    {
+      "path": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/results-reviewed/urban_study.json",
+      "analysis_version": 2,
+      "sha256": "29d35208091d47552873b0b01f756a8cb994b716657e60629c8c1159e90ba7b0",
+      "analyzer_sha256": "b95e7075c46f3ee172065e9db1ecc1cb5f7b16f60558b15d547930cbe32c8d78"
+    },
+    {
+      "path": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/results-final/urban_study.json",
+      "analysis_version": 3,
+      "sha256": "428dd7d149f13f4e021c7e225cd3ce4a97881aa017c4521a5241ccbb97fe02d1",
+      "analyzer_sha256": "d7831f9580f889bb59537c0da54368e3877492add740bc4cf47f311ca828c3f9"
+    }
+  ],
+  "correction": "Interrupted/no-trigger applicability and missing final stats labels clarified after independent review; all outcomes, paired estimates/CI and interaction estimates exactly unchanged. Raw/per-run analyses/original aggregate preserved.",
+  "primary_values_unchanged": true
+}

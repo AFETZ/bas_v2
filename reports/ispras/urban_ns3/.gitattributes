@@ -1,0 +1,8 @@
+# Preserve exported bytes so archived SHA256 also matches a fresh checkout.
+data/** -text
+# Original stdlib CSV exports use CRLF; retain those bytes and recognize their EOL.
+data/*.csv whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+reproduction/*.json -text
+figures/** -text
+# Matplotlib SVG coordinates are generated artifacts, reviewed as rendered figures.
+figures/*.svg binary

@@ -1,9 +1,20 @@
-# Active paper follow-up — user-authorized scope, 2026-10-27
+# Active paper follow-up — measured urban extension, 2026-10-29
+
+Latest completed measurements: read `reports/ispras/urban_ns3/RESULTS.md` and its
+independent reviews. The separate56-attempt urban study at `4d96d19` has55 valid
+full windows,36 completed/20 failed; order29 is the retained incomplete runtime
+failure. No replacements. Shared Gazebo/ns-3 boxes, upstream Buildings/LogDistance,
+horizontal Guided routes and radio-only barriers are implemented/measured.
+The scene is idealized, not Town01; propagation is uncalibrated. Sionna RT is not
+instantiated, but old image/fork build dependencies remain. Postseries analysis v3
+clarifies interruption/N/A without changing point estimates or CIs.
+User explicitly selected GPT-6 Astra Ultra for post-run analysis/text/review;
+root plus at most three active helpers, separate worktrees, nonauthor review.
 
 Latest article audit (2026-10-28): read `reports/ispras/README.md` and its six reports.
-Main30 and sensitivity18 remain immutable. New candidate-availability probes are
-separate engineering pairs, not a new main matrix. Geometry-aware horizontal flight
-is still planned; never describe Friis/Matrix/filter probes as measured building NLOS.
+Main30 and sensitivity18 remain immutable. Candidate-availability probes and the
+urban study are separate cohorts. Historical Friis/Matrix/filter runs never become
+measured building NLOS retroactively.
 
 For this worktree the current task is `NEXT_STEP_PROMPT.txt` and the current user request.
 Read `doc/LIVE_LEADER_REVIEW_20261027.md` and `doc/LIVE_LEADER_RESULTS.md`;
@@ -16,7 +27,8 @@ supersede conflicting older default-profile and one-agent statements below.
 - Mandatory: real five-SITL flight and live operation, operator commands through
   native ns-3, an observable GCS-selected coordinator relay/failover experiment,
   effective configuration logs, and plots of actual behavior for a paper.
-- Use the explicit native Friis baseline; Sionna and accelerated batch are optional.
+- Use explicit native Friis for the historical baseline or `geometry_logdistance`
+  for the measured urban scenario; Sionna and accelerated batch are optional.
   No hidden propagation fallback, fabricated ACK/PER/positions, or custom MAC.
 - Measured baseline `8e16ec2` uses native ad-hoc/direct peer routes. The old BSS
   profile remains separate; it cannot establish an independent peer radio path.
@@ -139,8 +151,9 @@ Keep active documents short:
 For this authorized paper task use `paper/live-leader-20261026`; keep measured
 versions and configuration snapshots immutable. Other delivery branches are historical. Historical RC1 scope is in `doc/DELIVERY_SCOPE.md`;
 record actual results and remaining blockers in `network/STATUS.md`. Preserve user edits.
-For this task use measured native ns-3.48 Wi-Fi PHY/MAC with explicit Friis;
-Sionna RT is optional and outside this follow-up.
+Use measured native ns-3.48 Wi-Fi PHY/MAC with explicit Friis or the declared
+urban upstream Buildings/LogDistance profile. Sionna RT is optional and outside
+the measurements. Preserve each cohort's actual settings and version.
 No custom PER/ACK/MAC, direct SITL bypass, or silent propagation fallback.
 Dependencies remain pinned; use upstream APIs and thin adapters. Full traces
 and external scene assets stay outside Git. Physical flight-control hardware

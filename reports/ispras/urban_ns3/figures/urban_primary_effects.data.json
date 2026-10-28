@@ -1,0 +1,704 @@
+[
+  {
+    "metric": "timely_per_offered",
+    "mode": "geometry",
+    "block_id": "seed1-r01",
+    "policy": "fixed",
+    "value": 0.34833333333333333,
+    "failed": true,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-fixed-r01"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "geometry",
+    "block_id": "seed1-r02",
+    "policy": "fixed",
+    "value": 0.34833333333333333,
+    "failed": true,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-fixed-r02"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "geometry",
+    "block_id": "seed1-r02",
+    "policy": "failover",
+    "value": 0.9633333333333334,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-failover-r02"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "geometry",
+    "block_id": "seed1-r03",
+    "policy": "fixed",
+    "value": 0.345,
+    "failed": true,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-fixed-r03"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "geometry",
+    "block_id": "seed1-r03",
+    "policy": "failover",
+    "value": 0.9633333333333334,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-failover-r03"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "geometry",
+    "block_id": "seed1-r04",
+    "policy": "fixed",
+    "value": 0.3441666666666667,
+    "failed": true,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-fixed-r04"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "geometry",
+    "block_id": "seed1-r04",
+    "policy": "failover",
+    "value": 0.965,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-failover-r04"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "geometry",
+    "block_id": "seed1-r05",
+    "policy": "fixed",
+    "value": 0.3466666666666667,
+    "failed": true,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-fixed-r05"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "geometry",
+    "block_id": "seed1-r05",
+    "policy": "failover",
+    "value": 0.97,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-failover-r05"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "geometry",
+    "block_id": "seed1-r06",
+    "policy": "fixed",
+    "value": 0.3466666666666667,
+    "failed": true,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-fixed-r06"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "geometry",
+    "block_id": "seed1-r06",
+    "policy": "failover",
+    "value": 0.9675,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-failover-r06"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "geometry",
+    "block_id": "seed1-r07",
+    "policy": "fixed",
+    "value": 0.3425,
+    "failed": true,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-fixed-r07"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "geometry",
+    "block_id": "seed1-r07",
+    "policy": "failover",
+    "value": 0.9666666666666667,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-failover-r07"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "geometry",
+    "block_id": "seed1-r08",
+    "policy": "fixed",
+    "value": 0.35083333333333333,
+    "failed": true,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-fixed-r08"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "geometry",
+    "block_id": "seed1-r08",
+    "policy": "failover",
+    "value": 0.9575,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-failover-r08"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "geometry",
+    "block_id": "seed1-r09",
+    "policy": "fixed",
+    "value": 0.35,
+    "failed": true,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-fixed-r09"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "geometry",
+    "block_id": "seed1-r09",
+    "policy": "failover",
+    "value": 0.965,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-failover-r09"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "geometry",
+    "block_id": "seed1-r10",
+    "policy": "fixed",
+    "value": 0.3433333333333333,
+    "failed": true,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-fixed-r10"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "geometry",
+    "block_id": "seed1-r10",
+    "policy": "failover",
+    "value": 0.9641666666666666,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-failover-r10"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "los_only",
+    "block_id": "seed1-r01",
+    "policy": "fixed",
+    "value": 0.9925,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-fixed-r01"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "los_only",
+    "block_id": "seed1-r01",
+    "policy": "failover",
+    "value": 0.9891666666666666,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-failover-r01"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "los_only",
+    "block_id": "seed1-r02",
+    "policy": "fixed",
+    "value": 0.9925,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-fixed-r02"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "los_only",
+    "block_id": "seed1-r02",
+    "policy": "failover",
+    "value": 0.9908333333333333,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-failover-r02"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "los_only",
+    "block_id": "seed1-r03",
+    "policy": "fixed",
+    "value": 0.9991666666666666,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-fixed-r03"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "los_only",
+    "block_id": "seed1-r03",
+    "policy": "failover",
+    "value": 1.0,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-failover-r03"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "los_only",
+    "block_id": "seed1-r04",
+    "policy": "fixed",
+    "value": 0.9908333333333333,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-fixed-r04"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "los_only",
+    "block_id": "seed1-r04",
+    "policy": "failover",
+    "value": 0.9908333333333333,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-failover-r04"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "los_only",
+    "block_id": "seed1-r05",
+    "policy": "fixed",
+    "value": 0.9991666666666666,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-fixed-r05"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "los_only",
+    "block_id": "seed1-r05",
+    "policy": "failover",
+    "value": 0.9991666666666666,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-failover-r05"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "los_only",
+    "block_id": "seed1-r06",
+    "policy": "fixed",
+    "value": 0.995,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-fixed-r06"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "los_only",
+    "block_id": "seed1-r06",
+    "policy": "failover",
+    "value": 0.9933333333333333,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-failover-r06"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "los_only",
+    "block_id": "seed1-r07",
+    "policy": "fixed",
+    "value": 0.9966666666666667,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-fixed-r07"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "los_only",
+    "block_id": "seed1-r07",
+    "policy": "failover",
+    "value": 0.9891666666666666,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-failover-r07"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "los_only",
+    "block_id": "seed1-r08",
+    "policy": "fixed",
+    "value": 0.9991666666666666,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-fixed-r08"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "los_only",
+    "block_id": "seed1-r08",
+    "policy": "failover",
+    "value": 0.9966666666666667,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-failover-r08"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "los_only",
+    "block_id": "seed1-r09",
+    "policy": "fixed",
+    "value": 0.9991666666666666,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-fixed-r09"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "los_only",
+    "block_id": "seed1-r09",
+    "policy": "failover",
+    "value": 0.9975,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-failover-r09"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "los_only",
+    "block_id": "seed1-r10",
+    "policy": "fixed",
+    "value": 0.9916666666666667,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-fixed-r10"
+  },
+  {
+    "metric": "timely_per_offered",
+    "mode": "los_only",
+    "block_id": "seed1-r10",
+    "policy": "failover",
+    "value": 0.9941666666666666,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-failover-r10"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "geometry",
+    "block_id": "seed1-r01",
+    "policy": "fixed",
+    "value": 0.5555555555555556,
+    "failed": true,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-fixed-r01"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "geometry",
+    "block_id": "seed1-r02",
+    "policy": "fixed",
+    "value": 0.5555555555555556,
+    "failed": true,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-fixed-r02"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "geometry",
+    "block_id": "seed1-r02",
+    "policy": "failover",
+    "value": 1.0,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-failover-r02"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "geometry",
+    "block_id": "seed1-r03",
+    "policy": "fixed",
+    "value": 0.5555555555555556,
+    "failed": true,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-fixed-r03"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "geometry",
+    "block_id": "seed1-r03",
+    "policy": "failover",
+    "value": 1.0,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-failover-r03"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "geometry",
+    "block_id": "seed1-r04",
+    "policy": "fixed",
+    "value": 0.5185185185185185,
+    "failed": true,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-fixed-r04"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "geometry",
+    "block_id": "seed1-r04",
+    "policy": "failover",
+    "value": 1.0,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-failover-r04"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "geometry",
+    "block_id": "seed1-r05",
+    "policy": "fixed",
+    "value": 0.5555555555555556,
+    "failed": true,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-fixed-r05"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "geometry",
+    "block_id": "seed1-r05",
+    "policy": "failover",
+    "value": 0.9629629629629629,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-failover-r05"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "geometry",
+    "block_id": "seed1-r06",
+    "policy": "fixed",
+    "value": 0.5555555555555556,
+    "failed": true,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-fixed-r06"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "geometry",
+    "block_id": "seed1-r06",
+    "policy": "failover",
+    "value": 1.0,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-failover-r06"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "geometry",
+    "block_id": "seed1-r07",
+    "policy": "fixed",
+    "value": 0.5185185185185185,
+    "failed": true,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-fixed-r07"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "geometry",
+    "block_id": "seed1-r07",
+    "policy": "failover",
+    "value": 1.0,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-failover-r07"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "geometry",
+    "block_id": "seed1-r08",
+    "policy": "fixed",
+    "value": 0.5555555555555556,
+    "failed": true,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-fixed-r08"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "geometry",
+    "block_id": "seed1-r08",
+    "policy": "failover",
+    "value": 1.0,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-failover-r08"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "geometry",
+    "block_id": "seed1-r09",
+    "policy": "fixed",
+    "value": 0.5555555555555556,
+    "failed": true,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-fixed-r09"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "geometry",
+    "block_id": "seed1-r09",
+    "policy": "failover",
+    "value": 1.0,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-failover-r09"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "geometry",
+    "block_id": "seed1-r10",
+    "policy": "fixed",
+    "value": 0.5555555555555556,
+    "failed": true,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-fixed-r10"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "geometry",
+    "block_id": "seed1-r10",
+    "policy": "failover",
+    "value": 1.0,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-geometry-failover-r10"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "los_only",
+    "block_id": "seed1-r01",
+    "policy": "fixed",
+    "value": 1.0,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-fixed-r01"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "los_only",
+    "block_id": "seed1-r01",
+    "policy": "failover",
+    "value": 1.0,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-failover-r01"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "los_only",
+    "block_id": "seed1-r02",
+    "policy": "fixed",
+    "value": 1.0,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-fixed-r02"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "los_only",
+    "block_id": "seed1-r02",
+    "policy": "failover",
+    "value": 1.0,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-failover-r02"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "los_only",
+    "block_id": "seed1-r03",
+    "policy": "fixed",
+    "value": 1.0,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-fixed-r03"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "los_only",
+    "block_id": "seed1-r03",
+    "policy": "failover",
+    "value": 1.0,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-failover-r03"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "los_only",
+    "block_id": "seed1-r04",
+    "policy": "fixed",
+    "value": 1.0,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-fixed-r04"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "los_only",
+    "block_id": "seed1-r04",
+    "policy": "failover",
+    "value": 1.0,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-failover-r04"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "los_only",
+    "block_id": "seed1-r05",
+    "policy": "fixed",
+    "value": 1.0,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-fixed-r05"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "los_only",
+    "block_id": "seed1-r05",
+    "policy": "failover",
+    "value": 0.9629629629629629,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-failover-r05"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "los_only",
+    "block_id": "seed1-r06",
+    "policy": "fixed",
+    "value": 1.0,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-fixed-r06"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "los_only",
+    "block_id": "seed1-r06",
+    "policy": "failover",
+    "value": 1.0,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-failover-r06"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "los_only",
+    "block_id": "seed1-r07",
+    "policy": "fixed",
+    "value": 1.0,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-fixed-r07"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "los_only",
+    "block_id": "seed1-r07",
+    "policy": "failover",
+    "value": 1.0,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-failover-r07"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "los_only",
+    "block_id": "seed1-r08",
+    "policy": "fixed",
+    "value": 1.0,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-fixed-r08"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "los_only",
+    "block_id": "seed1-r08",
+    "policy": "failover",
+    "value": 1.0,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-failover-r08"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "los_only",
+    "block_id": "seed1-r09",
+    "policy": "fixed",
+    "value": 1.0,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-fixed-r09"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "los_only",
+    "block_id": "seed1-r09",
+    "policy": "failover",
+    "value": 1.0,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-failover-r09"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "los_only",
+    "block_id": "seed1-r10",
+    "policy": "fixed",
+    "value": 1.0,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-fixed-r10"
+  },
+  {
+    "metric": "completed_waypoint_fraction",
+    "mode": "los_only",
+    "block_id": "seed1-r10",
+    "policy": "failover",
+    "value": 1.0,
+    "failed": false,
+    "run_id": "urban20261028-main-nominal-nominal-los_only-failover-r10"
+  }
+]

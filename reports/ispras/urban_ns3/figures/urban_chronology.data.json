@@ -1,0 +1,142 @@
+{
+  "fixed": [
+    {
+      "event": "NLOS",
+      "host_ns": 523941526013681.0,
+      "elapsed_host_s": 85.776436151,
+      "source": "native geometry"
+    },
+    {
+      "event": "probe timeout",
+      "host_ns": 523942330351720.0,
+      "elapsed_host_s": 86.58077419,
+      "source": "GCS event"
+    }
+  ],
+  "failover": [
+    {
+      "event": "NLOS",
+      "host_ns": 524429198278768.0,
+      "elapsed_host_s": 85.783473517,
+      "source": "native geometry"
+    },
+    {
+      "event": "probe timeout",
+      "host_ns": 524430147293433.0,
+      "elapsed_host_s": 86.732488182,
+      "source": "GCS event"
+    },
+    {
+      "event": "selection",
+      "host_ns": 524430147320484.0,
+      "elapsed_host_s": 86.732515233,
+      "source": "GCS issued grant",
+      "epoch": 2,
+      "leader_id": 3
+    },
+    {
+      "event": "valid_from",
+      "host_ns": 524431914409550.0,
+      "elapsed_host_s": 88.499604299,
+      "source": "issued grant absolute host time",
+      "epoch": 2
+    },
+    {
+      "event": "activation",
+      "host_ns": 524431921738904.0,
+      "elapsed_host_s": 88.506933653,
+      "source": "critical common-epoch endpoint event",
+      "uav_id": "5",
+      "common_epoch": 2,
+      "common_leader_id": 3
+    },
+    {
+      "event": "command created",
+      "host_ns": 524433418601705.0,
+      "elapsed_host_s": 90.003796454,
+      "source": "common all-five target CID stage CSV",
+      "command_id": "2:5:2208",
+      "uav_id": "5",
+      "common_epoch": 2,
+      "common_leader_id": 3
+    },
+    {
+      "event": "master receive",
+      "host_ns": 524433422148938.0,
+      "elapsed_host_s": 90.007343687,
+      "source": "common all-five target CID stage CSV",
+      "command_id": "2:5:2208",
+      "uav_id": "5",
+      "common_epoch": 2,
+      "common_leader_id": 3
+    },
+    {
+      "event": "master forward",
+      "host_ns": 524433422197258.0,
+      "elapsed_host_s": 90.007392007,
+      "source": "common all-five target CID stage CSV",
+      "command_id": "2:5:2208",
+      "uav_id": "5",
+      "common_epoch": 2,
+      "common_leader_id": 3
+    },
+    {
+      "event": "app receipt",
+      "host_ns": 524433426159498.0,
+      "elapsed_host_s": 90.011354247,
+      "source": "common all-five target CID stage CSV",
+      "command_id": "2:5:2208",
+      "uav_id": "5",
+      "common_epoch": 2,
+      "common_leader_id": 3
+    },
+    {
+      "event": "UART",
+      "host_ns": 524433426308668.0,
+      "elapsed_host_s": 90.011503417,
+      "source": "common all-five target CID stage CSV",
+      "command_id": "2:5:2208",
+      "uav_id": "5",
+      "common_epoch": 2,
+      "common_leader_id": 3
+    },
+    {
+      "event": "selected goal created",
+      "host_ns": 524447591481334.0,
+      "elapsed_host_s": 104.176676083,
+      "source": "selected verified new goal",
+      "uav_id": 1,
+      "goal_id": "waypoint4:uav1"
+    },
+    {
+      "event": "goal first command",
+      "host_ns": 524448421983153.0,
+      "elapsed_host_s": 105.007177902,
+      "source": "selected verified new goal",
+      "uav_id": 1,
+      "goal_id": "waypoint4:uav1"
+    },
+    {
+      "event": "goal first UART",
+      "host_ns": 524448438918126.0,
+      "elapsed_host_s": 105.024112875,
+      "source": "selected verified new goal",
+      "uav_id": 1,
+      "goal_id": "waypoint4:uav1"
+    },
+    {
+      "event": "goal physical completion",
+      "host_ns": 524483140614736.0,
+      "elapsed_host_s": 139.725809485,
+      "source": "selected verified new goal",
+      "uav_id": 1,
+      "goal_id": "waypoint4:uav1"
+    },
+    {
+      "event": "LOS return",
+      "host_ns": 524498337956824.0,
+      "elapsed_host_s": 154.923151573,
+      "source": "observed native geometry"
+    }
+  ]
+}
