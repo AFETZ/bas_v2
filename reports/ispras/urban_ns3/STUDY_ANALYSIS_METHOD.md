@@ -17,6 +17,14 @@ launcher по тому же run ID. Сохраняются все planned стр
 отсутствующие экспорты и обнаруженные unplanned контроллеры. Последние не
 подменяют неудачные planned попытки. Проверяются source/image/clean/RNG/mode,
 снимок scenario, policy, отсутствие искусственного отказа и общий горизонт.
+До расчётов основной frozen block должен содержать ровно четыре factorial cells,
+совпадающие RNG seed/run, горизонт и scenario/parameter variant. Config SHA пары
+fixed/failover одного радиорежима одинаков. Auxiliary blocks — ровно две политики
+с теми же условиями. Дубликаты/неполная frozen grid отвергаются до статистики;
+это отличается от отсутствия результата запланированной попытки. Interaction
+группируется также по scenario/parameter variant. Фактический digest executable
+из environment после сборки сверяется с `freeze.native_binary.sha256`; пропуск
+либо несовпадение сохраняется как provenance error, такой run не объединяется.
 
 Полный корректно записанный measurement window остаётся доступен для расчётов,
 если после него не удался teardown: attempt всё равно failed. Crash/пропуски

@@ -34,6 +34,60 @@ BOUNDS = dict(timely_per_offered=(0.,1.), completed_waypoint_fraction=(0.,1.),
               all_routes_finished=(0.,1.), restricted_post_NLOS_UART_60s=(0.,60.))
 
 
+def validate_frozen_blocks(frozen):
+    """Reject a malformed design before selecting or estimating any outcomes."""
+    cases=frozen.get("cases",[])
+    if not cases or len({r.get("run_id") for r in cases})!=len(cases):
+        raise ValueError("freeze must contain nonempty unique planned run IDs")
+    if any(r.get("cohort","main")=="main" for r in cases) and not frozen.get("native_binary",{}).get("sha256"):
+        raise ValueError("main freeze requires the actual post-build native_binary.sha256")
+    groups=defaultdict(list)
+    for row in cases:
+        if not row.get("run_id") or not row.get("block_id"):
+            raise ValueError("every frozen case requires run_id and block_id")
+        cohort=row.get("cohort","main")
+        if cohort not in ("main","sensitivity","engineering_boundary"):
+            raise ValueError(f"unknown frozen cohort: {cohort}")
+        if row.get("policy") not in ("fixed","failover") or row.get("radio_mode") not in ("geometry","los_only"):
+            raise ValueError("invalid frozen policy/radio_mode")
+        for key in ("rng_seed","rng_run"):
+            if type(row.get(key)) is not int or row[key] < 1:
+                raise ValueError(f"every frozen case requires a positive integer {key}")
+        if A.finite(row.get("duration_s")) is None or A.finite(row["duration_s"]) <= 0:
+            raise ValueError("every frozen case requires a positive duration_s")
+        for key in ("scenario_variant","parameter_variant"):
+            if not isinstance(row.get(key),str) or not row[key]:
+                raise ValueError(f"every frozen case requires explicit {key}")
+        if not isinstance(row.get("config_sha256"),str) or not row["config_sha256"]:
+            raise ValueError("every frozen case requires config_sha256")
+        for key in ("source_commit","image_id"):
+            if not frozen.get(key) or row.get(key,frozen[key]) != frozen[key]:
+                raise ValueError(f"case {key} differs from the immutable frozen version")
+        # block_id is unique within a cohort: splitting by variant here would
+        # conceal a mixed-condition block as two apparently incomplete blocks.
+        groups[(cohort,row["block_id"])].append(row)
+    common=("rng_seed","rng_run","duration_s","scenario_variant","parameter_variant")
+    for (cohort,block),rows in groups.items():
+        for key in common:
+            values={A.finite(r[key]) if key=="duration_s" else json.dumps(r.get(key),sort_keys=True) for r in rows}
+            if len(values)!=1:
+                raise ValueError(f"frozen block {cohort}/{block} mixes {key}")
+        cells=[(r["policy"],r["radio_mode"]) for r in rows]
+        if len(set(cells))!=len(cells):
+            raise ValueError(f"duplicate frozen policy/radio cell in {cohort}/{block}")
+        if cohort=="main":
+            expected={(p,m) for p in ("fixed","failover") for m in ("geometry","los_only")}
+            if set(cells)!=expected:
+                raise ValueError(f"main block {block} must contain exactly four factorial cells")
+        elif len(rows)!=2 or {r["policy"] for r in rows}!={"fixed","failover"} or len({r["radio_mode"] for r in rows})!=1:
+            raise ValueError(f"auxiliary block {cohort}/{block} must contain one exact fixed/failover pair")
+        for mode in {r["radio_mode"] for r in rows}:
+            pair=[r for r in rows if r["radio_mode"]==mode]
+            if len({r["config_sha256"] for r in pair})!=1:
+                raise ValueError(f"fixed/failover config differs in {cohort}/{block}/{mode}")
+    return cases
+
+
 def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest() if Path(path).is_file() else None
 
@@ -143,6 +197,13 @@ def run_record(case, frozen, export_dir, controller, *, runs_root=None):
     snapshot=common.get("metadata",{}).get("configuration_snapshot",{})
     if env.get("git_head") != frozen.get("source_commit") or str(env.get("source_dirty_paths")) != "0":
         problems.append("clean frozen runtime source not established")
+    expected_binary=frozen.get("native_binary",{}).get("sha256")
+    if expected_binary is not None or case.get("cohort","main")=="main":
+        observed_binary=env.get("native_binary_sha256")
+        if not observed_binary:
+            problems.append("post-build native executable digest missing from runtime environment")
+        elif not expected_binary or observed_binary != expected_binary:
+            problems.append("post-build native executable digest differs from frozen binary")
     if not frozen.get("image_id") or snapshot.get("container_image_id") != frozen["image_id"]:
         problems.append("pinned runtime image differs/not recorded")
     for key in ("rng_seed","rng_run"):
@@ -250,9 +311,12 @@ def contrasts(records):
         blocks=defaultdict(dict)
         for row in pairs:
             if row["cohort"]=="main" and row["metric"]==metric:
-                blocks[row["block_id"]][row["radio_mode"]]=row
-        rows=[]
-        for block,cells in blocks.items():
+                key=(row["scenario_variant"],row["parameter_variant"],row["block_id"])
+                if row["radio_mode"] in blocks[key]:
+                    raise ValueError(f"duplicate interaction cell: {key}/{row['radio_mode']}")
+                blocks[key][row["radio_mode"]]=row
+        variant_rows=defaultdict(list)
+        for (scenario,parameter,block),cells in blocks.items():
             g,l=cells.get("geometry",{}).get("difference"),cells.get("los_only",{}).get("difference")
             limits=[]
             if metric in BOUNDS and not any(cell.get("not_applicable") for cell in cells.values()):
@@ -261,27 +325,28 @@ def contrasts(records):
                                           ("los_only","failover",-1),("los_only","fixed",1)]:
                     value=cells.get(mode,{}).get(policy)
                     limits.append((sign*value,sign*value) if value is not None else (lo,hi) if sign==1 else (-hi,-lo))
-            rows.append(dict(block_id=block,metric=metric,geometry_effect=g,LOS_only_effect=l,
+            variant_rows[(scenario,parameter)].append(dict(block_id=block,scenario_variant=scenario,parameter_variant=parameter,
+                metric=metric,geometry_effect=g,LOS_only_effect=l,
                 interaction=g-l if g is not None and l is not None else None,
                 interaction_lower_bound=sum(v[0] for v in limits) if limits else None,
                 interaction_upper_bound=sum(v[1] for v in limits) if limits else None))
-        values=[r["interaction"] for r in rows if r["interaction"] is not None]
-        interactions.append(dict(metric=metric,planned_blocks=len(rows),complete_four_case_blocks=len(values),
-            definition="(failover-fixed) geometry minus (failover-fixed) LOS-only, within independent seed block",
-            estimate=interval(values),block_rows=rows,
-            missing_outcome_sensitivity=dict(status="deterministic_range_bounds_not_CI",
-                mean_interaction_bounds=[statistics.fmean(r[key] for r in rows) for key in
-                    ("interaction_lower_bound","interaction_upper_bound")])
-                if rows and all(r["interaction_lower_bound"] is not None for r in rows) else None))
+        for (scenario,parameter),rows in variant_rows.items():
+            values=[r["interaction"] for r in rows if r["interaction"] is not None]
+            interactions.append(dict(metric=metric,scenario_variant=scenario,parameter_variant=parameter,
+                planned_blocks=len(rows),complete_four_case_blocks=len(values),
+                definition="(failover-fixed) geometry minus (failover-fixed) LOS-only, within independent seed block and common scenario/parameter variant",
+                estimate=interval(values),block_rows=rows,
+                missing_outcome_sensitivity=dict(status="deterministic_range_bounds_not_CI",
+                    mean_interaction_bounds=[statistics.fmean(r[key] for r in rows) for key in
+                        ("interaction_lower_bound","interaction_upper_bound")])
+                    if rows and all(r["interaction_lower_bound"] is not None for r in rows) else None))
     return pairs,summaries,interactions
 
 
 def aggregate(freeze_path,analysis_root,controllers_root,output,*,runs_root=None):
     freeze_path,analysis_root,controllers_root,output=map(Path,(freeze_path,analysis_root,controllers_root,output))
     frozen=A.read_json(freeze_path)
-    cases=frozen.get("cases",[])
-    if not cases or len({r.get("run_id") for r in cases})!=len(cases):
-        raise ValueError("freeze must contain nonempty unique planned run IDs")
+    cases=validate_frozen_blocks(frozen)
     records=[run_record(case,frozen,analysis_root/case["run_id"],controllers_root/(case["run_id"]+".json"),runs_root=runs_root) for case in cases]
     pairs,summaries,interactions=contrasts(records)
     planned={r["run_id"] for r in cases}
