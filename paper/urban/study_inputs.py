@@ -14,6 +14,43 @@ METRIC_LABELS = {
 }
 
 
+def validate_closed_study(manifest, freeze, study, controllers, freeze_sha256):
+    """A final manuscript may retain failures but cannot precede attempt closure.
+
+    Controllers are saved launcher records, not run-success flags. A nonzero
+    return code is a closed failed attempt, never a reason to remove its row.
+    """
+    if study is None or manifest.get("kind") != "frozen_series":
+        raise ValueError("--final requires study_json and kind=frozen_series")
+    if not manifest.get("source_commit") or manifest["source_commit"] != freeze.get("source_commit"):
+        raise ValueError("frozen and manuscript runtime versions differ")
+    cases = freeze.get("cases", [])
+    expected = {r["run_id"]: r for r in cases}
+    records = study.get("runs", [])
+    if (not cases or len(expected) != len(cases) or len(records) != len(expected)
+            or {r["run_id"] for r in records} != set(expected)
+            or study.get("planned_attempts") != len(expected)
+            or study.get("observed_attempts") != len(expected)):
+        raise ValueError("final document requires the complete planned attempt roster")
+    if study.get("freeze_sha256") != freeze_sha256:
+        raise ValueError("aggregate and freeze differ")
+    for record in records:
+        rid = record["run_id"]
+        controller = controllers.get(rid)
+        if controller is None or record.get("controller_recorded") is not True:
+            raise ValueError(f"{rid}: missing attempt controller")
+        code = controller.get("returncode")
+        start, end = controller.get("started_host_monotonic_ns"), controller.get("ended_host_monotonic_ns")
+        if (not isinstance(code, int) or isinstance(code, bool)
+                or not isinstance(start, (int, float)) or not isinstance(end, (int, float)) or end < start):
+            raise ValueError(f"{rid}: attempt was started but its controller is not closed")
+        if record.get("controller_returncode") != code:
+            raise ValueError(f"{rid}: aggregate/controller completion differs; re-export")
+        if (controller.get("run_id") != rid or controller.get("source_commit") != freeze["source_commit"]
+                or controller.get("config_sha256") != expected[rid].get("config_sha256")):
+            raise ValueError(f"{rid}: controller identity/source/config differs from freeze")
+
+
 def cell_key(row):
     return tuple(row.get(key, "main" if key == "cohort" else "nominal") for key in
                  ("cohort", "scenario_variant", "parameter_variant")) + (row["radio_mode"], row["policy"])

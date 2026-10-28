@@ -68,17 +68,19 @@ class Revision:
                     self.runs.append((f"U{index:02d}", record.get("cohort", "unspecified"), result))
                     seen.add(record["run_id"])
         if args.final:
-            if self.kind != "frozen_series" or not self.runs:
-                raise ValueError("--final requires frozen_series with actual analysis inputs")
+            if not self.manifest.get("study_json") or not self.runs:
+                raise ValueError("--final requires study_json and actual analysis inputs")
             freeze = resolved(self.manifest["freeze_path"], self.base)
             self.read_json(freeze)
-            if not self.manifest.get("source_commit"):
-                raise ValueError("frozen version is required")
-            if self.manifest["source_commit"] != self.freeze.get("source_commit"):
-                raise ValueError("frozen and manuscript runtime versions differ")
-            if self.study and (self.study.get("observed_attempts") != self.study.get("planned_attempts")
-                               or self.study.get("freeze_sha256") != sha(freeze)):
-                raise ValueError("final document requires every planned attempt and the matching freeze")
+            controllers = {}
+            for record in self.study.get("runs", []):
+                path = resolved(record["input_paths"]["controller"], self.study_path.parent)
+                if not path.is_file():
+                    raise ValueError(f"missing final controller: {record['run_id']}")
+                controllers[record["run_id"]] = self.read_json(path)
+                if sha(path) != record.get("input_sha256", {}).get("controller"):
+                    raise ValueError(f"{record['run_id']}: controller changed since aggregate; re-export")
+            study_inputs.validate_closed_study(self.manifest, self.freeze, self.study, controllers, sha(freeze))
             for label, _group, run in self.runs:
                 checks = run.get("physical_checks", {})
                 full_window = run.get("observation_window", {}).get("complete") is True
@@ -273,7 +275,10 @@ class Revision:
         for entry in self.manifest.get("figures", []):
             if entry.get("measured") is not True or not self.runs:
                 raise ValueError("urban figures require explicit measured:true and actual analysis inputs")
-            self.figure(resolved(entry["path"], self.base), entry["caption_ru"], entry["caption_en"])
+            picture = entry.get("path") or entry.get("paths", {}).get("png")
+            if not picture:
+                raise ValueError("figure requires path or paths.png")
+            self.figure(resolved(picture, self.base), entry["caption_ru"], entry["caption_en"])
 
     def build(self):
         source = HERE / "src" / ("supplement.md" if self.args.supplement else "manuscript.md")

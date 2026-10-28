@@ -11,6 +11,42 @@ def record(run_id, *, eligible=True, failed=False, timely=.9, progress=.5):
 
 
 class PresentationTests(unittest.TestCase):
+    def test_final_requires_aggregate_and_closed_controller_not_just_attempted(self):
+        manifest = dict(kind="frozen_series", source_commit="runtime")
+        freeze = dict(source_commit="runtime", cases=[dict(run_id="one", config_sha256="cfg")])
+        study = dict(planned_attempts=1, observed_attempts=1, freeze_sha256="freeze",
+                     runs=[dict(run_id="one", controller_recorded=True, controller_returncode=None)])
+        controller = dict(run_id="one", source_commit="runtime", config_sha256="cfg",
+                          started_host_monotonic_ns=1)
+        with self.assertRaisesRegex(ValueError, "requires study_json"):
+            S.validate_closed_study(manifest, freeze, None, {}, "freeze")
+        with self.assertRaisesRegex(ValueError, "not closed"):
+            S.validate_closed_study(manifest, freeze, study, {"one": controller}, "freeze")
+        # A nonzero closed attempt is retained, even if its analysis is missing.
+        controller.update(returncode=2, ended_host_monotonic_ns=3)
+        study["runs"][0].update(controller_returncode=2, attempt_failed=True, analysis_recorded=False)
+        S.validate_closed_study(manifest, freeze, study, {"one": controller}, "freeze")
+        study["runs"][0]["controller_returncode"] = None
+        with self.assertRaisesRegex(ValueError, "re-export"):
+            S.validate_closed_study(manifest, freeze, study, {"one": controller}, "freeze")
+
+    def test_final_rejects_mismatched_freeze_source_and_incomplete_roster(self):
+        manifest = dict(kind="frozen_series", source_commit="runtime")
+        freeze = dict(source_commit="runtime", cases=[dict(run_id="one", config_sha256="cfg")])
+        study = dict(planned_attempts=1, observed_attempts=1, freeze_sha256="freeze",
+                     runs=[dict(run_id="one", controller_recorded=True, controller_returncode=0)])
+        controller = dict(run_id="one", source_commit="runtime", config_sha256="cfg", returncode=0,
+                          started_host_monotonic_ns=1, ended_host_monotonic_ns=3)
+        S.validate_closed_study(manifest, freeze, study, {"one": controller}, "freeze")
+        with self.assertRaisesRegex(ValueError, "aggregate and freeze differ"):
+            S.validate_closed_study(manifest, freeze, study, {"one": controller}, "otherfreeze")
+        controller["source_commit"] = "other-runtime"
+        with self.assertRaisesRegex(ValueError, "source/config differs"):
+            S.validate_closed_study(manifest, freeze, study, {"one": controller}, "freeze")
+        study["observed_attempts"] = 0
+        with self.assertRaisesRegex(ValueError, "complete planned"):
+            S.validate_closed_study(manifest, freeze, study, {"one": controller}, "freeze")
+
     def test_failed_after_valid_window_remains_failed_and_missing_window_is_not_zero(self):
         study = dict(runs=[record("one", failed=True), record("two", eligible=False, timely=None, progress=None)])
         row = S.cells(study)[0]

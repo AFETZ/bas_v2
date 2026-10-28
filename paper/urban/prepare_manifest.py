@@ -21,7 +21,10 @@ def main():
     expected = hashlib.sha256(args.freeze.read_bytes()).hexdigest()
     if study.get("freeze_sha256") != expected:
         raise ValueError("aggregate and freeze differ")
-    result = dict(kind="frozen_series" if study.get("observed_attempts") == study.get("planned_attempts") else "partial_series",
+    closed = (bool(study.get("runs")) and study.get("observed_attempts") == study.get("planned_attempts")
+              and all(r.get("controller_recorded") is True and r.get("controller_returncode") is not None
+                      for r in study.get("runs", [])))
+    result = dict(kind="frozen_series" if closed else "partial_series",
         source_commit=freeze["source_commit"], freeze_path=str(args.freeze.resolve()),
         study_json=str(args.study.resolve()), per_run_table=False, figures=[],
         status="presentation_inputs_only; no claim that all attempts completed successfully",

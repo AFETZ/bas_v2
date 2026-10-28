@@ -33,6 +33,8 @@ Manifest содержит `kind`: `preparation`, `engineering_pilot`, `partial_s
 (список четырёхстрочных строк таблицы: фактор/значение/clock/подтверждение);
 `analyses`: список `{label,path,group}` к настоящим `urban_analysis.json`;
 `figures`: список `{path,caption_ru,caption_en,measured:true}`;
+Допускается также формат renderer `{paths:{png,svg,pdf},caption_ru,caption_en,measured:true}`;
+builder вставляет PNG, остальные форматы сохраняются как исходные научные артефакты.
 `tables`: список `{csv,caption_ru,caption_en}` к готовым численным таблицам.
 Дополнительно `study_json` указывает на реальный `urban_study.json` агрегатора.
 Он добавляет все доступные per-run exports через их `input_paths.analysis`;
@@ -53,8 +55,11 @@ planned/failed/missing строки остаются в агрегированн
 Каждая включённая картинка требует `measured:true` и хотя бы один analysis input.
 Это маркировка источника; истинность изображения и статистики проверяет reviewer.
 
-`--final` допускается лишь с `kind=frozen_series`, существующим freeze и настоящими
-analysis inputs. Он отклоняет неподтверждённые физические completion и data-quality
+`--final` требует `study_json`, `kind=frozen_series`, совпадающие freeze/source и
+полный planned roster. Все controllers должны иметь returncode и end timestamp;
+`observed_attempts==planned_attempts` само по себе не доказывает завершение. Текущий
+хэш controller должен совпасть с агрегатором. Failed/missing сохраняются в roster.
+Builder отклоняет неподтверждённые физические completion и data-quality
 ошибки в заявленных полных окнах; неполные crashed attempts остаются наблюдениями
 с пропусками. Он не требует выигрыша failover, отсутствия failed или всех восстановлений.
 Хэши источника, шаблона, входных данных/рисунков и DOCX пишутся в `build_manifest.json`.
