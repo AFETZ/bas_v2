@@ -105,8 +105,8 @@ def freeze(plan, *, scenarios, pilot_analyses, reviews, image, horizon_s, output
     if not re.fullmatch(r"[A-Za-z0-9_-]+", study_id):
         raise ValueError("study ID must be a simple basename")
     config_inputs = {key:artifact(path) for key,path in scenarios.items()}
-    nominal = A.RELAY.read_json(scenarios["nominal"])
-    control = A.RELAY.read_json(scenarios["los_only"])
+    nominal = A.RELAY.read_json(Path(scenarios["nominal"]))
+    control = A.RELAY.read_json(Path(scenarios["los_only"]))
     # This is a radio ablation on the very same mission and physical scene.
     nominal_without_mode = json.loads(json.dumps(nominal))
     control_without_mode = json.loads(json.dumps(control))
