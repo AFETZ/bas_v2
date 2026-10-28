@@ -38,6 +38,8 @@ def main():
     source = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     config_sha = hashlib.sha256(config.read_bytes()).hexdigest()
     if args.freeze:
+        if args.build:
+            p.error("frozen study reuses the qualified native binary; build before freeze")
         freeze = json.loads(args.freeze.read_text())
         if freeze["source_commit"] != source:
             p.error("HEAD differs from frozen implementation")

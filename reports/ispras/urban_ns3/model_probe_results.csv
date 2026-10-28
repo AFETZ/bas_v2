@@ -7,3 +7,7 @@ open,1,LOS,,78.74340558150712,100,100,100,0,runs/urban-ns3-dev/probes02/open-pac
 reverse,0,NLOS,A,102.15801458807759,100,0,100,100,runs/urban-ns3-dev/probes02/reverse-packets.json
 roof_clear,1,LOS,,81.43869440073244,100,100,100,100,runs/urban-ns3-dev/probes02/roof_clear-packets.json
 two_buildings,0,NLOS,A;B,106.26305665397943,100,0,100,100,runs/urban-ns3-dev/probes02/two_buildings-packets.json
+horizontal_shadow60,0,NLOS,A,101.60812169110517,100,0,100,100,runs/urban-ns3-dev/staged-probes01/horizontal_shadow60-packets.json
+low_north12,0,NLOS,A,102.15801458807759,100,0,100,100,runs/urban-ns3-dev/staged-probes01/low_north12-packets.json
+stage_north70,1,LOS,,82.7077200030715,100,100,100,100,runs/urban-ns3-dev/staged-probes01/stage_north70-packets.json
+stage_south70,1,LOS,,80.83214628600848,100,100,100,100,runs/urban-ns3-dev/staged-probes01/stage_south70-packets.json
