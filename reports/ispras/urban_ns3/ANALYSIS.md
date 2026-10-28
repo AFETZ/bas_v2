@@ -42,6 +42,12 @@ is separate from application-stage lineage. The general product summarizer
 recognizes the geometry scalar chain and rejects a second spectrum pathloss;
 this alone is not evidence of physical model calibration or experiment success.
 
+`urban_target_CID_stages.csv` separately records unique target CID stages:
+master receive/forward, follower application receipt, UART write-end and audit.
+Each stage checks actor, creation, target, payload, UAV/epoch/leader identity.
+`rates_alias_note` explicitly preserves legacy `delivered=UART admitted` naming;
+application receipt is not PHY Rx/ACK, and unique physical goals are separate.
+
 The primary trigger is the first observed CP↔initial relay LOS→NLOS transition
 after measurement start. Starting in NLOS is not an invented transition.
 Without packet/application impairment the endpoint is called post-NLOS UART

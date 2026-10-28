@@ -280,3 +280,35 @@ def test_new_goal_group_is_maximum_of_verified_members_and_keeps_censor_crash_NA
     assert result["all_five"]["status"]=="interrupted_attempt"
     result=A.new_goal_after_NLOS(events,commands,checks,None,30*NS,full_window=True,data_valid=True)
     assert result["all_five"]["recovered"] is None and result["all_five"]["time_s"] is None
+
+
+def test_application_receipt_without_UART_is_counted_separately(tmp_path):
+    run,scenario=fixture(tmp_path)
+    path=run/"logs/coordination_events.jsonl"
+    events=[json.loads(line) for line in path.read_text().splitlines()]
+    events=[r for r in events if not (r.get("event")=="uart_admitted" and r.get("uav_id")==5 and r.get("epoch")==2)]
+    path.write_text("".join(json.dumps(r)+"\n" for r in events))
+    result=A.analyze(run,tmp_path/"stages",scenario_path=scenario)
+    counts=result["target_stage_counts"]
+    assert counts["target_CIDs_created_in_window"]==5
+    assert counts["follower_application_receive_CIDs"]==5
+    assert counts["UART_write_end_CIDs"]==4
+    assert counts["master_forward_required_CIDs"]==counts["master_forward_observed_CIDs"]==4
+    assert result["rates"]["all_five"]["delivered"]==4
+    assert "legacy delivered=UART admitted" in result["rates_alias_note"]
+    assert counts["independently_verified_unique_inspection_goals"]==4
+
+
+def test_intermediate_stage_payload_mismatch_is_not_verified_receipt(tmp_path):
+    run,scenario=fixture(tmp_path)
+    path=run/"logs/coordination_events.jsonl"
+    events=[json.loads(line) for line in path.read_text().splitlines()]
+    for row in events:
+        if row.get("event")=="follower_receive" and row.get("uav_id")==5:
+            row["payload_sha256"]="different-payload"
+    path.write_text("".join(json.dumps(r)+"\n" for r in events))
+    result=A.analyze(run,tmp_path/"mismatch",scenario_path=scenario)
+    counts=result["target_stage_counts"]
+    assert counts["target_CIDs_created_in_window"]==5
+    assert counts["follower_application_receive_CIDs"]==4 and counts["unverified_stage_records"]==1
+    assert counts["UART_write_end_CIDs"]==5

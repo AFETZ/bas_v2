@@ -492,6 +492,64 @@ def new_goal_after_NLOS(events, commands, physical_checks, trigger, end, *, full
         interpretation="creation wait refers to selected first successful post-NLOS goal, not absence of earlier goal generation; delivery includes processing/relay, movement may span later refreshes/HOLD; no continuous authority or movement causation inferred")
 
 
+def target_stage_counts(events, commands, start, end, run_id):
+    """Distinct application-stage CIDs; receipt, UART and goals are separate."""
+    by_cid=defaultdict(list)
+    for row in events:
+        if row.get("command_id") is not None:
+            by_cid[str(row["command_id"])].append(row)
+    output=[]
+    for command in commands:
+        created=command.get("created_ns")
+        if start is None or end is None or created is None or not start<=created<=end:
+            continue
+        i,leader=command["uav_id"],command["leader_id"]
+        records=by_cid[command["command_id"]]
+        origin=next((r for r in records if stage(r)=="gcs_send" and node_id(r.get("node_id"))==0),None)
+        origin=origin or {}
+        row=dict(run_id=run_id,uav_id=i,epoch=command["epoch"],leader_id=leader,command_id=command["command_id"],
+                 command_created_host_ns=created,payload_sha256=origin.get("payload_sha256"),
+                 origin_payload_recorded=bool(origin.get("payload_sha256")),
+                 master_forward_required=i!=leader,UART_write_end_host_ns=command.get("admitted_ns"),
+                 UART_write_end_observed=command.get("admitted_ns") is not None,
+                 UART_admission_audit_valid=bool(command.get("lease_status")=="valid" and command.get("lineage_status")=="valid" and command.get("policy_allowed")),
+                 complete_application_chain=command.get("application_chain_complete"),
+                 unverified_stage_records=0)
+        for name,actor in (("master_receive",leader),("master_forward",leader),("follower_receive",i)):
+            observed=[]
+            for event in records:
+                if stage(event)!=name or stamp(event) is None or not start<=stamp(event)<=end:
+                    continue
+                valid=(bool(origin.get("payload_sha256")) and event.get("run_id",run_id)==run_id and node_id(event.get("node_id"))==actor
+                    and node_id(event.get("uav_id"))==i and node_id(event.get("leader_id"))==leader
+                    and event.get("epoch")==command["epoch"] and event.get("payload_sha256")==origin["payload_sha256"]
+                    and number(event.get("command_created_host_monotonic_ns"))==created
+                    and RELAY.target(event)==command.get("target_position_m"))
+                if valid:
+                    observed.append(stamp(event))
+                else:
+                    row["unverified_stage_records"]+=1
+            row[name+"_observed"]=(bool(observed) if name!="master_forward" or i!=leader else None)
+            row[name+"_host_ns"]=min(observed) if observed else None
+        output.append(row)
+    unique={(r["run_id"],r["uav_id"],r["command_id"],r["epoch"],r["leader_id"]):r for r in output}
+    rows=list(unique.values())
+    counts=dict(target_CIDs_created_in_window=len(rows),
+        master_receive_CIDs=sum(r["master_receive_observed"] for r in rows),
+        master_forward_required_CIDs=sum(r["master_forward_required"] for r in rows),
+        master_forward_observed_CIDs=sum(r["master_forward_observed"] is True for r in rows),
+        follower_application_receive_CIDs=sum(r["follower_receive_observed"] for r in rows),
+        UART_write_end_CIDs=sum(r["UART_write_end_observed"] for r in rows),
+        audited_valid_UART_CIDs=sum(r["UART_admission_audit_valid"] for r in rows),
+        origin_payload_unrecorded_CIDs=sum(not r["origin_payload_recorded"] for r in rows),
+        unverified_stage_records=sum(r["unverified_stage_records"] for r in rows),
+        identity="unique (run,UAV,CID,epoch,leader), matching target/creation/payload and stage actor",
+        receipt_scope="follower_receive is application validated-envelope receipt; not PHY Rx, ACK or physical execution",
+        window_scope="target CIDs created inside measurement; stage observations/UART confined to measurement",
+        native_PHY_coverage="native packet/radiotap proof and PHY loss denominators are separate from these application counts")
+    return counts,rows
+
+
 def analyze(run_dir, output_dir, *, scenario_path=None, plots=False, deadline_ms=250., after_return_s=5.):
     run, out = Path(run_dir).resolve(), Path(output_dir).resolve()
     if out == run or run in out.parents:
@@ -551,6 +609,8 @@ def analyze(run_dir, output_dir, *, scenario_path=None, plots=False, deadline_ms
     new_goal=new_goal_after_NLOS(events,commands,checks,trigger,end,full_window=complete,
         data_valid=valid_recording and bool(poses) and bool(scenario)
             and not any("node_state.jsonl" in e for e in errors))
+    stage_counts,stage_rows=target_stage_counts(events,commands,start,end,expected_run)
+    stage_counts["independently_verified_unique_inspection_goals"]=sum(r["completed_waypoints"] for r in progress.values())
     index = {r["command_id"]:r for r in commands}
     offers = RELAY.read_csv(run/"metrics/relay_control_refresh.csv")
     opportunity = []
@@ -583,7 +643,8 @@ def analyze(run_dir, output_dir, *, scenario_path=None, plots=False, deadline_ms
         geometry=dict(samples=len(geometry), pairs=sorted({r["pair"] for r in geometry}), transitions=len(transitions),
             LOS_return_host_ns=return_ns, selected_radio_modes=sorted({r.get("radio_state", "") for r in geometry}),
             parameter_sets=sorted({r.get("parameter_set", "") for r in geometry})),
-        rates=common["rates"], uart_after_NLOS=uart, handover_uart=handover, performance=perf,
+        rates=common["rates"],rates_alias_note="legacy delivered=UART admitted; it does not count network/application receipt or physical goals",
+        target_stage_counts=stage_counts,uart_after_NLOS=uart, handover_uart=handover, performance=perf,
         uart_endpoint_label="first post-NLOS update latency; do not call recovery unless delivery impairment is independently established",
         mission_progress=progress, inspection_resume=resume,new_goal_after_NLOS=new_goal,
         physical_checks=dict(total=len(checks), verified=sum(r["status"] == "verified" and r["command_lineage_valid"]
@@ -615,6 +676,7 @@ def analyze(run_dir, output_dir, *, scenario_path=None, plots=False, deadline_ms
     new_goal_rows.append(dict(endpoint="all_five",**{k:v for k,v in group.items() if k!="stage_decomposition"},
                              **(group.get("stage_decomposition") or {})))
     write_rows(out/"metrics/urban_new_goal_after_NLOS.csv",new_goal_rows)
+    write_rows(out/"metrics/urban_target_CID_stages.csv",stage_rows)
     write_rows(out/"metrics/urban_opportunities.csv", opportunity,
         ["run_id", "request_id", "uav_id", "offered_host_ns", "scheduled_host_ns", "goal_id", "command_id", "timely", "admitted", "opportunity_to_UART_ms"])
     write_rows(out/"metrics/urban_clocks.csv", clocks, ["host_monotonic_ns", "source_sim_time_s", "session_id", "fresh_UAVs"])
