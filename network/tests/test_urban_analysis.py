@@ -228,3 +228,55 @@ def test_complete_study_design_contains_unpooled_sensitivity_and_boundary_pairs(
     assert len(rows) == len({r["case_id"] for r in rows}) == 56
     assert [sum(r["cohort"] == c for r in rows) for c in ("main","sensitivity","engineering_boundary")] == [40,12,4]
     assert len(prepare.design(5)) == 36
+
+
+def new_goal_fixture(uavs=(1,)):
+    events,commands,checks=[],[],[]
+    for i in uavs:
+        for label,born,finished in (("old",9,14),("new",11,17+i/10)):
+            goal=f"{label}:uav{i}"
+            target=(10.,float(i),12.)
+            events.append(dict(event="goal_created",uav_id=i,goal_id=goal,goal_created_host_monotonic_ns=born*NS,
+                host_monotonic_ns=born*NS,target_position_m=list(target),target_frame="ENU"))
+            for suffix,created,at in (("first",born+.2,born+.4),("latest",finished-.3,finished-.2)):
+                commands.append(dict(command_id=f"{goal}:{suffix}",uav_id=i,leader_id=2,epoch=2,
+                    goal_id=goal,goal_created_ns=born*NS,created_ns=created*NS,admitted_ns=at*NS,
+                    target_position_m=target,lease_status="valid",lineage_status="valid",
+                    application_chain_complete=True,policy_allowed=True,lease_valid_until_ns=30*NS))
+            commands.append(dict(command_id=f"{goal}:lost",uav_id=i,leader_id=2,epoch=2,goal_id=goal,
+                goal_created_ns=born*NS,created_ns=(born+.1)*NS,admitted_ns=None,target_position_m=target,
+                lease_status="no_admission",lineage_status="no_admission",application_chain_complete=False,policy_allowed=True))
+            events.append(dict(event="action_completed",uav_id=i,goal_id=goal,goal_created_host_monotonic_ns=born*NS,
+                host_monotonic_ns=finished*NS,admitted_command_id=f"{goal}:latest",admitted_epoch=2,leader_id=2,
+                target_position_m=list(target),target_frame="ENU"))
+            checks.append(dict(uav_id=i,goal_id=goal,completed_host_ns=finished*NS,status="verified",
+                command_lineage_valid=True,configured_waypoint_valid=True))
+    return events,commands,checks
+
+
+def test_new_goal_endpoint_excludes_old_goal_and_separates_first_latest_CIDs():
+    events,commands,checks=new_goal_fixture()
+    result=A.new_goal_after_NLOS(events,commands,checks,10*NS,30*NS,full_window=True,data_valid=True)
+    row=result["per_uav"]["1"]
+    assert row["goal_id"]=="new:uav1" and abs(row["time_s"]-7.1)<1e-9
+    assert row["first_admitted_goal_CID"]=="new:uav1:first"
+    assert row["completion_refresh_CID"]=="new:uav1:latest"
+    assert row["earliest_created_goal_CID"]=="new:uav1:lost" and row["earlier_created_unadmitted_CIDs"]==1
+    assert row["chronology_verified"] and abs(row["sum_error_s"])<1e-9
+    assert abs(sum(row["stage_decomposition"].values())-row["time_s"])<1e-9
+    assert result["all_five"]["status"]=="administratively_right_censored"
+
+
+def test_new_goal_group_is_maximum_of_verified_members_and_keeps_censor_crash_NA():
+    events,commands,checks=new_goal_fixture(range(1,6))
+    result=A.new_goal_after_NLOS(events,commands,checks,10*NS,30*NS,full_window=True,data_valid=True)
+    assert result["all_five"]["critical_uav_id"]==5
+    assert abs(result["all_five"]["time_s"]-7.5)<1e-9
+    assert result["all_five"]["same_relay_epoch"] is True
+    checks[:]=[r for r in checks if r["goal_id"]!="new:uav5"]
+    result=A.new_goal_after_NLOS(events,commands,checks,10*NS,30*NS,full_window=True,data_valid=True)
+    assert result["per_uav"]["5"]["status"]=="administratively_right_censored"
+    result=A.new_goal_after_NLOS(events,commands,checks,10*NS,18*NS,full_window=False,data_valid=True)
+    assert result["all_five"]["status"]=="interrupted_attempt"
+    result=A.new_goal_after_NLOS(events,commands,checks,None,30*NS,full_window=True,data_valid=True)
+    assert result["all_five"]["recovered"] is None and result["all_five"]["time_s"] is None

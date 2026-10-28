@@ -411,6 +411,87 @@ def mission_progress(events, poses, commands, scenario, config, start, end, trig
     return progress, physical_resume, checks
 
 
+def new_goal_after_NLOS(events, commands, physical_checks, trigger, end, *, full_window, data_valid):
+    """Secondary literal post-trigger-created goal endpoint, conditional on success.
+
+    Existing inspection_resume also permits pre-trigger goals; that endpoint is
+    unchanged. First admitted goal CID and the completion refresh are distinct.
+    """
+    verified={(r["uav_id"],r["goal_id"],r.get("completed_host_ns")) for r in physical_checks if r.get("status")=="verified"
+              and r.get("command_lineage_valid") and r.get("configured_waypoint_valid")}
+    command_index={r["command_id"]:r for r in commands}
+    created_goals={(node_id(r.get("uav_id")),r.get("goal_id")):r for r in events if stage(r)=="goal_created"}
+    per_uav={}
+    for i in UAVS:
+        candidates=[]
+        for row in events:
+            key=i,row.get("goal_id")
+            if (stage(row)!="action_completed" or node_id(row.get("uav_id"))!=i
+                    or (i,row.get("goal_id"),stamp(row)) not in verified):
+                continue
+            born=number(row.get("goal_created_host_monotonic_ns"))
+            finished=stamp(row)
+            creation=created_goals.get(key)
+            latest=command_index.get(str(row.get("admitted_command_id",row.get("command_id"))))
+            epoch=row.get("admitted_epoch",row.get("epoch"))
+            leader=node_id(row.get("leader_id"))
+            if (trigger is None or end is None or born is None or finished is None
+                    or not trigger<=born<=finished<=end or creation is None
+                    or number(creation.get("goal_created_host_monotonic_ns"))!=born
+                    or RELAY.target(creation)!=RELAY.target(row) or latest is None or not admitted(latest)):
+                continue
+            matching=[c for c in commands if c.get("uav_id")==i and c.get("goal_id")==row.get("goal_id")
+                and c.get("goal_created_ns")==born and c.get("epoch")==epoch and c.get("leader_id")==leader
+                and c.get("target_position_m")==RELAY.target(row) and c.get("created_ns") is not None
+                and born<=c["created_ns"]<=finished]
+            delivered=[c for c in matching if admitted(c) and c["created_ns"]<=c["admitted_ns"]<=finished]
+            if not delivered or latest not in delivered:
+                continue
+            first=min(delivered,key=lambda r:r["admitted_ns"])
+            earliest=min(matching,key=lambda r:r["created_ns"])
+            # Check one real lineage before assigning additive phases. Never
+            # add maxima computed from different UAVs/CIDs/clock domains.
+            ordered=(trigger<=born<=first["created_ns"]<=first["admitted_ns"]<=finished
+                and born<=latest["created_ns"]<=latest["admitted_ns"]<=finished
+                and latest.get("lease_valid_until_ns") is not None and finished<latest["lease_valid_until_ns"])
+            if not ordered:
+                continue
+            phases=dict(selected_goal_creation_wait_s=(born-trigger)/NS,
+                first_successful_refresh_creation_wait_s=(first["created_ns"]-born)/NS,
+                command_creation_to_first_UART_s=(first["admitted_ns"]-first["created_ns"])/NS,
+                first_UART_to_physical_completion_s=(finished-first["admitted_ns"])/NS)
+            candidates.append(dict(goal_id=row["goal_id"],uav_id=i,leader_id=leader,epoch=epoch,
+                completed_host_ns=finished,goal_created_host_ns=born,
+                first_admitted_goal_CID=first["command_id"],first_command_created_host_ns=first["created_ns"],
+                first_goal_UART_host_ns=first["admitted_ns"],
+                earliest_created_goal_CID=earliest["command_id"],earliest_command_created_host_ns=earliest["created_ns"],
+                earlier_created_unadmitted_CIDs=sum(c["created_ns"]<first["created_ns"] and not admitted(c) for c in matching),
+                completion_refresh_CID=latest["command_id"],completion_refresh_created_host_ns=latest["created_ns"],
+                completion_refresh_UART_host_ns=latest["admitted_ns"],target_position_m=RELAY.target(row),
+                stage_decomposition=phases,chronology_verified=True,
+                sum_error_s=sum(phases.values())-(finished-trigger)/NS))
+        selected=min(candidates,key=lambda r:r["completed_host_ns"]) if candidates else None
+        count=len({goal_id for (uav,goal_id),r in created_goals.items() if uav==i and trigger is not None
+                   and end is not None and number(r.get("goal_created_host_monotonic_ns")) is not None
+                   and trigger<=number(r["goal_created_host_monotonic_ns"])<=end})
+        per_uav[str(i)]=dict(endpoint(selected["completed_host_ns"] if selected else None,trigger,end,
+            full_window=full_window,data_valid=data_valid),**(selected or {}),post_trigger_goals_created=count,
+            selection="first successfully completed independently verified goal created after NLOS; conditional on this selected success")
+    observed=[row for row in per_uav.values() if row["status"]=="observed"]
+    all_observed=len(observed)==5
+    critical=max(observed,key=lambda r:r["completed_host_ns"]) if all_observed else None
+    scopes={(r["leader_id"],r["epoch"]) for r in observed}
+    group=dict(endpoint(critical["completed_host_ns"] if critical else None,trigger,end,
+        full_window=full_window,data_valid=data_valid),critical_uav_id=critical["uav_id"] if critical else None,
+        same_relay_epoch=len(scopes)==1 if all_observed else None,
+        member_goals={i:dict(goal_id=r.get("goal_id"),leader_id=r.get("leader_id"),epoch=r.get("epoch"))
+                      for i,r in per_uav.items()},
+        stage_decomposition=critical["stage_decomposition"] if critical else None,
+        definition="maximum of five individual first-success new-goal completion times; decomposition belongs only to the critical UAV, not stage-wise maxima")
+    return dict(per_uav=per_uav,all_five=group,
+        interpretation="creation wait refers to selected first successful post-NLOS goal, not absence of earlier goal generation; delivery includes processing/relay, movement may span later refreshes/HOLD; no continuous authority or movement causation inferred")
+
+
 def analyze(run_dir, output_dir, *, scenario_path=None, plots=False, deadline_ms=250., after_return_s=5.):
     run, out = Path(run_dir).resolve(), Path(output_dir).resolve()
     if out == run or run in out.parents:
@@ -467,6 +548,9 @@ def analyze(run_dir, output_dir, *, scenario_path=None, plots=False, deadline_ms
     if not scenario:
         errors.append("scenario snapshot missing; planned-waypoint denominator unavailable")
     progress, resume, checks = mission_progress(events, poses, commands, scenario, config, start, end, trigger)
+    new_goal=new_goal_after_NLOS(events,commands,checks,trigger,end,full_window=complete,
+        data_valid=valid_recording and bool(poses) and bool(scenario)
+            and not any("node_state.jsonl" in e for e in errors))
     index = {r["command_id"]:r for r in commands}
     offers = RELAY.read_csv(run/"metrics/relay_control_refresh.csv")
     opportunity = []
@@ -501,7 +585,7 @@ def analyze(run_dir, output_dir, *, scenario_path=None, plots=False, deadline_ms
             parameter_sets=sorted({r.get("parameter_set", "") for r in geometry})),
         rates=common["rates"], uart_after_NLOS=uart, handover_uart=handover, performance=perf,
         uart_endpoint_label="first post-NLOS update latency; do not call recovery unless delivery impairment is independently established",
-        mission_progress=progress, inspection_resume=resume,
+        mission_progress=progress, inspection_resume=resume,new_goal_after_NLOS=new_goal,
         physical_checks=dict(total=len(checks), verified=sum(r["status"] == "verified" and r["command_lineage_valid"]
                              and r["configured_waypoint_valid"] for r in checks)),
         post_LOS_return=postreturn, authority=dict(admission_audit=common["admission_audit"],
@@ -525,6 +609,12 @@ def analyze(run_dir, output_dir, *, scenario_path=None, plots=False, deadline_ms
         ["uav_id", "session_id", "source_sim_time_s", "host_monotonic_ns", "sample_host_ns", "quality", "x_m", "y_m", "z_m", "speed_mps", "sample_age_ms", "altitude_datum"])
     write_rows(out/"metrics/urban_physical_checks.csv", checks,
         ["uav_id", "goal_id", "status", "completed_host_ns", "completed_source_sim_time_s", "dwell_s", "observed_span_s", "samples", "max_gap_s", "max_speed_mps", "max_xy_error_m", "max_z_error_m", "command_id", "command_lineage_valid", "configured_waypoint_valid", "first_goal_admission_host_ns", "max_horizontal_displacement_m", "horizontal_movement_ge5m", "waypoint_index", "waypoint_id"])
+    new_goal_rows=[dict(endpoint=f"uav{i}",**{k:v for k,v in row.items() if k!="stage_decomposition"},
+                       **(row.get("stage_decomposition") or {})) for i,row in new_goal["per_uav"].items()]
+    group=new_goal["all_five"]
+    new_goal_rows.append(dict(endpoint="all_five",**{k:v for k,v in group.items() if k!="stage_decomposition"},
+                             **(group.get("stage_decomposition") or {})))
+    write_rows(out/"metrics/urban_new_goal_after_NLOS.csv",new_goal_rows)
     write_rows(out/"metrics/urban_opportunities.csv", opportunity,
         ["run_id", "request_id", "uav_id", "offered_host_ns", "scheduled_host_ns", "goal_id", "command_id", "timely", "admitted", "opportunity_to_UART_ms"])
     write_rows(out/"metrics/urban_clocks.csv", clocks, ["host_monotonic_ns", "source_sim_time_s", "session_id", "fresh_UAVs"])
