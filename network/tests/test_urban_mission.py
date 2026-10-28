@@ -32,9 +32,10 @@ def control_fixture():
     scenario.urban = load(scenario_dict())
     scenario.urban_frames = {i: scenario.urban.frame(i, (0, 0, 0)) for i in range(1, 6)}
     scenario.urban_holds, scenario.urban_last_sample = {}, {}
+    scenario.urban_barrier_state = {}
     scenario.urban_indices = {i: 0 for i in range(1, 6)}
     scenario.urban_reached = {i: [] for i in range(1, 6)}
-    scenario.args = SimpleNamespace(z_tolerance_m=1.5, xy_tolerance_m=3, hold_speed_mps=1)
+    scenario.args = SimpleNamespace(hold_s=2., z_tolerance_m=1.5, xy_tolerance_m=3, hold_speed_mps=1)
     scenario.source_s = 500
     scenario.gcs = SimpleNamespace(latest_messages={i: {} for i in range(1, 6)},
         latest_message_ns={i: {} for i in range(1, 6)},
@@ -56,6 +57,87 @@ def radio_sample(scenario, producer_ns, boot_s, world_points=None):
 
 
 class UrbanMissionTests(unittest.TestCase):
+    def test_route_dwell_three_does_not_overwrite_physical_hold_two_or_export(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = scenario_dict()
+            raw["mission"]["waypoint_dwell_s"] = 3
+            config = root / "scene.json"
+            config.write_text(json.dumps(raw))
+            args = SimpleNamespace(run_dir=root / "run", phase_file=root / "phase", run_id="unit",
+                node_state=root / "node_state.json",
+                urban_scenario=config, policy="fixed", initial_master=1, radio_watchdog_file=None,
+                watchdog_s=.3, hold_s=2., z_tolerance_m=1.5, xy_tolerance_m=3, hold_speed_mps=1,
+                fault_profile="none", pilot=True, experiment_profile="urban", command_period_s=1,
+                task_period_s=20)
+            fake_gcs = SimpleNamespace(mavutil=SimpleNamespace(mavlink=SimpleNamespace(
+                MAVLink=lambda *a, **kw: None), mode_mapping_acm={4: "GUIDED"}))
+            (args.run_dir / "logs").mkdir(parents=True)
+            with patch("scripts.product.relay_experiment.GCSService", return_value=fake_gcs), \
+                    patch("scripts.product.relay_experiment.Events", return_value=lambda *a, **kw: None):
+                scenario = RelayExperiment(args)
+            try:
+                self.assertEqual(scenario.observer.args.hold_s, 2)
+                scenario.source_s = 1
+                scenario.urban_goal(1, 0)
+                self.assertEqual(scenario.urban_holds[1].hold_s, 3)
+                exported = json.loads((args.run_dir / "metrics/relay_experiment_config.json").read_text())
+                self.assertEqual(exported["hold_s"], 2)
+                self.assertEqual(exported["urban_completion_criteria"], {
+                    "route_waypoint_dwell_s": 3,
+                    "route_dwell_clock": "autopilot_time_boot_ms",
+                    "physical_completion_hold_s": 2,
+                    "physical_completion_dwell_clock": "source_sim_time"})
+                self.assertEqual(scenario.summary["physical_completion_hold_s"], 2)
+                self.assertEqual(scenario.summary["route_waypoint_dwell_s"], 3)
+            finally:
+                scenario.csv_handle.close()
+
+    def test_barrier_waits_for_reached_waypoint_and_fresh_radio_then_releases_once(self):
+        scenario, events = control_fixture()
+        raw = scenario_dict()
+        raw["mission"]["barriers"] = {"1:1": {"minimum_reached": {"2": 0}}}
+        scenario.urban = load(raw)
+        goals = {}
+        # UAV1 reaches the corner, while UAV2 has not reached the required point.
+        for boot in (0., .5, 1., 1.5, 2., 2.5):
+            now = NS + int(boot*NS)
+            points = {i: scenario.urban.routes[i][0] for i in range(1, 6)}
+            points[2] = (120., 0., 12.)
+            radio_sample(scenario, now, boot, points)
+            with patch("scripts.product.relay_experiment.time.monotonic_ns", return_value=now):
+                scenario.advance_urban(goals)
+        self.assertEqual(scenario.urban_indices[1], 0)
+        self.assertEqual(scenario.urban_reached[1], [0])  # current point reached; next not released
+        self.assertEqual(sum(event == "barrier_wait" for event, _ in events), 1)
+        # Even an earlier valid reached record is insufficient with stale telemetry.
+        scenario.urban_reached[2] = [0]
+        for boot in (3., 3.5, 4.):
+            now = NS + int(boot*NS)
+            radio_sample(scenario, now, boot)
+            scenario.gcs.latest_message_ns[2]["LOCAL_POSITION_NED"] = 3*NS
+            scenario.gcs.latest_message_received_ns[2]["LOCAL_POSITION_NED"] = 3*NS
+            with patch("scripts.product.relay_experiment.time.monotonic_ns", return_value=now):
+                scenario.advance_urban(goals)
+        self.assertEqual(scenario.urban_indices[1], 0)
+        radio_sample(scenario, 5_500_000_000, 4.5)
+        with patch("scripts.product.relay_experiment.time.monotonic_ns", return_value=5_500_000_000):
+            scenario.advance_urban(goals)
+            scenario.advance_urban(goals)
+        self.assertEqual(scenario.urban_indices[1], 1)
+        self.assertEqual(scenario.urban_reached[1], [0])
+        releases = [fields for event, fields in events if event == "barrier_released"]
+        self.assertEqual(len(releases), 1)
+        self.assertEqual(releases[0]["reference_telemetry_producer_ns"], {"2": 5_500_000_000})
+
+    def test_barrier_rejects_unknown_or_impossible_references(self):
+        for key, required in (("1:5", {"2": 0}), ("1:1", {"2": 4}),
+                              ("1:1", {"6": 0}), ("1:1", {"1": 1})):
+            raw = scenario_dict()
+            raw["mission"]["barriers"] = {key: {"minimum_reached": required}}
+            with self.assertRaises(ValueError):
+                load(raw)
+
     def test_local_frame_has_correct_axes_sign_and_nonzero_origin(self):
         frame = NedFrame((20., 30., .195), (2., -1., .25))
         self.assertEqual(frame.to_ned((25., 33., 12.195)), (5., 4., -11.75))

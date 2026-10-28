@@ -275,10 +275,9 @@ class RelayExperiment:
         self.args = args
         self.urban = UrbanScenario.load(args.urban_scenario) if getattr(args, "urban_scenario", None) else None
         self.urban_frames, self.urban_holds, self.urban_last_sample = {}, {}, {}
+        self.urban_barrier_state = {}
         self.urban_indices = {i: 0 for i in UAV_IDS}
         self.urban_reached = {i: [] for i in UAV_IDS}
-        if self.urban:
-            args.hold_s = self.urban.waypoint_dwell_s
         args.run_dir.mkdir(parents=True, exist_ok=True)
         args.phase_file.parent.mkdir(parents=True, exist_ok=True)
         if (args.run_dir / "metrics/relay_experiment_summary.json").exists():
@@ -316,6 +315,9 @@ class RelayExperiment:
             self.summary.update(urban_scenario=self.urban.raw,
                 route_progression_source="radio_delivered_LOCAL_POSITION_NED",
                 route_dwell_clock="autopilot_time_boot_ms",
+                route_waypoint_dwell_s=self.urban.waypoint_dwell_s,
+                physical_completion_hold_s=args.hold_s,
+                physical_completion_dwell_clock="source_sim_time",
                 planned_waypoints={str(i): len(route) for i, route in self.urban.routes.items()})
         metrics = args.run_dir / "metrics"
         metrics.mkdir(exist_ok=True)
@@ -325,6 +327,13 @@ class RelayExperiment:
             "leader_id", "target_world_z_m", "target_relative_alt_m", "send_status"])
         self.csv.writeheader()
         frozen = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
+        if self.urban:
+            frozen["urban_completion_criteria"] = {
+                "route_waypoint_dwell_s": self.urban.waypoint_dwell_s,
+                "route_dwell_clock": "autopilot_time_boot_ms",
+                "physical_completion_hold_s": args.hold_s,
+                "physical_completion_dwell_clock": "source_sim_time",
+            }
         frozen["effective_service_args"] = {k: str(v) if isinstance(v, Path) else v for k, v in vars(service_args).items()}
         (metrics / "relay_experiment_config.json").write_text(json.dumps(frozen, indent=2) + "\n")
         (args.run_dir / "logs/coordination_gcs.ready").write_text(json.dumps(dict(pid=os.getpid())) + "\n")
@@ -703,22 +712,50 @@ class RelayExperiment:
             if pose.sample_ns < goals[i].created_ns:
                 continue
             index = self.urban_indices[i]
-            if index in self.urban_reached[i]:
-                continue
             if hold.observe(pose):
-                self.urban_reached[i].append(index)
-                self.emit("waypoint_reached_telemetry", uav_id=i,
-                    goal_id=goals[i].goal_id, waypoint_id=goals[i].waypoint_id,
-                    waypoint_index=index, target_position_m=goals[i].target,
-                    telemetry_position_m=pose.position, local_ned_m=[local.x, local.y, local.z],
-                    producer_host_monotonic_ns=pose.sample_ns,
-                    received_host_monotonic_ns=received, time_boot_ms=int(local.time_boot_ms),
-                    dwell_s=self.urban.waypoint_dwell_s, dwell_clock_domain="autopilot_time_boot_ms",
-                    source_sim_time_s=self.source_s,
-                    progression_source="radio_delivered_LOCAL_POSITION_NED")
-                if index + 1 < len(self.urban.routes[i]):
+                if index not in self.urban_reached[i]:
+                    self.urban_reached[i].append(index)
+                    self.emit("waypoint_reached_telemetry", uav_id=i,
+                        goal_id=goals[i].goal_id, waypoint_id=goals[i].waypoint_id,
+                        waypoint_index=index, target_position_m=goals[i].target,
+                        telemetry_position_m=pose.position, local_ned_m=[local.x, local.y, local.z],
+                        producer_host_monotonic_ns=pose.sample_ns,
+                        received_host_monotonic_ns=received, time_boot_ms=int(local.time_boot_ms),
+                        dwell_s=self.urban.waypoint_dwell_s, dwell_clock_domain="autopilot_time_boot_ms",
+                        source_sim_time_s=self.source_s,
+                        progression_source="radio_delivered_LOCAL_POSITION_NED")
+                if index + 1 < len(self.urban.routes[i]) and self.urban_barrier_ready(i, index + 1):
                     self.urban_indices[i] += 1
                     goals[i] = self.urban_goal(i, index + 1)
+
+    def urban_barrier_ready(self, i, next_index):
+        """Mission release gate; never consults geometry or observation inputs."""
+        key = i, next_index
+        required = self.urban.barriers.get(key)
+        if required is None:
+            return True
+        fresh = {uav: self.telemetry_pose(uav) for uav in required}
+        missing = {str(uav): index for uav, index in required.items()
+                   if index not in self.urban_reached[uav]}
+        stale = [uav for uav, pose in fresh.items() if pose is None]
+        state = self.urban_barrier_state.get(key)
+        fields = dict(uav_id=i, next_waypoint_index=next_index,
+                      barrier_id=f"{i}:{next_index}", minimum_reached=required,
+                      source_sim_time_s=self.source_s,
+                      progression_source="radio_delivered_LOCAL_POSITION_NED")
+        if missing or stale:
+            if state != "waiting":
+                self.emit("barrier_wait", **fields, missing_waypoints=missing,
+                          stale_telemetry_uavs=stale)
+                self.urban_barrier_state[key] = "waiting"
+            return False
+        if state != "released":
+            self.emit("barrier_released", **fields,
+                      reference_telemetry_producer_ns={str(uav): pose.sample_ns for uav, pose in fresh.items()},
+                      reference_telemetry_received_ns={str(uav):
+                          self.gcs.latest_message_received_ns[uav]["LOCAL_POSITION_NED"] for uav in required})
+            self.urban_barrier_state[key] = "released"
+        return True
 
     def measure(self):
         start_source, start_ns = self.source_s, time.monotonic_ns()

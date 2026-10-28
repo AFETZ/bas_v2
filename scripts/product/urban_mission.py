@@ -55,6 +55,7 @@ class UrbanScenario:
     telemetry_max_age_s: float
     speed_mps: float
     waypoint_dwell_s: float
+    barriers: dict[tuple[int, int], dict[int, int]]
 
     @classmethod
     def load(cls, path: Path):
@@ -76,7 +77,19 @@ class UrbanScenario:
         # Horizontal frame is explicit and fixed, not inferred from a GPS heading.
         if mission.get("ned_axes", "N=y,E=x,D=-z") != "N=y,E=x,D=-z":
             raise ValueError("unsupported urban NED axes; run a new frame qualification")
-        return cls(raw, spawns, routes, ground, age, speed, dwell)
+        barriers = {}
+        for key, value in mission.get("barriers", {}).items():
+            try:
+                uav, next_index = (int(v) for v in key.split(":"))
+                required = {int(i): int(index) for i, index in value["minimum_reached"].items()}
+            except (ValueError, KeyError, TypeError, AttributeError) as exc:
+                raise ValueError("invalid urban barrier; expected uav:next_index and minimum_reached") from exc
+            if (uav not in ids or not 0 < next_index < len(routes[uav]) or not required
+                    or any(i not in ids or index < 0 or index >= len(routes[i]) for i, index in required.items())
+                    or required.get(uav, -1) >= next_index):
+                raise ValueError("urban barrier references an invalid or own future waypoint")
+            barriers[uav, next_index] = required
+        return cls(raw, spawns, routes, ground, age, speed, dwell, barriers)
 
     def frame(self, uav_id, local_ned_ground):
         spawn = self.spawns[uav_id]
