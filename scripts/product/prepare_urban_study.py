@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import hashlib
 import importlib.util
 import json
@@ -10,6 +11,7 @@ from pathlib import Path
 import random
 import re
 import subprocess
+import time
 
 SPEC = importlib.util.spec_from_file_location("urban_study_analysis", Path(__file__).with_name("analyze_urban_experiment.py"))
 A = importlib.util.module_from_spec(SPEC)
@@ -116,7 +118,13 @@ def freeze(plan, *, scenarios, pilot_analyses, reviews, image, horizon_s, output
             duration_s=horizon_s, rng_run=row["rng_run"], config=str(config),
             config_sha256=config_inputs[variant]["sha256"], status="frozen_not_run"))
     result = dict(status="frozen_inputs_not_execution_results", schema_version=1,
+        frozen_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        frozen_at_host_monotonic_ns=time.monotonic_ns(),
         source_commit=git("rev-parse", "HEAD"), image_id=image,
+        parameter_snapshots=True, parameter_workers=5,
+        base_environment_source=artifact(root/"runs/paper-live-20261026/campaign/freeze.json"),
+        base_environment=A.RELAY.read_json(root/"runs/paper-live-20261026/campaign/freeze.json")["base_environment"],
+        native_binary=artifact(root/".external/ns-3-sionna-native/build/scratch/ns3.48-upstream-sionna-tap-spike-default"),
         observation_horizon_source_sim_time_s=horizon_s,
         study_id=study_id, rows=plan["rows"], cases=cases, scenario_inputs=config_inputs,
         pilot_analyses=[artifact(path) for path in pilot_analyses],

@@ -41,6 +41,11 @@ def main():
         freeze = json.loads(args.freeze.read_text())
         if freeze["source_commit"] != source:
             p.error("HEAD differs from frozen implementation")
+        if not args.parameters or args.parameter_workers != freeze["parameter_workers"]:
+            p.error("frozen series requires declared full pre/post parameter capture settings")
+        native = ROOT / ".external/ns-3-sionna-native/build/scratch/ns3.48-upstream-sionna-tap-spike-default"
+        if hashlib.sha256(native.read_bytes()).hexdigest() != freeze["native_binary"]["sha256"]:
+            p.error("native executable differs from frozen binary")
         row = next((r for r in freeze["cases"] if r["run_id"] == args.run_id), None)
         if not row or (row["policy"], float(row["duration_s"]), int(row["rng_run"]), row["config_sha256"]) != (
                 args.policy, args.duration, args.rng_run, config_sha):
@@ -49,6 +54,8 @@ def main():
             p.error("tracked source differs from frozen HEAD")
     env = {k: v for k, v in os.environ.items() if not k.startswith("BAS_")}
     baseline = json.loads((ROOT / "runs/paper-live-20261026/campaign/freeze.json").read_text())["base_environment"]
+    if args.freeze:
+        baseline = freeze["base_environment"]
     env.update(baseline)
     env.update(BAS_NATIVE_FIVE_RUN_ID=args.run_id, BAS_NATIVE_FIVE_SCENARIO="urban",
                BAS_NATIVE_PROPAGATION_PROFILE="geometry_logdistance", BAS_NATIVE_URBAN_CONFIG=str(config.relative_to(ROOT)),
