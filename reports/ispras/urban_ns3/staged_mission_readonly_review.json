@@ -1,0 +1,1156 @@
+{
+  "scope": "noncreator review of mission barriers/dwell and root launcher/frozen configuration; author of metrics does not independently certify own analysis code",
+  "observed_integration_HEAD": "4d96d196e29792e8fd508f97994b78251efaee12",
+  "observed_tracked_dirty": "",
+  "frozen_source": "4d96d196e29792e8fd508f97994b78251efaee12",
+  "frozen_native_SHA": "3f2341c4a368553f88d3b13da94e87f968069b824f6fece7fe9d4aa0170281ea",
+  "observed_native_SHA": "3f2341c4a368553f88d3b13da94e87f968069b824f6fece7fe9d4aa0170281ea",
+  "config_hashes": {
+    "high": {
+      "expected": "b1219f96804482b1ca3da8d9a0b43bf60b332d062a5c8b598b17f412680d474a",
+      "observed": "b1219f96804482b1ca3da8d9a0b43bf60b332d062a5c8b598b17f412680d474a"
+    },
+    "los_only": {
+      "expected": "8bc63c71c6756590248471fc7817e5c84ff5dcc64a6170943a63cf083cdab868",
+      "observed": "8bc63c71c6756590248471fc7817e5c84ff5dcc64a6170943a63cf083cdab868"
+    },
+    "low": {
+      "expected": "94887c3ae27a79330a1aff5286d9ab9a7c18c0352341608864f5de6dd5adb931",
+      "observed": "94887c3ae27a79330a1aff5286d9ab9a7c18c0352341608864f5de6dd5adb931"
+    },
+    "no_candidate": {
+      "expected": "99d75fe73b5c52d74e6ec6c6518c07c1a79f2b534d4b1311848e6831181db066",
+      "observed": "99d75fe73b5c52d74e6ec6c6518c07c1a79f2b534d4b1311848e6831181db066"
+    },
+    "nominal": {
+      "expected": "a7c12ddf5bd3608a389593099d960323fa2943c53a5cacf7df5a9ae7d7a0f88d",
+      "observed": "a7c12ddf5bd3608a389593099d960323fa2943c53a5cacf7df5a9ae7d7a0f88d"
+    },
+    "short_occlusion": {
+      "expected": "3e065c0d694ed50ceaf0b67f9911df579a993eb7e7edcd3c242fc5f328a84afb",
+      "observed": "3e065c0d694ed50ceaf0b67f9911df579a993eb7e7edcd3c242fc5f328a84afb"
+    }
+  },
+  "ablation_only_mode": true,
+  "cases": 56,
+  "main_cases": 40,
+  "source_sha256": {
+    "/home/bas/bas_v2-paper-live/scripts/product/relay_experiment.py": "68e1d6d5506abf3aee3d2c5e543ef1aca281c80b310d21538d096c0ac2cc0871",
+    "/home/bas/bas_v2-paper-live/scripts/product/run_urban_case.py": "6a2dc858cdc3199f719a174e5257306dbb27e974db939ccd258d75fb29a6b0f8",
+    "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/freeze.json": "8590f67b3acd2ce536e06eacfa518da65f024da4d73b02435aafc87c0945daed",
+    "/home/bas/bas-urban-metrics/reports/ispras/urban_ns3/tools/review_staged_mission.py": "927334dab560b0d22cc36cee1c66d63d5c228e3f533103bca568fd6127b721d4"
+  },
+  "runs": [
+    {
+      "run_id": "urban-staged-pilot05-failover",
+      "recorded_status": "completed",
+      "barrier_checks": [
+        {
+          "barrier_id": "1:2",
+          "host_ns": 518289751828278,
+          "elapsed_host_s": 60.431896471,
+          "requirements": {
+            "2": 2,
+            "3": 2,
+            "4": 2,
+            "5": 2
+          },
+          "checked_reference_telemetry_producer_ns": {
+            "2": 518289550147269,
+            "3": 518289557099538,
+            "4": 518289720182302,
+            "5": 518289720176501
+          },
+          "bad": []
+        },
+        {
+          "barrier_id": "2:3",
+          "host_ns": 518334620702338,
+          "elapsed_host_s": 105.300770531,
+          "requirements": {
+            "1": 3
+          },
+          "checked_reference_telemetry_producer_ns": {
+            "1": 518334567188445
+          },
+          "bad": []
+        },
+        {
+          "barrier_id": "4:3",
+          "host_ns": 518334743722252,
+          "elapsed_host_s": 105.423790445,
+          "requirements": {
+            "1": 3
+          },
+          "checked_reference_telemetry_producer_ns": {
+            "1": 518334567188445
+          },
+          "bad": []
+        },
+        {
+          "barrier_id": "5:3",
+          "host_ns": 518334744656279,
+          "elapsed_host_s": 105.424724472,
+          "requirements": {
+            "1": 3
+          },
+          "checked_reference_telemetry_producer_ns": {
+            "1": 518334567188445
+          },
+          "bad": []
+        },
+        {
+          "barrier_id": "3:3",
+          "host_ns": 518334785987217,
+          "elapsed_host_s": 105.46605541,
+          "requirements": {
+            "1": 3
+          },
+          "checked_reference_telemetry_producer_ns": {
+            "1": 518334567188445
+          },
+          "bad": []
+        }
+      ],
+      "gated_goal_checks": [
+        {
+          "goal_id": "waypoint2:uav1",
+          "barrier": "1:2",
+          "released_before_goal": true
+        },
+        {
+          "goal_id": "waypoint3:uav2",
+          "barrier": "2:3",
+          "released_before_goal": true
+        },
+        {
+          "goal_id": "waypoint3:uav4",
+          "barrier": "4:3",
+          "released_before_goal": true
+        },
+        {
+          "goal_id": "waypoint3:uav5",
+          "barrier": "5:3",
+          "released_before_goal": true
+        },
+        {
+          "goal_id": "waypoint3:uav3",
+          "barrier": "3:3",
+          "released_before_goal": true
+        }
+      ],
+      "telemetry_3s": {
+        "count": 27,
+        "passes": 27,
+        "checks": [
+          {
+            "uav_id": 1,
+            "goal_id": "waypoint0:uav1",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.1980000000000075,
+            "sample_count": 17,
+            "max_source_gap_s": 0.20000000000001705
+          },
+          {
+            "uav_id": 2,
+            "goal_id": "waypoint0:uav2",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.1980000000000075,
+            "sample_count": 17,
+            "max_source_gap_s": 0.20000000000001705
+          },
+          {
+            "uav_id": 3,
+            "goal_id": "waypoint0:uav3",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.1980000000000075,
+            "sample_count": 17,
+            "max_source_gap_s": 0.20000000000001705
+          },
+          {
+            "uav_id": 5,
+            "goal_id": "waypoint0:uav5",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.1999999999999886,
+            "sample_count": 17,
+            "max_source_gap_s": 0.20000000000001705
+          },
+          {
+            "uav_id": 4,
+            "goal_id": "waypoint0:uav4",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.2009999999999934,
+            "sample_count": 17,
+            "max_source_gap_s": 0.2009999999999934
+          },
+          {
+            "uav_id": 3,
+            "goal_id": "waypoint1:uav3",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.0,
+            "sample_count": 18,
+            "max_source_gap_s": 0.20199999999999818
+          },
+          {
+            "uav_id": 2,
+            "goal_id": "waypoint1:uav2",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.0,
+            "sample_count": 18,
+            "max_source_gap_s": 0.20000000000001705
+          },
+          {
+            "uav_id": 4,
+            "goal_id": "waypoint1:uav4",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.0,
+            "sample_count": 18,
+            "max_source_gap_s": 0.20100000000002183
+          },
+          {
+            "uav_id": 5,
+            "goal_id": "waypoint1:uav5",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.197999999999979,
+            "sample_count": 18,
+            "max_source_gap_s": 0.20000000000001705
+          },
+          {
+            "uav_id": 1,
+            "goal_id": "waypoint1:uav1",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.0,
+            "sample_count": 18,
+            "max_source_gap_s": 0.20000000000001705
+          },
+          {
+            "uav_id": 2,
+            "goal_id": "waypoint2:uav2",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.0,
+            "sample_count": 18,
+            "max_source_gap_s": 0.20000000000001705
+          },
+          {
+            "uav_id": 3,
+            "goal_id": "waypoint2:uav3",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.0,
+            "sample_count": 18,
+            "max_source_gap_s": 0.20000000000001705
+          },
+          {
+            "uav_id": 5,
+            "goal_id": "waypoint2:uav5",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.0,
+            "sample_count": 18,
+            "max_source_gap_s": 0.20199999999999818
+          },
+          {
+            "uav_id": 4,
+            "goal_id": "waypoint2:uav4",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.1990000000000123,
+            "sample_count": 17,
+            "max_source_gap_s": 0.20000000000001705
+          },
+          {
+            "uav_id": 1,
+            "goal_id": "waypoint2:uav1",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.0,
+            "sample_count": 18,
+            "max_source_gap_s": 0.20199999999999818
+          },
+          {
+            "uav_id": 1,
+            "goal_id": "waypoint3:uav1",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.0,
+            "sample_count": 18,
+            "max_source_gap_s": 0.20000000000004547
+          },
+          {
+            "uav_id": 4,
+            "goal_id": "waypoint3:uav4",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.0,
+            "sample_count": 18,
+            "max_source_gap_s": 0.20000000000004547
+          },
+          {
+            "uav_id": 5,
+            "goal_id": "waypoint3:uav5",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.0,
+            "sample_count": 18,
+            "max_source_gap_s": 0.20000000000004547
+          },
+          {
+            "uav_id": 3,
+            "goal_id": "waypoint3:uav3",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.0,
+            "sample_count": 18,
+            "max_source_gap_s": 0.20000000000004547
+          },
+          {
+            "uav_id": 4,
+            "goal_id": "waypoint4:uav4",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.0,
+            "sample_count": 18,
+            "max_source_gap_s": 0.20000000000004547
+          },
+          {
+            "uav_id": 5,
+            "goal_id": "waypoint4:uav5",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.0,
+            "sample_count": 18,
+            "max_source_gap_s": 0.20000000000004547
+          },
+          {
+            "uav_id": 3,
+            "goal_id": "waypoint4:uav3",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.0,
+            "sample_count": 18,
+            "max_source_gap_s": 0.20000000000004547
+          },
+          {
+            "uav_id": 2,
+            "goal_id": "waypoint3:uav2",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.0,
+            "sample_count": 18,
+            "max_source_gap_s": 0.20000000000004547
+          },
+          {
+            "uav_id": 2,
+            "goal_id": "waypoint4:uav2",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.0,
+            "sample_count": 18,
+            "max_source_gap_s": 0.20000000000004547
+          },
+          {
+            "uav_id": 1,
+            "goal_id": "waypoint4:uav1",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.0,
+            "sample_count": 18,
+            "max_source_gap_s": 0.20000000000004547
+          },
+          {
+            "uav_id": 1,
+            "goal_id": "waypoint5:uav1",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.0,
+            "sample_count": 18,
+            "max_source_gap_s": 0.20000000000004547
+          },
+          {
+            "uav_id": 1,
+            "goal_id": "waypoint6:uav1",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.0,
+            "sample_count": 18,
+            "max_source_gap_s": 0.20000000000004547
+          }
+        ]
+      },
+      "physical_2s": {
+        "count": 27,
+        "passes": 27,
+        "checks": [
+          {
+            "uav_id": 1,
+            "goal_id": "waypoint0:uav1",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.0200000000000102,
+            "sample_count": 88,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 2,
+            "goal_id": "waypoint0:uav2",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.0200000000000102,
+            "sample_count": 88,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 3,
+            "goal_id": "waypoint0:uav3",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.039999999999992,
+            "sample_count": 89,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 4,
+            "goal_id": "waypoint0:uav4",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.039999999999992,
+            "sample_count": 89,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 5,
+            "goal_id": "waypoint0:uav5",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.039999999999992,
+            "sample_count": 89,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 3,
+            "goal_id": "waypoint1:uav3",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.0,
+            "sample_count": 109,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 2,
+            "goal_id": "waypoint1:uav2",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.0,
+            "sample_count": 109,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 4,
+            "goal_id": "waypoint1:uav4",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.019999999999982,
+            "sample_count": 108,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 5,
+            "goal_id": "waypoint1:uav5",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.0,
+            "sample_count": 109,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 1,
+            "goal_id": "waypoint1:uav1",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.0,
+            "sample_count": 109,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 2,
+            "goal_id": "waypoint2:uav2",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.0,
+            "sample_count": 109,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 3,
+            "goal_id": "waypoint2:uav3",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.0,
+            "sample_count": 109,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 4,
+            "goal_id": "waypoint2:uav4",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.5,
+            "sample_count": 109,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 5,
+            "goal_id": "waypoint2:uav5",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.5,
+            "sample_count": 109,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 1,
+            "goal_id": "waypoint2:uav1",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.0,
+            "sample_count": 109,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 1,
+            "goal_id": "waypoint3:uav1",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.0,
+            "sample_count": 109,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 3,
+            "goal_id": "waypoint3:uav3",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.0,
+            "sample_count": 109,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 4,
+            "goal_id": "waypoint3:uav4",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.0,
+            "sample_count": 109,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 5,
+            "goal_id": "waypoint3:uav5",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.0,
+            "sample_count": 109,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 3,
+            "goal_id": "waypoint4:uav3",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.0,
+            "sample_count": 109,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 4,
+            "goal_id": "waypoint4:uav4",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.0,
+            "sample_count": 109,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 5,
+            "goal_id": "waypoint4:uav5",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.019999999999982,
+            "sample_count": 108,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 2,
+            "goal_id": "waypoint3:uav2",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.0,
+            "sample_count": 109,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 2,
+            "goal_id": "waypoint4:uav2",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.0,
+            "sample_count": 108,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 1,
+            "goal_id": "waypoint4:uav1",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.019999999999982,
+            "sample_count": 108,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 1,
+            "goal_id": "waypoint5:uav1",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.0,
+            "sample_count": 109,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 1,
+            "goal_id": "waypoint6:uav1",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.019999999999982,
+            "sample_count": 109,
+            "max_source_gap_s": 0.040000000000020464
+          }
+        ]
+      },
+      "WP_SPD": {
+        "before": [
+          {
+            "system_id": "1",
+            "component_id": "1",
+            "param_id": "WP_SPD",
+            "value_json": "3.0",
+            "param_index": "206",
+            "param_count": "1388"
+          },
+          {
+            "system_id": "2",
+            "component_id": "1",
+            "param_id": "WP_SPD",
+            "value_json": "3.0",
+            "param_index": "206",
+            "param_count": "1388"
+          },
+          {
+            "system_id": "3",
+            "component_id": "1",
+            "param_id": "WP_SPD",
+            "value_json": "3.0",
+            "param_index": "206",
+            "param_count": "1388"
+          },
+          {
+            "system_id": "4",
+            "component_id": "1",
+            "param_id": "WP_SPD",
+            "value_json": "3.0",
+            "param_index": "206",
+            "param_count": "1388"
+          },
+          {
+            "system_id": "5",
+            "component_id": "1",
+            "param_id": "WP_SPD",
+            "value_json": "3.0",
+            "param_index": "206",
+            "param_count": "1388"
+          }
+        ],
+        "after": [
+          {
+            "system_id": "1",
+            "component_id": "1",
+            "param_id": "WP_SPD",
+            "value_json": "3.0",
+            "param_index": "206",
+            "param_count": "1388"
+          },
+          {
+            "system_id": "2",
+            "component_id": "1",
+            "param_id": "WP_SPD",
+            "value_json": "3.0",
+            "param_index": "206",
+            "param_count": "1388"
+          },
+          {
+            "system_id": "3",
+            "component_id": "1",
+            "param_id": "WP_SPD",
+            "value_json": "3.0",
+            "param_index": "206",
+            "param_count": "1388"
+          },
+          {
+            "system_id": "4",
+            "component_id": "1",
+            "param_id": "WP_SPD",
+            "value_json": "3.0",
+            "param_index": "206",
+            "param_count": "1388"
+          },
+          {
+            "system_id": "5",
+            "component_id": "1",
+            "param_id": "WP_SPD",
+            "value_json": "3.0",
+            "param_index": "206",
+            "param_count": "1388"
+          }
+        ]
+      },
+      "critical_mission_goal_created_ns": 518334597219490,
+      "critical_mission_goal_done_ns": 518370054245072,
+      "raw_selected_goal_timing": {
+        "goal_id": "waypoint4:uav1",
+        "host_ns_sequence": [
+          518316109385255,
+          518334597219490,
+          518335328573416,
+          518335333801708,
+          518370054245072
+        ],
+        "time_ordered": true,
+        "intervals_s": [
+          18.487834235,
+          0.731353926,
+          0.005228292,
+          34.720443364
+        ],
+        "total_s": 53.944859817,
+        "first_admitted_CID": "2:1:2340",
+        "completion_CID": "2:1:2680",
+        "interpretation": "raw mission timing support, not independent review of author-owned metric selection implementation"
+      },
+      "input_sha256": {
+        "/home/bas/bas_v2-paper-live/runs/native-radio-realtime/urban-staged-pilot05-failover/logs/coordination_gcs.jsonl": "02b14dc4eebedac0e1489d318423e11a79d9a5c62d096aa24dbc1114d3614d5a",
+        "/home/bas/bas_v2-paper-live/runs/native-radio-realtime/urban-staged-pilot05-failover/logs/node_state.jsonl": "98816a642e85e66fab51d5a0363e7d4283dc15d1d5f9e84af74a07a33c631133",
+        "/home/bas/bas_v2-paper-live/runs/native-radio-realtime/urban-staged-pilot05-failover/logs/urban_scenario.json": "a7c12ddf5bd3608a389593099d960323fa2943c53a5cacf7df5a9ae7d7a0f88d"
+      }
+    },
+    {
+      "run_id": "urban-staged-pilot06-fixed",
+      "recorded_status": "failed",
+      "barrier_checks": [
+        {
+          "barrier_id": "1:2",
+          "host_ns": 518982000843517,
+          "elapsed_host_s": 61.988066384,
+          "requirements": {
+            "2": 2,
+            "3": 2,
+            "4": 2,
+            "5": 2
+          },
+          "checked_reference_telemetry_producer_ns": {
+            "2": 518981802472995,
+            "3": 518981835505248,
+            "4": 518981808543116,
+            "5": 518981827712996
+          },
+          "bad": []
+        }
+      ],
+      "gated_goal_checks": [
+        {
+          "goal_id": "waypoint2:uav1",
+          "barrier": "1:2",
+          "released_before_goal": true
+        }
+      ],
+      "telemetry_3s": {
+        "count": 15,
+        "passes": 15,
+        "checks": [
+          {
+            "uav_id": 1,
+            "goal_id": "waypoint0:uav1",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.1990000000000123,
+            "sample_count": 17,
+            "max_source_gap_s": 0.20000000000001705
+          },
+          {
+            "uav_id": 2,
+            "goal_id": "waypoint0:uav2",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.201999999999998,
+            "sample_count": 17,
+            "max_source_gap_s": 0.2009999999999934
+          },
+          {
+            "uav_id": 5,
+            "goal_id": "waypoint0:uav5",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.200000000000017,
+            "sample_count": 17,
+            "max_source_gap_s": 0.2009999999999934
+          },
+          {
+            "uav_id": 4,
+            "goal_id": "waypoint0:uav4",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.4000000000000057,
+            "sample_count": 18,
+            "max_source_gap_s": 0.2020000000000266
+          },
+          {
+            "uav_id": 3,
+            "goal_id": "waypoint0:uav3",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.397999999999996,
+            "sample_count": 18,
+            "max_source_gap_s": 0.20000000000001705
+          },
+          {
+            "uav_id": 3,
+            "goal_id": "waypoint1:uav3",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.0,
+            "sample_count": 18,
+            "max_source_gap_s": 0.20199999999999818
+          },
+          {
+            "uav_id": 2,
+            "goal_id": "waypoint1:uav2",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.1980000000000075,
+            "sample_count": 18,
+            "max_source_gap_s": 0.20000000000001705
+          },
+          {
+            "uav_id": 4,
+            "goal_id": "waypoint1:uav4",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.0,
+            "sample_count": 18,
+            "max_source_gap_s": 0.20199999999999818
+          },
+          {
+            "uav_id": 5,
+            "goal_id": "waypoint1:uav5",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.0,
+            "sample_count": 18,
+            "max_source_gap_s": 0.20100000000002183
+          },
+          {
+            "uav_id": 1,
+            "goal_id": "waypoint1:uav1",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.0010000000000048,
+            "sample_count": 18,
+            "max_source_gap_s": 0.20100000000002183
+          },
+          {
+            "uav_id": 2,
+            "goal_id": "waypoint2:uav2",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.0020000000000095,
+            "sample_count": 18,
+            "max_source_gap_s": 0.2009999999999934
+          },
+          {
+            "uav_id": 3,
+            "goal_id": "waypoint2:uav3",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.1980000000000075,
+            "sample_count": 18,
+            "max_source_gap_s": 0.20199999999999818
+          },
+          {
+            "uav_id": 5,
+            "goal_id": "waypoint2:uav5",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.200000000000017,
+            "sample_count": 18,
+            "max_source_gap_s": 0.2009999999999934
+          },
+          {
+            "uav_id": 4,
+            "goal_id": "waypoint2:uav4",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.0,
+            "sample_count": 16,
+            "max_source_gap_s": 0.20199999999999818
+          },
+          {
+            "uav_id": 1,
+            "goal_id": "waypoint2:uav1",
+            "declared_dwell_s": 3.0,
+            "pass_observed": true,
+            "observed_span_s": 3.0,
+            "sample_count": 18,
+            "max_source_gap_s": 0.2009999999999934
+          }
+        ]
+      },
+      "physical_2s": {
+        "count": 15,
+        "passes": 15,
+        "checks": [
+          {
+            "uav_id": 1,
+            "goal_id": "waypoint0:uav1",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.0600000000000023,
+            "sample_count": 89,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 2,
+            "goal_id": "waypoint0:uav2",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.0600000000000023,
+            "sample_count": 89,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 3,
+            "goal_id": "waypoint0:uav3",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.0600000000000023,
+            "sample_count": 89,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 4,
+            "goal_id": "waypoint0:uav4",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.0600000000000023,
+            "sample_count": 89,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 5,
+            "goal_id": "waypoint0:uav5",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.0600000000000023,
+            "sample_count": 89,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 3,
+            "goal_id": "waypoint1:uav3",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.019999999999982,
+            "sample_count": 108,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 2,
+            "goal_id": "waypoint1:uav2",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.0,
+            "sample_count": 108,
+            "max_source_gap_s": 0.03999999999999204
+          },
+          {
+            "uav_id": 4,
+            "goal_id": "waypoint1:uav4",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.0,
+            "sample_count": 109,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 5,
+            "goal_id": "waypoint1:uav5",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.0200000000000102,
+            "sample_count": 109,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 1,
+            "goal_id": "waypoint1:uav1",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.0,
+            "sample_count": 109,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 2,
+            "goal_id": "waypoint2:uav2",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.0,
+            "sample_count": 108,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 3,
+            "goal_id": "waypoint2:uav3",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.0,
+            "sample_count": 108,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 4,
+            "goal_id": "waypoint2:uav4",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.0,
+            "sample_count": 109,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 5,
+            "goal_id": "waypoint2:uav5",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.0,
+            "sample_count": 109,
+            "max_source_gap_s": 0.040000000000020464
+          },
+          {
+            "uav_id": 1,
+            "goal_id": "waypoint2:uav1",
+            "declared_dwell_s": 2,
+            "pass_observed": true,
+            "observed_span_s": 2.0,
+            "sample_count": 109,
+            "max_source_gap_s": 0.040000000000020464
+          }
+        ]
+      },
+      "WP_SPD": {
+        "before": [
+          {
+            "system_id": "1",
+            "component_id": "1",
+            "param_id": "WP_SPD",
+            "value_json": "3.0",
+            "param_index": "206",
+            "param_count": "1388"
+          },
+          {
+            "system_id": "2",
+            "component_id": "1",
+            "param_id": "WP_SPD",
+            "value_json": "3.0",
+            "param_index": "206",
+            "param_count": "1388"
+          },
+          {
+            "system_id": "3",
+            "component_id": "1",
+            "param_id": "WP_SPD",
+            "value_json": "3.0",
+            "param_index": "206",
+            "param_count": "1388"
+          },
+          {
+            "system_id": "4",
+            "component_id": "1",
+            "param_id": "WP_SPD",
+            "value_json": "3.0",
+            "param_index": "206",
+            "param_count": "1388"
+          },
+          {
+            "system_id": "5",
+            "component_id": "1",
+            "param_id": "WP_SPD",
+            "value_json": "3.0",
+            "param_index": "206",
+            "param_count": "1388"
+          }
+        ],
+        "after": null
+      },
+      "critical_mission_goal_created_ns": null,
+      "critical_mission_goal_done_ns": null,
+      "raw_selected_goal_timing": null,
+      "input_sha256": {
+        "/home/bas/bas_v2-paper-live/runs/native-radio-realtime/urban-staged-pilot06-fixed/logs/coordination_gcs.jsonl": "f186c1c4ca0a482cdfe7efeccb6d031aec3356a925e2ec801ab99a9ed79baa11",
+        "/home/bas/bas_v2-paper-live/runs/native-radio-realtime/urban-staged-pilot06-fixed/logs/node_state.jsonl": "792cb593056b4ad496488516fe11de0c32565027320d63e8e2c1bb1a1c30462f",
+        "/home/bas/bas_v2-paper-live/runs/native-radio-realtime/urban-staged-pilot06-fixed/logs/urban_scenario.json": "a7c12ddf5bd3608a389593099d960323fa2943c53a5cacf7df5a9ae7d7a0f88d"
+      }
+    }
+  ],
+  "first_main_identity": {
+    "run_id": "urban20261028-main-nominal-nominal-los_only-failover-r03",
+    "run_id_length": 56,
+    "observed": {
+      "source": "4d96d196e29792e8fd508f97994b78251efaee12",
+      "native_SHA": "3f2341c4a368553f88d3b13da94e87f968069b824f6fece7fe9d4aa0170281ea",
+      "config_SHA": "8bc63c71c6756590248471fc7817e5c84ff5dcc64a6170943a63cf083cdab868",
+      "image": "sha256:89d78eff9914b1644a1b01b793612e9ee8b19916c5a7bf5f578ba6d8bfbfafe5",
+      "rng_seed": 1,
+      "rng_run": 3,
+      "radio_mode": "los_only",
+      "duration_s": 240.0,
+      "workers": 5,
+      "pilot": false,
+      "recorded_status": "completed",
+      "controller_returncode": 0
+    },
+    "checks": {
+      "source_matches": true,
+      "native_matches": true,
+      "config_matches": true,
+      "image_matches": true,
+      "RNG_matches": true,
+      "mode_matches": true,
+      "duration_matches": true,
+      "workers_match": true,
+      "no_pilot": true,
+      "tracked_clean": true,
+      "freeze_precedes_attempt": true
+    },
+    "common_export_sha": "c5bc54103dc79c1e1a47e51bf9774b3c6e1518d1f49e9fddcb92bb95f2daaa4f",
+    "controller_sha": "5d854bfd13092397c90e131aa7c8d2fbb8eb1247f4d90670d67b272c8fb92982",
+    "scope": "direct source/config/runtime identity fields only; not an independent certification of metric calculations"
+  }
+}
