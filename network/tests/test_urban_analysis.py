@@ -1,0 +1,178 @@
+"""Explicit synthetic analysis fixtures, never evidence of integrated flight."""
+import csv
+import importlib.util
+import json
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+SPEC = importlib.util.spec_from_file_location("urban_analysis", ROOT/"scripts/product/analyze_urban_experiment.py")
+A = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(A)
+SPEC_OLD = importlib.util.spec_from_file_location("relay_fixture", ROOT/"network/tests/test_relay_analysis.py")
+OLD = importlib.util.module_from_spec(SPEC_OLD)
+SPEC_OLD.loader.exec_module(OLD)
+NS = 1_000_000_000
+
+
+def geometry(tmp_path, rows):
+    path = tmp_path/"geometry.csv"
+    with path.open("w") as stream:
+        writer = csv.DictWriter(stream, fieldnames=["time_s", "wall_monotonic_ns", "from_id", "to_id", "geom_los", "radio_state", "pathloss_db"])
+        writer.writeheader()
+        writer.writerows(rows)
+    errors = []
+    output = A.load_geometry(path, errors)
+    assert errors == []
+    return output
+
+
+def test_trigger_is_transition_with_prior_state_not_first_nlos_sample(tmp_path):
+    rows = geometry(tmp_path, [dict(time_s=t, wall_monotonic_ns=t*NS, from_id=0, to_id=1, geom_los=los)
+                               for t,los in [(9, False), (11, False), (12, True), (13, False)]])
+    result = A.geometry_transitions(rows, 10*NS, 20*NS)
+    assert [(r["transition"], A.stamp(r)/NS) for r in result] == [("LOS_return",12), ("NLOS_entry",13)]
+    assert result[-1]["transition_bracket_s"] == 1
+
+
+def test_other_link_shadow_does_not_define_primary_trigger(tmp_path):
+    rows = geometry(tmp_path, [dict(time_s=t, wall_monotonic_ns=t*NS, from_id=0, to_id=peer, geom_los=los)
+        for t,peer,los in [(9,2,True), (11,2,False), (12,1,True), (13,1,False)]])
+    transitions = A.geometry_transitions(rows, 10*NS, 20*NS)
+    chosen = next(r for r in transitions if r["pair"] == "0-1" and r["transition"] == "NLOS_entry")
+    assert A.stamp(chosen) == 13*NS
+
+
+def test_administrative_nonrecovery_differs_from_crash_missing_data_and_absent_event():
+    assert A.endpoint(None, 10*NS, 20*NS, full_window=True)["status"] == "administratively_right_censored"
+    interrupted = A.endpoint(None, 10*NS, 15*NS, full_window=False)
+    assert interrupted["status"] == "interrupted_attempt" and interrupted["censor_time_s"] is None
+    assert A.endpoint(None, None, 20*NS, full_window=True)["recovered"] is None
+    assert A.endpoint(None, 10*NS, 20*NS, full_window=True, data_valid=False)["status"] == "unverifiable_recording"
+    assert A.endpoint(12*NS, 10*NS, 15*NS, full_window=False)["time_s"] == 2
+
+
+def test_all_five_uart_requires_one_epoch_and_rejects_queued_prefault_command():
+    def command(i, epoch=2, created=11):
+        return dict(uav_id=i, leader_id=2, epoch=epoch, command_id=f"{epoch}:{i}:1", created_ns=created*NS,
+            admitted_ns=(12+i/10)*NS, lease_status="valid", lineage_status="valid",
+            application_chain_complete=True, policy_allowed=True)
+    rows = [command(i, epoch=3 if i == 5 else 2) for i in range(1,6)]
+    result = A.uart_endpoints(rows, 10*NS, 20*NS, True, True)
+    assert all(result[f"uav{i}"]["recovered"] for i in range(1,6))
+    assert result["all_five"]["recovered"] is False
+    rows[-1] = command(5, created=9)
+    result = A.uart_endpoints(rows, 10*NS, 20*NS, True, True)
+    assert result["uav5"]["recovered"] is False
+    assert A.uart_endpoints(rows, 10*NS, 20*NS, True, True, handover=True)["all_five"]["status"] == "not_applicable_no_handover"
+
+
+def test_same_epoch_renewals_are_not_conflicts_but_old_future_authority_is():
+    rows = [dict(event="grant_issued", grant_sequence=seq, leader_id=leader, epoch=epoch,
+                 valid_from_ns=low, valid_until_ns=high)
+            for seq,leader,epoch,low,high in [(1,1,1,0,20), (2,1,1,10,30), (3,2,2,25,40)]]
+    result = A.lease_conflicts(rows)
+    assert result == [dict(old_sequence=2, new_sequence=3, overlap_ns=5)]
+
+
+def test_physical_dwell_is_not_proved_by_completion_event_or_filled_gap():
+    completion = dict(uav_id=1, goal_id="waypoint0:uav1", source_sim_time_s=13,
+        dwell_s=2, target_position_m=[10,10,12], target_frame="ENU", host_monotonic_ns=13*NS)
+    poses = [dict(uav_id=1, session_id="unit", source_sim_time_s=t, quality="observed", x_m=10,y_m=10,z_m=12,speed_mps=0)
+             for t in (11,11.5,12,12.5,13)]
+    assert A.replay_dwell(completion, poses, {})["status"] == "verified"
+    assert A.replay_dwell(completion, poses[:2]+poses[3:], {})["status"] == "not_verified"
+    poses[2]["quality"] = "stale_or_fault"
+    assert A.replay_dwell(completion, poses, {})["status"] == "not_verified"
+
+
+def fixture(tmp_path):
+    run, events = OLD.fixture(tmp_path, condition="none")
+    for row in events:
+        if row.get("goal_id", "").startswith("after-"):
+            row["goal_id"] = f"waypoint0:uav{row['uav_id']}"
+            row["waypoint_index"] = 0
+            row["source_sim_time_s"] = 61
+    for row in events:
+        if row.get("event") == "gcs_send":
+            row["goal_id"] = f"waypoint0:uav{row['uav_id']}"
+            row["goal_created_host_monotonic_ns"] = 57*NS
+    (run/"logs/coordination_events.jsonl").write_text("".join(json.dumps(row)+"\n" for row in events))
+    with (run/"logs/geometry_links.csv").open("w") as stream:
+        writer = csv.DictWriter(stream, fieldnames=["time_s", "wall_monotonic_ns", "from_id", "to_id", "geom_los", "radio_state", "pathloss_db"])
+        writer.writeheader()
+        writer.writerows(dict(time_s=t, wall_monotonic_ns=t*NS, from_id=0, to_id=1, geom_los=los,
+                              radio_state="LOS" if los else "NLOS", pathloss_db=70 if los else 95)
+                         for t,los in [(54,True), (55,False), (62,True)])
+    snapshots = [dict(published_monotonic_ns=t*NS, session_id="fixture", source_sim_time_s=t, coordinate_frame="ENU",
+                     nodes=[dict(id=f"uav{i}", source_sim_time_s=t, sample_monotonic_ns=t*NS, position_m=[i,0,14],
+                                 velocity_enu_mps=[0,0,0], stale=False) for i in range(1,6)])
+                 for t in (58.5,59,59.5,60,60.5,61)]
+    (run/"logs/node_state.jsonl").write_text("".join(json.dumps(row)+"\n" for row in snapshots))
+    scenario = tmp_path/"scenario.json"
+    scenario.write_text(json.dumps(dict(routes={str(i):[[i,0,14]] for i in range(1,6)})))
+    return run, scenario
+
+
+def test_full_export_keeps_offered_missing_uart_and_waypoints_separate(tmp_path):
+    run, scenario = fixture(tmp_path)
+    result = A.analyze(run, tmp_path/"export", scenario_path=scenario)
+    assert result["rates"]["all_five"]["offered"] == 10
+    assert result["rates"]["all_five"]["timely_per_offered"] == .5
+    assert result["trigger"]["event"]["host_monotonic_ns"] == 55*NS
+    assert result["uart_after_NLOS"]["all_five"]["recovered"] is True
+    assert result["physical_checks"] == dict(total=5, verified=5)
+    assert all(row["completed_fraction"] == 1 for row in result["mission_progress"].values())
+    assert "not command ACK" in result["provenance"]["physical_evidence"]
+    assert result["post_LOS_return"]["offered"] == 0
+    assert result["post_LOS_return"]["admitted_per_offered"] is None
+    assert result["data_quality_errors"] == []
+
+
+def test_raw_directory_output_is_rejected(tmp_path):
+    run, scenario = fixture(tmp_path)
+    try:
+        A.analyze(run, run/"analysis", scenario_path=scenario)
+    except ValueError as error:
+        assert "immutable raw" in str(error)
+    else:
+        raise AssertionError("raw tree was writable by exporter")
+
+
+def test_plan_has_four_factorial_cases_per_seed_and_no_fake_freeze():
+    plan = A.study_plan(5)
+    assert plan == A.study_plan(5)
+    assert len(plan) == 20
+    blocks = {}
+    for row in plan:
+        blocks.setdefault(row["block_id"], []).append(row)
+        assert row["status"] == "planned_not_frozen_not_run"
+    assert all({(r["policy"],r["radio_mode"]) for r in rows} ==
+               {(p,m) for p in ("fixed","failover") for m in ("geometry","los_only")} for rows in blocks.values())
+
+
+def test_runtime_contract_accepts_explicit_geometry_and_rejects_double_pathloss():
+    spec = importlib.util.spec_from_file_location("urban_live_summary", ROOT/"scripts/product/summarize_native_radio_five_uav.py")
+    summary = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(summary)
+    config = summary.load_scenario_config(ROOT/"network/config/scenario_5uav_rock_demo_native_product.yaml")
+    radio, rt = config["radio"], config["sionna"]
+    stats = dict(uav_count=5, radio_node_count=6, shared_spectrum_channel_count=1,
+        native_ns3_phy=True, native_ns3_mac=True, custom_packet_error_model=False, custom_scheduler=False,
+        radio_backend="wifi", profile=radio["profile"], technology_specific_modem=False,
+        neighbor_discovery_mode=radio["neighbor_discovery_mode"], wifi_data_mode=radio["data_mode"],
+        wifi_control_mode=radio["control_mode"], wifi_ssid=radio["ssid"],
+        wifi_channel_number=radio["channel_number"], wifi_actual_channel_number=radio["channel_number"],
+        tx_power_w=radio["tx_power_w"], carrier_hz=radio["carrier_hz"],
+        wifi_actual_center_frequency_hz=radio["carrier_hz"], wifi_channel_width_mhz=radio["channel_width_mhz"],
+        readiness_lag_max_ms=rt["readiness_lag_max_ms"], selected_propagation_profile="geometry_logdistance",
+        scalar_base_propagation_model_count=1, phased_array_spectrum_propagation_model_count=0,
+        rx_psd_propagation_model="bas::GeometryLogDistance", sionna_in_process=False, sionna_drives_rx_psd=False,
+        packet_outcome_affected=True, pose_snapshots=10, stale_pose_samples=0, geometry_radio_mode="geometry",
+        geometry_parameter_set="unit_assumption", geometry_packet_evaluations=15, geometry_observation_rows=30)
+    assert summary.native_product_runtime_contract(stats, config)["passed"]
+    stats["phased_array_spectrum_propagation_model_count"] = 1
+    result = summary.native_product_runtime_contract(stats, config)
+    assert not result["passed"] and not result["checks"]["no_second_spectrum_pathloss"]
+    stats["phased_array_spectrum_propagation_model_count"] = 0
+    stats["sionna_in_process"] = True
+    assert not summary.native_product_runtime_contract(stats, config)["passed"]

@@ -364,7 +364,7 @@ def native_events(
 def native_product_runtime_contract(
     stats: dict[str, Any], scenario_config: dict[str, Any]
 ) -> dict[str, Any]:
-    """Validate that the observed process is the selected native Wi-Fi/Sionna product."""
+    """Validate the selected native Wi-Fi runtime, including explicit geometry mode."""
 
     radio = scenario_config.get("radio", {})
     sionna = scenario_config.get("sionna", {})
@@ -429,6 +429,29 @@ def native_product_runtime_contract(
             sionna.get("readiness_lag_max_ms"),
         ),
     }
+    geometry = stats.get("selected_propagation_profile") == "geometry_logdistance"
+    if geometry:
+        for name in ("single_sionna_rx_psd_model", "sionna_in_process", "sionna_drives_rx_psd", "solver_profile"):
+            exact.pop(name)
+        exact.update({
+            "one_scalar_geometry_model": stats.get("scalar_base_propagation_model_count") == 1,
+            "no_second_spectrum_pathloss": stats.get("phased_array_spectrum_propagation_model_count") == 0,
+            "geometry_model_bound": stats.get("rx_psd_propagation_model") == "bas::GeometryLogDistance",
+            "sionna_not_initialized": stats.get("sionna_in_process") is False,
+            "sionna_not_driving_psd": stats.get("sionna_drives_rx_psd") is False,
+            "explicit_geometry_radio_mode": stats.get("geometry_radio_mode") in ("geometry", "los_only"),
+            "explicit_geometry_parameters": isinstance(stats.get("geometry_parameter_set"), str)
+                and bool(stats["geometry_parameter_set"]),
+            "geometry_packet_evaluations_observed": isinstance(stats.get("geometry_packet_evaluations"), int)
+                and not isinstance(stats["geometry_packet_evaluations"], bool)
+                and stats["geometry_packet_evaluations"] > 0,
+            "geometry_observations_observed": isinstance(stats.get("geometry_observation_rows"), int)
+                and not isinstance(stats["geometry_observation_rows"], bool)
+                and stats["geometry_observation_rows"] > 0,
+        })
+        # These are RT cache/solver settings, not geometry-model measurements.
+        numeric_fields.pop("channel_state_max_age_s")
+        numeric_fields.pop("endpoint_displacement_threshold_m")
     for name, (observed, expected) in numeric_fields.items():
         exact[name] = (
             isinstance(observed, (int, float))
@@ -450,7 +473,7 @@ def native_product_runtime_contract(
         "max_number_of_paths",
         "cache_expiry_jitter_fraction",
     )
-    exact["sionna_solver_parameters"] = isinstance(solver, dict) and all(
+    solver_valid = isinstance(solver, dict) and all(
         field in solver
         and field in sionna
         and (
@@ -465,7 +488,10 @@ def native_product_runtime_contract(
         )
         for field in solver_fields
     )
-    return {"passed": all(exact.values()), "checks": exact}
+    if not geometry:
+        exact["sionna_solver_parameters"] = solver_valid
+    return {"passed": all(exact.values()), "checks": exact,
+            "propagation_profile": stats.get("selected_propagation_profile", "sionna")}
 
 
 def build_topology(run_dir: Path, stats: dict[str, Any]) -> dict[str, Any]:
@@ -515,7 +541,11 @@ def build_topology(run_dir: Path, stats: dict[str, Any]) -> dict[str, Any]:
         "mobility_models": radio_node_count,
         "tap_boundaries": radio_node_count,
         "shared_multi_model_spectrum_channels": shared_channel_count,
-        "sionna_rt_spectrum_propagation_loss_models": phased_model_count,
+        "sionna_rt_spectrum_propagation_loss_models": phased_model_count if stats.get("sionna_drives_rx_psd") is True else 0,
+        "phased_array_spectrum_propagation_loss_models": phased_model_count,
+        "scalar_base_propagation_loss_models": stats.get("scalar_base_propagation_model_count"),
+        "selected_propagation_profile": stats.get("selected_propagation_profile"),
+        "rx_psd_propagation_model": stats.get("rx_psd_propagation_model"),
         "radio_medium": (
             "native 802.11n QoS WifiMac/SpectrumWifiPhy"
             if wifi
@@ -3580,10 +3610,12 @@ def main() -> int:
         "centralized_priority_scheduler": "centralized_priority_scheduler" in process_text,
         "custom_five_uav_packet_engine": "ams-tap-packet-engine" in process_text,
     }
+    runtime_contract_key = ("native_wifi_runtime_contract" if stats.get("selected_propagation_profile") == "geometry_logdistance"
+                            else "native_wifi_sionna_runtime_contract")
     functional_checks = {
         "scenario_config_lineage": scenario_config_lineage,
         "traffic_config_lineage": traffic_config_lineage,
-        "native_wifi_sionna_runtime_contract": native_contract["passed"],
+        runtime_contract_key: native_contract["passed"],
         "realtime_scheduler_gazebo_and_pose_gates": realtime["realtime_readiness"]
         == "ready",
         "runtime_process_snapshot_observed": bool(process_text.strip()),
@@ -3677,7 +3709,7 @@ def main() -> int:
         "profile": stats.get("profile", scenario.get("profile")),
         "technology_specific_modem": bool(stats.get("technology_specific_modem", False)),
         "native_topology": topology,
-        "native_wifi_sionna_runtime_contract": native_contract,
+        runtime_contract_key: native_contract,
         "traffic_product_contract": {
             "passed": traffic_config_lineage,
             "configured": configured_traffic,
@@ -3742,7 +3774,7 @@ def main() -> int:
             if args.one_uav_run
             else "- One-UAV regression: not requested; not part of this run's gate."
         ),
-        f"- Radio-link observations: {observability['radio_rows']}; post-Sionna receive power is reported separately from unavailable RSSI/SINR metrics.",
+        f"- Radio-link observations: {observability['radio_rows']}; native receive power after the selected propagation model is reported separately from unavailable RSSI/SINR metrics.",
         f"- BLER: {observability['metric_availability']['bler']}",
         f"- Live Gazebo screenshots: {screenshots['screenshots_status']}.",
         f"- Causal clear -> shadow -> recovery gate: {causal['status']}.",
