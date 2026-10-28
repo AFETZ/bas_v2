@@ -16,8 +16,14 @@ import math
 from pathlib import Path
 import statistics
 import sys
+import textwrap
 
 NS=1_000_000_000
+PUBLICATION_WIDTH_CM=13.9
+PUBLICATION_WIDTH_IN=PUBLICATION_WIDTH_CM/2.54
+PUBLICATION_DPI=320  # >=1642px at13.9cm; SVG/PDF retain the same physical width.
+FONT_MAIN=8.
+FONT_SMALL=7.5
 PRIMARY=("timely_per_offered","completed_waypoint_fraction")
 CAPTIONS={
  "urban_first_pair":(
@@ -27,8 +33,8 @@ CAPTIONS={
   "Все заранее запланированные основные пары: timely/offered и доля физически подтверждённых waypoint. Крестик — failed attempt с наблюдённым исходом; отсутствующие исходы указаны счётчиком. Интервалы взяты из агрегатора по целым парам; interaction использует полные четырёхслучайные блоки.",
   "All preplanned main pairs: timely/offered and verified waypoint fraction. Crosses mark failed attempts with observed outcomes; missing outcomes are counted, never plotted at zero. Stored whole-pair intervals and complete four-case interaction are reported."),
  "urban_chronology":(
-  "Та же первая geometry-пара: геометрическое затенение, direct-probe timeout, назначение/valid_from/активация, прикладной приём/UART критического CID и физический прогресс. Общая шкала host monotonic; отсутствующие события не восстанавливаются из других часов. Post-NLOS latency без нарушения обмена не называется восстановлением.",
-  "Same first geometry pair: shadowing, direct-probe timeout, selection/valid_from/activation, critical-CID application receipt/UART and physical progress. One host-monotonic scale; missing events are not reconstructed from other clocks. Post-NLOS latency alone is not labelled recovery."),
+  "Та же первая geometry-пара: затенение, timeout, назначение/valid_from/активация, прикладной приём/UART критического CID и физический прогресс. Верхний ряд укрупнён в host секундах после NLOS; цель и скорость ниже показаны за полное окно в host секундах после старта. Отсутствующие события не восстанавливаются из других часов. Post-NLOS latency без нарушения обмена не называется восстановлением.",
+  "Same first geometry pair: shadowing, timeout, selection/valid_from/activation, critical-CID application receipt/UART and physical progress. Top row zooms host seconds after NLOS; goal and speed below use the full window in host seconds after start. Missing events are not reconstructed from other clocks. Post-NLOS latency alone is not labelled recovery."),
  "urban_sensitivity_resources":(
   "Чувствительность к объявленным NLOS-гипотезам и наблюдённая стоимость: независимые парные точки, RTF/lag и CPU/RSS записанных компонентов. Auxiliary n3/boundary n1 описательные; main CI к ним не переносится. CPU нормирован на одно ядро, RSS не включает весь хост/tmpfs. GPU показывается только при наличии записи.",
   "Sensitivity to declared NLOS assumptions and observed cost: independent pair points, RTF/lag and recorded-component CPU/RSS. Auxiliary n3/boundary n1 are descriptive without borrowed main CIs. CPU is relative to one core; process RSS excludes whole-host/tmpfs memory. GPU is reported only when recorded.")}
@@ -261,17 +267,17 @@ def draw_geometry(axis,data,*,y_offset=0):
 
 def figure_pair(plt,pair):
     from matplotlib.patches import Rectangle
-    fig,axes=plt.subplots(3,2,figsize=(11,9),gridspec_kw={"height_ratios":[2.1,1.4,.65]})
+    fig,axes=plt.subplots(3,2,figsize=(PUBLICATION_WIDTH_IN,6.4),gridspec_kw={"height_ratios":[2.1,1.3,.6]})
     for col,policy in enumerate(("fixed","failover")):
         data=pair[policy];begin,end=data["begin"],data["end"]
         for b in data["scenario"].get("buildings",[]):
             low,high=b["min"],b["max"]
             axes[0,col].add_patch(Rectangle(low[:2],high[0]-low[0],high[1]-low[1],fc=".65",ec=".3",alpha=.5))
-            axes[0,col].text(low[0],low[1],f"{b.get('id','')}\nh={high[2]-low[2]:g} m",fontsize=7)
+            axes[0,col].text(low[0],low[1],f"{b.get('id','')}\nh={high[2]-low[2]:g} m",fontsize=FONT_SMALL)
         gcs=data["scenario"].get("gcs")
         if isinstance(gcs,list) and len(gcs)==3 and all(finite(v) is not None for v in gcs):
-            axes[0,col].scatter([gcs[0]],[gcs[1]],marker="*",s=85,color="black",label=f"GCS (ENU z={gcs[2]:g} m)",zorder=5)
-            axes[0,col].annotate("GCS",(gcs[0],gcs[1]),xytext=(4,-10),textcoords="offset points",fontsize=7)
+            axes[0,col].scatter([gcs[0]],[gcs[1]],marker="*",s=65,color="black",label=f"GCS, z={gcs[2]:g}m",zorder=5)
+            axes[0,col].annotate("GCS",(gcs[0],gcs[1]),xytext=(4,-10),textcoords="offset points",fontsize=FONT_SMALL)
         if begin is None:
             axes[0,col].text(.5,.5,"No recorded measurement window",ha="center",transform=axes[0,col].transAxes)
         for i in range(1,6):
@@ -290,28 +296,29 @@ def figure_pair(plt,pair):
         nlos=[r for r in data["geometry"] if not r["geom_los"]]
         if nlos:
             axes[0,col].scatter([float(r["to_x"]) if r["to_id"]=="1" else float(r["from_x"]) for r in nlos[::10]],
-                [float(r["to_y"]) if r["to_id"]=="1" else float(r["from_y"]) for r in nlos[::10]],s=3,c="crimson",label="UAV1 geometric NLOS",zorder=4)
+                [float(r["to_y"]) if r["to_id"]=="1" else float(r["from_y"]) for r in nlos[::10]],s=3,c="crimson",label="UAV1 NLOS",zorder=4)
             initial=nlos[0]
             axes[0,col].plot([float(initial["from_x"]),float(initial["to_x"])],
                              [float(initial["from_y"]),float(initial["to_y"])],ls=":",lw=.8,color="crimson",
-                             label="First NLOS 3D link: XY projection")
+                             label="3D link: XY view")
         if begin is not None:
             draw_geometry(axes[2,col],data)
-        axes[0,col].set(title=f"{policy}: {data['result'].get('recorded_status','missing')}",xlabel="ENU X, m",ylabel="ENU Y, m",aspect="equal")
-        axes[0,col].legend(fontsize=6,loc="best")
-        axes[1,col].set(ylabel="ENU Z, m (not AGL)",title="Actual altitude / dashed GCS requested target")
-        axes[2,col].set(xlabel="Host seconds from measurement start",yticks=[0,1],yticklabels=["NLOS","LOS"],ylim=(-.2,1.2))
+        axes[0,col].set(title=f"{policy}\n{data['result'].get('recorded_status','missing')}",xlabel="ENU X, m",ylabel="ENU Y, m" if col==0 else "",aspect="equal")
+        axes[1,col].set(ylabel="ENU Z, m" if col==0 else "",title="Solid: actual\nDashed: GCS intent")
+        axes[2,col].set(xlabel="Host s after start",yticks=[0,1],yticklabels=["NLOS","LOS"] if col==0 else ["", ""],ylim=(-.2,1.2))
         if begin is not None and end is not None:
             for ax in axes[1:,col]: ax.set_xlim(0,(end-begin)/NS)
-    fig.suptitle("First frozen geometry block: "+pair["fixed"]["case"]["block_id"],fontsize=11)
-    fig.tight_layout()
+    handles,labels=axes[0,0].get_legend_handles_labels()
+    fig.legend(handles,labels,loc="lower center",ncol=3,fontsize=FONT_SMALL,frameon=False)
+    fig.suptitle("First geometry pair: "+pair["fixed"]["case"]["block_id"],fontsize=FONT_MAIN+1)
+    fig.tight_layout(rect=(0,.1,1,.97),pad=.7)
     return fig
 
 
 def figure_primary(plt,aggregate,frozen):
-    fig,axes=plt.subplots(2,2,figsize=(11,7))
-    audit=[]
-    names={"timely_per_offered":"Timely / offered, %","completed_waypoint_fraction":"Verified waypoints / planned, %"}
+    fig,axes=plt.subplots(2,2,figsize=(PUBLICATION_WIDTH_IN,5.8))
+    audit=[];estimates=[]
+    names={"timely_per_offered":"Timely / offered, %","completed_waypoint_fraction":"Verified points, %"}
     for row,metric in enumerate(PRIMARY):
         for col,mode in enumerate(("geometry","los_only")):
             ax=axes[row,col];blocks=primary_points(aggregate,frozen,metric,mode)
@@ -328,67 +335,77 @@ def figure_primary(plt,aggregate,frozen):
                     ax.scatter(x+offset,100*value,marker="x" if status else "o",color=f"C{j%10}",s=28,zorder=4)
                     audit.append(dict(metric=metric,mode=mode,block_id=key[-1],policy=policy,value=value,failed=status,run_id=pair[policy]["run_id"]))
             summaries=[r for r in aggregate.get("paired_contrasts",[]) if r["cohort"]=="main" and r["radio_mode"]==mode and r["metric"]==metric]
-            text=f"complete pairs {complete}/{len(blocks)}; missing outcomes {missing}; failed observed {failed}"
             for summary in summaries:
                 estimate=summary["failover_minus_fixed"];CI=estimate.get("interval_95")
-                text+=f"\nΔ={percent_text(estimate.get('mean'))} pp"
-                text+=f"; stored95% [{100*CI[0]:+.2f}, {100*CI[1]:+.2f}]" if CI else "; CI unavailable"
-            ax.text(.02,.02,text,transform=ax.transAxes,fontsize=7,va="bottom",bbox=dict(fc="white",alpha=.85,ec="none"))
-            ax.set(xticks=[0,1],xticklabels=["fixed","failover"],xlim=(-.2,1.2),ylim=(-2,104),ylabel=names[metric],title=mode)
+                name="Timely" if metric==PRIMARY[0] else "Mission"
+                text=f"{name} {mode.replace('los_only','LOS')}: Δ{percent_text(estimate.get('mean'))}pp"
+                text+=f";95% [{100*CI[0]:+.2f},{100*CI[1]:+.2f}]" if CI else "; CI unavailable"
+                estimates.append(text)
+            title=f"{mode.replace('los_only','LOS-only')} · pairs {complete}/{len(blocks)}\nmissing {missing}; failed observed {failed}"
+            ax.set(xticks=[0,1],xticklabels=["fixed","failover"],xlim=(-.2,1.2),ylim=(-2,104),ylabel=names[metric] if col==0 else "",title=title)
     interaction=[]
     for row in aggregate.get("policy_geometry_interactions",[]):
         if row["metric"] in PRIMARY:
             estimate=row["estimate"];CI=estimate.get("interval_95")
-            text=f"{row['metric']}: interaction {percent_text(estimate.get('mean'))} pp; complete blocks {row['complete_four_case_blocks']}/{row['planned_blocks']}"
-            if CI: text+=f"; stored95% [{100*CI[0]:+.2f}, {100*CI[1]:+.2f}]"
+            name="Timely" if row["metric"]==PRIMARY[0] else "Mission"
+            text=f"{name} interaction {percent_text(estimate.get('mean'))} pp; blocks {row['complete_four_case_blocks']}/{row['planned_blocks']}"
+            if CI: text+=f";95% [{100*CI[0]:+.2f},{100*CI[1]:+.2f}]"
             interaction.append(text)
-    fig.text(.04,.015,"\n".join(interaction),fontsize=7)
-    fig.suptitle("All main pairs; cross = failed attempt with observed outcome",fontsize=11)
-    fig.tight_layout(rect=(0,.08,1,.97))
+    fig.text(.04,.015,"\n".join(textwrap.fill(s,width=68) for s in estimates+interaction),fontsize=FONT_SMALL)
+    fig.suptitle("All main pairs · × = failed observed attempt",fontsize=FONT_MAIN+1)
+    fig.tight_layout(rect=(0,.21,1,.97),pad=.7)
     return fig,audit
 
 
 def figure_chronology(plt,pair,inputs):
-    fig,axes=plt.subplots(3,2,figsize=(11,9),gridspec_kw={"height_ratios":[2.2,1.2,1.3]})
+    fig,axes=plt.subplots(3,2,figsize=(PUBLICATION_WIDTH_IN,7.7),gridspec_kw={"height_ratios":[2.1,1.15,1.35]})
     timelines={}
     lanes={"NLOS":0,"LOS return":0,"probe timeout":1,"selection":2,"valid_from":3,"activation":4,"command created":5,
            "master receive":6,"master forward":6,"app receipt":7,"UART":8}
+    focus=(-1.,6.)
+    for data in pair.values():
+        t=data["result"].get("uart_after_NLOS",{}).get("all_five",{}).get("time_s")
+        if finite(t) is not None: focus=(focus[0],max(focus[1],float(t)+2))
     for col,policy in enumerate(("fixed","failover")):
         data=pair[policy];begin,end=data["begin"],data["end"]
         timeline=chronology_data(data,inputs);timelines[policy]=timeline
+        trigger=data["result"].get("trigger",{}).get("event")
+        onset=(host(trigger)-begin)/NS if trigger and begin is not None else None
         for item in timeline:
-            if item["event"] in lanes:
+            if item["event"] in lanes and onset is not None:
                 y=lanes[item["event"]]
-                axes[0,col].scatter(item["elapsed_host_s"],y,s=30,marker="|",color="C3")
-                text=(item["event"]+" " if y==0 else "")+f"{item['elapsed_host_s']:.3f}"
-                axes[0,col].annotate(text,(item["elapsed_host_s"],y),xytext=(4,2),textcoords="offset points",fontsize=6)
+                axes[0,col].scatter(item["elapsed_host_s"]-onset,y,s=35,marker="|",color="C3")
             if item["event"].startswith("selected goal") or item["event"].startswith("goal "):
                 y={"selected goal created":0,"goal first command":1,"goal first UART":2,"goal physical completion":3}[item["event"]]
-                axes[1,col].scatter(item["elapsed_host_s"],y,s=30,marker="|",color="C2")
-                axes[1,col].annotate(f"{item['elapsed_host_s']:.3f}",(item["elapsed_host_s"],y),xytext=(4,2),textcoords="offset points",fontsize=6)
+                axes[1,col].scatter(item["elapsed_host_s"],y,s=35,marker="|",color="C2")
         if not any(r["event"]=="selection" for r in timeline):
-            axes[0,col].text(.98,.8,"No post-NLOS selection observed",ha="right",transform=axes[0,col].transAxes,fontsize=7)
+            axes[0,col].text(.98,.25,"No new\nselection",ha="right",transform=axes[0,col].transAxes,fontsize=FONT_SMALL)
         if data["result"].get("uart_after_NLOS",{}).get("all_five",{}).get("status")=="observed" and not any(r["event"]=="UART" for r in timeline):
-            axes[0,col].text(.02,.05,"Summary UART observed; matching common-CID stages unavailable",transform=axes[0,col].transAxes,fontsize=7)
+            axes[0,col].text(.02,.05,"UART in summary;\nCID trace missing",transform=axes[0,col].transAxes,fontsize=FONT_SMALL)
         if not any(r["event"]=="goal physical completion" for r in timeline):
-            axes[1,col].text(.02,.5,"No completed new post-NLOS goal of all five",transform=axes[1,col].transAxes,fontsize=7)
+            axes[1,col].text(.98,.4,"No all-five\nnew-goal completion",ha="right",transform=axes[1,col].transAxes,fontsize=FONT_SMALL)
         for i in range(1,6):
             for n,part in enumerate(trajectory_segments(data["trajectory"],i)):
                 selected=[r for r in part if finite(r.get("speed_mps")) is not None]
                 if selected and begin is not None:
                     axes[2,col].plot([(host(r)-begin)/NS for r in selected],[float(r["speed_mps"]) for r in selected],color=f"C{i-1}",lw=.8,label=f"UAV{i}" if n==0 else None)
-        trigger=data["result"].get("trigger",{}).get("event")
         if trigger and begin is not None:
-            at=(host(trigger)-begin)/NS
-            for ax in axes[:,col]: ax.axvline(at,color=".4",ls=":",lw=.8)
-        axes[0,col].set(yticks=list(range(9)),yticklabels=["geometry","probe timeout","selection","valid_from","activation","CID created","relay RX/forward","app receipt","UART"],title=policy)
-        axes[1,col].set(yticks=list(range(4)),yticklabels=["selected goal created","first success CID","first UART","physical completion"])
-        axes[2,col].set(xlabel="Host seconds from measurement start",ylabel="Actual speed, m/s")
-        axes[2,col].legend(fontsize=6,ncol=5)
+            axes[0,col].axvline(0,color=".4",ls=":",lw=.8)
+            for ax in axes[1:,col]: ax.axvline(onset,color=".4",ls=":",lw=.8)
+        axes[0,col].set(yticks=list(range(9)),yticklabels=["Geometry","Timeout","Select","Lease start","Active","CID made","Relay RX/TX","App RX","UART"] if col==0 else [""]*9,
+                        title=policy,xlim=focus,xlabel="Host s after NLOS (zoom)")
+        if onset is None:
+            axes[0,col].set_xticks([]);axes[0,col].set_xlabel("NLOS origin unavailable")
+            axes[0,col].text(.98,.6,"NLOS not\nobserved",ha="right",transform=axes[0,col].transAxes,fontsize=FONT_SMALL)
+        axes[1,col].set(yticks=list(range(4)),yticklabels=["Goal made","CID made","UART","Reached"] if col==0 else [""]*4,
+                        title="Selected new goal · full window")
+        axes[2,col].set(xlabel="Host s after start",ylabel="Speed, m/s" if col==0 else "")
         if begin is not None and end is not None:
-            for ax in axes[:,col]: ax.set_xlim(0,(end-begin)/NS)
-    fig.suptitle("Same preplanned pair: geometry → protocol → UART → physical progress",fontsize=11)
-    fig.tight_layout()
+            for ax in axes[1:,col]: ax.set_xlim(0,(end-begin)/NS)
+    handles,labels=axes[2,0].get_legend_handles_labels()
+    fig.legend(handles,labels,loc="lower center",ncol=5,fontsize=FONT_SMALL,frameon=False)
+    fig.suptitle("First pair: protocol zoom / goal and motion",fontsize=FONT_MAIN+1)
+    fig.tight_layout(rect=(0,.045,1,.97),pad=.7)
     return fig,timelines
 
 
@@ -412,7 +429,8 @@ def sensitivity_rows(aggregate,frozen,inputs):
         if row["radio_mode"]!="geometry" or row["metric"] not in PRIMARY or row["cohort"] not in ("main","sensitivity"):
             continue
         exponent=values.get(row["parameter_variant"])
-        for n,value in enumerate(row["failover_minus_fixed"].get("differences",[])):
+        differences=row["failover_minus_fixed"].get("differences",[])
+        for n,value in enumerate(differences or [None]):
             output.append(dict(cohort=row["cohort"],parameter_variant=row["parameter_variant"],exponent=exponent,
                 metric=row["metric"],difference=value,index=n,complete_pairs=row["complete_pairs"],planned_pairs=row["planned_pairs"]))
     return output
@@ -443,7 +461,7 @@ def resource_rows(frozen,analysis_root,inputs):
 
 
 def figure_cost(plt,aggregate,frozen,analysis_root,inputs):
-    fig,axes=plt.subplots(2,2,figsize=(11,8))
+    fig,axes=plt.subplots(2,2,figsize=(PUBLICATION_WIDTH_IN,6.7))
     sensitivity=sensitivity_rows(aggregate,frozen,inputs);resources=resource_rows(frozen,analysis_root,inputs)
     for index,metric in enumerate(PRIMARY):
         ax=axes[index,0];points=[r for r in sensitivity if r["metric"]==metric and r["exponent"] is not None]
@@ -451,12 +469,15 @@ def figure_cost(plt,aggregate,frozen,analysis_root,inputs):
         for r in points: groups[(r["cohort"],r["exponent"])].append(r)
         for (cohort,exponent),rows in groups.items():
             for j,row in enumerate(rows):
-                ax.scatter(exponent+(j-(len(rows)-1)/2)*.006,100*row["difference"],marker="o" if cohort=="main" else "s",s=25,
-                           color="C0" if cohort=="main" else "C1")
-            ax.annotate(f"{cohort}: {rows[0]['complete_pairs']}/{rows[0]['planned_pairs']} pairs",(exponent,.02),
-                        xycoords=("data","axes fraction"),ha="center",fontsize=7)
+                if row["difference"] is not None:
+                    ax.scatter(exponent+(j-(len(rows)-1)/2)*.006,100*row["difference"],marker="o" if cohort=="main" else "s",s=20,
+                               color="C0" if cohort=="main" else "C1")
+        ticks=sorted({exponent for cohort,exponent in groups})
+        ax.set_xticks(ticks)
+        ax.set_xticklabels([f"{x:g}\n"+"/".join(str(v) for v in (next(rows for (cohort,exponent),rows in groups.items() if exponent==x)[0]["complete_pairs"],
+                                                   next(rows for (cohort,exponent),rows in groups.items() if exponent==x)[0]["planned_pairs"])) for x in ticks])
         ax.axhline(0,color="grey",lw=.7)
-        ax.set(xlabel="Declared NLOS exponent (uncalibrated hypothesis)",ylabel="Failover − fixed, pp",title=metric)
+        ax.set(xlabel="NLOS exponent / complete pairs",ylabel="Δ, pp",title="Timely effect" if metric==PRIMARY[0] else "Mission effect")
     runs={}
     for row in resources: runs.setdefault(row["run_id"],row)
     lag_axis=axes[0,1].twinx()
@@ -465,28 +486,31 @@ def figure_cost(plt,aggregate,frozen,analysis_root,inputs):
         if row["RTF"] is not None: axes[0,1].scatter(row["order"],row["RTF"],s=15,c="C0",marker=marker)
         if row["lag_p95_ms"] is not None: lag_axis.scatter(row["order"],row["lag_p95_ms"],s=12,c="C3",marker="+")
     axes[0,1].axhline(1,color="grey",ls=":",lw=.7)
-    axes[0,1].set(xlabel="Frozen execution order",ylabel="Integral RTF (blue)",title="Recorded timing; missing values absent")
-    lag_axis.set_ylabel("Native lag p95, ms (red)")
+    axes[0,1].set(xlabel="Frozen order",ylabel="RTF (blue)",title="Timing")
+    lag_axis.set_ylabel("Lag p95, ms (red)")
     rss_axis=axes[1,1].twinx()
     components=sorted({r["component"] for r in resources if r["component"]!="not_recorded"})
     for k,component in enumerate(components):
         rows=[r for r in resources if r["component"]==component]
-        label=component.replace("native_ns3_sionna","native ns-3 (legacy process label)")
+        label={"native_ns3_sionna":"native ns-3","arducopter":"SITL ×5","gazebo":"Gazebo"}.get(component,component)
         axes[1,1].plot([r["order"] for r in rows],[r["mean_CPU_one_core_pct"] if r["mean_CPU_one_core_pct"] is not None else float("nan") for r in rows],
                       marker=".",ls="none",color=f"C{k}",label=label)
         rss_axis.plot([r["order"] for r in rows],[r["max_process_RSS_MiB"] if r["max_process_RSS_MiB"] is not None else float("nan") for r in rows],
                       marker="+",ls="none",color=f"C{k}",alpha=.6)
-    axes[1,1].set(xlabel="Frozen execution order",ylabel="Mean CPU, % of one core (dots)",title="Monitored processes only; not whole-host memory")
-    rss_axis.set_ylabel("Maximum process RSS, MiB (+)")
-    axes[1,1].legend(fontsize=6,loc="best")
+    axes[1,1].set(xlabel="Frozen order",ylabel="CPU, % core (dots)",title="Monitored processes")
+    rss_axis.set_ylabel("Max RSS, MiB (+)")
+    axes[1,1].legend(fontsize=FONT_SMALL,loc="best",handletextpad=.3)
     boundary=[]
     for r in aggregate.get("paired_contrasts",[]):
         if r["cohort"]=="engineering_boundary" and r["metric"] in PRIMARY:
-            boundary.append(f"{r['scenario_variant']} {r['metric']}: Δ{percent_text(r['failover_minus_fixed'].get('mean'))}pp (n={r['complete_pairs']}/{r['planned_pairs']}, descriptive)")
+            name="timely" if r["metric"]==PRIMARY[0] else "mission"
+            scenario=r["scenario_variant"].replace("short_occlusion","Short").replace("no_candidate","No candidate")
+            boundary.append(f"{scenario}, {name}: Δ{percent_text(r['failover_minus_fixed'].get('mean'))}pp; pairs {r['complete_pairs']}/{r['planned_pairs']}")
     missing=sum(row["RTF"] is None for row in runs.values())
-    gpu="GPU measurements: not recorded" if not any(r.get("GPU_utilization") is not None for r in resources) else "GPU values available in source exports; see data file"
-    fig.text(.04,.015,"\n".join(boundary+[f"Missing timing runs: {missing}; {gpu}; auxiliary cohorts have no main CI."]),fontsize=6)
-    fig.tight_layout(rect=(0,.1,1,.98))
+    gpu="GPU not recorded" if not any(r.get("GPU_utilization") is not None for r in resources) else "GPU measured: see data"
+    footer=boundary+[f"Timing missing: {missing}; {gpu}. Auxiliary pairs are descriptive."]
+    fig.text(.04,.015,"\n".join(textwrap.fill(s,width=68) for s in footer),fontsize=FONT_SMALL)
+    fig.tight_layout(rect=(0,.14,1,.99),pad=.7)
     return fig,dict(sensitivity=sensitivity,resources=resources,boundary_descriptions=boundary)
 
 
@@ -494,7 +518,9 @@ def render(args):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    plt.rcParams.update({"font.family":"DejaVu Sans","font.size":8,"axes.grid":True,"grid.alpha":.2,"svg.fonttype":"none"})
+    plt.rcParams.update({"font.family":"DejaVu Sans","font.size":FONT_MAIN,"axes.titlesize":FONT_MAIN,
+                         "axes.labelsize":FONT_MAIN,"xtick.labelsize":FONT_SMALL,"ytick.labelsize":FONT_SMALL,
+                         "legend.fontsize":FONT_SMALL,"axes.grid":True,"grid.alpha":.2,"svg.fonttype":"none"})
     inputs=Inputs();frozen=inputs.json(args.freeze);aggregate=inputs.json(args.aggregate)
     if aggregate.get("freeze_sha256")!=hashlib.sha256(Path(args.freeze).read_bytes()).hexdigest():
         raise ValueError("aggregate references a different freeze")
@@ -505,6 +531,7 @@ def render(args):
     pair_cases=first_geometry_pair(frozen)
     pair={p:read_case(case,args.analysis_root,args.runs_root,inputs) for p,case in pair_cases.items()}
     manifest=dict(schema_version=1,preview=args.allow_incomplete,batch_complete=complete,figures=[],not_rendered=[],
+        publication_width_cm=PUBLICATION_WIDTH_CM,font_floor_pt=FONT_SMALL,png_dpi=PUBLICATION_DPI,
         argv=[sys.executable,*sys.argv],freeze_sha256=hashlib.sha256(Path(args.freeze).read_bytes()).hexdigest(),
         renderer_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),first_block=pair_cases["fixed"]["block_id"])
     tasks=[]
@@ -519,11 +546,11 @@ def render(args):
     for identity,make in tasks:
         fig,data=make();paths={}
         for extension in ("png","svg","pdf"):
-            path=args.output/(identity+"."+extension);fig.savefig(path,dpi=300,bbox_inches="tight")
+            path=args.output/(identity+"."+extension);fig.savefig(path,dpi=PUBLICATION_DPI,bbox_inches=None)
             paths[extension]=str(path.resolve())
         plt.close(fig)
         data_path=args.output/(identity+".data.json");data_path.write_text(json.dumps(data,indent=2,allow_nan=False)+"\n")
-        manifest["figures"].append(dict(id=identity,measured=True,paths=paths,data_path=str(data_path.resolve()),
+        manifest["figures"].append(dict(id=identity,measured=True,path=paths["png"],paths=paths,data_path=str(data_path.resolve()),
             caption_ru=CAPTIONS[identity][0],caption_en=CAPTIONS[identity][1],
             output_sha256={key:hashlib.sha256(Path(path).read_bytes()).hexdigest() for key,path in paths.items()}))
     manifest.update(input_files=inputs.used,missing_input_files=sorted(inputs.missing))

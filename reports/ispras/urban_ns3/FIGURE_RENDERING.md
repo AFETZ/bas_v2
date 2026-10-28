@@ -16,11 +16,18 @@ python3 scripts/product/plot_urban_study.py \
 
 Heavy rendering belongs to the integration owner after native activity finishes,
 under `/tmp/bas-paper-runtime.lock`, using the existing document image. This
-command does not start BAS or alter raw. Each produced figure has PNG at300dpi
+command does not start BAS or alter raw. Each produced figure has PNG at320dpi
 (width≥1642px), SVG/PDF, data/provenance JSON and RU/EN captions in
 `figure_manifest.json`. Only actually rendered files are listed as measured.
 `--allow-incomplete` is an explicit preview flag; manifest.preview must stay
 false for final manuscript use. The default refuses an unfinished batch.
+
+All four canvases have physical width13.9cm, matching manuscript insertion.
+Main text is8pt and annotations/ticks≥7.5pt at that width; no11in source is
+shrunk to half size. Saving retains the exact physical canvas rather than
+expanding a tight bounding box. Shared legends, short labels and wrapped
+footer estimates reduce panel crowding. Final rendered files still require
+visual inspection; syntax/structure tests do not prove the absence of overlap.
 
 The geometry pair is selected from the first frozen main block, independent of
 success or presence of later files. Failed/missing cases cannot be substituted.
@@ -39,7 +46,10 @@ process CPU/RSS retain their own units and incomplete coverage; no GPU value is
 imputed. Native PHY packet proof stays separate from application event lanes.
 
 Chronology uses observed host-monotonic fields only; ns-3 PCAP timestamps are not
-mixed into the axis. `follower_receive` is application receipt. Selected new-goal
+mixed into the axis. The protocol row zooms seconds after actual NLOS; selected
+goal and speed rows retain the full window in host seconds after start. Numeric
+labels are not piled onto nearly simultaneous CID events; exact timestamps are
+retained in data JSON. `follower_receive` is application receipt. Selected new-goal
 creation/first successful refresh/UART/completion are different event lanes;
 actual speed comes from trajectory samples, not ACK or commanded speed. Critical
 UART is chosen from the exact common all-five CID set and its stage-CSV write

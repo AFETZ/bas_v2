@@ -1,5 +1,6 @@
 """Small structural presentation checks; no graphics/runtime or result fixtures."""
 import csv
+import ast
 import importlib.util
 import json
 from pathlib import Path
@@ -109,3 +110,25 @@ def test_requested_altitude_carries_known_ENU_intent_without_filling_physics():
     assert P.requested_altitude_series(events,1,10*NS,20*NS)==[(0,70),(2,60),(10,60)]
     assert P.requested_altitude_series([goal(12,60)],1,10*NS,20*NS)==[(2,60),(10,60)]
     assert P.requested_altitude_series([goal(5,-12,"NED")],1,10*NS,20*NS)==[]
+
+
+def test_publication_size_font_floor_and_exact_physical_canvas():
+    assert P.PUBLICATION_WIDTH_CM==13.9
+    assert P.PUBLICATION_WIDTH_IN*P.PUBLICATION_DPI>=1642
+    assert P.FONT_MAIN>=7 and P.FONT_SMALL>=7
+    tree=ast.parse(Path(P.__file__).read_text())
+    figures=[]
+    for node in ast.walk(tree):
+        if not isinstance(node,ast.Call):
+            continue
+        for keyword in node.keywords:
+            if keyword.arg=="fontsize" and isinstance(keyword.value,ast.Constant):
+                assert keyword.value.value>=7
+            if keyword.arg=="figsize":
+                assert isinstance(keyword.value,ast.Tuple)
+                assert isinstance(keyword.value.elts[0],ast.Name) and keyword.value.elts[0].id=="PUBLICATION_WIDTH_IN"
+                figures.append(node)
+        if isinstance(node.func,ast.Attribute) and node.func.attr=="savefig":
+            canvas=next(k.value for k in node.keywords if k.arg=="bbox_inches")
+            assert isinstance(canvas,ast.Constant) and canvas.value is None
+    assert len(figures)==4
