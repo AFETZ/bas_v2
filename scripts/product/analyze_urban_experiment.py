@@ -17,6 +17,7 @@ import json
 import math
 from pathlib import Path
 import random
+import re
 import sys
 
 SPEC = importlib.util.spec_from_file_location("urban_relay_audit", Path(__file__).with_name("analyze_relay_experiment.py"))
@@ -82,7 +83,7 @@ def load_geometry(path, errors):
             continue
         seen.add(key)
         result.append(dict(row, from_id=a, to_id=b, pair=f"{pair[0]}-{pair[1]}",
-                           host_monotonic_ns=at, source_sim_time_s=model, geom_los=los,
+                           host_monotonic_ns=at, ns3_time_s=model, geom_los=los,
                            pathloss_db=number(row.get("pathloss_db"))))
     return sorted(result, key=lambda row: row["host_monotonic_ns"])
 
@@ -169,6 +170,8 @@ def read_poses(path, start, end, errors):
                 if i not in UAVS:
                     continue
                 at = number(node.get("source_sim_time_s", row.get("source_sim_time_s")))
+                sample_host = number(node.get("sample_monotonic_ns"))
+                source_clock = number(row.get("source_sim_time_s"))
                 point, velocity = node.get("position_m"), node.get("velocity_enu_mps")
                 quality = ("stale_or_fault" if row.get("fault") or node.get("stale", True)
                            else "unsupported_frame" if row.get("coordinate_frame") != "ENU"
@@ -178,12 +181,18 @@ def read_poses(path, start, end, errors):
                     and all(number(value) is not None for value in point+velocity))
                 if at is None or not vectors_valid:
                     quality = "missing_pose_or_clock"
+                elif sample_host is None:
+                    quality = "missing_sample_clock"
+                elif not 0 <= host-sample_host <= .5*NS:
+                    quality = "stale_or_future_sample_clock"
+                elif source_clock is None or at-source_clock > .1:
+                    quality = "inconsistent_source_clock"
                 key = (row.get("session_id"), at, quality)
                 if previous.get(i) == key:
                     continue
                 previous[i] = key
                 result.append(dict(uav_id=i, session_id=row.get("session_id"), source_sim_time_s=at,
-                    host_monotonic_ns=host, sample_host_ns=number(node.get("sample_monotonic_ns")),
+                    host_monotonic_ns=host, sample_host_ns=sample_host,
                     quality=quality, x_m=point[0] if quality == "observed" else None,
                     y_m=point[1] if quality == "observed" else None, z_m=point[2] if quality == "observed" else None,
                     speed_mps=math.sqrt(sum(v*v for v in velocity)) if quality == "observed" else None,
@@ -191,7 +200,7 @@ def read_poses(path, start, end, errors):
     return result
 
 
-def replay_dwell(completion, poses, config):
+def replay_dwell(completion, poses, config, *, first_goal_admission_ns=None):
     """Independent observed-pose check, never fills a missing interval."""
     i, target = node_id(completion.get("uav_id")), RELAY.target(completion)
     finish = number(completion.get("source_sim_time_s"))
@@ -216,7 +225,9 @@ def replay_dwell(completion, poses, config):
             continue
         error_xy = math.hypot(pose["x_m"]-target[0], pose["y_m"]-target[1])
         error_z = abs(pose["z_m"]-target[2])
-        if error_xy > xy or error_z > z or pose["speed_mps"] > speed:
+        if (error_xy > xy or error_z > z or pose["speed_mps"] > speed
+                or (first_goal_admission_ns is not None and
+                    (pose.get("sample_host_ns") is None or pose["sample_host_ns"] < first_goal_admission_ns))):
             started, sample_count = None, 0
             continue
         if started is None:
@@ -228,7 +239,8 @@ def replay_dwell(completion, poses, config):
     span = finish-started if started is not None and last is not None and abs(last-finish) <= .05 else None
     return dict(base, status="verified" if span is not None and span+1e-8 >= hold else "not_verified",
                 observed_span_s=span, samples=sample_count, max_gap_s=max_gap,
-                max_speed_mps=max_speed, max_xy_error_m=max_xy, max_z_error_m=max_z)
+                max_speed_mps=max_speed, max_xy_error_m=max_xy, max_z_error_m=max_z,
+                first_goal_admission_host_ns=first_goal_admission_ns)
 
 
 def lease_conflicts(events):
@@ -245,6 +257,72 @@ def lease_conflicts(events):
     return conflicts
 
 
+def performance(run, start, end, errors):
+    """Observe host/source clocks and recorded process samples within the window."""
+    clocks, windows, resources = [], [], []
+    if start is None or end is None:
+        return dict(status="missing_measurement_window"), clocks, windows, resources
+    path = run/"logs/node_state.jsonl"
+    if path.is_file():
+        with path.open() as stream:
+            for index, line in enumerate(stream, 1):
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    # read_poses also reports the exact source error; don't invent clocks.
+                    continue
+                host, model = number(row.get("published_monotonic_ns")), number(row.get("source_sim_time_s"))
+                if host is None or model is None or not start <= host <= end:
+                    continue
+                clocks.append(dict(host_monotonic_ns=host, source_sim_time_s=model,
+                    session_id=row.get("session_id"), fresh_UAVs=sum(node_id(n.get("id")) in UAVS
+                        and not n.get("stale", True) for n in row.get("nodes", []))))
+    previous, anchor, segments, gap = None, None, 0, []
+    for row in clocks:
+        if (previous is None or row["session_id"] != previous["session_id"]
+                or row["source_sim_time_s"] < previous["source_sim_time_s"]
+                or row["host_monotonic_ns"] <= previous["host_monotonic_ns"]):
+            segments += 1
+            anchor = row
+        else:
+            gap.append((row["host_monotonic_ns"]-previous["host_monotonic_ns"])/NS)
+            elapsed = (row["host_monotonic_ns"]-anchor["host_monotonic_ns"])/NS
+            if elapsed >= 1:
+                windows.append(dict(host_monotonic_ns=row["host_monotonic_ns"],
+                    source_sim_time_s=row["source_sim_time_s"], wall_duration_s=elapsed,
+                    RTF=(row["source_sim_time_s"]-anchor["source_sim_time_s"])/elapsed))
+                anchor = row
+        previous = row
+    grouped = defaultdict(list)
+    for row in RELAY.read_jsonl(run/"logs/runtime_resources.jsonl", errors):
+        host = number(row.get("monotonic_ns"))
+        if host is not None and start <= host <= end:
+            grouped[(host, row.get("component"))].append(row)
+    for (at, component), samples in sorted(grouped.items(), key=lambda item:item[0][0]):
+        cpu, rss = ([number(r.get(field)) for r in samples] for field in ("cpu_percent_one_core", "rss_bytes"))
+        resources.append(dict(host_monotonic_ns=at, component=component, process_count=len(samples),
+            sum_cpu_percent_one_core=sum(cpu) if all(v is not None for v in cpu) else None,
+            sum_process_RSS_bytes=sum(rss) if all(v is not None for v in rss) else None))
+    lag = [number(r.get("value")) for r in RELAY.read_csv(run/"logs/native_radio_events.csv")
+           if r.get("event") == "realtime_lag" and stamp(r) is not None and start <= stamp(r) <= end]
+    model = {name:dict(CPU_percent_one_core=RELAY.distribution([r["sum_cpu_percent_one_core"] for r in resources
+                if r["component"] == name and r["sum_cpu_percent_one_core"] is not None]),
+            process_RSS_bytes=RELAY.distribution([r["sum_process_RSS_bytes"] for r in resources
+                if r["component"] == name and r["sum_process_RSS_bytes"] is not None]))
+             for name in sorted({str(r["component"]) for r in resources})}
+    integral = ((clocks[-1]["source_sim_time_s"]-clocks[0]["source_sim_time_s"])/
+                ((clocks[-1]["host_monotonic_ns"]-clocks[0]["host_monotonic_ns"])/NS)
+                if len(clocks) > 1 and segments == 1 else None)
+    return dict(status="observed" if clocks else "not_recorded", integral_RTF=integral,
+        approximately_1s_RTF=RELAY.distribution([r["RTF"] for r in windows]),
+        RTF_window_wall_duration_s=RELAY.distribution([r["wall_duration_s"] for r in windows]),
+        tracker_publication_gap_s=RELAY.distribution(gap), clock_segments=segments,
+        scheduler_lag_ms=RELAY.distribution([v for v in lag if v is not None]), resources=model,
+        resource_scope="recorded components/process RSS only, not all host helpers or tmpfs memory",
+        GPU_utilization=None, GPU_status="not_recorded_by_this_exporter; do not infer zero load",
+        radio_computation_time=None, radio_computation_status="not_inferred_from_packet_count"), clocks, windows, resources
+
+
 def mission_progress(events, poses, commands, scenario, config, start, end, trigger):
     routes = scenario.get("routes", {})
     command_index = {r["command_id"]:r for r in commands}
@@ -253,23 +331,45 @@ def mission_progress(events, poses, commands, scenario, config, start, end, trig
         if (stage(row) != "action_completed" or stamp(row) is None or start is None or end is None
                 or not start <= stamp(row) <= end):
             continue
-        key = node_id(row.get("uav_id")), row.get("goal_id")
+        i = node_id(row.get("uav_id"))
+        waypoint_index = row.get("waypoint_index")
+        match = re.fullmatch(r"waypoint(\d+):uav(\d+)", str(row.get("goal_id", "")))
+        if waypoint_index is None and match is not None and int(match[2]) == i:
+            waypoint_index = int(match[1])
+        key = i, waypoint_index
         if key in seen:
             continue
-        seen.add(key)
         # Takeoff/vertical goals are not urban inspection points.
-        if row.get("waypoint_index") is None and not str(row.get("goal_id", "")).startswith("waypoint"):
+        if waypoint_index is None:
             continue
+        seen.add(key)
         command = command_index.get(str(row.get("admitted_command_id", row.get("command_id"))))
-        check = replay_dwell(row, poses, config)
+        goal_commands = [c for c in commands if c.get("goal_id") == row.get("goal_id") and c["uav_id"] == i
+            and admitted(c) and c.get("epoch") == row.get("admitted_epoch", row.get("epoch"))
+            and c.get("target_position_m") == RELAY.target(row) and c["admitted_ns"] <= stamp(row)]
+        first_admission = min((c["admitted_ns"] for c in goal_commands), default=None)
+        check = replay_dwell(row, poses, config, first_goal_admission_ns=first_admission)
         chain = (command is not None and admitted(command) and command["target_position_m"] == RELAY.target(row)
                  and command["admitted_ns"] <= stamp(row) and command.get("goal_id") == row.get("goal_id")
                  and command["uav_id"] == key[0] and command["epoch"] == row.get("admitted_epoch", row.get("epoch"))
-                 and command["leader_id"] == node_id(row.get("leader_id")))
+                 and command["leader_id"] == node_id(row.get("leader_id"))
+                 and command.get("lease_valid_until_ns") is not None and stamp(row) < command["lease_valid_until_ns"])
+        route = routes.get(str(i), [])
+        membership = (isinstance(waypoint_index, int) and not isinstance(waypoint_index, bool)
+            and 0 <= waypoint_index < len(route) and RELAY.target(row) is not None
+            and math.dist(tuple(route[waypoint_index]), RELAY.target(row)) <= 1e-7)
+        maneuver_poses = [p for p in poses if p["uav_id"] == i and p["quality"] == "observed"
+            and first_admission is not None and p.get("sample_host_ns") is not None
+            and first_admission <= p["sample_host_ns"] <= stamp(row)]
+        first_pose = maneuver_poses[0] if maneuver_poses else None
+        displacement = max((math.hypot(p["x_m"]-first_pose["x_m"], p["y_m"]-first_pose["y_m"])
+                            for p in maneuver_poses), default=None) if first_pose else None
         check.update(command_id=command["command_id"] if command else None, command_lineage_valid=bool(chain),
-                     waypoint_index=row.get("waypoint_index"), waypoint_id=row.get("waypoint_id"))
+                     configured_waypoint_valid=membership, max_horizontal_displacement_m=displacement,
+                     horizontal_movement_ge5m=displacement >= 5 if displacement is not None else None,
+                     waypoint_index=waypoint_index, waypoint_id=row.get("waypoint_id"))
         checks.append(check)
-        if check["status"] == "verified" and chain:
+        if check["status"] == "verified" and chain and membership:
             completions.append(row)
     progress, physical_resume = {}, {}
     for i in UAVS:
@@ -360,7 +460,9 @@ def analyze(run_dir, output_dir, *, scenario_path=None, plots=False, deadline_ms
     handover = uart_endpoints(commands, trigger, end, complete, valid_recording, initial_leader=initial,
         initial_epoch=initial_epoch, handover=True, handover_observed=bool(selected_after))
     poses = read_poses(run/"logs/node_state.jsonl", start, end, errors)
-    snapshot = scenario_path or run/"configuration/urban_scenario.json"
+    perf, clocks, clock_windows, resources = performance(run, start, end, errors)
+    snapshot = scenario_path or (run/"logs/urban_scenario.json" if (run/"logs/urban_scenario.json").is_file()
+                                 else run/"configuration/urban_scenario.json")
     scenario = RELAY.read_json(Path(snapshot))
     if not scenario:
         errors.append("scenario snapshot missing; planned-waypoint denominator unavailable")
@@ -387,6 +489,9 @@ def analyze(run_dir, output_dir, *, scenario_path=None, plots=False, deadline_ms
         admitted=sum(r["admitted"] for r in after) if return_ns is not None else None,
         admitted_per_offered=sum(r["admitted"] for r in after)/len(after) if after and postreturn_complete else None)
     conflicts = lease_conflicts(events)
+    activation_rows = [r for r in events if stage(r) == "leader_activated" and return_ns is not None
+        and return_ns <= (stamp(r) or -1) <= end and r.get("leader_id") != initial]
+    activation_scopes = sorted({(r.get("leader_id"), r.get("epoch")) for r in activation_rows})
     result = dict(analysis_version=1, run_id=expected_run, raw_run_dir=str(run), recorded_status=common["run_status"],
         recorded_error=common["run_error"], policy=common["policy"], pilot=common["pilot"], observation_window=window,
         trigger=dict(status="observed" if trigger_row else "not_observed", pair=pair, event=trigger_row,
@@ -394,15 +499,17 @@ def analyze(run_dir, output_dir, *, scenario_path=None, plots=False, deadline_ms
         geometry=dict(samples=len(geometry), pairs=sorted({r["pair"] for r in geometry}), transitions=len(transitions),
             LOS_return_host_ns=return_ns, selected_radio_modes=sorted({r.get("radio_state", "") for r in geometry}),
             parameter_sets=sorted({r.get("parameter_set", "") for r in geometry})),
-        rates=common["rates"], uart_after_NLOS=uart, handover_uart=handover,
+        rates=common["rates"], uart_after_NLOS=uart, handover_uart=handover, performance=perf,
         uart_endpoint_label="first post-NLOS update latency; do not call recovery unless delivery impairment is independently established",
         mission_progress=progress, inspection_resume=resume,
-        physical_checks=dict(total=len(checks), verified=sum(r["status"] == "verified" and r["command_lineage_valid"] for r in checks)),
+        physical_checks=dict(total=len(checks), verified=sum(r["status"] == "verified" and r["command_lineage_valid"]
+                             and r["configured_waypoint_valid"] for r in checks)),
         post_LOS_return=postreturn, authority=dict(admission_audit=common["admission_audit"],
             total_UART_admissions=common["admission_total"], unverifiable_admissions=common["unverifiable_admissions"],
             overlapping_issued_grants=conflicts, selections=len(selections), selection_events=selections,
-            activations_after_LOS_return=sum(stage(r) == "leader_activated" and return_ns is not None
-                and return_ns <= (stamp(r) or -1) <= end and r.get("leader_id") != initial for r in events)),
+            role_scopes_activated_after_LOS_return=len(activation_scopes) if return_ns is not None else None,
+            role_scopes_activated_after_LOS_return_ids=activation_scopes if return_ns is not None else None,
+            endpoint_activation_rows_after_LOS_return=len(activation_rows) if return_ns is not None else None),
         provenance=dict(scenario_path=str(snapshot), scenario_sha256=hashlib.sha256(Path(snapshot).read_bytes()).hexdigest() if Path(snapshot).is_file() else None,
             script_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             common_audit_script_sha256=hashlib.sha256(Path(RELAY.__file__).read_bytes()).hexdigest(),
@@ -413,13 +520,16 @@ def analyze(run_dir, output_dir, *, scenario_path=None, plots=False, deadline_ms
     for row in opportunity:
         row["run_id"] = expected_run
     write_rows(out/"metrics/urban_geometry_transitions.csv", transitions,
-        ["pair", "transition", "host_monotonic_ns", "source_sim_time_s", "previous_observed_host_ns", "transition_bracket_s", "geom_los", "radio_state", "blocker_ids", "pathloss_db", "parameter_set"])
+        ["pair", "transition", "host_monotonic_ns", "ns3_time_s", "previous_observed_host_ns", "transition_bracket_s", "geom_los", "radio_state", "blocker_ids", "pathloss_db", "parameter_set"])
     write_rows(out/"metrics/urban_trajectory.csv", poses,
         ["uav_id", "session_id", "source_sim_time_s", "host_monotonic_ns", "sample_host_ns", "quality", "x_m", "y_m", "z_m", "speed_mps", "sample_age_ms", "altitude_datum"])
     write_rows(out/"metrics/urban_physical_checks.csv", checks,
-        ["uav_id", "goal_id", "status", "completed_host_ns", "completed_source_sim_time_s", "dwell_s", "observed_span_s", "samples", "max_gap_s", "max_speed_mps", "max_xy_error_m", "max_z_error_m", "command_id", "command_lineage_valid", "waypoint_index", "waypoint_id"])
+        ["uav_id", "goal_id", "status", "completed_host_ns", "completed_source_sim_time_s", "dwell_s", "observed_span_s", "samples", "max_gap_s", "max_speed_mps", "max_xy_error_m", "max_z_error_m", "command_id", "command_lineage_valid", "configured_waypoint_valid", "first_goal_admission_host_ns", "max_horizontal_displacement_m", "horizontal_movement_ge5m", "waypoint_index", "waypoint_id"])
     write_rows(out/"metrics/urban_opportunities.csv", opportunity,
         ["run_id", "request_id", "uav_id", "offered_host_ns", "scheduled_host_ns", "goal_id", "command_id", "timely", "admitted", "opportunity_to_UART_ms"])
+    write_rows(out/"metrics/urban_clocks.csv", clocks, ["host_monotonic_ns", "source_sim_time_s", "session_id", "fresh_UAVs"])
+    write_rows(out/"metrics/urban_RTF.csv", clock_windows, ["host_monotonic_ns", "source_sim_time_s", "wall_duration_s", "RTF"])
+    write_rows(out/"metrics/urban_resources.csv", resources, ["host_monotonic_ns", "component", "process_count", "sum_cpu_percent_one_core", "sum_process_RSS_bytes"])
     RELAY.write_json(out/"metrics/urban_analysis.json", result)
     if plots:
         plot_run(out, result, poses, scenario, geometry, events)

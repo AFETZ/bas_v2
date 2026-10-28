@@ -25,7 +25,8 @@ Input contract:
   remain distinct in the LOS-only ablation. Positions/frequency stay in raw.
 - `logs/node_state.jsonl`: actual ENU Gazebo odometry, node source simulation
   timestamps, publication/received clocks, velocities and stale flags.
-- An immutable scenario snapshot with five `routes` and physical building boxes;
+- An immutable `logs/urban_scenario.json` snapshot (legacy configuration/ fallback)
+  with five `routes` and physical building boxes;
   explicit `--scenario` is supported if the snapshot is elsewhere. The path and
   SHA256 are included in provenance; absent snapshots give null denominators.
 
@@ -47,10 +48,15 @@ Without packet/application impairment the endpoint is called post-NLOS UART
 latency, not restored control. Per-UAV first updates and all-five under one
 leader/epoch are separate. No actual handover means handover-only endpoint N/A.
 
-Physical completion requires goal/CID/target/epoch/relay consistency and replay
+Physical completion requires configured waypoint index/XYZ membership,
+goal/CID/target/epoch/relay consistency, live authority at completion and replay
 of actual pose samples within the held region for the requested dwell. Repeated
 publications cannot extend dwell; stale intervals/session changes/source gaps
-break it. A post-event refresh of a previously admitted goal does not establish
+break it. Freshness is checked from actual sample/publication clocks, not only
+the stale flag. Dwell starts after the first valid same-goal/epoch admission;
+latest refresh need not start a new dwell. Continuous authority between refreshes
+is not inferred. Actual per-goal and per-UAV horizontal displacement is exported.
+A post-event refresh of a previously admitted goal does not establish
 causation of movement. BRAKE→Guided and motion need their own observations.
 
 An observed endpoint remains observed even if later teardown fails. Valid
@@ -64,6 +70,13 @@ Study-plan output consists of independent seed blocks, four randomized cases
 per block: fixed/failover × geometry/LOS-only. It is not a freeze or execution
 record. Actual flight/source/config signatures and pilot review belong to root.
 Seeds do not ensure equal realized random packet outcomes after policies diverge.
+
+`scripts/product/prepare_urban_study.py plan --output NEW_PATH --repeats 10`
+prepares all56 cases (40 main,12 sensitivity,4 engineering); repeats5 gives36.
+Its `freeze --help` describes the required existing pilot/review/config inputs.
+Freeze refuses overwrite, incomplete/invalid pilots, dirty tracked source and
+nonpinned/missing images. Output includes exact case IDs/config hashes compatible
+with `run_urban_case.py`. It does not run cases or generate scientific approval.
 
 Focused tests: `network/tests/test_urban_analysis.py` uses explicitly synthetic
 fixtures to verify missing delivery, conflicting authority, epoch mixing, false

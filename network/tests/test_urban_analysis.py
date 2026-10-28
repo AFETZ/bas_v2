@@ -176,3 +176,55 @@ def test_runtime_contract_accepts_explicit_geometry_and_rejects_double_pathloss(
     stats["phased_array_spectrum_propagation_model_count"] = 0
     stats["sionna_in_process"] = True
     assert not summary.native_product_runtime_contract(stats, config)["passed"]
+
+
+def test_pose_freshness_is_verified_from_clocks_not_only_stale_flag(tmp_path):
+    row = dict(published_monotonic_ns=10*NS, session_id="fixture", source_sim_time_s=10, coordinate_frame="ENU",
+        nodes=[dict(id="uav1", source_sim_time_s=10, sample_monotonic_ns=9*NS,
+                    position_m=[0,0,10], velocity_enu_mps=[0,0,0], stale=False)])
+    path = tmp_path/"poses.jsonl"
+    path.write_text(json.dumps(row)+"\n")
+    errors = []
+    poses = A.read_poses(path, 9*NS, 11*NS, errors)
+    assert poses[0]["quality"] == "stale_or_future_sample_clock"
+    assert poses[0]["x_m"] is None
+    row["nodes"][0]["sample_monotonic_ns"] = 10*NS+1
+    path.write_text(json.dumps(row)+"\n")
+    assert A.read_poses(path, 9*NS, 11*NS, [])[0]["quality"] == "stale_or_future_sample_clock"
+
+
+def test_physical_goal_cannot_complete_after_lease_or_at_wrong_configured_point(tmp_path):
+    run, scenario = fixture(tmp_path)
+    events = [json.loads(line) for line in (run/"logs/coordination_events.jsonl").read_text().splitlines()]
+    for row in events:
+        if row.get("event") == "action_completed" and row.get("waypoint_index") == 0:
+            row["host_monotonic_ns"] = 66*NS
+    (run/"logs/coordination_events.jsonl").write_text("".join(json.dumps(r)+"\n" for r in events))
+    result = A.analyze(run, tmp_path/"expired", scenario_path=scenario)
+    assert result["physical_checks"]["verified"] == 0
+    for row in events:
+        if row.get("event") == "action_completed" and row.get("waypoint_index") == 0:
+            row["host_monotonic_ns"] = 61*NS
+            row["waypoint_index"] = 10
+    (run/"logs/coordination_events.jsonl").write_text("".join(json.dumps(r)+"\n" for r in events))
+    result = A.analyze(run, tmp_path/"offroute", scenario_path=scenario)
+    assert result["physical_checks"]["verified"] == 0
+    assert all(r["completed_fraction"] == 0 for r in result["mission_progress"].values())
+
+
+def test_pre_admission_pose_dwell_does_not_prove_execution():
+    completion = dict(uav_id=1, goal_id="waypoint0:uav1", source_sim_time_s=13,
+        dwell_s=2, target_position_m=[10,10,12], target_frame="ENU", host_monotonic_ns=13*NS)
+    poses = [dict(uav_id=1, session_id="unit", source_sim_time_s=t, sample_host_ns=t*NS,
+                  quality="observed", x_m=10,y_m=10,z_m=12,speed_mps=0) for t in (11,11.5,12,12.5,13)]
+    assert A.replay_dwell(completion, poses, {}, first_goal_admission_ns=12*NS)["status"] == "not_verified"
+
+
+def test_complete_study_design_contains_unpooled_sensitivity_and_boundary_pairs():
+    spec = importlib.util.spec_from_file_location("urban_prepare", ROOT/"scripts/product/prepare_urban_study.py")
+    prepare = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(prepare)
+    rows = prepare.design()
+    assert len(rows) == len({r["case_id"] for r in rows}) == 56
+    assert [sum(r["cohort"] == c for r in rows) for c in ("main","sensitivity","engineering_boundary")] == [40,12,4]
+    assert len(prepare.design(5)) == 36
