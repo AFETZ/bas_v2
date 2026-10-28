@@ -1,0 +1,11 @@
+run_id,rng_run,policy,critical_uav_id,critical_command_id,T_detect_s,T_select_s,T_lease_s,planned_fence_wait_s,endpoint_activation_jitter_s,T_delivery_s,T_admission_s,T_UART_s,sequence_verified,old_max_issued_expiry_ns,guard_s,all_UART_admission_count,observed_invalid_UART_count,duplicate_UART_CIDs,additive_sum_error_s
+paper-relay-selective-failover-s1-r04,4,failover,5,2:5:1155,0.876966063,0.00010162,1.745350985,1.739317302,0.006033683,1.304199846,0.000147886,3.9267664,True,368844551492537,0.01,2806,0,0,0.0
+paper-relay-selective-fixed-s1-r04,4,fixed,5,1:5:1157,0.897444543,,,,,,0.000189465,61.939726568,,,,2216,0,0,
+paper-relay-selective-fixed-s1-r01,1,fixed,5,1:5:1154,0.970667308,,,,,,0.000134682,61.956937258,,,,2197,0,0,
+paper-relay-selective-failover-s1-r01,1,failover,5,2:5:1101,0.9812624,3.5887e-05,1.749395046,1.742609704,0.006785342,1.251116428,0.000135453,3.981945214,True,369923034361548,0.01,2741,0,0,0.0
+paper-relay-selective-fixed-s1-r05,5,fixed,5,1:5:1157,1.003940549,,,,,,0.000150392,62.940822989,,,,2190,0,0,
+paper-relay-selective-failover-s1-r05,5,failover,5,2:5:1128,0.878403808,4.3712e-05,1.791860599,1.783782119,0.00807848,1.307180611,0.000130384,3.977619114,True,370617717863364,0.01,2782,0,0,0.0
+paper-relay-selective-fixed-s1-r02,2,fixed,5,1:5:1143,0.792576557,,,,,,0.000153447,61.983007298,,,,2203,0,0,
+paper-relay-selective-failover-s1-r02,2,failover,5,2:5:1127,0.94467991,3.6178e-05,1.816699562,1.815096968,0.001602594,1.218079075,0.000145232,3.979639957,True,374811723741127,0.01,2796,0,0,0.0
+paper-relay-selective-failover-s1-r03,3,failover,5,2:5:1144,0.987846094,3.4254e-05,1.783299922,1.781903996,0.001395926,1.179589078,0.000197039,3.950966387,True,375163396125520,0.01,2795,0,0,4.440892098500626e-16
+paper-relay-selective-fixed-s1-r03,3,fixed,5,1:5:1185,0.969923193,,,,,,0.000148197,62.960309165,,,,2228,0,0,

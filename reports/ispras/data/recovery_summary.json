@@ -1,0 +1,57 @@
+{
+  "measured_source": "8e16ec223e895c11891e6e7d7c39dff8cee39cac",
+  "audit_script_sha256": "cad6ac03658f537b4925c3ec48596f30f80e3f70ad7360aea8b0af5a9a64b205",
+  "audit_base_source": "bb026a052a2474df29bee3603cc98af27592e207",
+  "command": "python3 reports/ispras/tools/recovery_timing.py --raw-root /home/bas/bas_v2-paper-live/runs/native-radio-realtime --output reports/ispras/data",
+  "definition": "T_lease uses observed activation at the critical endpoint; T_delivery includes refresh/issuer wait. delivery is application follower_receive, not PHY arrival. Log timestamp jitter remains included.",
+  "summary": {
+    "T_detect_s": {
+      "n": 5,
+      "mean": 0.933831655,
+      "median": 0.94467991,
+      "min": 0.876966063,
+      "max": 0.987846094,
+      "sample_sd": 0.05383043192481982
+    },
+    "T_select_s": {
+      "n": 5,
+      "mean": 5.03302e-05,
+      "median": 3.6178e-05,
+      "min": 3.4254e-05,
+      "max": 0.00010162,
+      "sample_sd": 2.8904061794149282e-05
+    },
+    "T_lease_s": {
+      "n": 5,
+      "mean": 1.7773212228,
+      "median": 1.783299922,
+      "min": 1.745350985,
+      "max": 1.816699562,
+      "sample_sd": 0.029998997309130464
+    },
+    "T_delivery_s": {
+      "n": 5,
+      "mean": 1.2520330076,
+      "median": 1.251116428,
+      "min": 1.179589078,
+      "max": 1.307180611,
+      "sample_sd": 0.05514632758052351
+    },
+    "T_admission_s": {
+      "n": 5,
+      "mean": 0.0001511988,
+      "median": 0.000145232,
+      "min": 0.000130384,
+      "max": 0.000197039,
+      "sample_sd": 2.6594583089418796e-05
+    },
+    "T_UART_s": {
+      "n": 5,
+      "mean": 3.9633874144,
+      "median": 3.977619114,
+      "min": 3.9267664,
+      "max": 3.981945214,
+      "sample_sd": 0.024012803656694125
+    }
+  }
+}

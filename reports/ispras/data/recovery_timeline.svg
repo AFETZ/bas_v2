@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="420" viewBox="0 0 1000 420">
+<rect width="1000" height="420" fill="white"/>
+<g font-family="sans-serif" font-size="14">
+<text x="30" y="25">Observed critical-command timeline; main selective failover, n=5</text>
+<text x="10" y="98">Run 1</text>
+<rect x="100" y="80" width="196.25248" height="24" fill="#888"><title>T_detect_s: 0.981262400s</title></rect>
+<rect x="296.25248" y="80" width="0.3" height="24" fill="#c49b35"><title>T_select_s: 0.000035887s</title></rect>
+<rect x="296.25965740000004" y="80" width="349.87900920000004" height="24" fill="#6a83c5"><title>T_lease_s: 1.749395046s</title></rect>
+<rect x="646.1386666" y="80" width="250.2232856" height="24" fill="#258c86"><title>T_delivery_s: 1.251116428s</title></rect>
+<rect x="896.3619522" y="80" width="0.3" height="24" fill="#c95b5b"><title>T_admission_s: 0.000135453s</title></rect>
+<text x="906.3890428" y="98">3.981945s</text>
+<text x="10" y="143">Run 2</text>
+<rect x="100" y="125" width="188.935982" height="24" fill="#888"><title>T_detect_s: 0.944679910s</title></rect>
+<rect x="288.93598199999997" y="125" width="0.3" height="24" fill="#c49b35"><title>T_select_s: 0.000036178s</title></rect>
+<rect x="288.9432176" y="125" width="363.3399124" height="24" fill="#6a83c5"><title>T_lease_s: 1.816699562s</title></rect>
+<rect x="652.28313" y="125" width="243.61581499999997" height="24" fill="#258c86"><title>T_delivery_s: 1.218079075s</title></rect>
+<rect x="895.898945" y="125" width="0.3" height="24" fill="#c95b5b"><title>T_admission_s: 0.000145232s</title></rect>
+<text x="905.9279914" y="143">3.979640s</text>
+<text x="10" y="188">Run 3</text>
+<rect x="100" y="170" width="197.5692188" height="24" fill="#888"><title>T_detect_s: 0.987846094s</title></rect>
+<rect x="297.5692188" y="170" width="0.3" height="24" fill="#c49b35"><title>T_select_s: 0.000034254s</title></rect>
+<rect x="297.5760696" y="170" width="356.65998440000004" height="24" fill="#6a83c5"><title>T_lease_s: 1.783299922s</title></rect>
+<rect x="654.2360540000001" y="170" width="235.9178156" height="24" fill="#258c86"><title>T_delivery_s: 1.179589078s</title></rect>
+<rect x="890.1538696000001" y="170" width="0.3" height="24" fill="#c95b5b"><title>T_admission_s: 0.000197039s</title></rect>
+<text x="900.1932774000002" y="188">3.950966s</text>
+<text x="10" y="233">Run 4</text>
+<rect x="100" y="215" width="175.3932126" height="24" fill="#888"><title>T_detect_s: 0.876966063s</title></rect>
+<rect x="275.39321259999997" y="215" width="0.3" height="24" fill="#c49b35"><title>T_select_s: 0.000101620s</title></rect>
+<rect x="275.41353660000004" y="215" width="349.070197" height="24" fill="#6a83c5"><title>T_lease_s: 1.745350985s</title></rect>
+<rect x="624.4837335999999" y="215" width="260.8399692" height="24" fill="#258c86"><title>T_delivery_s: 1.304199846s</title></rect>
+<rect x="885.3237028" y="215" width="0.3" height="24" fill="#c95b5b"><title>T_admission_s: 0.000147886s</title></rect>
+<text x="895.35328" y="233">3.926766s</text>
+<text x="10" y="278">Run 5</text>
+<rect x="100" y="260" width="175.68076159999998" height="24" fill="#888"><title>T_detect_s: 0.878403808s</title></rect>
+<rect x="275.6807616" y="260" width="0.3" height="24" fill="#c49b35"><title>T_select_s: 0.000043712s</title></rect>
+<rect x="275.689504" y="260" width="358.3721198" height="24" fill="#6a83c5"><title>T_lease_s: 1.791860599s</title></rect>
+<rect x="634.0616238" y="260" width="261.4361222" height="24" fill="#258c86"><title>T_delivery_s: 1.307180611s</title></rect>
+<rect x="895.497746" y="260" width="0.3" height="24" fill="#c95b5b"><title>T_admission_s: 0.000130384s</title></rect>
+<text x="905.5238228000001" y="278">3.977619s</text>
+<line x1="100" y1="70" x2="100" y2="300" stroke="#ddd"/>
+<text x="100" y="325">0s</text>
+<line x1="300" y1="70" x2="300" y2="300" stroke="#ddd"/>
+<text x="300" y="325">1s</text>
+<line x1="500" y1="70" x2="500" y2="300" stroke="#ddd"/>
+<text x="500" y="325">2s</text>
+<line x1="700" y1="70" x2="700" y2="300" stroke="#ddd"/>
+<text x="700" y="325">3s</text>
+<line x1="900" y1="70" x2="900" y2="300" stroke="#ddd"/>
+<text x="900" y="325">4s</text>
+<rect x="15" y="350" width="14" height="14" fill="#888"/>
+<text x="34" y="362">T_detect_s</text>
+<rect x="210" y="350" width="14" height="14" fill="#c49b35"/>
+<text x="229" y="362">T_select_s</text>
+<rect x="405" y="350" width="14" height="14" fill="#6a83c5"/>
+<text x="424" y="362">T_lease_s</text>
+<rect x="600" y="350" width="14" height="14" fill="#258c86"/>
+<text x="619" y="362">T_delivery_s</text>
+<rect x="795" y="350" width="14" height="14" fill="#c95b5b"/>
+<text x="814" y="362">T_admission_s</text>
+<text x="15" y="400">Same critical UAV/CID throughout; microscopic select/UART segments have minimum visible width.</text>
+</g></svg>
