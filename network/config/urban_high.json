@@ -212,10 +212,11 @@
   "mission": {
     "telemetry_max_age_s": 0.5,
     "speed_mps": 3.0,
-    "waypoint_dwell_s": 2.0,
+    "waypoint_dwell_s": 3.0,
     "world_ground_reference_z_m": 0.195,
     "ground_reference_source": "iris/model.sdf base_collision poseZ=-.08 minus box halfheight .115; ground topZ=0, contact residual not corrected",
-    "route_design_reason": "Inspect northern facades and finish in northern radio corridor; reserve stayswest/north. Prior returnroute pilot retained separately; protocol and all coefficients unchanged."
+    "route_design_reason": "Inspect northern facades and finish in northern radio corridor; reserve stayswest/north. Prior returnroute pilot retained separately; protocol and all coefficients unchanged.",
+    "waypoint_dwell_reason": "3s radio-telemetry progression hold provides margin for separate2s actual-pose completion test and asynchronous clocks; fixed before main freeze. Physical2s criterion unchanged."
   },
   "radio": {
     "parameter_set": "hypothesis_high_v1",
