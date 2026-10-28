@@ -1,0 +1,24 @@
+{
+  "source_head": "8e16ec223e895c11891e6e7d7c39dff8cee39cac",
+  "audit_base": "bb026a052a2474df29bee3603cc98af27592e207",
+  "primary_inputs": "raw GCS/UAV JSONL, offered CSV, native fault CSV, run config/summary",
+  "pose_replay": false,
+  "counts": {
+    "offered": 27000,
+    "unique_offered_CIDs": 22472,
+    "offered_unsent": 4528,
+    "unique_created_goals": 1350,
+    "unique_offered_goals": 1350,
+    "timely": 22254,
+    "all_UART": 75058,
+    "unique_UART": 75058,
+    "target_window": 22254,
+    "target_outside_window": 636,
+    "non_target_window": 22335,
+    "non_target_outside_window": 29833,
+    "duplicate_admitted": 0,
+    "invalid_authority_or_age": 0
+  },
+  "discrepancies": [],
+  "run_count": 30
+}

@@ -1,0 +1,3 @@
+policy,n,fault_to_goal_creation_s,goal_creation_to_first_command_creation_s,first_command_creation_to_UART_s,goal_creation_to_first_UART_s,first_UART_to_completion_s,fault_to_completion_s,source
+fixed,5,54.968840707000005,7.3765174376000004,0.010037509,7.3865549466000004,5.359328114999999,67.71472376860001,retained independent decomposition CSV; selected CID/goal identity checked against new primary completion replay
+failover,5,14.972628,0.9728301846,0.0105410554,0.98337124,5.3461937939999995,21.302193034000002,retained independent decomposition CSV; selected CID/goal identity checked against new primary completion replay

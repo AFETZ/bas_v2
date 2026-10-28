@@ -1,0 +1,7 @@
+nominal_duration_s,policy,n,completed,failed,timely_per_offered_mean,T_UART_mean,T_goal_mean,source
+0.5,fixed,3,2,1,0.987037037037037,1.2609290003333333,18.603036194999998,"retained separate18 export, not a new primary replay"
+0.5,failover,3,3,0,0.9892592592592592,1.2706445686666668,18.612891856333334,"retained separate18 export, not a new primary replay"
+2,fixed,3,2,1,0.9796296296296297,3.602386173333333,19.167530154999998,"retained separate18 export, not a new primary replay"
+2,failover,3,2,1,0.9803703703703702,3.943489608666667,18.623997183666667,"retained separate18 export, not a new primary replay"
+10,fixed,3,3,0,0.9311111111111111,11.616732784666667,20.952707907,"retained separate18 export, not a new primary replay"
+10,failover,3,3,0,0.977037037037037,3.9394097723333332,18.614542956333334,"retained separate18 export, not a new primary replay"
