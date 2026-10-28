@@ -1,0 +1,233 @@
+{
+  "scope": "independent fixed input/design and pilot/native-proof consistency review; no main outcome analysis",
+  "freeze_path": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/freeze.json",
+  "freeze_sha256": "8590f67b3acd2ce536e06eacfa518da65f024da4d73b02435aafc87c0945daed",
+  "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+  "review_script_sha256": "915fed8d8c893ac5eaa18e961179dc822a9d2021208115e9ac60ac20d9490f14",
+  "checks": {
+    "exact56_cases": true,
+    "unique_run_ids": true,
+    "contiguous_orders": true,
+    "main_four_case_grid": true,
+    "auxiliary_exact_policy_pairs": true,
+    "common_conditions_inside_blocks": true,
+    "ten_distinct_main_rng_blocks": true,
+    "main_rng_declaration_matches_cases": true,
+    "all_fixed_horizons240": true,
+    "predeclared_endpoints": true,
+    "cleanup60_and_full_parameters": true,
+    "random_order_reproduced": true,
+    "all_attached_inputs_match_actual_bytes": true,
+    "physical_ablation_exact_except_radio_mode": true,
+    "nominal_vs_control_modes": true,
+    "nominal_route_hold3": true,
+    "nominal_speed3": true,
+    "actual_native_binary_matches_freeze": true,
+    "integration_HEAD_unchanged": true,
+    "native_four_followers_proof_consistent_with_raw_logs": true,
+    "urban-staged-pilot05-failover_window240_offers1200": true,
+    "urban-staged-pilot05-failover_physical2_route3": true,
+    "urban-staged-pilot06-fixed_window240_offers1200": true,
+    "urban-staged-pilot06-fixed_physical2_route3": true,
+    "freeze_precedes_first_controller": true,
+    "first_main_postbuild_binary_hash_matches_freeze": true,
+    "first_main_source_identity_matches_freeze": true,
+    "validation_matches_actual_freeze": true
+  },
+  "issues": [],
+  "cohort_counts": {
+    "main": 40,
+    "sensitivity": 12,
+    "engineering_boundary": 4
+  },
+  "main_block_RNG_pairs": {
+    "seed1-r03": [
+      1,
+      3
+    ],
+    "seed1-r04": [
+      1,
+      4
+    ],
+    "seed1-r07": [
+      1,
+      7
+    ],
+    "seed1-r08": [
+      1,
+      8
+    ],
+    "seed1-r02": [
+      1,
+      2
+    ],
+    "seed1-r06": [
+      1,
+      6
+    ],
+    "seed1-r05": [
+      1,
+      5
+    ],
+    "seed1-r01": [
+      1,
+      1
+    ],
+    "seed1-r09": [
+      1,
+      9
+    ],
+    "seed1-r10": [
+      1,
+      10
+    ]
+  },
+  "artifact_checks": [
+    {
+      "kind": "scenario",
+      "path": "/home/bas/bas_v2-paper-live/network/config/urban_high.json",
+      "matches_frozen_bytes_and_sha256": true
+    },
+    {
+      "kind": "scenario",
+      "path": "/home/bas/bas_v2-paper-live/network/config/urban_los_only.json",
+      "matches_frozen_bytes_and_sha256": true
+    },
+    {
+      "kind": "scenario",
+      "path": "/home/bas/bas_v2-paper-live/network/config/urban_low.json",
+      "matches_frozen_bytes_and_sha256": true
+    },
+    {
+      "kind": "scenario",
+      "path": "/home/bas/bas_v2-paper-live/network/config/urban_no_candidate.json",
+      "matches_frozen_bytes_and_sha256": true
+    },
+    {
+      "kind": "scenario",
+      "path": "/home/bas/bas_v2-paper-live/network/config/urban_north_inspection.json",
+      "matches_frozen_bytes_and_sha256": true
+    },
+    {
+      "kind": "scenario",
+      "path": "/home/bas/bas_v2-paper-live/network/config/urban_short_occlusion.json",
+      "matches_frozen_bytes_and_sha256": true
+    },
+    {
+      "kind": "review",
+      "path": "/home/bas/bas_v2-paper-live/reports/ispras/urban_ns3/PILOT_PAIR_REVIEW.md",
+      "matches_frozen_bytes_and_sha256": true
+    },
+    {
+      "kind": "review",
+      "path": "/home/bas/bas_v2-paper-live/reports/ispras/urban_ns3/STUDY_AGGREGATOR_REVIEW.md",
+      "matches_frozen_bytes_and_sha256": true
+    },
+    {
+      "kind": "review",
+      "path": "/home/bas/bas_v2-paper-live/reports/ispras/urban_ns3/staged_native_probe_review.json",
+      "matches_frozen_bytes_and_sha256": true
+    },
+    {
+      "kind": "pilot_analysis",
+      "path": "/home/bas/bas_v2-paper-live/runs/urban-ns3-dev/staged-pilot05-final-analysis/metrics/urban_analysis.json",
+      "matches_frozen_bytes_and_sha256": true
+    },
+    {
+      "kind": "pilot_analysis",
+      "path": "/home/bas/bas_v2-paper-live/runs/urban-ns3-dev/staged-pilot06-final-analysis/metrics/urban_analysis.json",
+      "matches_frozen_bytes_and_sha256": true
+    },
+    {
+      "kind": "base_environment",
+      "path": "/home/bas/bas_v2-paper-live/runs/paper-live-20261026/campaign/freeze.json",
+      "matches_frozen_bytes_and_sha256": true
+    }
+  ],
+  "pilot_windows": [
+    {
+      "run_id": "urban-staged-pilot05-failover",
+      "status": "completed",
+      "error": null,
+      "offers": 1200,
+      "observed_source_span_s": 240.009,
+      "physical_hold_s": 2,
+      "route_hold_s": 3.0,
+      "raw_action_completed_count": 27,
+      "land_timeout_s": 180
+    },
+    {
+      "run_id": "urban-staged-pilot06-fixed",
+      "status": "failed",
+      "error": "cleanup ScenarioError: landing/automatic disarm not observed for all five",
+      "offers": 1200,
+      "observed_source_span_s": 240.009,
+      "physical_hold_s": 2,
+      "route_hold_s": 3.0,
+      "raw_action_completed_count": 15,
+      "land_timeout_s": 180
+    }
+  ],
+  "native_proof_path": "/home/bas/bas_v2-paper-live/reports/ispras/urban_ns3/pilot_pair/native_epoch2.json",
+  "native_proof_sha256": "82c804a32eb18033c18f2039874689a926eac84ea091405081009a4ab29cff91",
+  "native_commands": [
+    {
+      "command_id": "2:1:2190",
+      "destination_id": 1,
+      "command_hops_raw_log_consistent": [
+        true,
+        true
+      ],
+      "actual_UART_return_hash_consistent": true,
+      "created_after_CP1_NLOS_s": 4.220377784,
+      "admitted_after_CP1_NLOS_s": 4.232879016
+    },
+    {
+      "command_id": "2:2:2191",
+      "destination_id": 2,
+      "command_hops_raw_log_consistent": [
+        true,
+        true
+      ],
+      "actual_UART_return_hash_consistent": true,
+      "created_after_CP1_NLOS_s": 4.220589658,
+      "admitted_after_CP1_NLOS_s": 4.233805569
+    },
+    {
+      "command_id": "2:3:2192",
+      "destination_id": 3,
+      "command_hops_raw_log_consistent": [
+        true,
+        true
+      ],
+      "actual_UART_return_hash_consistent": true,
+      "created_after_CP1_NLOS_s": 4.220847537,
+      "admitted_after_CP1_NLOS_s": 4.235325154
+    },
+    {
+      "command_id": "2:5:2194",
+      "destination_id": 5,
+      "command_hops_raw_log_consistent": [
+        true,
+        true
+      ],
+      "actual_UART_return_hash_consistent": true,
+      "created_after_CP1_NLOS_s": 4.221029656,
+      "admitted_after_CP1_NLOS_s": 4.236257156
+    }
+  ],
+  "native_raw_log_sha256": {
+    "/home/bas/bas_v2-paper-live/runs/native-radio-realtime/urban-staged-pilot05-failover/logs/coordination_gcs.jsonl": "02b14dc4eebedac0e1489d318423e11a79d9a5c62d096aa24dbc1114d3614d5a",
+    "/home/bas/bas_v2-paper-live/runs/native-radio-realtime/urban-staged-pilot05-failover/logs/coordination_uav1.jsonl": "cbb2cdfdb381544f0d407415d53a00c5174f49798ac9799e70ee98d2b05f2f69",
+    "/home/bas/bas_v2-paper-live/runs/native-radio-realtime/urban-staged-pilot05-failover/logs/coordination_uav2.jsonl": "9d541d9aee391fe04502f37fbe583ff9865ed3f9421da26f46156d9e2d6dfc5f",
+    "/home/bas/bas_v2-paper-live/runs/native-radio-realtime/urban-staged-pilot05-failover/logs/coordination_uav3.jsonl": "e3a15de7b69c11b0d032cb70ff439ae0b120b27d40fca60ce31d618293411203",
+    "/home/bas/bas_v2-paper-live/runs/native-radio-realtime/urban-staged-pilot05-failover/logs/coordination_uav4.jsonl": "64e15e8a4929b4c224319736d5120cd0e92194d16817336ec36022189b426aac",
+    "/home/bas/bas_v2-paper-live/runs/native-radio-realtime/urban-staged-pilot05-failover/logs/coordination_uav5.jsonl": "5b1168e42da762d9d607042f0469af0cddbee50f4a3087ae2c770a7eae8216d0"
+  },
+  "limits": [
+    "No Docker/image-inspect/build or full-PCAP reread; image identity is checked as frozen metadata only.",
+    "Native proof crosschecked against actual UART/GCS logs and file identity; packet bytes were previously read by the native inspector, not rescanned here.",
+    "This does not independently recalculate all pilot physical dwell traces or any main-series effect.",
+    "Unique RNG blocks are a design property, not a claim that shared-host scheduling noise is absent."
+  ]
+}
