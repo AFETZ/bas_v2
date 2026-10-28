@@ -5,6 +5,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 IMAGE="${BAS_CONTAINER_IMAGE:-multiagent_simulation:latest}"
 CONTAINER_NAME="${BAS_NATIVE_FIVE_CONTAINER_NAME:-bas-v2-native-radio-five-uav}"
 SCENARIO_KEY="${BAS_NATIVE_FIVE_SCENARIO:-town01}"
+# Gazebo server, bridges, tracker and viewer share this host. Pin upstream
+# Transport to loopback instead of auto-advertising a VPN/external interface.
+export GZ_IP=127.0.0.1
 GUI="${BAS_NATIVE_FIVE_GUI:-0}"
 CAPTURE_IMAGES="${BAS_NATIVE_CAPTURE_IMAGES:-1}"
 CAPTURE_STORAGE="${BAS_NATIVE_CAPTURE_STORAGE:-disk}"
@@ -146,6 +149,7 @@ run_in_container() {
     "${gpu_args[@]}" \
     "${gui_args[@]}" \
     -e BAS_SIMULATION_MODE -e BAS_LOCKSTEP_STEP_MS -e BAS_LOCKSTEP_TIMEOUT_S \
+    -e GZ_IP \
     -e BAS_NATIVE_FIVE_IN_CONTAINER=1 \
     -e BAS_CONTAINER_IMAGE_ID="$image_id" \
     -e BAS_SOURCE_HEAD="$(git -C "$ROOT_DIR" rev-parse HEAD)" \
@@ -657,6 +661,7 @@ PY
   printf 'cmake_version=%s\n' "$(cmake --version | head -n1 | awk '{print $3}')"
   printf 'ros_domain_id=%s\n' "$ROS_DOMAIN_ID"
   printf 'gz_partition=%s\n' "$GZ_PARTITION"
+  printf 'gz_ip=%s\n' "$GZ_IP"
   printf 'scenario_key=%s\nscenario=%s\nmap_id=%s\nworld=%s\nscene=%s\n' \
     "$SCENARIO_KEY" "$SCENARIO" "$MAP_ID" "$WORLD" "$SCENE"
   printf 'gui=%s\n' "$GUI"
