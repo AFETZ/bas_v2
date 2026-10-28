@@ -65,9 +65,13 @@ WIFI_AGGREGATION="${BAS_NATIVE_WIFI_AGGREGATION:-$WIFI_AGGREGATION_DEFAULT}"
 }
 PROPAGATION_PROFILE="${BAS_NATIVE_PROPAGATION_PROFILE:-sionna}"
 case "$PROPAGATION_PROFILE" in
-  sionna|hybrid|friis) ;;
+  sionna|hybrid|friis|geometry_logdistance) ;;
   *) printf 'Unsupported propagation profile: %s\n' "$PROPAGATION_PROFILE" >&2; exit 2 ;;
 esac
+REQUIRES_RT=0
+[[ "$PROPAGATION_PROFILE" != sionna && "$PROPAGATION_PROFILE" != hybrid ]] || REQUIRES_RT=1
+GEOMETRY_CONFIG="${BAS_NATIVE_URBAN_CONFIG:-network/config/urban_two_building.json}"
+[[ "$GEOMETRY_CONFIG" == /* ]] || GEOMETRY_CONFIG="$ROOT_DIR/$GEOMETRY_CONFIG"
 export BAS_SIMULATION_MODE="${BAS_SIMULATION_MODE:-realtime}"
 export BAS_LOCKSTEP_STEP_MS="${BAS_LOCKSTEP_STEP_MS:-20}"
 export BAS_LOCKSTEP_TIMEOUT_S="${BAS_LOCKSTEP_TIMEOUT_S:-60}"
@@ -83,12 +87,18 @@ step, timeout = int(sys.argv[1]), float(sys.argv[2])
 assert 1 <= step <= 50 and math.isfinite(timeout) and timeout > 0, 'Invalid lockstep step/timeout'
 PYMODE
 
-[[ "$SCENARIO_KEY" == town01 || "$SCENARIO_KEY" == rock_demo || "$SCENARIO_KEY" == customer ]] || {
-  printf 'Scenario must be town01, rock_demo or customer: %s\n' "$SCENARIO_KEY" >&2
+[[ "$SCENARIO_KEY" == town01 || "$SCENARIO_KEY" == rock_demo || "$SCENARIO_KEY" == customer || "$SCENARIO_KEY" == urban ]] || {
+  printf 'Scenario must be town01, rock_demo, customer or urban: %s\n' "$SCENARIO_KEY" >&2
   exit 2
 }
 [[ "$GUI" == 0 || "$GUI" == 1 ]] || { printf 'BAS_NATIVE_FIVE_GUI must be 0 or 1.\n' >&2; exit 2; }
 [[ "$CAPTURE_IMAGES" == 0 || "$CAPTURE_IMAGES" == 1 ]] || { printf 'BAS_NATIVE_CAPTURE_IMAGES must be 0 or 1.\n' >&2; exit 2; }
+if [[ "$SCENARIO_KEY" == urban ]]; then
+  [[ "$PROPAGATION_PROFILE" == geometry_logdistance && "$FAULT_PROFILE" == none && "$COORDINATION_POLICY" != off ]] || {
+    printf 'Urban mission requires geometry_logdistance, explicit coordinator policy and no injected fault.\n' >&2; exit 2;
+  }
+  BAS_NATIVE_EXPERIMENT_PROFILE=urban
+fi
 
 run_in_container() {
   command -v docker >/dev/null 2>&1 || { printf 'Docker is required.\n' >&2; return 2; }
@@ -104,8 +114,17 @@ run_in_container() {
   if [[ "$SCENARIO_KEY" == town01 ]]; then
     python3 "$ROOT_DIR/scripts/product/prepare_town01_gazebo.py"
   fi
+  if [[ "$SCENARIO_KEY" == urban ]]; then
+    python3 "$ROOT_DIR/scripts/product/prepare_urban_gazebo.py" --config "$GEOMETRY_CONFIG" --output "$ROOT_DIR/.external/urban_ns3"
+  fi
+  local container_geometry="$GEOMETRY_CONFIG"
+  if [[ "$GEOMETRY_CONFIG" == "$ROOT_DIR/"* ]]; then
+    container_geometry="/workspace/multiagent_simulation/${GEOMETRY_CONFIG#"$ROOT_DIR/"}"
+  elif [[ "$PROPAGATION_PROFILE" == geometry_logdistance ]]; then
+    printf 'Urban config must be inside the mounted repository: %s\n' "$GEOMETRY_CONFIG" >&2; return 2
+  fi
   local -a gpu_args=()
-  if [[ "$PROPAGATION_PROFILE" != friis || "$GUI" == 1 || "$CAPTURE_IMAGES" == 1 ]] && \
+  if [[ "$REQUIRES_RT" == 1 || "$GUI" == 1 || "$CAPTURE_IMAGES" == 1 ]] && \
     command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
     gpu_args=(--gpus all -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=graphics,utility,compute)
   fi
@@ -132,6 +151,7 @@ run_in_container() {
     -e BAS_SOURCE_HEAD="$(git -C "$ROOT_DIR" rev-parse HEAD)" \
     -e BAS_SOURCE_DIRTY="$(git -C "$ROOT_DIR" status --porcelain | wc -l)" \
     -e BAS_NATIVE_PROPAGATION_PROFILE="${BAS_NATIVE_PROPAGATION_PROFILE:-sionna}" \
+    -e BAS_NATIVE_URBAN_CONFIG="$container_geometry" \
     -e BAS_NATIVE_WIFI_TOPOLOGY="$WIFI_TOPOLOGY" \
     -e BAS_NATIVE_WIFI_EXPLICIT_BAR="$WIFI_EXPLICIT_BAR" \
     -e BAS_NATIVE_WIFI_AGGREGATION="$WIFI_AGGREGATION" \
@@ -231,10 +251,10 @@ if [[ "${BAS_NATIVE_FLIGHT_DIAGNOSTIC:-0}" == 1 ]]; then
 fi
 if [[ "$COORDINATION_POLICY" != off ]]; then
   [[ "$BAS_SIMULATION_MODE" == realtime && "$UAV_COUNT" == 5 &&
-     "$PROPAGATION_PROFILE" == friis && "$WIFI_TOPOLOGY" == adhoc &&
+     ( "$PROPAGATION_PROFILE" == friis || "$PROPAGATION_PROFILE" == geometry_logdistance ) && "$WIFI_TOPOLOGY" == adhoc &&
      "$SCENARIO_MODE" == product && "$ACTIVE_UART_CHANNELS" == control &&
      -z "${BAS_NATIVE_EXTERNAL_CONFIG:-}" && -z "${BAS_NATIVE_SOURCES:-}" ]] || {
-    printf 'Coordination requires five realtime UAVs, explicit Friis/ad-hoc, control UART only, and no other scenario mode.\n' >&2
+    printf 'Coordination requires five realtime UAVs, explicit Friis or geometry_logdistance/ad-hoc, control UART only, and no other scenario mode.\n' >&2
     exit 2
   }
   SCENARIO_MODE="relay_experiment"
@@ -281,7 +301,9 @@ PATCH_FILE="$ROOT_DIR/network/ns3/patches/mr2608-spike-compatibility.patch"
 REALTIME_CACHE_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-realtime-scene-cache.patch"
 PHASED_ARRAY_ADAPTER_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-spectrumwifi-phased-array-adapter.patch"
 LOCKSTEP_TAP_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-lockstep-tap-read.patch"
-if [[ "$SCENARIO_KEY" == customer ]]; then
+if [[ "$SCENARIO_KEY" == urban ]]; then
+  SCENARIO="$ROOT_DIR/.external/urban_ns3/scenario.yaml"
+elif [[ "$SCENARIO_KEY" == customer ]]; then
   SCENARIO="$ROOT_DIR/network/config/scenario_5uav_customer_native_product.yaml"
 elif [[ "$SCENARIO_KEY" == rock_demo ]]; then
   SCENARIO="$ROOT_DIR/network/config/scenario_5uav_rock_demo_native_product.yaml"
@@ -353,7 +375,7 @@ for required_file in "$ROOT_DIR/scripts/product/capture_effective_config.py" \
   "$PHASED_ARRAY_ADAPTER_PATCH" "$LOCKSTEP_TAP_PATCH" "$RADIO_CONFIG" "$WORLD" "$CAMERA_FRAGMENT" "$SITL_DEFAULTS"; do
   [[ -f "$required_file" ]] || { printf 'Missing input: %s\n' "$required_file" >&2; exit 2; }
 done
-if [[ "$PROPAGATION_PROFILE" != friis && ! -f "$SCENE" ]]; then
+if [[ "$REQUIRES_RT" == 1 && ! -f "$SCENE" ]]; then
   printf 'Missing RT scene: %s\n' "$SCENE" >&2; exit 2
 fi
 export GZ_SIM_RESOURCE_PATH="${GZ_SIM_RESOURCE_PATH:-}:$(dirname "$WORLD")"
@@ -478,7 +500,7 @@ fi
 PYTHONPATH="$PYTHON_DEPS" python3 - "$PROPAGATION_PROFILE" <<'PY'
 import sys
 from importlib.metadata import version
-if sys.argv[1] != "friis":
+if sys.argv[1] in ("sionna", "hybrid"):
     assert version("sionna") == "1.2.0"
     assert version("sionna-rt") == "1.2.0"
 assert version("pybind11") == "2.11.1"
@@ -568,8 +590,13 @@ fi
 export PATH="$PYTHON_TOOLING/bin:$PATH"
 export PYTHONPATH="$PYTHON_TOOLING:$PYTHON_DEPS:${PYTHONPATH:-}"
 cp "$PROJECT_SOURCE" "$UPSTREAM_SOURCE"
-cp "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" "$ROOT_DIR/network/ns3/scratch/native-live-state.h" "$ROOT_DIR/network/ns3/scratch/native-lockstep.h" "$NS3_DIR/scratch/"
+cp "$ROOT_DIR/network/ns3/scratch/native-geometry-loss.h" "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" "$ROOT_DIR/network/ns3/scratch/native-live-state.h" "$ROOT_DIR/network/ns3/scratch/native-lockstep.h" "$NS3_DIR/scratch/"
 source_args=()
+if [[ "$PROPAGATION_PROFILE" == geometry_logdistance ]]; then
+  [[ -f "$GEOMETRY_CONFIG" && "$FAULT_PROFILE" == none ]] || { printf 'Geometry radio requires explicit JSON and no injected fault.\n' >&2; exit 2; }
+  cp "$GEOMETRY_CONFIG" "$RUN_DIR/logs/urban_scenario.json"
+  source_args+=(--geometryConfig="$RUN_DIR/logs/urban_scenario.json" --geometryCsv="$RUN_DIR/logs/geometry_links.csv")
+fi
 if [[ -n "${BAS_NATIVE_SOURCES:-}" ]]; then
   python3 "$ROOT_DIR/scripts/product/prepare_native_sources.py" \
     --config "$ROOT_DIR/$BAS_NATIVE_SOURCES" --output "$RUN_DIR/logs/native_sources.json"
@@ -581,7 +608,7 @@ if [[ -n "${BAS_NATIVE_EXTERNAL_CONFIG:-}" && "$SCENARIO_MODE" != latency_diagno
 fi
 if [[ "${BAS_NATIVE_FIVE_SKIP_BUILD:-0}" == 1 ]]; then
   [[ -x "$BINARY" ]] || { printf 'Requested binary reuse but binary is absent.\n' >&2; exit 2; }
-  [[ "$BINARY" -nt "$PROJECT_SOURCE" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-live-state.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-lockstep.h" && "$BINARY" -nt "$REALTIME_CACHE_PATCH" && "$BINARY" -nt "$LOCKSTEP_TAP_PATCH" ]] || {
+  [[ "$BINARY" -nt "$PROJECT_SOURCE" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-geometry-loss.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-live-state.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-lockstep.h" && "$BINARY" -nt "$REALTIME_CACHE_PATCH" && "$BINARY" -nt "$LOCKSTEP_TAP_PATCH" ]] || {
     printf 'Binary predates native source/header; rerun without BAS_NATIVE_FIVE_SKIP_BUILD.\n' >&2; exit 2;
   }
   printf 'Reused focused native target after exact project/upstream source synchronization.\n' \
@@ -640,6 +667,8 @@ PY
   printf 'radio_config=%s\nradio_backend=%s\n' "$RADIO_CONFIG" "$RADIO_BACKEND"
   printf 'native_sources=%s\nexternal_endpoint_config=%s\n' "${BAS_NATIVE_SOURCES:-none}" "${BAS_NATIVE_EXTERNAL_CONFIG:-none}"
   printf 'profile=%s\n' "$RADIO_PROFILE"
+  printf 'selected_propagation_profile=%s\nsionna_runtime_enabled=%s\n' "$PROPAGATION_PROFILE" "$REQUIRES_RT"
+  [[ "$PROPAGATION_PROFILE" != geometry_logdistance ]] || printf 'geometry_config=%s\ngeometry_radio_model=upstream_LogDistance_selected_by_3D_Buildings\ngeometry_antenna_offset_enu_m=0,0,0\n' "$RUN_DIR/logs/urban_scenario.json"
   printf 'technology_specific_modem=%s\n' "$TECHNOLOGY_SPECIFIC_MODEM"
   printf 'uav_count=%s\nradio_node_count=%s\nshared_spectrum_channels=1\n' "$UAV_COUNT" "$((UAV_COUNT + 1))"
   printf 'carrier_hz=%s\nchannel_number=%s\nchannel_width_mhz=%s\nwifi_data_mode=%s\nwifi_control_mode=%s\n' \
@@ -660,8 +689,12 @@ PY
     "$SIONNA_REFRACTION" "$SIONNA_SYNTHETIC_ARRAY" "$SIONNA_SEED"
   printf 'sionna_max_number_of_paths=%s\nsionna_cache_jitter_fraction=%s\n' \
     "$SIONNA_MAX_NUMBER_OF_PATHS" "$SIONNA_CACHE_JITTER_FRACTION"
-  printf 'cache_policy=displacement_velocity_orientation_or_time\nchannel_state_max_age_s=%s\nendpoint_displacement_threshold_m=%s\n' \
-    "$CHANNEL_STATE_MAX_AGE_S" "$UPDATE_DISTANCE_THRESHOLD_M"
+  if [[ "$PROPAGATION_PROFILE" == geometry_logdistance ]]; then
+    printf 'cache_policy=none_evaluate_actual_positions_per_packet\ngeometry_diagnostic_sample_s=0.1\ngeometry_transition_check_s=0.02\n'
+  else
+    printf 'cache_policy=displacement_velocity_orientation_or_time\nchannel_state_max_age_s=%s\nendpoint_displacement_threshold_m=%s\n' \
+      "$CHANNEL_STATE_MAX_AGE_S" "$UPDATE_DISTANCE_THRESHOLD_M"
+  fi
   printf 'readiness_lag_max_ms=%s\nreadiness_consecutive_samples=%s\n' \
     "$READINESS_LAG_MAX_MS" "$READINESS_CONSECUTIVE_SAMPLES"
   printf 'neighbor_discovery_mode=%s\n' "$NEIGHBOR_DISCOVERY_MODE"
@@ -704,8 +737,11 @@ capture_effective_configuration() {
     --config "native_neighbors=$RUN_DIR/logs/static_neighbors.txt"
     --config "native_capture_storage=$RUN_DIR/logs/native_capture_storage.json"
   )
-  if [[ "$PROPAGATION_PROFILE" == friis ]]; then
+  if [[ "$REQUIRES_RT" == 0 ]]; then
     config_args+=(--not-enabled sionna)
+    if [[ "$PROPAGATION_PROFILE" == geometry_logdistance ]]; then
+      config_args+=(--config "geometry_radio=$RUN_DIR/logs/urban_scenario.json")
+    fi
   else
     config_args+=(--config "sionna_scene=$SCENE")
   fi
@@ -1235,6 +1271,7 @@ if [[ "$COORDINATION_POLICY" != off ]]; then
     --experiment-profile "${BAS_NATIVE_EXPERIMENT_PROFILE:-main}"
     --parameter-workers "${BAS_NATIVE_PARAMETER_WORKERS:-1}"
   )
+  [[ "$SCENARIO_KEY" != urban ]] || experiment_args+=(--urban-scenario "$RUN_DIR/logs/urban_scenario.json")
   [[ "${BAS_NATIVE_EXPERIMENT_PILOT:-0}" != 1 ]] || experiment_args+=(--pilot)
   [[ "${BAS_NATIVE_PARAMETER_SNAPSHOTS:-0}" != 1 ]] || experiment_args+=(--parameter-snapshots)
   run_with_native_watchdog ip netns exec ams-gcs env PYTHONPATH="$ROOT_DIR:${PYTHONPATH:-}" \

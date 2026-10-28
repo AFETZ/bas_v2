@@ -32,6 +32,7 @@
 #include "native-spectrum-sources.h"
 #include "native-live-state.h"
 #include "native-lockstep.h"
+#include "native-geometry-loss.h"
 #include <memory>
 
 #include <algorithm>
@@ -152,6 +153,7 @@ std::string g_runtimeHeartbeat;
 bool g_radiosIsolated{false};
 std::string g_propagationProfile{"sionna"};
 bool g_runtimeOperational{false};
+Ptr<bas::GeometryLogDistance> g_geometry;
 bool g_liveStateValid{false};
 int64_t g_radioEpochNs{0};
 double g_stateMaxAgeS{0.5};
@@ -816,6 +818,7 @@ class LivePositionSource
                 LogEvent("live_pose", g_nodeNames[i], "", 0, ageMs,
                     "measured_pose_age_ms;source_sim_s="+std::to_string(snapshot[i].sourceTime));
             }
+            if (g_geometry) g_geometry->ObserveAll();
             ++g_poseSnapshots;
             g_liveStateValid=true;
         }
@@ -1270,7 +1273,8 @@ WriteStats(const std::string& path)
            << "  \"fault_default_extra_loss_db\": 0,\n"
            << "  \"fault_active_at_stop\": " << (g_faultActive ? "true" : "false") << ",\n"
            << "  \"tap_ingress_segment\": {\"type\": \"local_fast_csma\", \"radio_medium\": false},\n"
-           << "  \"cache_policy\": \"displacement_velocity_orientation_or_time\",\n"
+           << "  \"cache_policy\": \"" << (g_geometry ? "none_actual_positions_per_packet" :
+                "displacement_velocity_orientation_or_time") << "\",\n"
            << "  \"simulation_mode\": \"" << g_executionMode << "\",\n"
            << "  \"coupling_step_ms\": " << g_couplingStepMs << ",\n"
            << "  \"completed_lockstep_steps\": " << g_completedSteps << ",\n"
@@ -1354,13 +1358,20 @@ WriteStats(const std::string& path)
            << "  \"custom_packet_error_model\": false,\n"
            << "  \"custom_scheduler\": false,\n"
            << "  \"sionna_in_process\": "
-           << (g_propagationProfile != "friis" ? "true" : "false") << ",\n"
+           << ((g_propagationProfile == "sionna" || g_propagationProfile == "hybrid") ? "true" : "false") << ",\n"
+           << "  \"sionna_solver_enabled\": "
+           << ((g_propagationProfile == "sionna" || g_propagationProfile == "hybrid") ? "true" : "false") << ",\n"
            << "  \"selected_propagation_profile\": \"" << g_propagationProfile << "\",\n"
+           << "  \"scalar_base_propagation_model_count\": " << (g_geometry ? 1 : 0) << ",\n"
+           << "  \"geometry_radio_mode\": \"" << (g_geometry ? g_geometry->mode : "not_enabled") << "\",\n"
+           << "  \"geometry_parameter_set\": \"" << (g_geometry ? g_geometry->parameterSet : "not_enabled") << "\",\n"
+           << "  \"geometry_packet_evaluations\": " << (g_geometry ? g_geometry->PacketEvaluations() : 0) << ",\n"
+           << "  \"geometry_observation_rows\": " << (g_geometry ? g_geometry->RecordedRows() : 0) << ",\n"
            << "  \"phased_array_spectrum_propagation_model_count\": "
            << g_phasedArraySpectrumPropagationModels.size() << ",\n"
            << "  \"rx_psd_propagation_model\": \""
            << (g_phasedArraySpectrumPropagationModels.empty()
-                   ? "none"
+                   ? (g_geometry ? "bas::GeometryLogDistance" : "none")
                    : g_phasedArraySpectrumPropagationModels.front())
            << "\",\n"
            << "  \"sionna_drives_rx_psd\": " << (sionnaDrivesRxPsd ? "true" : "false")
@@ -1385,7 +1396,7 @@ WriteStats(const std::string& path)
            << ", \"cache_expiry_jitter_fraction\": " << g_sionnaCacheJitterFraction
            << "},\n"
            << "  \"packet_outcome_affected\": "
-           << (sionnaDrivesRxPsd ? "true" : "false") << "\n"
+           << ((sionnaDrivesRxPsd || g_geometry) ? "true" : "false") << "\n"
            << "}\n";
 }
 
@@ -1410,6 +1421,7 @@ main(int argc, char* argv[])
     std::string wifiControlMode = "ErpOfdmRate6Mbps";
     bool wifiAggregation = true;
     std::string sourceConfig;
+    std::string geometryConfig, geometryCsv;
     std::string attributeDump;
     std::string wifiSsid = "bas-native-radio";
     uint16_t wifiChannelNumber = 1;
@@ -1465,6 +1477,8 @@ main(int argc, char* argv[])
                      ignoredLegacyPacketOutcomeClaim);
     command.AddValue("solverProfile", "Sionna solver profile identifier", solverProfile);
     command.AddValue("wifiDataMode", "Constant 802.11n data mode", wifiDataMode);
+    command.AddValue("geometryConfig", "Explicit building/empirical parameter JSON", geometryConfig);
+    command.AddValue("geometryCsv", "Actual geometry/pathloss observation CSV", geometryCsv);
     command.AddValue("sources", "Explicit resolved WaveformGenerator source config", sourceConfig);
     command.AddValue("attributeDump", "Optional native ConfigStore RawText snapshot path", attributeDump);
     command.AddValue("wifiControlMode", "Constant 802.11n control mode", wifiControlMode);
@@ -1491,7 +1505,7 @@ main(int argc, char* argv[])
     command.AddValue("eventCsv", "Native radio and position event CSV", eventCsv);
     command.AddValue("statsFile", "Final native radio counters", statsFile);
     command.AddValue("readyFile", "Readiness file", readyFile);
-    command.AddValue("propagationProfile", "Explicit sionna, friis or hybrid", g_propagationProfile);
+    command.AddValue("propagationProfile", "Explicit sionna, friis, hybrid or geometry_logdistance", g_propagationProfile);
     command.AddValue("phaseFile", "Current product flight phase file", phaseFile);
     command.AddValue("duration", "Maximum ns-3 simulation duration in seconds", duration);
     command.AddValue("executionMode", "realtime or lockstep", g_executionMode);
@@ -1577,14 +1591,19 @@ main(int argc, char* argv[])
                     "tapUavs count must match uavCount (got "
                         << uavTapNames.size() << ", expected " << uavCount << ")");
     NS_ABORT_MSG_IF(g_propagationProfile != "sionna" && g_propagationProfile != "friis" &&
-                    g_propagationProfile != "hybrid", "invalid explicit propagation profile");
-    const bool requiresRt = g_propagationProfile != "friis";
+                    g_propagationProfile != "hybrid" && g_propagationProfile != "geometry_logdistance",
+                    "invalid explicit propagation profile");
+    const bool requiresRt = g_propagationProfile == "sionna" || g_propagationProfile == "hybrid";
+    const bool geometryProfile = g_propagationProfile == "geometry_logdistance";
+    NS_ABORT_MSG_IF(geometryProfile && (geometryConfig.empty() || geometryCsv.empty() ||
+                    !sourceConfig.empty() || g_faultProfile != "none"),
+                    "geometry profile requires explicit geometryConfig/geometryCsv and no injected losses/sources");
     NS_ABORT_MSG_IF(g_faultProfile != "none" && g_faultProfile != "selective" &&
                     g_faultProfile != "total_GCS", "invalid explicit fault profile");
     NS_ABORT_MSG_IF(g_faultMasterId < 1 || g_faultMasterId > uavCount ||
                     !std::isfinite(g_faultExtraLossDb) || g_faultExtraLossDb <= 0.0,
                     "invalid fault master ID or added pair loss");
-    NS_ABORT_MSG_IF(g_faultProfile != "none" && (requiresRt || radioBackend != "wifi"),
+    NS_ABORT_MSG_IF(g_faultProfile != "none" && (g_propagationProfile != "friis" || radioBackend != "wifi"),
                     "pair-loss experiment currently requires explicit native Friis Wi-Fi");
     NS_ABORT_MSG_IF(positionFile.empty() || readyFile.empty() || phaseFile.empty(),
                     "positionFile, readyFile, and phaseFile are required");
@@ -1625,12 +1644,14 @@ main(int argc, char* argv[])
     g_flushMaxDelayMs = flushMaxDelayMs;
     g_readinessLagMaxMs = readinessLagMaxMs;
     g_readinessConsecutiveSamples = readinessConsecutiveSamples;
+    if (requiresRt) {
     Config::SetDefault("ns3::SionnaRtChannelModel::UpdatePeriod",
                        TimeValue(Seconds(channelStateMaxAgeS)));
     Config::SetDefault("ns3::SionnaRtChannelModel::UpdateDistanceThreshold",
                        DoubleValue(updateDistanceThresholdM));
     Config::SetDefault("ns3::SionnaRtChannelModel::UpdateJitterFraction",
                        DoubleValue(sionnaCacheJitterFraction));
+    }
 
     g_nodeNames.push_back("cp");
     for (uint32_t index = 1; index <= uavCount; ++index)
@@ -1705,7 +1726,17 @@ main(int argc, char* argv[])
         solver.seed = sionnaSeed;
         sionna->SetRtPathSolverConfig(solver);
     }
-    if (sourceConfig.empty() && g_propagationProfile == "sionna")
+    if (geometryProfile)
+    {
+        g_geometry=CreateObject<bas::GeometryLogDistance>();
+        g_geometry->Load(geometryConfig,carrierHz,geometryCsv);
+        g_geometry->Bind(mobility);
+        channel->AddPropagationLossModel(g_geometry);
+        LogEvent("geometry_propagation_binding", "ns3", "", 0, 1,
+                 "scalar=bas::GeometryLogDistance;native=ns3::LogDistancePropagationLossModel;"
+                 "condition=ns3::BuildingsChannelConditionModel;no_spectrum_base_loss=true");
+    }
+    else if (sourceConfig.empty() && g_propagationProfile == "sionna")
         channel->AddPhasedArraySpectrumPropagationLossModel(sionna);
     else
     {
@@ -1720,7 +1751,7 @@ main(int argc, char* argv[])
         LogEvent("source_propagation_dispatch", "ns3", "", 0, router->sources.size(),
                  "wrapper=bas::SourcePropagation;selected_profile=" + g_propagationProfile + ";one_model_per_signal=true");
     }
-    g_phasedArraySpectrumPropagationModels.push_back(g_propagationProfile == "sionna"
+    if (!geometryProfile) g_phasedArraySpectrumPropagationModels.push_back(g_propagationProfile == "sionna"
         ? sionna->GetInstanceTypeId().GetName() : (g_propagationProfile == "friis"
             ? "ns3::FriisSpectrumPropagationLossModel" : "bas::ExplicitNativeSionnaFriisSelection"));
     LogEvent("rx_psd_model_binding",
@@ -1729,7 +1760,8 @@ main(int argc, char* argv[])
              0,
              static_cast<double>(g_phasedArraySpectrumPropagationModels.size()),
              "channel=ns3::MultiModelSpectrumChannel;sole_model=" +
-                 g_phasedArraySpectrumPropagationModels.front() + ";effect=received_psd");
+                 (geometryProfile ? std::string("bas::GeometryLogDistance") :
+                  g_phasedArraySpectrumPropagationModels.front()) + ";effect=received_psd");
 
     NetDeviceContainer radioDevices;
     if (radioBackend == "aloha")
@@ -2065,6 +2097,7 @@ main(int argc, char* argv[])
         g_lockstep.reset();
     }
     std::filesystem::remove(g_runtimeHeartbeat);
+    if (g_geometry) g_geometry->Close();
     Simulator::Destroy();
     WriteStats(statsFile);
     FlushEvents();
