@@ -15,6 +15,8 @@ def main():
     parser.add_argument("--study", type=Path, required=True)
     parser.add_argument("--freeze", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--input-root", type=Path,
+                        help="Explicit base for repository-relative analysis/controller paths")
     args = parser.parse_args()
     study = json.loads(args.study.read_text())
     freeze = json.loads(args.freeze.read_text())
@@ -29,6 +31,8 @@ def main():
         study_json=str(args.study.resolve()), per_run_table=False, figures=[],
         status="presentation_inputs_only; no claim that all attempts completed successfully",
         source_sha256=dict(study=hashlib.sha256(args.study.read_bytes()).hexdigest(), freeze=expected))
+    if args.input_root:
+        result["input_root"] = str(args.input_root.resolve())
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2) + "\n")
     print(args.output)

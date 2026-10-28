@@ -10,7 +10,7 @@ PRIMARY_METRICS = ("timely_per_offered", "completed_waypoint_fraction")
 METRIC_LABELS = {
     "timely_per_offered": "Timely/offered, п.п.",
     "completed_waypoint_fraction": "Точки/план, п.п.",
-    "restricted_post_NLOS_UART_60s": "Ограниченное отсутствие UART, с",
+    "restricted_post_NLOS_UART_60s": "min(T_UART,60), с",
 }
 
 

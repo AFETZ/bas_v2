@@ -37,7 +37,12 @@ def resolved(path, parent):
 
 
 def fmt(value, places=3):
-    return "—" if value is None or value == "" else f"{float(value):.{places}f}".replace(".", ",")
+    if value is None or value == "":
+        return "—"
+    number = float(value)
+    if round(number, places) == 0:
+        number = 0.0
+    return f"{number:.{places}f}".replace(".", ",")
 
 
 class Revision:
@@ -46,12 +51,25 @@ class Revision:
         self.inputs = {}
         self.base = args.manifest.resolve().parent if args.manifest else HERE
         self.manifest = self.read_json(args.manifest) if args.manifest else {"kind": "preparation"}
+        if args.final and args.supplement:
+            raise ValueError("supplement.md is an archived preparation source, not the final manuscript")
+        if self.manifest.get("figure_manifest"):
+            rendered = self.read_json(resolved(self.manifest["figure_manifest"], self.base))
+            if args.final and (rendered.get("batch_complete") is not True
+                               or rendered.get("preview") is not False or rendered.get("not_rendered")):
+                raise ValueError("final manuscript requires the complete measured figure batch")
+            self.manifest["figures"] = rendered.get("figures", [])
+        for name in self.manifest.get("evidence_sources", []):
+            path = resolved(name, self.base)
+            self.inputs[str(path)] = sha(path)
         self.kind = self.manifest.get("kind", "preparation")
         if self.kind not in ("preparation", "engineering_pilot", "partial_series", "frozen_series"):
             raise ValueError("unknown dataset kind")
         self.freeze = self.read_json(resolved(self.manifest["freeze_path"], self.base)) if self.manifest.get("freeze_path") else {}
         self.study_path = resolved(self.manifest["study_json"], self.base) if self.manifest.get("study_json") else None
         self.study = self.read_json(self.study_path) if self.study_path else None
+        self.input_root = resolved(self.manifest["input_root"], self.base) if self.manifest.get("input_root") else (
+            self.study_path.parent if self.study_path else self.base)
         self.runs = []
         for index, entry in enumerate(self.manifest.get("analyses", []), 1):
             path = resolved(entry["path"], self.base)
@@ -60,8 +78,10 @@ class Revision:
         seen = {run["run_id"] for _, _, run in self.runs}
         if self.study:
             for index, record in enumerate(self.study.get("runs", []), 1):
-                path = resolved(record["input_paths"]["analysis"], self.study_path.parent)
+                path = resolved(record["input_paths"]["analysis"], self.input_root)
                 if path.is_file() and record["run_id"] not in seen:
+                    if sha(path) != record.get("input_sha256", {}).get("analysis"):
+                        raise ValueError(f"{record['run_id']}: analysis changed since aggregate; re-export")
                     result = self.read_json(path)
                     if result.get("run_id") != record["run_id"]:
                         raise ValueError("study/per-run identity mismatch")
@@ -74,7 +94,7 @@ class Revision:
             self.read_json(freeze)
             controllers = {}
             for record in self.study.get("runs", []):
-                path = resolved(record["input_paths"]["controller"], self.study_path.parent)
+                path = resolved(record["input_paths"]["controller"], self.input_root)
                 if not path.is_file():
                     raise ValueError(f"missing final controller: {record['run_id']}")
                 controllers[record["run_id"]] = self.read_json(path)
@@ -91,7 +111,7 @@ class Revision:
         STYLE.configure(self.doc)
         self.doc.sections[0].header.paragraphs[0].text = "Восстановление управления и геометрическое экранирование"
         self.doc.core_properties.title = "Anonymous UAV relay manuscript: geometry extension"
-        self.doc.core_properties.modified = datetime(2026, 10, 28, tzinfo=timezone.utc)
+        self.doc.core_properties.modified = datetime(2026, 10, 29, tzinfo=timezone.utc)
         self.table_number, self.figure_number = 0, 0
 
     def read_json(self, path):
@@ -178,10 +198,10 @@ class Revision:
             "preparation": "Новая основная городская серия в данном черновике не представлена. Численные эффекты политики, интервалы и вывод об успешном восстановлении не заполнены. Это каркас методики и представления результатов.",
             "engineering_pilot": "Ниже представлены инженерные пилоты. Они не включены в оценку эффекта замороженной основной серии и не устанавливают воспроизводимый средний выигрыш failover.",
             "partial_series": "Ниже представлены доступные попытки ещё не завершённой серии. Неуспешные и неполные окна сохранены. Итоговый эффект по завершённому плану пока не заявляется.",
-            "frozen_series": "Ниже представлены попытки отдельно замороженной городской серии. Статус запуска, полнота окна, отсутствие события и цензурирование остаются различимыми. Наличие failed не является основанием удалить попытку.",
+            "frozen_series": "Следующие таблицы относятся к основной части новой серии; вспомогательные когорты рассмотрены отдельно. Средние вычислены по полным измерительным окнам с сохранением статуса failed.",
         }
         self.para(descriptions[self.kind], "ispAnotation")
-        if self.manifest.get("source_commit"):
+        if self.manifest.get("source_commit") and self.kind != "frozen_series":
             self.para("Версия новой реализации: " + str(self.manifest["source_commit"]) + ".")
         if self.manifest.get("probe_review"):
             probe = self.read_json(resolved(self.manifest["probe_review"], self.base))
@@ -228,10 +248,6 @@ class Revision:
 
     def study_results(self):
         study = self.study
-        self.para(f"В экспортированном новом наборе: {study['planned_attempts']} запланированных попыток, "
-                  f"{study['observed_attempts']} наблюдённых, {study['failed_attempts']} failed и "
-                  f"{study['valid_full_window_attempts']} допустимых полных окон. Failed после полного окна "
-                  "остаётся failed, хотя его сетевое наблюдение может быть допустимо. Неполное окно не получает нулевой прогресс.")
         cell_rows = study_inputs.cells(study)
         effect_rows = study_inputs.contrasts(study, study_inputs.PRIMARY_METRICS + ("restricted_post_NLOS_UART_60s",))
         interaction_rows = study_inputs.interactions(study)
@@ -239,15 +255,13 @@ class Revision:
         stages = study_inputs.stage_counts(study, analyses)
         self.presentation_tables = dict(cells=cell_rows, contrasts=effect_rows,
                                        interactions=interaction_rows, stage_counts=stages)
-        names = {"main": "main", "sensitivity": "sensitivity", "engineering_boundary": "boundary"}
-        self.table(["Когорта / модель", "Радио / политика", "План / failed / valid", "Timely, % (n)", "Точки, % (n)"],
-            [[f"{names.get(r['cohort'], r['cohort'])}/{r['parameter_variant']}/{r['scenario_variant']}",
-              r["radio_mode"] + "/" + r["policy"], f"{r['planned']}/{r['failed']}/{r['eligible']}",
+        self.table(["Радио / политика", "Попытки / failed / полные", "Timely, % (n)", "Точки, % (n)"],
+            [[r["radio_mode"] + "/" + r["policy"], f"{r['planned']}/{r['failed']}/{r['eligible']}",
               (fmt(100*r["timely_per_offered"]) + f" ({r['timely_per_offered_n']})") if r["timely_per_offered"] is not None else "—",
               (fmt(100*r["completed_waypoint_fraction"]) + f" ({r['completed_waypoint_fraction_n']})") if r["completed_waypoint_fraction"] is not None else "—"]
-             for r in cell_rows],
-            "Новая серия; средние по допустимым полным окнам, n — число наблюдений показателя. Вспомогательные когорты описательные.",
-            "New study; means over eligible complete windows, with metric-specific n. Auxiliary cohorts are descriptive.")
+             for r in cell_rows if r["cohort"] == "main"],
+            "Основная серия: средние полных окон; n — число наблюдений. Failed не означает отсутствие пригодного измерительного окна.",
+            "Main study: complete-window means, with metric-specific n. A failed attempt may retain a valid measurement window.")
         def interval_text(value):
             return "—" if value is None else "[" + "; ".join(fmt(x) for x in value) + "]"
         self.table(["Радиорежим / показатель", "Полных / план пар", "Failover−fixed", "95% интервал", "Bounds пропусков"],
@@ -261,15 +275,14 @@ class Revision:
               interval_text(r["interval_95"]), interval_text(r["missing_bounds"])] for r in interaction_rows],
             "Разность эффектов geometry−LOS-only требует четырёх случаев одного блока. Отсутствующее значение не заменено нулём.",
             "Geometry-minus-LOS-only policy interaction requires all four cases of a seed block. Missing is not zero.")
-        self.table(["Радио / политика", "n stage / valid", "Offered / created", "App receive", "UART / validUART", "Цели"],
-            [[r["radio_mode"] + "/" + r["policy"], f"{r['complete_stage_runs']}/{r['eligible_runs']}",
-              f"{r['offered']} / {r['target_CIDs_created_in_window']}" if r["offered"] is not None else "—",
-              r["follower_application_receive_CIDs"],
-              f"{r['UART_write_end_CIDs']} / {r['audited_valid_UART_CIDs']}" if r["UART_write_end_CIDs"] is not None else "—",
+        self.table(["Радио / политика (n)", "Offered", "Создано CID", "App / UART", "Точки"],
+            [[r["radio_mode"] + "/" + r["policy"] + f" ({r['complete_stage_runs']})",
+              r["offered"], r["target_CIDs_created_in_window"],
+              f"{r['follower_application_receive_CIDs']} / {r['UART_write_end_CIDs']}" if r["UART_write_end_CIDs"] is not None else "—",
               r["independently_verified_unique_inspection_goals"]] for r in stages if r["cohort"] == "main"],
             "Суммы по полным stage-экспортам основной серии. App receive — валидированный прикладной приём CID; это не PHY Rx/ACK. Цели — уникальные waypoint.",
             "Sums over complete stage exports of the main study. Application CID receipt is not PHY reception or ACK; goals are unique waypoints.")
-        self.para("Сетевые счётчики выше относятся к target CID, созданным в измерительном окне, с проверенной идентичностью run/UAV/CID/epoch/relay, payload и цели. Общий счёт UART включает также служебные кадры и приводится в полных артефактах. Native PHY-доказательство обеих передач и обратной телеметрии получено отдельно для всех четырёх follower диагностической пары; оно не подменяет покадровый аудит всех попыток новой серии.")
+        self.para("Счётчики CID относятся к целевым командам, созданным в окне, с проверенной идентичностью run/UAV/CID/epoch/relay, payload и цели. Все показанные UART-допуски прошли аудит полномочий. Native PHY-путь обеих передач и обратной телеметрии разобран отдельно для четырёх follower диагностической пары; это не покадровый аудит всех 56 попыток.")
 
     def figures(self):
         for entry in self.manifest.get("figures", []):
@@ -284,7 +297,8 @@ class Revision:
         source = HERE / "src" / ("supplement.md" if self.args.supplement else "manuscript.md")
         self.inputs[str(source)] = sha(source)
         self.inputs[str(Path(__file__))] = sha(Path(__file__))
-        for path in (PAPER / "tools/build_docx.py", PAPER / "template/official_russian_template.dotm"):
+        for path in (HERE / "study_inputs.py", PAPER / "tools/build_docx.py",
+                     PAPER / "template/official_russian_template.dotm"):
             self.inputs[str(path)] = sha(path)
         for line in source.read_text().splitlines():
             if not line.strip():

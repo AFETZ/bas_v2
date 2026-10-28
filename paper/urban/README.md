@@ -1,9 +1,14 @@
-# Анонимное дополнение: геометрическое NLOS и горизонтальный осмотр
+# Анонимная статья: геометрическое NLOS и горизонтальное движение
 
-Основной новый черновик — `src/manuscript.md`: сокращённое введение/обзор, новые
-разделы 3–4, отдельные проверенные old30/sensitivity18 и новая городская серия.
-`src/supplement.md` сохраняет промежуточное дополнение разделов 3–6; флаг
-`--supplement` выбирает его. `paper/src` и прежние DOCX/PDF не меняются.
+Основной текст — `src/manuscript.md`: архитектура, методика и фактические исходы
+56 замороженных попыток, отдельно от прежних old30/sensitivity18/candidate8.
+Сохранены 36 completed, 20 failed и 55 допустимых полных окон; прерванная попытка
+не заменена. Средние, парные эффекты, интервалы и interaction берутся из сохранённого
+агрегата; четыре научных рисунка строятся по реальным данным. Прежние таблицы и
+рисунки не дублируются в новой редакции. Пагинация проверяется по итоговому PDF.
+`src/supplement.md` — архивный подготовительный текст до основной серии, который
+не входит в итоговый комплект. Флаг `--supplement` выбирает только архивный проект;
+его сочетание с `--final` отклоняется. `paper/src` и прежние DOCX/PDF не меняются.
 Без manifest результаты новой городской серии явно обозначены
 как **не представленные/не измеренные в новой основной серии**. Таблицы и картинки
 не заполняются нулями, ожидаемыми эффектами либо результатами старых когорт.
@@ -35,9 +40,16 @@ Manifest содержит `kind`: `preparation`, `engineering_pilot`, `partial_s
 `figures`: список `{path,caption_ru,caption_en,measured:true}`;
 Допускается также формат renderer `{paths:{png,svg,pdf},caption_ru,caption_en,measured:true}`;
 builder вставляет PNG, остальные форматы сохраняются как исходные научные артефакты.
+Вместо копии списка `figure_manifest` может указывать на фактический manifest
+renderer: итоговая сборка требует `batch_complete:true`, `preview:false` и отсутствие
+невыпущенных рисунков. Файл перечитывается при сборке, его хэш фиксируется.
+`evidence_sources` содержит дополнительные источники численного текста (CSV/JSON):
+их хэши записываются, а громоздкие строки не вставляются в основной документ.
 `tables`: список `{csv,caption_ru,caption_en}` к готовым численным таблицам.
 Дополнительно `study_json` указывает на реальный `urban_study.json` агрегатора.
 Он добавляет все доступные per-run exports через их `input_paths.analysis`;
+`input_root` явно задаёт базу этих путей и путей controllers, если они относительны
+корню интеграционного репозитория, а не каталогу `study_json`.
 planned/failed/missing строки остаются в агрегированном представлении. Таблицы
 содержат число valid окон, средние показателей, парные эффекты, interaction и
 отдельные worst/best bounds пропусков. CI переносятся из агрегатора и не
@@ -86,7 +98,8 @@ python3 -m unittest discover -s paper/urban -p 'test_study_inputs.py' -v
 
 ```bash
 python3 paper/urban/prepare_manifest.py --study FINAL_AGGREGATE/urban_study.json \
-  --freeze runs/urban-ns3-20261028/freeze.json --output paper/urban/results-manifest.json
+  --freeze runs/urban-ns3-20261028/freeze.json --input-root /home/bas/bas_v2-paper-live \
+  --output paper/urban/results-manifest.json
 ```
 
 Реальные графики/подписи добавить после построения по контракту `FIGURES.md`.
