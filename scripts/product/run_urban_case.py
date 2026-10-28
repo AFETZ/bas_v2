@@ -28,7 +28,8 @@ def main():
     if not args.run_id or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for c in args.run_id):
         p.error("run-id must be a simple unique basename")
     raw = ROOT / "runs/native-radio-realtime" / args.run_id
-    controllers = ROOT / "runs/urban-ns3-dev/controllers"
+    controllers = (args.freeze.resolve().parent / "controllers" if args.freeze
+                   else ROOT / "runs/urban-ns3-dev/controllers")
     controllers.mkdir(parents=True, exist_ok=True)
     ledger = controllers / (args.run_id + ".json")
     if raw.exists() or ledger.exists():
@@ -65,6 +66,7 @@ def main():
                BAS_NATIVE_EXPERIMENT_PROFILE="urban", BAS_NATIVE_EXPERIMENT_DURATION_S=str(args.duration),
                BAS_NATIVE_EXPERIMENT_PILOT="1" if args.pilot else "0", BAS_NATIVE_PARAMETER_SNAPSHOTS="1" if args.parameters else "0",
                BAS_NATIVE_PARAMETER_WORKERS=str(args.parameter_workers),
+               BAS_NATIVE_LAND_TIMEOUT_S="60",
                BAS_NATIVE_FIVE_SKIP_BUILD="0" if args.build else "1", BAS_NATIVE_RNG_SEED="1", BAS_NATIVE_RNG_RUN=str(args.rng_run))
     argv = ["flock", "--nonblock", "--conflict-exit-code", "75", "/tmp/bas-paper-runtime.lock",
             "./network/ns3/run_native_radio_five_uav.sh"]

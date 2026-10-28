@@ -1,0 +1,34 @@
+{
+  "scope": "diagnostic pilots, not pooled with the future frozen series; n1 per policy, no CI",
+  "script_sha256": "88248bc1c57ca15071471b43496eba5e2ef282a79d59995de83e726ced9853c1",
+  "inputs": [
+    {
+      "path": "runs/urban-ns3-dev/staged-pilot05-final-analysis/metrics/urban_analysis.json",
+      "sha256": "a0547c41aa906126f52f5bed320315ec37638c4b11b24774006eabd0fb0adf8c",
+      "raw_run_dir": "/home/bas/bas_v2-paper-live/runs/native-radio-realtime/urban-staged-pilot05-failover",
+      "analysis_provenance": {
+        "command_audit": "reuses existing relay admission/issued-authority/payload lineage audit; urban geometry and pose dwell independently replayed",
+        "common_audit_script_sha256": "83dea947c54a78d26ee81da661edc8afdb581b099639aded3ef1e4a60f6eba60",
+        "physical_evidence": "Gazebo odometry; not command ACK or network receipt; stale/missing intervals are not filled",
+        "scenario_path": "/home/bas/bas_v2-paper-live/runs/native-radio-realtime/urban-staged-pilot05-failover/logs/urban_scenario.json",
+        "scenario_sha256": "a7c12ddf5bd3608a389593099d960323fa2943c53a5cacf7df5a9ae7d7a0f88d",
+        "script_sha256": "38645cc5386bd88f8964cfbb65b841e40cf3d87308677bb2cff09e50402dc6bf"
+      }
+    },
+    {
+      "path": "runs/urban-ns3-dev/staged-pilot06-final-analysis/metrics/urban_analysis.json",
+      "sha256": "46b5c2ecef1b854f9815a250e62e7f594bc3d19b3767abc3a44be0155e150e44",
+      "raw_run_dir": "/home/bas/bas_v2-paper-live/runs/native-radio-realtime/urban-staged-pilot06-fixed",
+      "analysis_provenance": {
+        "command_audit": "reuses existing relay admission/issued-authority/payload lineage audit; urban geometry and pose dwell independently replayed",
+        "common_audit_script_sha256": "83dea947c54a78d26ee81da661edc8afdb581b099639aded3ef1e4a60f6eba60",
+        "physical_evidence": "Gazebo odometry; not command ACK or network receipt; stale/missing intervals are not filled",
+        "scenario_path": "/home/bas/bas_v2-paper-live/runs/native-radio-realtime/urban-staged-pilot06-fixed/logs/urban_scenario.json",
+        "scenario_sha256": "a7c12ddf5bd3608a389593099d960323fa2943c53a5cacf7df5a9ae7d7a0f88d",
+        "script_sha256": "38645cc5386bd88f8964cfbb65b841e40cf3d87308677bb2cff09e50402dc6bf"
+      }
+    }
+  ],
+  "rates_alias": "legacy delivered means UART admission; application receipt is separately counted",
+  "censoring": "blank time is not zero; failed post-window landing remains failed"
+}

@@ -134,6 +134,7 @@ def freeze(plan, *, scenarios, pilot_analyses, reviews, image, horizon_s, output
         frozen_at_host_monotonic_ns=time.monotonic_ns(),
         source_commit=git("rev-parse", "HEAD"), image_id=image,
         parameter_snapshots=True, parameter_workers=5,
+        land_timeout_s=60,
         main_block_RNG_pairs=blocks,
         ablation_check="all JSON content identical after removing radio.mode",
         outcome_spec=dict(primary=["fixed-horizon timely/offered", "configured physical waypoint progress"],

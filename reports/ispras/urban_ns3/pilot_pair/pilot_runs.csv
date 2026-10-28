@@ -1,0 +1,3 @@
+run_id,policy,attempt_status,full_window,offered,target_created,master_receive,follower_application_receive,target_UART,timely,timely_per_offered,all_UART_admissions,physical_waypoints,planned_waypoints,relay_changes,T_UART_post_NLOS_s,UART_endpoint_status,T_new_goal_after_NLOS_s,new_goal_endpoint_status,integral_RTF
+urban-staged-pilot05-failover,failover,completed,True,1200,1177,1167,1163,1161,1161,0.9675,4253,27,27,1,4.236257156,observed,53.944859817,observed,0.9998785759533266
+urban-staged-pilot06-fixed,fixed,failed,True,1200,444,427,424,424,424,0.35333333333333333,2181,15,27,0,,administratively_right_censored,,administratively_right_censored,0.9998637838061853
