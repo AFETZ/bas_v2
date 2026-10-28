@@ -543,6 +543,7 @@ def plot_run(out, result, poses, scenario, geometry, events):
     from matplotlib.patches import Rectangle
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
     origin = result["observation_window"]["start_host_monotonic_ns"]
+    end = result["observation_window"]["end_host_monotonic_ns"]
     for building in scenario.get("buildings", []):
         low, high = building.get("min"), building.get("max")
         if low is not None and high is not None:
@@ -568,11 +569,12 @@ def plot_run(out, result, poses, scenario, geometry, events):
     axes[0, 0].legend(fontsize=8)
     axes[0, 1].set(xlabel="host seconds since measurement", ylabel="world ENU Z (m)", title="Actual altitude (not AGL)")
     for row in geometry:
-        if row["pair"] == result["trigger"]["pair"] and origin is not None:
+        if (row["pair"] == result["trigger"]["pair"] and origin is not None and end is not None
+                and origin <= stamp(row) <= end):
             axes[1, 0].scatter((stamp(row)-origin)/NS, 1 if row["geom_los"] else 0, s=2, color="C0")
             axes[1, 1].scatter((stamp(row)-origin)/NS, row["pathloss_db"], s=2, color="C0")
     for row in events:
-        if origin is None or stamp(row) is None:
+        if origin is None or end is None or stamp(row) is None or not origin <= stamp(row) <= end:
             continue
         at = (stamp(row)-origin)/NS
         if stage(row) == "grant_issued" and row.get("reason") == "selection":
@@ -580,6 +582,9 @@ def plot_run(out, result, poses, scenario, geometry, events):
                 ax.axvline(at, linestyle="--", color="C3", alpha=.7)
     axes[1, 0].set(xlabel="host seconds since measurement", yticks=[0, 1], yticklabels=["NLOS", "LOS"], title="CP↔initial relay geometry; dashed: selection")
     axes[1, 1].set(xlabel="host seconds since measurement", ylabel="pathloss (dB)", title="Model loss of CP↔initial relay")
+    if origin is not None and end is not None:
+        for ax in (axes[0, 1], axes[1, 0], axes[1, 1]):
+            ax.set_xlim(0, (end-origin)/NS)
     for ax in axes.flat:
         ax.grid(alpha=.2)
     fig.suptitle(result["run_id"])
