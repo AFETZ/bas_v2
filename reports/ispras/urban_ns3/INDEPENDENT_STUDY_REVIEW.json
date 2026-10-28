@@ -1,0 +1,1622 @@
+{
+  "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+  "freeze_sha256": "8590f67b3acd2ce536e06eacfa518da65f024da4d73b02435aafc87c0945daed",
+  "original_result_sha256": "019e72ede04274fc08fb46a8f9fc263eed40a15fd8c0664c699e8f7b383b813e",
+  "source_scripts": [
+    {
+      "path": "scripts/product/analyze_urban_study.py",
+      "current_checkout_unchanged_since_freeze": false,
+      "frozen_sha256": "1dcef1f6eb0bda92df92219d984b54625069b0cb31f20034e64338161e85cae8",
+      "current_checkout_sha256": "d7831f9580f889bb59537c0da54368e3877492add740bc4cf47f311ca828c3f9",
+      "original_output_matches_frozen_analyzer": true
+    },
+    {
+      "path": "scripts/product/analyze_urban_experiment.py",
+      "current_checkout_unchanged_since_freeze": true,
+      "frozen_sha256": "38645cc5386bd88f8964cfbb65b841e40cf3d87308677bb2cff09e50402dc6bf",
+      "current_checkout_sha256": "38645cc5386bd88f8964cfbb65b841e40cf3d87308677bb2cff09e50402dc6bf",
+      "original_output_matches_frozen_analyzer": true
+    },
+    {
+      "path": "scripts/product/analyze_relay_experiment.py",
+      "current_checkout_unchanged_since_freeze": true,
+      "frozen_sha256": "83dea947c54a78d26ee81da661edc8afdb581b099639aded3ef1e4a60f6eba60",
+      "current_checkout_sha256": "83dea947c54a78d26ee81da661edc8afdb581b099639aded3ef1e4a60f6eba60",
+      "original_output_matches_frozen_analyzer": true
+    }
+  ],
+  "attempted": 56,
+  "status_counts": {
+    "completed": 36,
+    "failed": 20
+  },
+  "cohort_counts": {
+    "main": 40,
+    "sensitivity": 12,
+    "engineering_boundary": 4
+  },
+  "full_windows": 55,
+  "recorded_error_counts": {
+    "None": 36,
+    "cleanup ScenarioError: landing/automatic disarm not observed for all five": 19,
+    "ScenarioError: stale native published_monotonic_ns; cleanup RuntimeError: native radio watchdog expired or disappeared after readiness": 1
+  },
+  "opportunity_clock_check": {
+    "all_full_and_partial_offered": 66190,
+    "timely_CID_but_scheduled_to_UART_over_250ms": 0
+  },
+  "arithmetic_checks": 624,
+  "arithmetic_discrepancies": [],
+  "paired_estimates": [
+    {
+      "group": [
+        "main",
+        "nominal",
+        "nominal",
+        "los_only"
+      ],
+      "metric": "timely_per_offered",
+      "n": 10,
+      "differences": [
+        0.0008333333333333526,
+        0.0,
+        -0.007500000000000062,
+        -0.0024999999999999467,
+        -0.0016666666666667052,
+        -0.0016666666666667052,
+        0.0,
+        -0.0033333333333334103,
+        -0.0016666666666665941,
+        0.0024999999999999467
+      ],
+      "mean": -0.0015000000000000124,
+      "interval_95": [
+        -0.0031666666666667065,
+        -1.1102230246251566e-17
+      ],
+      "planned_pair_bounds": [
+        -0.0015000000000000124,
+        -0.0015000000000000124
+      ]
+    },
+    {
+      "group": [
+        "main",
+        "nominal",
+        "nominal",
+        "los_only"
+      ],
+      "metric": "completed_waypoint_fraction",
+      "n": 10,
+      "differences": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        -0.03703703703703709,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "mean": -0.003703703703703709,
+      "interval_95": [
+        -0.011111111111111127,
+        0.0
+      ],
+      "planned_pair_bounds": [
+        -0.003703703703703709,
+        -0.003703703703703709
+      ]
+    },
+    {
+      "group": [
+        "main",
+        "nominal",
+        "nominal",
+        "los_only"
+      ],
+      "metric": "all_routes_finished",
+      "n": 10,
+      "differences": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        -1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "mean": -0.1,
+      "interval_95": [
+        -0.3,
+        0.0
+      ],
+      "planned_pair_bounds": [
+        -0.1,
+        -0.1
+      ]
+    },
+    {
+      "group": [
+        "main",
+        "nominal",
+        "nominal",
+        "los_only"
+      ],
+      "metric": "new_relay_selections",
+      "n": 10,
+      "differences": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "mean": 0.0,
+      "interval_95": [
+        0.0,
+        0.0
+      ],
+      "planned_pair_bounds": null
+    },
+    {
+      "group": [
+        "main",
+        "nominal",
+        "nominal",
+        "los_only"
+      ],
+      "metric": "integral_RTF",
+      "n": 10,
+      "differences": [
+        -7.645249152365974e-05,
+        -1.8422402223272627e-05,
+        3.348703556071975e-05,
+        -0.00011148390264359431,
+        3.692744751582211e-05,
+        8.08512166065034e-05,
+        4.500225155734672e-05,
+        1.5222307837237103e-05,
+        -1.431490926795398e-06,
+        -8.266075046559074e-06
+      ],
+      "mean": -4.5661032862520654e-07,
+      "interval_95": [
+        -3.585259595046963e-05,
+        3.1338419482911945e-05
+      ],
+      "planned_pair_bounds": null
+    },
+    {
+      "group": [
+        "main",
+        "nominal",
+        "nominal",
+        "los_only"
+      ],
+      "metric": "restricted_post_NLOS_UART_60s",
+      "n": 10,
+      "differences": [
+        0.00876815999999997,
+        0.98898048,
+        -0.0009223589999999837,
+        0.009518979999999982,
+        0.000292370000000014,
+        0.021379204000000013,
+        0.01980327000000001,
+        -1.022459177,
+        0.03844388499999998,
+        -0.015133878000000017
+      ],
+      "mean": 0.004867093500000003,
+      "interval_95": [
+        -0.29868685263,
+        0.30140964837500006
+      ],
+      "planned_pair_bounds": null
+    },
+    {
+      "group": [
+        "main",
+        "nominal",
+        "nominal",
+        "geometry"
+      ],
+      "metric": "timely_per_offered",
+      "n": 9,
+      "differences": [
+        0.6183333333333334,
+        0.6208333333333333,
+        0.6241666666666666,
+        0.6066666666666667,
+        0.615,
+        0.6208333333333333,
+        0.6233333333333333,
+        0.615,
+        0.6208333333333333
+      ],
+      "mean": 0.6183333333333334,
+      "interval_95": [
+        0.6146296296296296,
+        0.6213888888888888
+      ],
+      "planned_pair_bounds": [
+        0.5216666666666667,
+        0.6216666666666667
+      ]
+    },
+    {
+      "group": [
+        "main",
+        "nominal",
+        "nominal",
+        "geometry"
+      ],
+      "metric": "completed_waypoint_fraction",
+      "n": 9,
+      "differences": [
+        0.4444444444444444,
+        0.4814814814814815,
+        0.4814814814814815,
+        0.4444444444444444,
+        0.4444444444444444,
+        0.4444444444444444,
+        0.40740740740740733,
+        0.4444444444444444,
+        0.4444444444444444
+      ],
+      "mean": 0.448559670781893,
+      "interval_95": [
+        0.4362139917695473,
+        0.46090534979423864
+      ],
+      "planned_pair_bounds": [
+        0.34814814814814815,
+        0.4481481481481481
+      ]
+    },
+    {
+      "group": [
+        "main",
+        "nominal",
+        "nominal",
+        "geometry"
+      ],
+      "metric": "all_routes_finished",
+      "n": 9,
+      "differences": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        0.0,
+        1.0,
+        1.0
+      ],
+      "mean": 0.8888888888888888,
+      "interval_95": [
+        0.6666666666666666,
+        1.0
+      ],
+      "planned_pair_bounds": [
+        0.8,
+        0.9
+      ]
+    },
+    {
+      "group": [
+        "main",
+        "nominal",
+        "nominal",
+        "geometry"
+      ],
+      "metric": "new_relay_selections",
+      "n": 9,
+      "differences": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "mean": 1.0,
+      "interval_95": [
+        1.0,
+        1.0
+      ],
+      "planned_pair_bounds": null
+    },
+    {
+      "group": [
+        "main",
+        "nominal",
+        "nominal",
+        "geometry"
+      ],
+      "metric": "integral_RTF",
+      "n": 9,
+      "differences": [
+        -3.052112776802396e-05,
+        -7.014857101561578e-05,
+        -7.2489022919786095e-06,
+        -0.00014118849382660503,
+        -2.107851699850727e-05,
+        -9.408864894622226e-05,
+        -6.510599312115062e-06,
+        -4.601442411233947e-05,
+        -9.066740858765243e-06
+      ],
+      "mean": -4.7318447236685853e-05,
+      "interval_95": [
+        -7.811165665748564e-05,
+        -2.1370734202410783e-05
+      ],
+      "planned_pair_bounds": null
+    },
+    {
+      "group": [
+        "main",
+        "nominal",
+        "nominal",
+        "geometry"
+      ],
+      "metric": "restricted_post_NLOS_UART_60s",
+      "n": 9,
+      "differences": [
+        -55.7719701,
+        -55.796250089,
+        -55.747949808,
+        -55.778043057,
+        -55.744255733,
+        -55.759911602,
+        -55.743504192,
+        -55.782722523000004,
+        -55.768673
+      ],
+      "mean": -55.76592001155555,
+      "interval_95": [
+        -55.77726998678889,
+        -55.754827552722226
+      ],
+      "planned_pair_bounds": null
+    },
+    {
+      "group": [
+        "sensitivity",
+        "nominal",
+        "low",
+        "geometry"
+      ],
+      "metric": "timely_per_offered",
+      "n": 3,
+      "differences": [
+        0.6191666666666666,
+        0.6241666666666666,
+        0.62
+      ],
+      "mean": 0.6211111111111111,
+      "interval_95": null,
+      "planned_pair_bounds": [
+        0.6211111111111111,
+        0.6211111111111111
+      ]
+    },
+    {
+      "group": [
+        "sensitivity",
+        "nominal",
+        "low",
+        "geometry"
+      ],
+      "metric": "completed_waypoint_fraction",
+      "n": 3,
+      "differences": [
+        0.40740740740740733,
+        0.4444444444444444,
+        0.4444444444444444
+      ],
+      "mean": 0.43209876543209874,
+      "interval_95": null,
+      "planned_pair_bounds": [
+        0.43209876543209874,
+        0.43209876543209874
+      ]
+    },
+    {
+      "group": [
+        "sensitivity",
+        "nominal",
+        "low",
+        "geometry"
+      ],
+      "metric": "all_routes_finished",
+      "n": 3,
+      "differences": [
+        0.0,
+        1.0,
+        1.0
+      ],
+      "mean": 0.6666666666666666,
+      "interval_95": null,
+      "planned_pair_bounds": [
+        0.6666666666666666,
+        0.6666666666666666
+      ]
+    },
+    {
+      "group": [
+        "sensitivity",
+        "nominal",
+        "low",
+        "geometry"
+      ],
+      "metric": "new_relay_selections",
+      "n": 3,
+      "differences": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "mean": 1.0,
+      "interval_95": null,
+      "planned_pair_bounds": null
+    },
+    {
+      "group": [
+        "sensitivity",
+        "nominal",
+        "low",
+        "geometry"
+      ],
+      "metric": "integral_RTF",
+      "n": 3,
+      "differences": [
+        9.574721395955166e-06,
+        -2.0746099008817076e-05,
+        -6.165391920653907e-05
+      ],
+      "mean": -2.4275098939800326e-05,
+      "interval_95": null,
+      "planned_pair_bounds": null
+    },
+    {
+      "group": [
+        "sensitivity",
+        "nominal",
+        "low",
+        "geometry"
+      ],
+      "metric": "restricted_post_NLOS_UART_60s",
+      "n": 3,
+      "differences": [
+        -55.757161668,
+        -55.753714136,
+        -54.775859261
+      ],
+      "mean": -55.428911688333336,
+      "interval_95": null,
+      "planned_pair_bounds": null
+    },
+    {
+      "group": [
+        "sensitivity",
+        "nominal",
+        "high",
+        "geometry"
+      ],
+      "metric": "timely_per_offered",
+      "n": 3,
+      "differences": [
+        0.6308333333333334,
+        0.6316666666666666,
+        0.6233333333333333
+      ],
+      "mean": 0.6286111111111111,
+      "interval_95": null,
+      "planned_pair_bounds": [
+        0.6286111111111111,
+        0.6286111111111111
+      ]
+    },
+    {
+      "group": [
+        "sensitivity",
+        "nominal",
+        "high",
+        "geometry"
+      ],
+      "metric": "completed_waypoint_fraction",
+      "n": 3,
+      "differences": [
+        0.4814814814814815,
+        0.4444444444444444,
+        0.4444444444444444
+      ],
+      "mean": 0.4567901234567901,
+      "interval_95": null,
+      "planned_pair_bounds": [
+        0.4567901234567901,
+        0.4567901234567901
+      ]
+    },
+    {
+      "group": [
+        "sensitivity",
+        "nominal",
+        "high",
+        "geometry"
+      ],
+      "metric": "all_routes_finished",
+      "n": 3,
+      "differences": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "mean": 1.0,
+      "interval_95": null,
+      "planned_pair_bounds": [
+        1.0,
+        1.0
+      ]
+    },
+    {
+      "group": [
+        "sensitivity",
+        "nominal",
+        "high",
+        "geometry"
+      ],
+      "metric": "new_relay_selections",
+      "n": 3,
+      "differences": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "mean": 1.0,
+      "interval_95": null,
+      "planned_pair_bounds": null
+    },
+    {
+      "group": [
+        "sensitivity",
+        "nominal",
+        "high",
+        "geometry"
+      ],
+      "metric": "integral_RTF",
+      "n": 3,
+      "differences": [
+        -2.2743992707185967e-05,
+        -7.021474584667509e-05,
+        1.9570610329422422e-05
+      ],
+      "mean": -2.446270940814621e-05,
+      "interval_95": null,
+      "planned_pair_bounds": null
+    },
+    {
+      "group": [
+        "sensitivity",
+        "nominal",
+        "high",
+        "geometry"
+      ],
+      "metric": "restricted_post_NLOS_UART_60s",
+      "n": 3,
+      "differences": [
+        -55.775088605,
+        -55.772807842,
+        -54.783165662
+      ],
+      "mean": -55.44368736966667,
+      "interval_95": null,
+      "planned_pair_bounds": null
+    },
+    {
+      "group": [
+        "engineering_boundary",
+        "short_occlusion",
+        "nominal",
+        "geometry"
+      ],
+      "metric": "timely_per_offered",
+      "n": 1,
+      "differences": [
+        0.8208333333333334
+      ],
+      "mean": 0.8208333333333334,
+      "interval_95": null,
+      "planned_pair_bounds": [
+        0.8208333333333334,
+        0.8208333333333334
+      ]
+    },
+    {
+      "group": [
+        "engineering_boundary",
+        "short_occlusion",
+        "nominal",
+        "geometry"
+      ],
+      "metric": "completed_waypoint_fraction",
+      "n": 1,
+      "differences": [
+        0.07999999999999996
+      ],
+      "mean": 0.07999999999999996,
+      "interval_95": null,
+      "planned_pair_bounds": [
+        0.07999999999999996,
+        0.07999999999999996
+      ]
+    },
+    {
+      "group": [
+        "engineering_boundary",
+        "short_occlusion",
+        "nominal",
+        "geometry"
+      ],
+      "metric": "all_routes_finished",
+      "n": 1,
+      "differences": [
+        0.0
+      ],
+      "mean": 0.0,
+      "interval_95": null,
+      "planned_pair_bounds": [
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "group": [
+        "engineering_boundary",
+        "short_occlusion",
+        "nominal",
+        "geometry"
+      ],
+      "metric": "new_relay_selections",
+      "n": 1,
+      "differences": [
+        1.0
+      ],
+      "mean": 1.0,
+      "interval_95": null,
+      "planned_pair_bounds": null
+    },
+    {
+      "group": [
+        "engineering_boundary",
+        "short_occlusion",
+        "nominal",
+        "geometry"
+      ],
+      "metric": "integral_RTF",
+      "n": 1,
+      "differences": [
+        -4.885036084689709e-05
+      ],
+      "mean": -4.885036084689709e-05,
+      "interval_95": null,
+      "planned_pair_bounds": null
+    },
+    {
+      "group": [
+        "engineering_boundary",
+        "short_occlusion",
+        "nominal",
+        "geometry"
+      ],
+      "metric": "restricted_post_NLOS_UART_60s",
+      "n": 1,
+      "differences": [
+        -56.214991625
+      ],
+      "mean": -56.214991625,
+      "interval_95": null,
+      "planned_pair_bounds": null
+    },
+    {
+      "group": [
+        "engineering_boundary",
+        "no_candidate",
+        "nominal",
+        "geometry"
+      ],
+      "metric": "timely_per_offered",
+      "n": 1,
+      "differences": [
+        0.0016666666666666496
+      ],
+      "mean": 0.0016666666666666496,
+      "interval_95": null,
+      "planned_pair_bounds": [
+        0.0016666666666666496,
+        0.0016666666666666496
+      ]
+    },
+    {
+      "group": [
+        "engineering_boundary",
+        "no_candidate",
+        "nominal",
+        "geometry"
+      ],
+      "metric": "completed_waypoint_fraction",
+      "n": 1,
+      "differences": [
+        0.0
+      ],
+      "mean": 0.0,
+      "interval_95": null,
+      "planned_pair_bounds": [
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "group": [
+        "engineering_boundary",
+        "no_candidate",
+        "nominal",
+        "geometry"
+      ],
+      "metric": "all_routes_finished",
+      "n": 1,
+      "differences": [
+        0.0
+      ],
+      "mean": 0.0,
+      "interval_95": null,
+      "planned_pair_bounds": [
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "group": [
+        "engineering_boundary",
+        "no_candidate",
+        "nominal",
+        "geometry"
+      ],
+      "metric": "new_relay_selections",
+      "n": 1,
+      "differences": [
+        0.0
+      ],
+      "mean": 0.0,
+      "interval_95": null,
+      "planned_pair_bounds": null
+    },
+    {
+      "group": [
+        "engineering_boundary",
+        "no_candidate",
+        "nominal",
+        "geometry"
+      ],
+      "metric": "integral_RTF",
+      "n": 1,
+      "differences": [
+        -4.34565168688783e-05
+      ],
+      "mean": -4.34565168688783e-05,
+      "interval_95": null,
+      "planned_pair_bounds": null
+    },
+    {
+      "group": [
+        "engineering_boundary",
+        "no_candidate",
+        "nominal",
+        "geometry"
+      ],
+      "metric": "restricted_post_NLOS_UART_60s",
+      "n": 1,
+      "differences": [
+        0.0
+      ],
+      "mean": 0.0,
+      "interval_95": null,
+      "planned_pair_bounds": null
+    }
+  ],
+  "interactions": [
+    {
+      "metric": "timely_per_offered",
+      "n": 9,
+      "mean": 0.6196296296296296,
+      "interval_95": [
+        0.6159259259259259,
+        0.6235185185185186
+      ],
+      "planned_block_bounds": [
+        0.5231666666666667,
+        0.6231666666666666
+      ]
+    },
+    {
+      "metric": "completed_waypoint_fraction",
+      "n": 9,
+      "mean": 0.4526748971193416,
+      "interval_95": [
+        0.4444444444444444,
+        0.46502057613168724
+      ],
+      "planned_block_bounds": [
+        0.3518518518518518,
+        0.45185185185185184
+      ]
+    },
+    {
+      "metric": "all_routes_finished",
+      "n": 9,
+      "mean": 1.0,
+      "interval_95": [
+        1.0,
+        1.0
+      ],
+      "planned_block_bounds": [
+        0.9,
+        1.0
+      ]
+    },
+    {
+      "metric": "new_relay_selections",
+      "n": 9,
+      "mean": 1.0,
+      "interval_95": [
+        1.0,
+        1.0
+      ],
+      "planned_block_bounds": null
+    },
+    {
+      "metric": "integral_RTF",
+      "n": 9,
+      "mean": -4.51197348896315e-05,
+      "interval_95": [
+        -8.404065486360752e-05,
+        -1.2059535042143963e-05
+      ],
+      "planned_block_bounds": null
+    },
+    {
+      "metric": "restricted_post_NLOS_UART_60s",
+      "n": 9,
+      "mean": -55.88493446844445,
+      "interval_95": [
+        -56.114635610130556,
+        -55.76106542122222
+      ],
+      "planned_block_bounds": null
+    }
+  ],
+  "descriptive": [
+    {
+      "group": [
+        "main",
+        "nominal",
+        "nominal",
+        "los_only",
+        "failover"
+      ],
+      "planned": 10,
+      "observed": 10,
+      "means": {
+        "timely_per_offered": 0.9940833333333334,
+        "completed_waypoint_fraction": 0.9962962962962963,
+        "all_routes_finished": 0.9,
+        "new_relay_selections": 0.0,
+        "integral_RTF": 0.9998586186607816,
+        "restricted_post_NLOS_UART_60s": 0.3373214629
+      },
+      "new_goal_statuses": {
+        "observed": 10
+      },
+      "post_NLOS_UART_s": [
+        0.254951956,
+        1.215959508,
+        0.240411369,
+        0.241944574,
+        0.228001597,
+        0.248831985,
+        0.243648469,
+        0.215210339,
+        0.254334007,
+        0.229920825
+      ],
+      "conditional_new_goal_s": [
+        50.927002552,
+        50.926652125,
+        50.940417043,
+        50.948467126,
+        50.89263629,
+        50.924029416,
+        50.919247142,
+        50.92891137,
+        50.959838371,
+        50.902510429
+      ]
+    },
+    {
+      "group": [
+        "main",
+        "nominal",
+        "nominal",
+        "los_only",
+        "fixed"
+      ],
+      "planned": 10,
+      "observed": 10,
+      "means": {
+        "timely_per_offered": 0.9955833333333333,
+        "completed_waypoint_fraction": 1.0,
+        "all_routes_finished": 1.0,
+        "new_relay_selections": 0.0,
+        "integral_RTF": 0.9998590752711103,
+        "restricted_post_NLOS_UART_60s": 0.3324543694
+      },
+      "new_goal_statuses": {
+        "observed": 10
+      },
+      "post_NLOS_UART_s": [
+        0.246183796,
+        0.226979028,
+        0.241333728,
+        0.232425594,
+        0.227709227,
+        0.227452781,
+        0.223845199,
+        1.237669516,
+        0.215890122,
+        0.245054703
+      ],
+      "conditional_new_goal_s": [
+        51.925061778,
+        50.916381295,
+        50.915656496,
+        50.932502577,
+        50.951347951,
+        50.929700741,
+        50.91720084,
+        50.934930444,
+        50.885579549,
+        50.948063071
+      ]
+    },
+    {
+      "group": [
+        "main",
+        "nominal",
+        "nominal",
+        "geometry",
+        "fixed"
+      ],
+      "planned": 10,
+      "observed": 10,
+      "means": {
+        "timely_per_offered": 0.34658333333333335,
+        "completed_waypoint_fraction": 0.5481481481481482,
+        "all_routes_finished": 0.0,
+        "new_relay_selections": 0.0,
+        "integral_RTF": 0.9998963348271037,
+        "restricted_post_NLOS_UART_60s": 60.0
+      },
+      "new_goal_statuses": {
+        "administratively_right_censored": 10
+      },
+      "post_NLOS_UART_s": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "conditional_new_goal_s": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "group": [
+        "main",
+        "nominal",
+        "nominal",
+        "geometry",
+        "failover"
+      ],
+      "planned": 10,
+      "observed": 9,
+      "means": {
+        "timely_per_offered": 0.9647222222222221,
+        "completed_waypoint_fraction": 0.9958847736625516,
+        "all_routes_finished": 0.8888888888888888,
+        "new_relay_selections": 1.0,
+        "integral_RTF": 0.9998506690617847,
+        "restricted_post_NLOS_UART_60s": 4.234079988444445
+      },
+      "new_goal_statuses": {
+        "observed": 9,
+        "not_applicable_no_observed_NLOS_transition": 1
+      },
+      "post_NLOS_UART_s": [
+        4.2280299,
+        4.203749911,
+        4.252050192,
+        4.221956943,
+        4.255744267,
+        4.240088398,
+        4.256495808,
+        null,
+        4.217277477,
+        4.231327
+      ],
+      "conditional_new_goal_s": [
+        53.942335968,
+        53.903617207,
+        53.949614713,
+        53.935878129,
+        53.981051275,
+        53.937269404,
+        53.937702144,
+        null,
+        52.891839635,
+        53.942523186
+      ]
+    },
+    {
+      "group": [
+        "sensitivity",
+        "nominal",
+        "low",
+        "geometry",
+        "fixed"
+      ],
+      "planned": 3,
+      "observed": 3,
+      "means": {
+        "timely_per_offered": 0.34833333333333333,
+        "completed_waypoint_fraction": 0.5555555555555556,
+        "all_routes_finished": 0.0,
+        "new_relay_selections": 0.0,
+        "integral_RTF": 0.9998796576332164,
+        "restricted_post_NLOS_UART_60s": 60.0
+      },
+      "new_goal_statuses": {
+        "administratively_right_censored": 3
+      },
+      "post_NLOS_UART_s": [
+        null,
+        null,
+        null
+      ],
+      "conditional_new_goal_s": [
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "group": [
+        "sensitivity",
+        "nominal",
+        "low",
+        "geometry",
+        "failover"
+      ],
+      "planned": 3,
+      "observed": 3,
+      "means": {
+        "timely_per_offered": 0.9694444444444444,
+        "completed_waypoint_fraction": 0.9876543209876543,
+        "all_routes_finished": 0.6666666666666666,
+        "new_relay_selections": 1.0,
+        "integral_RTF": 0.9998553825342765,
+        "restricted_post_NLOS_UART_60s": 4.571088311666666
+      },
+      "new_goal_statuses": {
+        "observed": 3
+      },
+      "post_NLOS_UART_s": [
+        4.242838332,
+        4.246285864,
+        5.224140739
+      ],
+      "conditional_new_goal_s": [
+        53.936725856,
+        53.94228256,
+        53.958867019
+      ]
+    },
+    {
+      "group": [
+        "sensitivity",
+        "nominal",
+        "high",
+        "geometry",
+        "fixed"
+      ],
+      "planned": 3,
+      "observed": 3,
+      "means": {
+        "timely_per_offered": 0.3422222222222222,
+        "completed_waypoint_fraction": 0.54320987654321,
+        "all_routes_finished": 0.0,
+        "new_relay_selections": 0.0,
+        "integral_RTF": 0.9998903625166444,
+        "restricted_post_NLOS_UART_60s": 60.0
+      },
+      "new_goal_statuses": {
+        "administratively_right_censored": 3
+      },
+      "post_NLOS_UART_s": [
+        null,
+        null,
+        null
+      ],
+      "conditional_new_goal_s": [
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "group": [
+        "sensitivity",
+        "nominal",
+        "high",
+        "geometry",
+        "failover"
+      ],
+      "planned": 3,
+      "observed": 3,
+      "means": {
+        "timely_per_offered": 0.9708333333333333,
+        "completed_waypoint_fraction": 1.0,
+        "all_routes_finished": 1.0,
+        "new_relay_selections": 1.0,
+        "integral_RTF": 0.9998658998072362,
+        "restricted_post_NLOS_UART_60s": 4.556312630333333
+      },
+      "new_goal_statuses": {
+        "observed": 3
+      },
+      "post_NLOS_UART_s": [
+        4.224911395,
+        4.227192158,
+        5.216834338
+      ],
+      "conditional_new_goal_s": [
+        53.934324188,
+        53.910368611,
+        53.927099991
+      ]
+    },
+    {
+      "group": [
+        "engineering_boundary",
+        "short_occlusion",
+        "nominal",
+        "geometry",
+        "fixed"
+      ],
+      "planned": 1,
+      "observed": 1,
+      "means": {
+        "timely_per_offered": 0.16666666666666666,
+        "completed_waypoint_fraction": 0.88,
+        "all_routes_finished": 0.0,
+        "new_relay_selections": 0.0,
+        "integral_RTF": 0.9999022620582231,
+        "restricted_post_NLOS_UART_60s": 60.0
+      },
+      "new_goal_statuses": {
+        "administratively_right_censored": 1
+      },
+      "post_NLOS_UART_s": [
+        null
+      ],
+      "conditional_new_goal_s": [
+        null
+      ]
+    },
+    {
+      "group": [
+        "engineering_boundary",
+        "short_occlusion",
+        "nominal",
+        "geometry",
+        "failover"
+      ],
+      "planned": 1,
+      "observed": 1,
+      "means": {
+        "timely_per_offered": 0.9875,
+        "completed_waypoint_fraction": 0.96,
+        "all_routes_finished": 0.0,
+        "new_relay_selections": 1.0,
+        "integral_RTF": 0.9998534116973762,
+        "restricted_post_NLOS_UART_60s": 3.785008375
+      },
+      "new_goal_statuses": {
+        "administratively_right_censored": 1
+      },
+      "post_NLOS_UART_s": [
+        3.785008375
+      ],
+      "conditional_new_goal_s": [
+        null
+      ]
+    },
+    {
+      "group": [
+        "engineering_boundary",
+        "no_candidate",
+        "nominal",
+        "geometry",
+        "fixed"
+      ],
+      "planned": 1,
+      "observed": 1,
+      "means": {
+        "timely_per_offered": 0.265,
+        "completed_waypoint_fraction": 0.4,
+        "all_routes_finished": 0.0,
+        "new_relay_selections": 0.0,
+        "integral_RTF": 0.9999215761054964,
+        "restricted_post_NLOS_UART_60s": 60.0
+      },
+      "new_goal_statuses": {
+        "administratively_right_censored": 1
+      },
+      "post_NLOS_UART_s": [
+        null
+      ],
+      "conditional_new_goal_s": [
+        null
+      ]
+    },
+    {
+      "group": [
+        "engineering_boundary",
+        "no_candidate",
+        "nominal",
+        "geometry",
+        "failover"
+      ],
+      "planned": 1,
+      "observed": 1,
+      "means": {
+        "timely_per_offered": 0.26666666666666666,
+        "completed_waypoint_fraction": 0.4,
+        "all_routes_finished": 0.0,
+        "new_relay_selections": 0.0,
+        "integral_RTF": 0.9998781195886275,
+        "restricted_post_NLOS_UART_60s": 60.0
+      },
+      "new_goal_statuses": {
+        "administratively_right_censored": 1
+      },
+      "post_NLOS_UART_s": [
+        null
+      ],
+      "conditional_new_goal_s": [
+        null
+      ]
+    }
+  ],
+  "review_method": "Independent stdlib arithmetic and selected raw replay; no analyzer imports, simulator, PCAP or parameter scan.",
+  "raw_checks": [
+    {
+      "run_id": "urban20261028-main-nominal-nominal-geometry-fixed-r03",
+      "target_stage_counts": {
+        "target_CIDs_created_in_window": 433,
+        "master_receive_CIDs": 422,
+        "follower_receive_CIDs": 414,
+        "UART_write_end_CIDs": 414,
+        "audited_valid_UART_CIDs": 414,
+        "master_forward_required_CIDs": 345,
+        "master_forward_CIDs": 336
+      },
+      "offered": 1200,
+      "timely": 414,
+      "timely_per_offered": 0.345,
+      "target_lineage_discrepancies": [],
+      "overlapping_different_scope_grants": [],
+      "raw_geometric_trigger_host_ns": 523941526013681,
+      "raw_transition_bracket_host_s": 0.0397009,
+      "post_NLOS_UART_s": null,
+      "post_detection_UART_s": null
+    },
+    {
+      "run_id": "urban20261028-main-nominal-nominal-geometry-failover-r03",
+      "target_stage_counts": {
+        "target_CIDs_created_in_window": 1176,
+        "master_receive_CIDs": 1163,
+        "follower_receive_CIDs": 1158,
+        "UART_write_end_CIDs": 1156,
+        "audited_valid_UART_CIDs": 1156,
+        "master_forward_required_CIDs": 939,
+        "master_forward_CIDs": 928
+      },
+      "offered": 1200,
+      "timely": 1156,
+      "timely_per_offered": 0.9633333333333334,
+      "target_lineage_discrepancies": [],
+      "overlapping_different_scope_grants": [],
+      "raw_geometric_trigger_host_ns": 524429198278768,
+      "raw_transition_bracket_host_s": 0.060115127,
+      "post_NLOS_UART_s": 4.2280299,
+      "post_detection_UART_s": 3.279015235,
+      "selected_new_goal_raw_checks": [
+        {
+          "uav_id": 3,
+          "goal_id": "waypoint3:uav3",
+          "first_CID": "2:3:2356",
+          "completion_CID": "2:3:2396",
+          "same_as_export": true,
+          "chronology_valid": true,
+          "elapsed_host_s": 23.97542516,
+          "decomposition_host_s": [
+            18.591859704,
+            0.632144352,
+            0.002418529,
+            4.749002575
+          ],
+          "raw_dwell_source_s": 2.0,
+          "dwell_verified": true,
+          "max_sample_gap_source_s": 0.040000000000020464,
+          "samples": 86
+        },
+        {
+          "uav_id": 4,
+          "goal_id": "waypoint3:uav4",
+          "first_CID": "2:4:2357",
+          "completion_CID": "2:4:2397",
+          "same_as_export": true,
+          "chronology_valid": true,
+          "elapsed_host_s": 23.991971115,
+          "decomposition_host_s": [
+            18.592835451,
+            0.631274213,
+            0.018525792,
+            4.749335659
+          ],
+          "raw_dwell_source_s": 2.0,
+          "dwell_verified": true,
+          "max_sample_gap_source_s": 0.040000000000020464,
+          "samples": 86
+        },
+        {
+          "uav_id": 5,
+          "goal_id": "waypoint3:uav5",
+          "first_CID": "2:5:2358",
+          "completion_CID": "2:5:2398",
+          "same_as_export": true,
+          "chronology_valid": true,
+          "elapsed_host_s": 23.992026929,
+          "decomposition_host_s": [
+            18.452578257,
+            0.771640501,
+            0.019370474,
+            4.748437697
+          ],
+          "raw_dwell_source_s": 2.0,
+          "dwell_verified": true,
+          "max_sample_gap_source_s": 0.040000000000020464,
+          "samples": 86
+        },
+        {
+          "uav_id": 2,
+          "goal_id": "waypoint3:uav2",
+          "first_CID": "2:2:2355",
+          "completion_CID": "2:2:2540",
+          "same_as_export": true,
+          "chronology_valid": true,
+          "elapsed_host_s": 39.209552346,
+          "decomposition_host_s": [
+            18.42430448,
+            0.799605089,
+            0.017940026,
+            19.967702751
+          ],
+          "raw_dwell_source_s": 2.5,
+          "dwell_verified": true,
+          "max_sample_gap_source_s": 0.040000000000020464,
+          "samples": 108
+        },
+        {
+          "uav_id": 1,
+          "goal_id": "waypoint4:uav1",
+          "first_CID": "2:1:2354",
+          "completion_CID": "2:1:2689",
+          "same_as_export": true,
+          "chronology_valid": true,
+          "elapsed_host_s": 53.942335968,
+          "decomposition_host_s": [
+            18.393202566,
+            0.830501819,
+            0.016934973,
+            34.70169661
+          ],
+          "raw_dwell_source_s": 2.0,
+          "dwell_verified": true,
+          "max_sample_gap_source_s": 0.040000000000020464,
+          "samples": 87
+        }
+      ]
+    }
+  ],
+  "interpretation_review": {
+    "discrepancies": [
+      {
+        "id": "R1",
+        "severity": "interpretation_correction_required",
+        "scope": "original aggregate and per-run endpoint statuses",
+        "observed": "Interrupted order29 is labelled not_applicable_no_trigger / not_applicable_no_observed_NLOS_transition; direct-probe endpoint similarly N/A.",
+        "correction": "Use interrupted_before_observed_trigger and unknown applicability, retaining null values. Full-window no-trigger N/A remains distinct.",
+        "implication": "Primary fixed-horizon missing bounds are valid. No numerical post-NLOS 60s bounds for all ten without the additional assumption that a trigger would occur; use not_identified_due_unknown_trigger_applicability.",
+        "evidence": {
+          "run_id": "urban20261028-main-nominal-nominal-geometry-failover-r01",
+          "original_restricted": {
+            "censor_time_s": null,
+            "observed_time_s": null,
+            "status": "not_applicable_no_trigger",
+            "tau_host_s": 60.0,
+            "value": null
+          },
+          "full_window": false
+        },
+        "final_resolution": "remediated_in_final_version3"
+      },
+      {
+        "id": "R2",
+        "severity": "provenance_wording_correction_required",
+        "scope": "original aggregate provenance_errors",
+        "observed": [
+          "effective geometry propagation/mode differs",
+          "artificial fault present/unknown in geometric experiment"
+        ],
+        "correction": "Absent final native_stats means effective profile not verified from that artifact, not measured mode mismatch or proof of artificial fault.",
+        "evidence": {
+          "run_id": "urban20261028-main-nominal-nominal-geometry-failover-r01",
+          "native_stats_present": false
+        },
+        "final_resolution": "remediated_in_final_version3"
+      },
+      {
+        "id": "R3",
+        "severity": "reporting_constraint",
+        "scope": "short_occlusion engineering pair",
+        "observed": "Only failover returned to LOS; fixed remained NLOS to the end.",
+        "correction": "Describe the configured boundary and observed policy-dependent trajectories; do not claim matched exogenous short outages.",
+        "evidence": [
+          {
+            "run_id": "urban20261028-engineering_boundary-short_occlusion-nominal-geometry-fixed-r01",
+            "observed_LOS_return_delay_host_s": null,
+            "followup_host_s": 200.80459596
+          },
+          {
+            "run_id": "urban20261028-engineering_boundary-short_occlusion-nominal-geometry-failover-r01",
+            "observed_LOS_return_delay_host_s": 6.920123365,
+            "followup_host_s": 200.800586844
+          }
+        ]
+      },
+      {
+        "id": "R4",
+        "severity": "reporting_constraint",
+        "scope": "latency clock origin",
+        "observed": "All nine complete main geometry failover first-post-NLOS UART latencies exceed 4s; all corresponding post-detection latencies are below 4s.",
+        "correction": "Report both origins; do not transplant the historical <=4s target or call geometric NLOS itself established service loss.",
+        "evidence": {
+          "n": 9,
+          "post_NLOS_host_s": {
+            "mean": 4.234079988444445,
+            "min": 4.203749911,
+            "max": 4.256495808
+          },
+          "after_probe_detection_host_s": {
+            "mean": 3.3219754915555555,
+            "min": 3.249442352,
+            "max": 3.446396344
+          }
+        }
+      },
+      {
+        "id": "R5",
+        "severity": "reporting_constraint",
+        "scope": "conditional physical new-goal endpoint",
+        "observed": "Main geometry failover has 9 observed all-five first-success new-goal endpoints; fixed has zero and zero newly created post-trigger goals in all ten.",
+        "correction": "T_goal is a selected successful-goal latency, not a paired recovery mean or pure flight/control latency. Report opportunities and censoring; retain one critical UAV for additive decomposition. Configured waypoints include initial/vertical positions, so counts are not horizontal-maneuver counts."
+      },
+      {
+        "id": "R6",
+        "severity": "reporting_constraint",
+        "scope": "denominators and failure counts",
+        "observed": "All full windows offer 1200 refresh opportunities. Some have no CID; application receipt, UART, and unique configured goals have distinct counts. 19 failed cleanup attempts retain complete windows.",
+        "correction": "Keep 36 completed /20 failed distinct from55 eligible windows; define timely relative to CID creation at<=250host ms with all opportunities in the denominator; never use selected latency samples as availability."
+      }
+    ],
+    "crash": {
+      "run_id": "urban20261028-main-nominal-nominal-geometry-failover-r01",
+      "observed_window_host_s": 70.238973547,
+      "original_log_text": "536702202111626\tmsg=\"RealtimeSimulatorImpl::ProcessOneEvent (): Hard real-time limit exceeded (jitter = 31790122927)\", +207.263564675s 3 file=/workspace/multiagent_simulation/.external/ns-3-sionna-native/src/core/model/realtime-simulator-impl.cc, line=365\n536702202134799\tNS_FATAL, terminating\n536702202139498\tterminate called without an active exception\n",
+      "cause_status": "Fatal realtime jitter observed; cause of host stall not established"
+    },
+    "scope_limits": [
+      "No full-series independent raw pose/authority replay; all 56 export arithmetic and selected r03 raw pair only.",
+      "No native PHY/PCAP, packet loss denominator, parameter completeness or hardware certification.",
+      "No runtime launch/build or retry; original measurements and aggregate retained."
+    ]
+  },
+  "reviewed_overlay": {
+    "status": "read_and_compared",
+    "path": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/results-final/urban_study.json",
+    "sha256": "428dd7d149f13f4e021c7e225cd3ce4a97881aa017c4521a5241ccbb97fe02d1",
+    "analysis_version": 3,
+    "all_outcomes_paired_estimates_interaction_estimates_exactly_unchanged": true,
+    "restricted_crash_endpoint": {
+      "censor_time_s": null,
+      "interpretation": "interruption prevents determining whether a trigger would occur within the full horizon",
+      "observed_time_s": null,
+      "status": "interrupted_before_observed_trigger",
+      "tau_host_s": 60.0,
+      "unknown_applicability": true,
+      "value": null
+    },
+    "restricted_pair_unknown_ids": [
+      "seed1-r01"
+    ],
+    "restricted_pair_NA_ids": [],
+    "restricted_missing_bounds": {
+      "interpretation": "no numerical range bounds without assuming that the unobserved trigger would occur",
+      "planned_pairs": 10,
+      "status": "not_identified_due_unknown_trigger_applicability"
+    },
+    "crash_provenance_errors": [
+      "effective geometry propagation/mode not recorded in final native stats",
+      "fault profile not recorded in final native stats or experiment config"
+    ],
+    "crash_table_endpoint_statuses": {
+      "interrupted_before_observed_trigger": 13
+    },
+    "crash_table_original_statuses_retained": 13,
+    "crash_embedded_post_NLOS_status": "interrupted_before_observed_trigger",
+    "crash_embedded_detection_status": "interrupted_before_observed_trigger"
+  }
+}
