@@ -1,0 +1,495 @@
+{
+  "scope": "static route and common-box identity review, not flight/packet prediction",
+  "inputs_sha256": {
+    "/home/bas/bas_v2-paper-live/network/config/urban_north_inspection.json": "14102dcb681297d346ed509b18597ca6987a35cae4e9f740529ad3514ae5fdcf",
+    "/home/bas/bas_v2-paper-live/runs/native-radio-realtime/urban-north-pilot02-failover/sitl/urban-native-live-cameras.sdf": "28fd076bac5446bc2f945da4c07699d992cdab6e40e4b40e8e0bde9509d5b56a",
+    "/home/bas/bas_v2-paper-live/runs/native-radio-realtime/urban-block-pilot01-failover/logs/ns3_attributes.txt": "4020a34ab910c005139e64507ba31765d32af22b48ca58cb1d80ea230ee45c26",
+    "/home/bas/bas_v2-paper-live/network/config/urban_two_building.json": "91ee71603806189fdd666f0b5698eca49ea9f4480d07c9daa4dfd361f023e58f"
+  },
+  "review_script_sha256": "999bae1095e34f7f7560e4132d001619a3d262acd52905be3ed4ec28bcd592d6",
+  "config_scenario": "urban_north_facade_inspection_v1",
+  "world_name": "map",
+  "gazebo_shapes": [
+    {
+      "id": "A",
+      "shape": "collision",
+      "observed_min": [
+        40.0,
+        20.0,
+        0.0
+      ],
+      "observed_max": [
+        70.0,
+        65.0,
+        30.0
+      ],
+      "equal": true
+    },
+    {
+      "id": "A",
+      "shape": "visual",
+      "observed_min": [
+        40.0,
+        20.0,
+        0.0
+      ],
+      "observed_max": [
+        70.0,
+        65.0,
+        30.0
+      ],
+      "equal": true
+    },
+    {
+      "id": "B",
+      "shape": "collision",
+      "observed_min": [
+        95.0,
+        20.0,
+        0.0
+      ],
+      "observed_max": [
+        125.0,
+        65.0,
+        25.0
+      ],
+      "equal": true
+    },
+    {
+      "id": "B",
+      "shape": "visual",
+      "observed_min": [
+        95.0,
+        20.0,
+        0.0
+      ],
+      "observed_max": [
+        125.0,
+        65.0,
+        25.0
+      ],
+      "equal": true
+    }
+  ],
+  "actual_ns3_boundaries": [
+    [
+      40.0,
+      70.0,
+      20.0,
+      65.0,
+      0.0,
+      30.0
+    ],
+    [
+      95.0,
+      125.0,
+      20.0,
+      65.0,
+      0.0,
+      25.0
+    ]
+  ],
+  "actual_ns3_boundaries_match": true,
+  "planned_route_hits_in_3m_building_envelope": [],
+  "representative_geometric_graphs": {
+    "initial_airborne": {
+      "positions": {
+        "0": [
+          0,
+          0,
+          2
+        ],
+        "1": [
+          20,
+          0,
+          12
+        ],
+        "2": [
+          35,
+          0,
+          14
+        ],
+        "3": [
+          50,
+          0,
+          16
+        ],
+        "4": [
+          65,
+          0,
+          18
+        ],
+        "5": [
+          80,
+          0,
+          20
+        ]
+      },
+      "edges": {
+        "0-1": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "0-2": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "0-3": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "0-4": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "0-5": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "1-2": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "1-3": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "1-4": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "1-5": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "2-3": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "2-4": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "2-5": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "3-4": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "3-5": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "4-5": {
+          "geometric_los": true,
+          "blocker_ids": []
+        }
+      },
+      "all_peer_LOS_candidate_ids": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "actual_packet_availability": "not inferred from geometry"
+    },
+    "north_corridor_waypoint2": {
+      "positions": {
+        "0": [
+          0,
+          0,
+          2
+        ],
+        "1": [
+          85,
+          80,
+          12
+        ],
+        "2": [
+          80,
+          85,
+          14
+        ],
+        "3": [
+          20,
+          90,
+          16
+        ],
+        "4": [
+          15,
+          65,
+          18
+        ],
+        "5": [
+          135,
+          85,
+          20
+        ]
+      },
+      "edges": {
+        "0-1": {
+          "geometric_los": false,
+          "blocker_ids": [
+            "A"
+          ]
+        },
+        "0-2": {
+          "geometric_los": false,
+          "blocker_ids": [
+            "A"
+          ]
+        },
+        "0-3": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "0-4": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "0-5": {
+          "geometric_los": false,
+          "blocker_ids": [
+            "A",
+            "B"
+          ]
+        },
+        "1-2": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "1-3": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "1-4": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "1-5": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "2-3": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "2-4": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "2-5": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "3-4": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "3-5": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "4-5": {
+          "geometric_los": true,
+          "blocker_ids": []
+        }
+      },
+      "all_peer_LOS_candidate_ids": [
+        3,
+        4
+      ],
+      "actual_packet_availability": "not inferred from geometry"
+    },
+    "final_inspection": {
+      "positions": {
+        "0": [
+          0,
+          0,
+          2
+        ],
+        "1": [
+          20,
+          80,
+          16
+        ],
+        "2": [
+          35,
+          85,
+          18
+        ],
+        "3": [
+          15,
+          90,
+          20
+        ],
+        "4": [
+          10,
+          65,
+          22
+        ],
+        "5": [
+          130,
+          85,
+          24
+        ]
+      },
+      "edges": {
+        "0-1": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "0-2": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "0-3": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "0-4": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "0-5": {
+          "geometric_los": false,
+          "blocker_ids": [
+            "A",
+            "B"
+          ]
+        },
+        "1-2": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "1-3": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "1-4": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "1-5": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "2-3": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "2-4": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "2-5": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "3-4": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "3-5": {
+          "geometric_los": true,
+          "blocker_ids": []
+        },
+        "4-5": {
+          "geometric_los": true,
+          "blocker_ids": []
+        }
+      },
+      "all_peer_LOS_candidate_ids": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "actual_packet_availability": "not inferred from geometry"
+    }
+  },
+  "unchanged_radio_parameters": true,
+  "unchanged_buildings": true,
+  "route_changes": [
+    {
+      "uav_id": 1,
+      "waypoint": 4,
+      "before": [
+        20,
+        0,
+        12
+      ],
+      "after": [
+        20,
+        80,
+        16
+      ]
+    },
+    {
+      "uav_id": 2,
+      "waypoint": 4,
+      "before": [
+        35,
+        0,
+        14
+      ],
+      "after": [
+        35,
+        85,
+        18
+      ]
+    },
+    {
+      "uav_id": 3,
+      "waypoint": 4,
+      "before": [
+        15,
+        0,
+        16
+      ],
+      "after": [
+        15,
+        90,
+        20
+      ]
+    },
+    {
+      "uav_id": 4,
+      "waypoint": 4,
+      "before": [
+        10,
+        0,
+        18
+      ],
+      "after": [
+        10,
+        65,
+        22
+      ]
+    },
+    {
+      "uav_id": 5,
+      "waypoint": 4,
+      "before": [
+        130,
+        0,
+        20
+      ],
+      "after": [
+        130,
+        85,
+        24
+      ]
+    }
+  ],
+  "issues": [],
+  "limits": [
+    "3m-inflated segment checks do not prove vehicle tracking, stopping distance or collision-free actual trajectories.",
+    "All-peer LOS feasibility does not prove fresh native peer replies or packet delivery; policy uses measured probes.",
+    "Representative positions are not replayed or forced into the simulator.",
+    "Prior failed return-route pilot is a separate retained result; north-facade route is a pilot-informed revision before freeze."
+  ]
+}

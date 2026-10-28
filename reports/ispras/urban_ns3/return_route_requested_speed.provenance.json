@@ -1,0 +1,22 @@
+{
+  "run_id": "urban-block-pilot01-failover",
+  "measurement_source_s": [
+    262.286,
+    562.2860000000001
+  ],
+  "scope": "Independent observed-speed/parameter mismatch, no inferred flight at configured speed",
+  "inputs_sha256": {
+    "/home/bas/bas_v2-paper-live/runs/native-radio-realtime/urban-block-pilot01-failover/logs/urban_scenario.json": "91ee71603806189fdd666f0b5698eca49ea9f4480d07c9daa4dfd361f023e58f",
+    "/home/bas/bas_v2-paper-live/runs/native-radio-realtime/urban-block-pilot01-failover/logs/coordination_gcs.jsonl": "ed08d41d961113d044d1d1d5ed91b6ca371d326b49abf1ff9a564d06fab00125",
+    "/home/bas/bas_v2-paper-live/runs/native-radio-realtime/urban-block-pilot01-failover/logs/node_state.jsonl": "7d14431efdea8150ec998d65d18a70671d9befea3a7e96322f3eaa53aed6bfae",
+    "/home/bas/bas_v2-paper-live/runs/native-radio-realtime/urban-block-pilot01-failover/configuration/parameters-before/parameters.csv": "8d3ce154a30b7e5f1219d2ae36e39c3b216b045fe1140b0e1f2b3172e2b4682e"
+  },
+  "script_sha256": "af4b6d0881d0a1af79d2d405b6db64325ac80e58839953441ce89735a0056b74",
+  "command": [
+    "python3",
+    "reports/ispras/urban_ns3/tools/review_requested_speed.py",
+    "/home/bas/bas_v2-paper-live/runs/native-radio-realtime/urban-block-pilot01-failover",
+    "--output",
+    "reports/ispras/urban_ns3/return_route_requested_speed.csv"
+  ]
+}
