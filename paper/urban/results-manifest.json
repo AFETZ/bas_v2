@@ -17,5 +17,19 @@
     "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/results-final/tables/parameter_coverage.csv",
     "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/results-final/tables/parameter_changes.csv",
     "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/results-final/tables/table_sources.json"
-  ]
+  ],
+  "figure_ids": [
+    "urban_first_pair",
+    "urban_primary_effects"
+  ],
+  "figure_captions": {
+    "urban_first_pair": {
+      "caption_ru": "Первая запланированная geometry-пара: фактические XY, высоты и LOS/NLOS. Пунктир — намерение НПУ, не UART-доказательство. Разрывы данных сохранены. Подготовка relay — 70 м, горизонтальный участок — 60 м, фасадный — 12 м; follower преимущественно удерживают точки при переключении.",
+      "caption_en": "First preplanned geometry pair: actual XY, altitude and LOS/NLOS. Dashed lines show GCS intent, not UART evidence; gaps remain. Relay preparation is at 70 m, horizontal flight at 60 m and facade flight at 12 m; followers mostly hold during reassignment."
+    },
+    "urban_primary_effects": {
+      "caption_ru": "Все основные пары: timely/offered и достигнутые точки. Крестик — failed с наблюдённым исходом; пропуск не изображён нулём. Интервалы рассчитаны по целым парам, interaction — по полным четырёхслучайным блокам.",
+      "caption_en": "All main pairs: timely/offered and completed waypoints. Crosses mark failed attempts with observed outcomes; missing is not zero. Intervals use whole pairs; interaction uses complete four-case blocks."
+    }
+  }
 }

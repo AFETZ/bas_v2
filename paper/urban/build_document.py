@@ -59,6 +59,17 @@ class Revision:
                                or rendered.get("preview") is not False or rendered.get("not_rendered")):
                 raise ValueError("final manuscript requires the complete measured figure batch")
             self.manifest["figures"] = rendered.get("figures", [])
+        if self.manifest.get("figure_ids"):
+            figures = {entry["id"]: entry for entry in self.manifest.get("figures", [])}
+            selected = self.manifest["figure_ids"]
+            if len(set(selected)) != len(selected) or any(name not in figures for name in selected):
+                raise ValueError("manuscript figure selection must name distinct measured figures")
+            self.manifest["figures"] = [figures[name] for name in selected]
+        for entry in self.manifest.get("figures", []):
+            override = self.manifest.get("figure_captions", {}).get(entry.get("id"), {})
+            for name in ("caption_ru", "caption_en"):
+                if name in override:
+                    entry[name] = override[name]
         for name in self.manifest.get("evidence_sources", []):
             path = resolved(name, self.base)
             self.inputs[str(path)] = sha(path)
