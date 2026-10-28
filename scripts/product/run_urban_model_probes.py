@@ -12,7 +12,7 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def run(output, config):
+def run(output, config, selection="baseline"):
     output.mkdir(parents=True, exist_ok=False)
     base = json.loads(config.read_text())
     models = {"unchanged": base}
@@ -34,6 +34,13 @@ def run(output, config):
         ("equal", "equal", "0,0,2", "85,80,12", "15,90,16"),
         ("los_only", "los_only", "0,0,2", "85,80,12", "15,90,16"),
     ]
+    if selection == "staged":
+        cases = [
+            ("stage_south70", "unchanged", "0,0,2", "85,0,70", "15,65,18"),
+            ("stage_north70", "unchanged", "0,0,2", "85,80,70", "15,65,18"),
+            ("horizontal_shadow60", "unchanged", "0,0,2", "85,45,60", "15,65,18"),
+            ("low_north12", "unchanged", "0,0,2", "85,80,12", "15,65,18"),
+        ]
     for name, model in models.items():
         (output / (name + "-config.json")).write_text(json.dumps(model, indent=2) + "\n")
     ns3 = ROOT / ".external/ns-3-sionna-native"
@@ -61,5 +68,6 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--config", type=Path, default=ROOT / "network/config/urban_two_building.json")
+    p.add_argument("--selection", choices=("baseline", "staged"), default="baseline")
     args = p.parse_args()
-    run(args.output.resolve(), args.config.resolve())
+    run(args.output.resolve(), args.config.resolve(), args.selection)

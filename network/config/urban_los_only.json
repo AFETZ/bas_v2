@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "scenario": "urban_north_facade_inspection_v1",
+  "scenario": "urban_staged_facade_inspection_v1",
   "status": "uncalibrated_research_configuration_pilot_required",
   "frame": {
     "coordinate_frame": "ENU",
@@ -77,12 +77,22 @@
       [
         20,
         0,
-        12
+        70
       ],
       [
         85,
         0,
-        12
+        70
+      ],
+      [
+        85,
+        0,
+        60
+      ],
+      [
+        85,
+        80,
+        60
       ],
       [
         85,
@@ -215,8 +225,38 @@
     "waypoint_dwell_s": 3.0,
     "world_ground_reference_z_m": 0.195,
     "ground_reference_source": "iris/model.sdf base_collision poseZ=-.08 minus box halfheight .115; ground topZ=0, contact residual not corrected",
-    "route_design_reason": "Inspect northern facades and finish in northern radio corridor; reserve stayswest/north. Prior returnroute pilot retained separately; protocol and all coefficients unchanged.",
-    "waypoint_dwell_reason": "3s radio-telemetry progression hold provides margin for separate2s actual-pose completion test and asynchronous clocks; fixed before main freeze. Physical2s criterion unchanged."
+    "route_design_reason": "Pilot-informed staged communication support: high initial relay70m lets peers reach northern facade; then60m horizontal transit enters geometric CP shadow while reserve4 remains viable; lower12m close facade stage follows actual handover. Old10m/s returnfailure and3m/s closed-loop deadlock retained separately. No radio/protocol coefficient changes.",
+    "waypoint_dwell_reason": "3s radio-telemetry progression hold provides margin for separate2s actual-pose completion test and asynchronous clocks; fixed before main freeze. Physical2s criterion unchanged.",
+    "barriers": {
+      "1:2": {
+        "minimum_reached": {
+          "2": 2,
+          "3": 2,
+          "4": 2,
+          "5": 2
+        }
+      },
+      "2:3": {
+        "minimum_reached": {
+          "1": 3
+        }
+      },
+      "3:3": {
+        "minimum_reached": {
+          "1": 3
+        }
+      },
+      "4:3": {
+        "minimum_reached": {
+          "1": 3
+        }
+      },
+      "5:3": {
+        "minimum_reached": {
+          "1": 3
+        }
+      }
+    }
   },
   "radio": {
     "parameter_set": "hypothesis_nominal_v1",
