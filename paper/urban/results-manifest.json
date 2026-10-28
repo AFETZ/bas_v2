@@ -2,20 +2,20 @@
   "kind": "frozen_series",
   "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
   "freeze_path": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/freeze.json",
-  "study_json": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/results-reviewed/urban_study.json",
+  "study_json": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/results-final/urban_study.json",
   "per_run_table": false,
   "status": "all 56 controllers closed; 36 completed,20 failed,55 valid full windows; failures and missingness retained",
   "source_sha256": {
-    "study": "29d35208091d47552873b0b01f756a8cb994b716657e60629c8c1159e90ba7b0",
+    "study": "428dd7d149f13f4e021c7e225cd3ce4a97881aa017c4521a5241ccbb97fe02d1",
     "freeze": "8590f67b3acd2ce536e06eacfa518da65f024da4d73b02435aafc87c0945daed"
   },
   "input_root": "/home/bas/bas_v2-paper-live",
-  "figure_manifest": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/final-figures/figure_manifest.json",
+  "figure_manifest": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/publication-figures/figure_manifest.json",
   "evidence_sources": [
-    "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/results-reviewed/tables/descriptive_runs.csv",
-    "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/results-reviewed/tables/endpoints.csv",
-    "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/results-reviewed/tables/parameter_coverage.csv",
-    "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/results-reviewed/tables/parameter_changes.csv",
-    "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/results-reviewed/tables/table_sources.json"
+    "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/results-final/tables/descriptive_runs.csv",
+    "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/results-final/tables/endpoints.csv",
+    "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/results-final/tables/parameter_coverage.csv",
+    "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/results-final/tables/parameter_changes.csv",
+    "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/results-final/tables/table_sources.json"
   ]
 }
