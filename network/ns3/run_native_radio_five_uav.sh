@@ -627,6 +627,15 @@ else
   ) > "$RUN_DIR/logs/ns3_build.log" 2>&1
 fi
 [[ -x "$BINARY" ]] || { printf 'Focused native target did not build.\n' >&2; exit 1; }
+# The integration caller holds the runtime/build lock through execution and
+# teardown. Identify the actual post-build/reused executable, not a prior file.
+NATIVE_BINARY_SHA256="$(python3 - "$BINARY" <<'PYBINARYSHA'
+import hashlib
+from pathlib import Path
+import sys
+print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())
+PYBINARYSHA
+)"
 
 mapfile -t DEPENDENCIES < <(PYTHONPATH="$PYTHON_DEPS" python3 - <<'PY'
 from importlib.metadata import PackageNotFoundError, version
@@ -654,6 +663,7 @@ PY
   printf 'ns3_version=3.48\n'
   printf 'ns3_rng_seed=%s\nns3_rng_run=%s\n' "$RNG_SEED" "$RNG_RUN"
   printf 'ns3_exact_sha=%s\n' "$(git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" rev-parse HEAD)"
+  printf 'native_binary_sha256=%s\n' "$NATIVE_BINARY_SHA256"
   printf 'ns3_compatibility_patch=true\n'
   printf 'python_version=%s\n' "$(python3 --version | awk '{print $2}')"
   printf '%s\n' "${DEPENDENCIES[@]}"
