@@ -267,7 +267,7 @@ def draw_geometry(axis,data,*,y_offset=0):
 
 def figure_pair(plt,pair):
     from matplotlib.patches import Rectangle
-    fig,axes=plt.subplots(3,2,figsize=(PUBLICATION_WIDTH_IN,6.4),gridspec_kw={"height_ratios":[2.1,1.3,.6]})
+    fig,axes=plt.subplots(3,2,figsize=(PUBLICATION_WIDTH_IN,6.6),gridspec_kw={"height_ratios":[2.1,1.3,.6]})
     for col,policy in enumerate(("fixed","failover")):
         data=pair[policy];begin,end=data["begin"],data["end"]
         for b in data["scenario"].get("buildings",[]):
@@ -304,14 +304,14 @@ def figure_pair(plt,pair):
         if begin is not None:
             draw_geometry(axes[2,col],data)
         axes[0,col].set(title=f"{policy}\n{data['result'].get('recorded_status','missing')}",xlabel="ENU X, m",ylabel="ENU Y, m" if col==0 else "",aspect="equal")
-        axes[1,col].set(ylabel="ENU Z, m" if col==0 else "",title="Solid: actual\nDashed: GCS intent")
+        axes[1,col].set(ylabel="ENU Z, m" if col==0 else "",title="Actual / dashed GCS intent")
         axes[2,col].set(xlabel="Host s after start",yticks=[0,1],yticklabels=["NLOS","LOS"] if col==0 else ["", ""],ylim=(-.2,1.2))
         if begin is not None and end is not None:
             for ax in axes[1:,col]: ax.set_xlim(0,(end-begin)/NS)
     handles,labels=axes[0,0].get_legend_handles_labels()
     fig.legend(handles,labels,loc="lower center",ncol=3,fontsize=FONT_SMALL,frameon=False)
     fig.suptitle("First geometry pair: "+pair["fixed"]["case"]["block_id"],fontsize=FONT_MAIN+1)
-    fig.tight_layout(rect=(0,.1,1,.97),pad=.7)
+    fig.tight_layout(rect=(0,.1,1,.97),pad=.8,h_pad=1.8)
     return fig
 
 
