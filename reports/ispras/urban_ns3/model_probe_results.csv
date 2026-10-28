@@ -1,0 +1,9 @@
+case,geometric_LOS,selected_radio_state,blockers,loss_db,offered_per_path,direct_rx,relay_first_rx,relay_second_rx,raw_json
+blocked,0,NLOS,A,102.15801458807759,100,0,100,100,runs/urban-ns3-dev/probes02/blocked-packets.json
+equal,0,NLOS,A,81.47045282246694,100,100,100,100,runs/urban-ns3-dev/probes02/equal-packets.json
+los_only,0,LOS,A,81.47045282246694,100,100,100,100,runs/urban-ns3-dev/probes02/los_only-packets.json
+moved,1,LOS,,81.47045282246694,100,100,100,100,runs/urban-ns3-dev/probes02/moved-packets.json
+open,1,LOS,,78.74340558150712,100,100,100,0,runs/urban-ns3-dev/probes02/open-packets.json
+reverse,0,NLOS,A,102.15801458807759,100,0,100,100,runs/urban-ns3-dev/probes02/reverse-packets.json
+roof_clear,1,LOS,,81.43869440073244,100,100,100,100,runs/urban-ns3-dev/probes02/roof_clear-packets.json
+two_buildings,0,NLOS,A;B,106.26305665397943,100,0,100,100,runs/urban-ns3-dev/probes02/two_buildings-packets.json

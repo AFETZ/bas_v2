@@ -1,0 +1,10 @@
+{
+  "status": "measured_component_probe_not_flight",
+  "runtime_image": "sha256:89d78eff9914b1644a1b01b793612e9ee8b19916c5a7bf5f578ba6d8bfbfafe5",
+  "source": "8e748eb4e9abaaaec9bf64850092886a85319bd3",
+  "raw": "runs/urban-ns3-dev/probes02",
+  "commands": "runs/urban-ns3-dev/probes02/commands.json",
+  "probe_phy": "802.11g6Mbps; fiveSITLproduct802.11nseparate",
+  "prior_failure": "probes01 stopped before native execution because sourcegitpath unavailableinsidecontainer; retained",
+  "cpu_gpu": "CPU native probe, no GPU/Sionna solver requested"
+}
