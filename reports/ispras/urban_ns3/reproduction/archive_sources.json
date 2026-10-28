@@ -1,0 +1,23 @@
+[
+  {
+    "source_path": "/home/bas/bas_v2-paper-live/runs/paper-live-20261026/campaign/freeze.json",
+    "archive_file": "base_freeze_20261026.json",
+    "bytes": 11422,
+    "sha256": "f0f3c823f9a410e0c24ee421d0b2df25ff2d91f17567ceec8bd842d0e8e9585d",
+    "operation": "byte-identical copy; original unchanged"
+  },
+  {
+    "source_path": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/freeze.json",
+    "archive_file": "freeze.json",
+    "bytes": 66374,
+    "sha256": "8590f67b3acd2ce536e06eacfa518da65f024da4d73b02435aafc87c0945daed",
+    "operation": "byte-identical copy; original unchanged"
+  },
+  {
+    "source_path": "/home/bas/bas_v2-paper-live/runs/urban-ns3-20261028/plan.json",
+    "archive_file": "plan.json",
+    "bytes": 22924,
+    "sha256": "6ad60a20bb6888fb6bf0fa9111c61d463f0ce71e7d38d2fec514cd1a631be307",
+    "operation": "byte-identical copy; original unchanged"
+  }
+]
