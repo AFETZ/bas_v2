@@ -105,6 +105,15 @@ def freeze(plan, *, scenarios, pilot_analyses, reviews, image, horizon_s, output
     if not re.fullmatch(r"[A-Za-z0-9_-]+", study_id):
         raise ValueError("study ID must be a simple basename")
     config_inputs = {key:artifact(path) for key,path in scenarios.items()}
+    nominal = A.RELAY.read_json(scenarios["nominal"])
+    control = A.RELAY.read_json(scenarios["los_only"])
+    # This is a radio ablation on the very same mission and physical scene.
+    nominal_without_mode = json.loads(json.dumps(nominal))
+    control_without_mode = json.loads(json.dumps(control))
+    nominal_without_mode["radio"].pop("mode")
+    control_without_mode["radio"].pop("mode")
+    if nominal_without_mode != control_without_mode:
+        raise ValueError("LOS-only control differs from nominal beyond radio.mode")
     cases = []
     for row in plan["rows"]:
         variant = ("los_only" if row["radio_mode"] == "los_only" else row["scenario_variant"]
@@ -117,11 +126,19 @@ def freeze(plan, *, scenarios, pilot_analyses, reviews, image, horizon_s, output
         cases.append(dict(row, run_id=f"{study_id}-{row['case_id']}", policy=row["policy"],
             duration_s=horizon_s, rng_run=row["rng_run"], config=str(config),
             config_sha256=config_inputs[variant]["sha256"], status="frozen_not_run"))
+    blocks = {r["block_id"]:(r["rng_seed"],r["rng_run"]) for r in cases if r["cohort"]=="main"}
+    if len(set(blocks.values())) != len(blocks):
+        raise ValueError("independent main blocks reuse an RNG seed/run")
     result = dict(status="frozen_inputs_not_execution_results", schema_version=1,
         frozen_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
         frozen_at_host_monotonic_ns=time.monotonic_ns(),
         source_commit=git("rev-parse", "HEAD"), image_id=image,
         parameter_snapshots=True, parameter_workers=5,
+        main_block_RNG_pairs=blocks,
+        ablation_check="all JSON content identical after removing radio.mode",
+        outcome_spec=dict(primary=["fixed-horizon timely/offered", "configured physical waypoint progress"],
+            optional_restricted_horizon_host_s=60, physical_hold_source_s=2,
+            route_hold_autopilot_s=3, inference_unit="independent whole seed block"),
         base_environment_source=artifact(root/"runs/paper-live-20261026/campaign/freeze.json"),
         base_environment=A.RELAY.read_json(root/"runs/paper-live-20261026/campaign/freeze.json")["base_environment"],
         native_binary=artifact(root/".external/ns-3-sionna-native/build/scratch/ns3.48-upstream-sionna-tap-spike-default"),
