@@ -16,6 +16,8 @@
 | Completion хранит max_vertical_displacement | `scripts/product/relay_experiment.py:179–205`; goal recovery в analyzer | Горизонтальную цель нельзя пропускать через прежний критерий «новая высота/вертикальный манёвр» без отдельного профиля и критерия. |
 | Старый product YAML содержит горизонтальный маршрут только UAV1 | `network/config/scenario_5uav_town01_native_product.yaml:101–123` | Уже есть путь вдоль улицы/за квартал для отдельного драйвера; он не превращает relay mission в маршруты всех пяти. |
 
+На интеграции дополнительно реально вызван runner с failover+Sionna при остальных допустимых realtime/5UAV/ad-hoc/control настройках. Он завершился кодом2 с сообщением `Coordination requires ... explicit Friis/ad-hoc` до старта ns-3/полёта. Точный argv/env/output — `urban_relay_guard.json`. Это проверка запрета конфигурации, не запуск RT solver и не измерение его производительности.
+
 ## Можно ли подключить лёгкое затенение без собственных радиоформул
 
 В установленном upstream есть `src/buildings/model/buildings-channel-condition-model.cc:44–77,156–176`: outdoor LOS определяется пересечением отрезка с `Building::IsIntersect`. Это настоящая пространственная классификация, но **не модель ослабления**. Нужны Building объёмы, `MobilityBuildingInfo` и обновление indoor/outdoor состояния при движении. В измеренной native-цепочке этого нет.

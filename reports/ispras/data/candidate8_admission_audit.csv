@@ -1,0 +1,9 @@
+run_id,admissions,valid_issued_authority,unverifiable,lineage_errors,invalidated
+paper-candidate4-unavailable-fixed-20261028-rx,1806,1806,0,0,0
+paper-candidate4-unavailable-failover-20261028-rx,1860,1860,0,0,0
+paper-candidate4-unavailable-fixed-20261028-rx-d5,1848,1848,0,0,0
+paper-candidate4-unavailable-failover-20261028-rx-d5,1875,1875,0,0,0
+paper-candidate4-unavailable-fixed-20261028-rx-d30,1593,1593,0,0,0
+paper-candidate4-unavailable-failover-20261028-rx-d30,1897,1897,0,0,0
+paper-candidate4-unavailable-fixed-20261028-rx-d2,1887,1887,0,0,0
+paper-candidate4-unavailable-failover-20261028-rx-d2,1904,1904,0,0,0

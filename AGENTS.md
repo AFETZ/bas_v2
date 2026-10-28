@@ -1,5 +1,10 @@
 # Active paper follow-up — user-authorized scope, 2026-10-27
 
+Latest article audit (2026-10-28): read `reports/ispras/README.md` and its six reports.
+Main30 and sensitivity18 remain immutable. New candidate-availability probes are
+separate engineering pairs, not a new main matrix. Geometry-aware horizontal flight
+is still planned; never describe Friis/Matrix/filter probes as measured building NLOS.
+
 For this worktree the current task is `NEXT_STEP_PROMPT.txt` and the current user request.
 Read `doc/LIVE_LEADER_REVIEW_20261027.md` and `doc/LIVE_LEADER_RESULTS.md`;
 `doc/LIVE_LEADER_PLAN.md` preserves the original implementation plan, not current status.

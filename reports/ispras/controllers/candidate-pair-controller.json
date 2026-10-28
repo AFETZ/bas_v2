@@ -1,0 +1,208 @@
+[
+  {
+    "run_id": "paper-candidate4-unavailable-fixed-20261028",
+    "policy": "fixed",
+    "source": "bb026a052a2474df29bee3603cc98af27592e207",
+    "environment": {
+      "BAS_CONTAINER_IMAGE": "sha256:89d78eff9914b1644a1b01b793612e9ee8b19916c5a7bf5f578ba6d8bfbfafe5",
+      "BAS_NATIVE_FIVE_SCENARIO": "town01",
+      "BAS_NATIVE_FIVE_GUI": "0",
+      "BAS_NATIVE_PHYSICS_PROFILE": "stock",
+      "BAS_NATIVE_PROPAGATION_PROFILE": "friis",
+      "BAS_NATIVE_WIFI_TOPOLOGY": "adhoc",
+      "BAS_NATIVE_WIFI_EXPLICIT_BAR": "0",
+      "BAS_NATIVE_WIFI_AGGREGATION": "0",
+      "BAS_NATIVE_UART_CHANNELS": "control",
+      "BAS_NATIVE_UAV_COUNT": "5",
+      "BAS_NATIVE_CAPTURE_IMAGES": "0",
+      "BAS_NATIVE_EVENT_LOGGING": "metrics_only",
+      "BAS_NATIVE_CAPTURE_STORAGE": "tmpfs",
+      "BAS_NATIVE_FAULT_MASTER_ID": "1",
+      "BAS_NATIVE_FAULT_EXTRA_LOSS_DB": "200",
+      "BAS_NATIVE_EXPERIMENT_PILOT": "1",
+      "BAS_NATIVE_EXPERIMENT_DURATION_S": "90",
+      "BAS_NATIVE_FAULT_START_S": "30",
+      "BAS_NATIVE_FAULT_END_S": "40",
+      "BAS_NATIVE_COMMAND_PERIOD_S": "1",
+      "BAS_NATIVE_TASK_PERIOD_S": "20",
+      "BAS_NATIVE_FIVE_SKIP_BUILD": "1",
+      "BAS_NATIVE_FIVE_RUN_ID": "paper-candidate4-unavailable-fixed-20261028",
+      "BAS_NATIVE_COORDINATION_POLICY": "fixed",
+      "BAS_NATIVE_FAULT_PROFILE": "selective",
+      "BAS_NATIVE_EXPERIMENT_PROFILE": "main",
+      "BAS_NATIVE_RNG_SEED": "1",
+      "BAS_NATIVE_RNG_RUN": "27",
+      "BAS_NATIVE_PARAMETER_SNAPSHOTS": "0"
+    },
+    "argv": [
+      "./network/ns3/run_native_radio_five_uav.sh"
+    ],
+    "events": [
+      {
+        "event": "firewall_rule",
+        "host_monotonic_ns": 507713958452146,
+        "argv": [
+          "docker",
+          "exec",
+          "bas-v2-native-radio-five-uav",
+          "ip",
+          "netns",
+          "exec",
+          "ams-gcs",
+          "iptables",
+          "-I",
+          "OUTPUT",
+          "1",
+          "-p",
+          "udp",
+          "-d",
+          "10.71.4.10",
+          "-j",
+          "DROP"
+        ],
+        "returncode": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      {
+        "event": "firewall_rule",
+        "host_monotonic_ns": 507713997751089,
+        "argv": [
+          "docker",
+          "exec",
+          "bas-v2-native-radio-five-uav",
+          "ip",
+          "netns",
+          "exec",
+          "ams-gcs",
+          "iptables",
+          "-I",
+          "INPUT",
+          "1",
+          "-p",
+          "udp",
+          "-s",
+          "10.71.4.10",
+          "-j",
+          "DROP"
+        ],
+        "returncode": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      {
+        "event": "candidate4_direct_GCS_UDP_blocked",
+        "host_monotonic_ns": 507713997989625
+      },
+      {
+        "event": "launcher_exited",
+        "host_monotonic_ns": 507717068760716,
+        "returncode": 1
+      }
+    ],
+    "returncode": 1
+  },
+  {
+    "run_id": "paper-candidate4-unavailable-failover-20261028",
+    "policy": "failover",
+    "source": "bb026a052a2474df29bee3603cc98af27592e207",
+    "environment": {
+      "BAS_CONTAINER_IMAGE": "sha256:89d78eff9914b1644a1b01b793612e9ee8b19916c5a7bf5f578ba6d8bfbfafe5",
+      "BAS_NATIVE_FIVE_SCENARIO": "town01",
+      "BAS_NATIVE_FIVE_GUI": "0",
+      "BAS_NATIVE_PHYSICS_PROFILE": "stock",
+      "BAS_NATIVE_PROPAGATION_PROFILE": "friis",
+      "BAS_NATIVE_WIFI_TOPOLOGY": "adhoc",
+      "BAS_NATIVE_WIFI_EXPLICIT_BAR": "0",
+      "BAS_NATIVE_WIFI_AGGREGATION": "0",
+      "BAS_NATIVE_UART_CHANNELS": "control",
+      "BAS_NATIVE_UAV_COUNT": "5",
+      "BAS_NATIVE_CAPTURE_IMAGES": "0",
+      "BAS_NATIVE_EVENT_LOGGING": "metrics_only",
+      "BAS_NATIVE_CAPTURE_STORAGE": "tmpfs",
+      "BAS_NATIVE_FAULT_MASTER_ID": "1",
+      "BAS_NATIVE_FAULT_EXTRA_LOSS_DB": "200",
+      "BAS_NATIVE_EXPERIMENT_PILOT": "1",
+      "BAS_NATIVE_EXPERIMENT_DURATION_S": "90",
+      "BAS_NATIVE_FAULT_START_S": "30",
+      "BAS_NATIVE_FAULT_END_S": "40",
+      "BAS_NATIVE_COMMAND_PERIOD_S": "1",
+      "BAS_NATIVE_TASK_PERIOD_S": "20",
+      "BAS_NATIVE_FIVE_SKIP_BUILD": "1",
+      "BAS_NATIVE_FIVE_RUN_ID": "paper-candidate4-unavailable-failover-20261028",
+      "BAS_NATIVE_COORDINATION_POLICY": "failover",
+      "BAS_NATIVE_FAULT_PROFILE": "selective",
+      "BAS_NATIVE_EXPERIMENT_PROFILE": "main",
+      "BAS_NATIVE_RNG_SEED": "1",
+      "BAS_NATIVE_RNG_RUN": "27",
+      "BAS_NATIVE_PARAMETER_SNAPSHOTS": "0"
+    },
+    "argv": [
+      "./network/ns3/run_native_radio_five_uav.sh"
+    ],
+    "events": [
+      {
+        "event": "firewall_rule",
+        "host_monotonic_ns": 507733434735093,
+        "argv": [
+          "docker",
+          "exec",
+          "bas-v2-native-radio-five-uav",
+          "ip",
+          "netns",
+          "exec",
+          "ams-gcs",
+          "iptables",
+          "-I",
+          "OUTPUT",
+          "1",
+          "-p",
+          "udp",
+          "-d",
+          "10.71.4.10",
+          "-j",
+          "DROP"
+        ],
+        "returncode": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      {
+        "event": "firewall_rule",
+        "host_monotonic_ns": 507733480728554,
+        "argv": [
+          "docker",
+          "exec",
+          "bas-v2-native-radio-five-uav",
+          "ip",
+          "netns",
+          "exec",
+          "ams-gcs",
+          "iptables",
+          "-I",
+          "INPUT",
+          "1",
+          "-p",
+          "udp",
+          "-s",
+          "10.71.4.10",
+          "-j",
+          "DROP"
+        ],
+        "returncode": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      {
+        "event": "candidate4_direct_GCS_UDP_blocked",
+        "host_monotonic_ns": 507733480988069
+      },
+      {
+        "event": "launcher_exited",
+        "host_monotonic_ns": 507736149737079,
+        "returncode": 1
+      }
+    ],
+    "returncode": 1
+  }
+]

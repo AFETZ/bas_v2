@@ -1,5 +1,13 @@
 # Product Status
 
+## Article audit, 2026-10-28
+
+- [Six requested audit reports, raw-derived CSV and timelines](../reports/ispras/README.md). Main30/sensitivity18 were not rerun or rewritten. Algorithm/runtime code unchanged; main selective UART mean independently reproduced as3.9633874144s; all published table means/paired intervals agree.
+- Main27000offers=22472sentCID+4528unsent;75058uniqueUART=22254target/window+636target/outside+22335non-target/window+29833non-target/outside.1350created goals/1200sent-admitted-completed; selected-goal creation delay is conditional, not a silent generator. Timely origin is command.created, not offer timestamp.
+- New direct-GCS UAV4 reply-unavailability probes:2/5/10/30s ×fixed/failover ×onepair, eight completed plus two retained preflight failures from bidirectional OUTPUT DROP/EPERM. All five physical cycles;40postfault goals independently replayed.14670UART, zero observed age/lease/write/duplicate anomalies. Alternative relaysUAV2/UAV5;5s failover UART5.932s exceeds4s. At2s new lease starts after restored RF/old echo, no observed UART benefit. New n=1 diagnostics remain separate from main30 and sensitivity18; no CI.
+- Friis still has no building shadowing. Relay guard forbids RT, goal adapter fixesXY, completion is vertical. [Precise feasibility and implementation gaps](../reports/ispras/OBSTACLE_FEASIBILITY.md); planned two-building/five-route industrial scenario is **not measured**, with actual LOS/NLOS times unavailable. Urban propagation/flight remains future work; no fabricated shadowing result.
+- Pinned image/assets/native runtime restart checked; actual five SITL ELF/version recorded (ArduCopter4.8.0-dev,3c073f9a). Clone still requires external image/assets/raw/build manifest. Paper PDF and old raw unchanged; no conference submission.
+
 Updated: 2026-10-27. This status describes the user-authorized paper/live worktree `/home/bas/bas_v2-paper-live`, not every historical BAS profile.
 Main30 measured implementation: `8e16ec223e895c11891e6e7d7c39dff8cee39cac`; separate sensitivity18: `e6453c8e2a1ed4f6e4f9b16c224104e62e2df5d1`. Pinned image `sha256:89d78eff9914b1644a1b01b793612e9ee8b19916c5a7bf5f578ba6d8bfbfafe5`.
 

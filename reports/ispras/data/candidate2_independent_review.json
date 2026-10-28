@@ -1,0 +1,318 @@
+{
+  "method": "Independent raw authority/CID and deduplicated Gazebo pose replay; no production analyzer import",
+  "records": [
+    {
+      "run_id": "paper-candidate4-unavailable-fixed-20261028-rx-d2",
+      "status": "completed",
+      "pilot": true,
+      "nominal_fault_s": 2.0,
+      "actual_RF_duration_s": 1.999891555,
+      "policy": "fixed",
+      "selections": [],
+      "direct_UAV4_echo_during_fault": 0,
+      "direct_UAV4_echo_count": 1,
+      "overlap_violations": [],
+      "all_UART_count": 1887,
+      "invalid_UART_count": 0,
+      "duplicate_UART_CIDs": 0,
+      "individual_UART": [
+        {
+          "uav_id": 1,
+          "first_CID": "1:1:994",
+          "UART_recovery_s": 3.92247589
+        },
+        {
+          "uav_id": 2,
+          "first_CID": "1:2:985",
+          "UART_recovery_s": 2.926843854
+        },
+        {
+          "uav_id": 3,
+          "first_CID": "1:3:996",
+          "UART_recovery_s": 3.925810616
+        },
+        {
+          "uav_id": 4,
+          "first_CID": "1:4:997",
+          "UART_recovery_s": 3.926561755
+        },
+        {
+          "uav_id": 5,
+          "first_CID": "1:5:988",
+          "UART_recovery_s": 2.929447779
+        }
+      ],
+      "T_UART_s": 3.926561755,
+      "physical_goals": {
+        "1": {
+          "CID": "1:1:1114",
+          "first_goal_CID": "1:1:1064",
+          "start_ns": 510175472499770,
+          "end_ns": 510180654980648,
+          "target": [
+            20.0,
+            4.858516261622033e-18,
+            12.546475748031945
+          ],
+          "completion_source_s": 158.12,
+          "T_goal_s": 16.102679514,
+          "pose_samples": 223,
+          "independent_max_vertical_displacement_m": 4.061788256662469,
+          "dwell_observed_source_span_s": 2.0,
+          "dwell_max_speed_mps": 0.995545375626658,
+          "dwell_max_z_error_m": 0.589213715698147,
+          "dwell_max_xy_error_m": 0.03290482530463036,
+          "dwell_max_source_gap_s": 0.040000000000020464
+        },
+        "2": {
+          "CID": "1:2:1115",
+          "first_goal_CID": "1:2:1065",
+          "start_ns": 510175477598164,
+          "end_ns": 510180655070026,
+          "target": [
+            35.0,
+            -3.866006281145355e-18,
+            16.546475748031945
+          ],
+          "completion_source_s": 158.12,
+          "T_goal_s": 16.102768892,
+          "pose_samples": 223,
+          "independent_max_vertical_displacement_m": 4.015251759010594,
+          "dwell_observed_source_span_s": 2.0,
+          "dwell_max_speed_mps": 0.9829127926384913,
+          "dwell_max_z_error_m": 0.6664529764399738,
+          "dwell_max_xy_error_m": 0.036068410460046246,
+          "dwell_max_source_gap_s": 0.040000000000020464
+        },
+        "3": {
+          "CID": "1:3:1116",
+          "first_goal_CID": "1:3:1066",
+          "start_ns": 510175478248213,
+          "end_ns": 510180625989297,
+          "target": [
+            50.0,
+            -3.658565539851087e-18,
+            20.252475748031944
+          ],
+          "completion_source_s": 158.1,
+          "T_goal_s": 16.073688163,
+          "pose_samples": 221,
+          "independent_max_vertical_displacement_m": 3.992790558485151,
+          "dwell_observed_source_span_s": 2.0,
+          "dwell_max_speed_mps": 0.9973911002633009,
+          "dwell_max_z_error_m": 0.3859127753024687,
+          "dwell_max_xy_error_m": 0.03397732469972824,
+          "dwell_max_source_gap_s": 0.040000000000020464
+        },
+        "4": {
+          "CID": "1:4:1117",
+          "first_goal_CID": "1:4:1067",
+          "start_ns": 510175478681967,
+          "end_ns": 510180655088891,
+          "target": [
+            65.0,
+            -2.0001021765611646e-18,
+            24.252475748031944
+          ],
+          "completion_source_s": 158.12,
+          "T_goal_s": 16.102787757,
+          "pose_samples": 223,
+          "independent_max_vertical_displacement_m": 4.017259347446274,
+          "dwell_observed_source_span_s": 2.0,
+          "dwell_max_speed_mps": 0.979035627435036,
+          "dwell_max_z_error_m": 0.37661835811334754,
+          "dwell_max_xy_error_m": 0.04128892432484914,
+          "dwell_max_source_gap_s": 0.040000000000020464
+        },
+        "5": {
+          "CID": "1:5:1118",
+          "first_goal_CID": "1:5:1068",
+          "start_ns": 510175479869805,
+          "end_ns": 510180655102527,
+          "target": [
+            80.0,
+            -2.6975892173635232e-18,
+            28.422475748031946
+          ],
+          "completion_source_s": 158.12,
+          "T_goal_s": 16.102801393,
+          "pose_samples": 223,
+          "independent_max_vertical_displacement_m": 4.0142144047106,
+          "dwell_observed_source_span_s": 2.0,
+          "dwell_max_speed_mps": 0.9780599215574403,
+          "dwell_max_z_error_m": 0.5189509204457075,
+          "dwell_max_xy_error_m": 0.03951246059765886,
+          "dwell_max_source_gap_s": 0.040000000000020464
+        }
+      },
+      "criteria_recorded": {
+        "five_uav_lifecycle": true,
+        "two_completed_goals_each": true,
+        "two_completed_target_levels_each": true,
+        "live_integral_rtf_target": true,
+        "total_GCS_hold_all_five": null
+      },
+      "limits": "Vertical diagnostic mission, INPUT-only GCS filter; not all-peer UAV4 isolation, not building-aware, not new PCAP audit."
+    },
+    {
+      "run_id": "paper-candidate4-unavailable-failover-20261028-rx-d2",
+      "status": "completed",
+      "pilot": true,
+      "nominal_fault_s": 2.0,
+      "actual_RF_duration_s": 1.999655341,
+      "policy": "failover",
+      "selections": [
+        {
+          "leader": 2,
+          "epoch": 2,
+          "at_ns": 510426053767442,
+          "valid_from": 510427687183606
+        }
+      ],
+      "direct_UAV4_echo_during_fault": 0,
+      "direct_UAV4_echo_count": 1,
+      "overlap_violations": [],
+      "all_UART_count": 1904,
+      "invalid_UART_count": 0,
+      "duplicate_UART_CIDs": 0,
+      "individual_UART": [
+        {
+          "uav_id": 1,
+          "first_CID": "2:1:989",
+          "UART_recovery_s": 3.92694377
+        },
+        {
+          "uav_id": 2,
+          "first_CID": "2:2:990",
+          "UART_recovery_s": 3.923455422
+        },
+        {
+          "uav_id": 3,
+          "first_CID": "2:3:991",
+          "UART_recovery_s": 3.927847764
+        },
+        {
+          "uav_id": 4,
+          "first_CID": "2:4:992",
+          "UART_recovery_s": 3.929221178
+        },
+        {
+          "uav_id": 5,
+          "first_CID": "2:5:993",
+          "UART_recovery_s": 3.930176449
+        }
+      ],
+      "T_UART_s": 3.930176449,
+      "physical_goals": {
+        "1": {
+          "CID": "2:1:1109",
+          "first_goal_CID": "2:1:1059",
+          "start_ns": 510436093139737,
+          "end_ns": 510441293766257,
+          "target": [
+            20.0,
+            6.010483732784964e-18,
+            12.513475748031944
+          ],
+          "completion_source_s": 159.84,
+          "T_goal_s": 16.124949643,
+          "pose_samples": 225,
+          "independent_max_vertical_displacement_m": 4.052110396286043,
+          "dwell_observed_source_span_s": 2.0,
+          "dwell_max_speed_mps": 0.9801746079282517,
+          "dwell_max_z_error_m": 0.5707481349303141,
+          "dwell_max_xy_error_m": 0.0400162356877476,
+          "dwell_max_source_gap_s": 0.040000000000020464
+        },
+        "2": {
+          "CID": "2:2:1110",
+          "first_goal_CID": "2:2:1060",
+          "start_ns": 510436088683155,
+          "end_ns": 510441293824255,
+          "target": [
+            35.0,
+            -3.505590567652091e-18,
+            16.513475748031944
+          ],
+          "completion_source_s": 159.84,
+          "T_goal_s": 16.125007641,
+          "pose_samples": 225,
+          "independent_max_vertical_displacement_m": 4.045231885365263,
+          "dwell_observed_source_span_s": 2.0,
+          "dwell_max_speed_mps": 0.9719835986407549,
+          "dwell_max_z_error_m": 0.5640453174151965,
+          "dwell_max_xy_error_m": 0.027425364712518916,
+          "dwell_max_source_gap_s": 0.040000000000020464
+        },
+        "3": {
+          "CID": "2:3:1111",
+          "first_goal_CID": "2:3:1061",
+          "start_ns": 510436093420524,
+          "end_ns": 510441248733927,
+          "target": [
+            50.0,
+            -3.658565539851087e-18,
+            20.366475748031945
+          ],
+          "completion_source_s": 159.8,
+          "T_goal_s": 16.079917313,
+          "pose_samples": 222,
+          "independent_max_vertical_displacement_m": 4.010914422231529,
+          "dwell_observed_source_span_s": 2.0,
+          "dwell_max_speed_mps": 0.9982759006937435,
+          "dwell_max_z_error_m": 0.4563136976015052,
+          "dwell_max_xy_error_m": 0.039572452199391234,
+          "dwell_max_source_gap_s": 0.040000000000020464
+        },
+        "4": {
+          "CID": "2:4:1112",
+          "first_goal_CID": "2:4:1062",
+          "start_ns": 510436094245039,
+          "end_ns": 510441293842029,
+          "target": [
+            65.0,
+            -1.9530200860491353e-18,
+            24.285475748031946
+          ],
+          "completion_source_s": 159.84,
+          "T_goal_s": 16.125025415,
+          "pose_samples": 225,
+          "independent_max_vertical_displacement_m": 4.010937811835618,
+          "dwell_observed_source_span_s": 2.0,
+          "dwell_max_speed_mps": 0.971335881130527,
+          "dwell_max_z_error_m": 0.33485874955879424,
+          "dwell_max_xy_error_m": 0.04703285491956532,
+          "dwell_max_source_gap_s": 0.040000000000020464
+        },
+        "5": {
+          "CID": "2:5:1113",
+          "first_goal_CID": "2:5:1063",
+          "start_ns": 510436095400585,
+          "end_ns": 510441293858129,
+          "target": [
+            80.0,
+            -4.276198016025684e-18,
+            28.285475748031946
+          ],
+          "completion_source_s": 159.84,
+          "T_goal_s": 16.125041515,
+          "pose_samples": 225,
+          "independent_max_vertical_displacement_m": 4.008062781281392,
+          "dwell_observed_source_span_s": 2.0,
+          "dwell_max_speed_mps": 0.9709532170446883,
+          "dwell_max_z_error_m": 0.3839556716519752,
+          "dwell_max_xy_error_m": 0.04675336773285852,
+          "dwell_max_source_gap_s": 0.040000000000020464
+        }
+      },
+      "criteria_recorded": {
+        "five_uav_lifecycle": true,
+        "two_completed_goals_each": true,
+        "two_completed_target_levels_each": true,
+        "live_integral_rtf_target": true,
+        "total_GCS_hold_all_five": null
+      },
+      "limits": "Vertical diagnostic mission, INPUT-only GCS filter; not all-peer UAV4 isolation, not building-aware, not new PCAP audit."
+    }
+  ]
+}

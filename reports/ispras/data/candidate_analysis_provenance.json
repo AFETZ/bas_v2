@@ -1,0 +1,55 @@
+{
+  "runtime_source": "bb026a052a2474df29bee3603cc98af27592e207",
+  "python_analysis": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+  "commands": [
+    [
+      "python3",
+      "reports/ispras/tools/analyze_candidate_batch.py"
+    ],
+    [
+      "python3",
+      "reports/ispras/tools/review_candidate_runs.py",
+      "--raw-root",
+      "runs/native-radio-realtime",
+      "--run-ids",
+      "paper-candidate4-unavailable-fixed-20261028-rx",
+      "paper-candidate4-unavailable-failover-20261028-rx",
+      "paper-candidate4-unavailable-fixed-20261028-rx-d5",
+      "paper-candidate4-unavailable-failover-20261028-rx-d5",
+      "paper-candidate4-unavailable-fixed-20261028-rx-d30",
+      "paper-candidate4-unavailable-failover-20261028-rx-d30",
+      "--output",
+      "reports/ispras/data/candidate_independent_review.json"
+    ],
+    [
+      "python3",
+      "reports/ispras/tools/summarize_candidates.py"
+    ]
+  ],
+  "heavy_lock": "/tmp/bas-paper-runtime.lock",
+  "raw_run_ids": [
+    "paper-candidate4-unavailable-fixed-20261028-rx",
+    "paper-candidate4-unavailable-failover-20261028-rx",
+    "paper-candidate4-unavailable-fixed-20261028-rx-d5",
+    "paper-candidate4-unavailable-failover-20261028-rx-d5",
+    "paper-candidate4-unavailable-fixed-20261028-rx-d30",
+    "paper-candidate4-unavailable-failover-20261028-rx-d30"
+  ],
+  "scripts_sha256": {
+    "reports/ispras/tools/summarize_candidates.py": "2a72d3738e3b798b2bcd24581115f23922214cdde5863d49f622c411f2a1de94",
+    "reports/ispras/tools/analyze_candidate_batch.py": "2ab4e5485ace2692109ce8e78ef2b9e87a2108eb4e0d0a3b1c9626a9682a5016",
+    "reports/ispras/tools/review_candidate_runs.py": "eef0cfb29bc3739511552fc1faa7ceb8d69b37ffdc608b925c10f0a3de0c65cf",
+    "reports/ispras/tools/recovery_timing.py": "cad6ac03658f537b4925c3ec48596f30f80e3f70ad7360aea8b0af5a9a64b205",
+    "reports/ispras/tools/run_candidate_probe.py": "a4638af4c2beb305a664f651cb211aa5131eb0df2df4b28d8a567aacf67a704a",
+    "reports/ispras/tools/plot_candidate_timeline.py": "25b45a6ceb8b665ff35a4e4d44bbcb108d2a1d369db2a2089044ca7cda7f4511"
+  },
+  "input_paths": [
+    "runs/ispras-audit-20261028/candidate-analysis/paper-candidate4-unavailable-fixed-20261028-rx/metrics/relay_analysis.json",
+    "runs/ispras-audit-20261028/candidate-analysis/paper-candidate4-unavailable-failover-20261028-rx/metrics/relay_analysis.json",
+    "runs/ispras-audit-20261028/candidate-analysis/paper-candidate4-unavailable-fixed-20261028-rx-d5/metrics/relay_analysis.json",
+    "runs/ispras-audit-20261028/candidate-analysis/paper-candidate4-unavailable-failover-20261028-rx-d5/metrics/relay_analysis.json",
+    "runs/ispras-audit-20261028/candidate-analysis/paper-candidate4-unavailable-fixed-20261028-rx-d30/metrics/relay_analysis.json",
+    "runs/ispras-audit-20261028/candidate-analysis/paper-candidate4-unavailable-failover-20261028-rx-d30/metrics/relay_analysis.json"
+  ],
+  "plot": "pinned image 89d78eff... Python3.10 Matplotlib; plot_candidate_timeline.py underlock"
+}

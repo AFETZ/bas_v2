@@ -1,0 +1,8 @@
+{
+  "runtime_source": "bb026a052a2474df29bee3603cc98af27592e207",
+  "controller_source_path": "reports/ispras/tools/run_candidate_probe.py",
+  "controller_sha256": "216200465891815f444e8f364de9c3c3b3529a56fba1b923e4f4354540da2a8d",
+  "first_two_runs": "bidirectional UDP drop, failed before measurement; preserved",
+  "rx_pair": "INPUT-only direct UAV4 reply block, same physical/network code; engineering pilot90s/fault30..40/seed1/run27",
+  "source_dirty": "reports only; no runtime files changed"
+}

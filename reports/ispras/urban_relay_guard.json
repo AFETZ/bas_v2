@@ -1,0 +1,42 @@
+{
+  "runtime_head": "ffb720c0f50da7234621c649a81028b10289f53d",
+  "argv": [
+    "flock",
+    "-n",
+    "-E",
+    "75",
+    "/tmp/bas-paper-runtime.lock",
+    "./network/ns3/run_native_radio_five_uav.sh"
+  ],
+  "environment": {
+    "BAS_CONTAINER_IMAGE": "sha256:89d78eff9914b1644a1b01b793612e9ee8b19916c5a7bf5f578ba6d8bfbfafe5",
+    "BAS_NATIVE_FIVE_SCENARIO": "town01",
+    "BAS_NATIVE_FIVE_GUI": "0",
+    "BAS_NATIVE_PHYSICS_PROFILE": "stock",
+    "BAS_NATIVE_PROPAGATION_PROFILE": "sionna",
+    "BAS_NATIVE_WIFI_TOPOLOGY": "adhoc",
+    "BAS_NATIVE_WIFI_EXPLICIT_BAR": "0",
+    "BAS_NATIVE_WIFI_AGGREGATION": "0",
+    "BAS_NATIVE_UART_CHANNELS": "control",
+    "BAS_NATIVE_UAV_COUNT": "5",
+    "BAS_NATIVE_CAPTURE_IMAGES": "0",
+    "BAS_NATIVE_EVENT_LOGGING": "metrics_only",
+    "BAS_NATIVE_CAPTURE_STORAGE": "tmpfs",
+    "BAS_NATIVE_FAULT_MASTER_ID": "1",
+    "BAS_NATIVE_FAULT_EXTRA_LOSS_DB": "200",
+    "BAS_NATIVE_EXPERIMENT_PILOT": "0",
+    "BAS_NATIVE_EXPERIMENT_DURATION_S": "180",
+    "BAS_NATIVE_FAULT_START_S": "45",
+    "BAS_NATIVE_FAULT_END_S": "105",
+    "BAS_NATIVE_COMMAND_PERIOD_S": "1",
+    "BAS_NATIVE_TASK_PERIOD_S": "20",
+    "BAS_NATIVE_FIVE_SKIP_BUILD": "1",
+    "BAS_NATIVE_FIVE_RUN_ID": "paper-urban-relay-rejected-20261028",
+    "BAS_NATIVE_COORDINATION_POLICY": "failover",
+    "BAS_SIMULATION_MODE": "realtime"
+  },
+  "returncode": 2,
+  "elapsed_wall_s": 9.342137479,
+  "output": "{\"building_collision_boxes\": 401, \"coordinate_transform\": \"identity\", \"max_source_to_gazebo_vertex_delta_m\": 0.0, \"schema_version\": 1, \"source\": \"Town01/map/scene.xml and its canonical PLY meshes\", \"static_vertices_baked\": true, \"surface_collision_boxes\": 57, \"vegetation_collision\": false, \"visual_categories\": [\"bridge\", \"building\", \"ground\", \"road\", \"roadline\", \"rock\", \"sidewalk\", \"static\", \"terrain\", \"wall\"], \"visual_meshes\": 140, \"visual_triangles\": 1489181, \"visual_vertices\": 867887, \"world_sdf\": \"/home/bas/bas_v2-paper-live/.external/cavise_maps/Town01/gazebo/town01.sdf\"}\nCoordination requires five realtime UAVs, explicit Friis/ad-hoc, control UART only, and no other scenario mode.\n",
+  "scope": "configuration rejection before NS3/flight; not a RT propagation performance probe"
+}

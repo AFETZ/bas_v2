@@ -1,0 +1,2 @@
+ArduCopter V4.8.0-dev
+ArduCopter V4.8.0-dev (3c073f9a)

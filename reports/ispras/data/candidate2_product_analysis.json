@@ -1,0 +1,36 @@
+[
+  {
+    "run_id": "paper-candidate4-unavailable-fixed-20261028-rx-d2",
+    "status": "completed",
+    "nominal_fault_s": 2,
+    "policy": "fixed",
+    "timely_per_offered": 0.9688888888888889,
+    "T_UART_s": 3.926561755,
+    "T_goal_s": 16.102801393,
+    "criteria": {
+      "five_uav_lifecycle": true,
+      "two_completed_goals_each": true,
+      "two_completed_target_levels_each": true,
+      "live_integral_rtf_target": true,
+      "total_GCS_hold_all_five": null
+    },
+    "errors": []
+  },
+  {
+    "run_id": "paper-candidate4-unavailable-failover-20261028-rx-d2",
+    "status": "completed",
+    "nominal_fault_s": 2,
+    "policy": "failover",
+    "timely_per_offered": 0.9622222222222222,
+    "T_UART_s": 3.930176449,
+    "T_goal_s": 16.125041515,
+    "criteria": {
+      "five_uav_lifecycle": true,
+      "two_completed_goals_each": true,
+      "two_completed_target_levels_each": true,
+      "live_integral_rtf_target": true,
+      "total_GCS_hold_all_five": null
+    },
+    "errors": []
+  }
+]

@@ -1,0 +1,21 @@
+{
+  "status": "planned_before_additional_runs",
+  "runtime_source": "bb026a052a2474df29bee3603cc98af27592e207",
+  "controller_sha256": "a4638af4c2beb305a664f651cb211aa5131eb0df2df4b28d8a567aacf67a704a",
+  "conditions": {
+    "measurement_s": 90,
+    "fault_start_model_s": 30,
+    "fault_durations_s": [
+      5,
+      30
+    ],
+    "policy_order": [
+      "fixed",
+      "failover"
+    ],
+    "seed": 1,
+    "run": 27,
+    "uav4": "INPUT-only direct GCS UDP reply drop throughout; peer relay intact"
+  },
+  "scope": "four engineering attempts, one pair per duration; not main30 or sensitivity18; no CI with n=1; earlier10s candidate pair separate engineering pilot"
+}

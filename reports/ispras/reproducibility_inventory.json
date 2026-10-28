@@ -1,0 +1,17 @@
+{
+  "audit_source": "bb026a052a2474df29bee3603cc98af27592e207",
+  "host_os": "Linux-7.0.0-38-generic-x86_64-with-glibc2.39",
+  "runtime_probe": "runs/ispras-audit-20261028/runtime-version-probe.txt",
+  "availability": {
+    ".external/cavise_maps/Town01/gazebo/town01.sdf": true,
+    ".external/cavise_maps/Town01/map/scene.xml": true,
+    "install": true,
+    "runs/paper-live-20261026/campaign/freeze.json": true,
+    "runs/paper-followup-20261027/sensitivity/freeze.json": true,
+    "runs/native-radio-realtime/paper-relay-selective-failover-s1-r04": true,
+    "paper/build/manuscript_anonymous.pdf": true,
+    ".external/ns-3-sionna-native/build/scratch/ns3.48-upstream-sionna-tap-spike-default": true
+  },
+  "main_runtime_source": "8e16ec223e895c11891e6e7d7c39dff8cee39cac",
+  "sensitivity_runtime_source": "e6453c8e2a1ed4f6e4f9b16c224104e62e2df5d1"
+}

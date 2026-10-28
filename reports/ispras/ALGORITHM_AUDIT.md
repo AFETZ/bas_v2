@@ -10,7 +10,7 @@
 | Timeout 1 с | `service.py:349–368`, `--detection-s=1` | Все три времени: получения, отправки ответа и исходного nonce должны быть не старше срока. Это не «ровно 1 с после RF-отказа». |
 | Lease 2 с / renewal 0,5 с | `service.py:387–399`, parser defaults | Абсолютный lease от `max(now, active_from)`; продление не продолжается при отсутствии прямой доступности текущего лидера. |
 | Guard 10 мс | `policy.py:171–188`, Authority.issue, `--skew-margin-s=.01` | Новый epoch начинается после **максимального expiry всех выданных** старых полномочий, включая потерянные продления. По raw пяти смен gap=0,010 с. |
-| Freshness 250 мс | `policy.py:242–264`, `service.py:632–651` | Возраст команды от `created_ns`, отдельно freshness телеметрии. Это не отдельный deadline от момента offer. Timely/offered проверяет собственный offer deadline. |
+| Freshness 250 мс | `policy.py:242–264`, `service.py:632–651` | Возраст команды от `created_ns`, отдельно freshness телеметрии. Timely/offered использует command-created→UART, а offered задаёт знаменатель/CID join; отдельного дедлайна от момента offer нет. |
 
 В `logs/process_snapshot.txt` основной серии UAV service запускаются без переопределения перечисленных defaults. GCS создаётся `relay_experiment.py` с `service.build_parser()`; измеренные параметры соответствуют статье. Численные значения конфигурации не равны гарантированным точным задержкам исполнения.
 

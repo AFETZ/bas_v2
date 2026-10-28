@@ -1,0 +1,7 @@
+3c073f9a09590307e99f49f960dd0f4dac7fc5bb
+ArduPilot-4.6.0-beta1-7205-g3c073f9a09
+libdart-core+collisions+odelcpsolver6.13:amd64	6.13.2+ds1-1~osrf2~jammy
+#define THISFIRMWARE "ArduCopter V4.8.0-dev"
+#define FIRMWARE_VERSION 4,8,0,FIRMWARE_VERSION_TYPE_DEV
+#define FW_TYPE FIRMWARE_VERSION_TYPE_DEV
+80081862d5e9be8064abb17b66eff4ac7c93de9dbd1835eb920723067ac24772  /workspace/ardu_ws/src/ardupilot/build/sitl/bin/arducopter

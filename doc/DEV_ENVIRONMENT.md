@@ -1,5 +1,11 @@
 # BAS paper: текущая среда разработки
 
+Аудит 28.10.2026 завершён в `reports/ispras/README.md`: восемь новых вертикальных
+диагностических запусков, два preflight failed сохранены; никаких runtime/algorithm
+изменений. Obstacle-aware горизонтальный сценарий пока planned, blockers описаны явно.
+Новые audit worktrees: `/home/bas/bas-audit-{algorithm,metrics,obstacles}` от `bb026a0`;
+они не содержат собственных writable native builds/assets и не заменяют интеграцию.
+
 Обновлено 27.10.2026. Задача: `NEXT_STEP_PROMPT.txt` и текущий запрос пользователя.
 Прочитать `LIVE_LEADER_REVIEW_20261027.md`, `LIVE_LEADER_RESULTS.md`, `network/STATUS.md`.
 `LIVE_LEADER_PLAN.md` сохраняет исторический план реализации; P0–P5 не начинать заново.

@@ -1,0 +1,64 @@
+{
+  "runtime_first6": "bb026a052a2474df29bee3603cc98af27592e207",
+  "runtime_last2": "ffb720c0f50da7234621c649a81028b10289f53d",
+  "plans": [
+    "additional_candidate_plan.json",
+    "candidate_two_second_plan.json"
+  ],
+  "python_analysis": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+  "commands": [
+    [
+      "python3",
+      "reports/ispras/tools/analyze_two_second.py"
+    ],
+    [
+      "python3",
+      "reports/ispras/tools/review_candidate_runs.py",
+      "--raw-root",
+      "runs/native-radio-realtime",
+      "--run-ids",
+      "paper-candidate4-unavailable-fixed-20261028-rx-d2",
+      "paper-candidate4-unavailable-failover-20261028-rx-d2",
+      "--output",
+      "reports/ispras/data/candidate2_independent_review.json"
+    ],
+    [
+      "python3",
+      "reports/ispras/tools/summarize_candidates.py",
+      "--prefix",
+      "candidate8"
+    ]
+  ],
+  "raw_run_ids": [
+    "paper-candidate4-unavailable-fixed-20261028-rx",
+    "paper-candidate4-unavailable-failover-20261028-rx",
+    "paper-candidate4-unavailable-fixed-20261028-rx-d5",
+    "paper-candidate4-unavailable-failover-20261028-rx-d5",
+    "paper-candidate4-unavailable-fixed-20261028-rx-d30",
+    "paper-candidate4-unavailable-failover-20261028-rx-d30",
+    "paper-candidate4-unavailable-fixed-20261028-rx-d2",
+    "paper-candidate4-unavailable-failover-20261028-rx-d2"
+  ],
+  "scripts_sha256": {
+    "reports/ispras/tools/summarize_candidates.py": "3e73fae0863f3fa2958ff18da0c9f1e757c5d24f028c2657152e2c66c1029864",
+    "reports/ispras/tools/analyze_candidate_batch.py": "2ab4e5485ace2692109ce8e78ef2b9e87a2108eb4e0d0a3b1c9626a9682a5016",
+    "reports/ispras/tools/analyze_two_second.py": "61d8381054219660c1cfa96b4e9db3f78474ee6bb406ea74dc1ed4ab65f0d942",
+    "reports/ispras/tools/review_candidate_runs.py": "eef0cfb29bc3739511552fc1faa7ceb8d69b37ffdc608b925c10f0a3de0c65cf",
+    "reports/ispras/tools/recovery_timing.py": "cad6ac03658f537b4925c3ec48596f30f80e3f70ad7360aea8b0af5a9a64b205",
+    "reports/ispras/tools/run_candidate_probe.py": "a4638af4c2beb305a664f651cb211aa5131eb0df2df4b28d8a567aacf67a704a",
+    "reports/ispras/tools/plot_candidate_timeline.py": "f00dd1574b0cf225100b9d86a4b34a5e6e48a65c2f12501abbd98fb6663835bc"
+  },
+  "previous6": "candidate_analysis_provenance.json; modified6-script copies preserved in methods_candidate6/",
+  "merge": "candidate8 JSON joins unchanged6 records + newly computed2 records; prior6 data/plots retained",
+  "plot": "plot_candidate_timeline.py --prefix candidate8 in pinnedimage/Python3.10/Matplotlib underlock",
+  "phase_export_command": [
+    "python3",
+    "reports/ispras/tools/export_candidate_phase.py"
+  ],
+  "phase_script_sha256": "cc65b68b80d500b8902a31a7cdb18bca0262643d59a1e4cc9b75ac9e4475e1c9",
+  "merge_command": [
+    "python3",
+    "reports/ispras/tools/merge_candidate_reviews.py"
+  ],
+  "merge_script_sha256": "7b1c338abf08ff82dda3ab8e21d21b08d678e808225acf899d10278dd135ef7a"
+}

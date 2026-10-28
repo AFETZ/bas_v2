@@ -1,0 +1,9 @@
+run_id,actual_RF_duration_s,selection_after_fault_s,new_valid_from_after_fault_s,old_channel_fresh_echo_after_fault_s,new_valid_from_after_RFend,new_valid_from_after_old_echo
+paper-candidate4-unavailable-fixed-20261028-rx,9.99999511,,,10.064808101,,
+paper-candidate4-unavailable-failover-20261028-rx,9.94998591,0.915962828,2.519454113,10.143287913,False,False
+paper-candidate4-unavailable-fixed-20261028-rx-d5,4.99997437,,,5.148410086,,
+paper-candidate4-unavailable-failover-20261028-rx-d5,5.049953591,0.861650535,2.379414054,5.163509923,False,False
+paper-candidate4-unavailable-fixed-20261028-rx-d30,29.998521307,,,30.038561513,,
+paper-candidate4-unavailable-failover-20261028-rx-d30,30.049990766,0.859382921,2.7476778,30.081815964,False,False
+paper-candidate4-unavailable-fixed-20261028-rx-d2,1.999891555,,,2.146786614,,
+paper-candidate4-unavailable-failover-20261028-rx-d2,1.999655341,0.884950828,2.518366992,2.146772556,True,True

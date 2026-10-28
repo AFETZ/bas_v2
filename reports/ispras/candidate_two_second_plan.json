@@ -1,0 +1,20 @@
+{
+  "planned_before_runs": true,
+  "reason": "complete same-condition duration coverage; earlier2s cohort has different candidate/fault phase",
+  "runtime_head": "ffb720c0f50da7234621c649a81028b10289f53d",
+  "runtime_files_changed_vs_bb026a0": "",
+  "dirty_tracked_paths": [
+    "reports/ispras/ALGORITHM_AUDIT.md"
+  ],
+  "controller_sha256": "a4638af4c2beb305a664f651cb211aa5131eb0df2df4b28d8a567aacf67a704a",
+  "fault_seconds": 2,
+  "measurement_seconds": 90,
+  "fault_start_model_s": 30,
+  "seed": 1,
+  "rng_run": 27,
+  "policy_order": [
+    "fixed",
+    "failover"
+  ],
+  "scope": "additional exploratory engineering pair after5/10/30; no n1CI or claim of initial preregistration"
+}

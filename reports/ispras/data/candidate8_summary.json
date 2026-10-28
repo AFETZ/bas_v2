@@ -1,0 +1,14 @@
+{
+  "completed": 8,
+  "failed_before_measurement": 2,
+  "all_UART": 14670,
+  "invalid_UART": 0,
+  "duplicate_CID": 0,
+  "independent_endpoints_match": true,
+  "min_displacement_m": 3.991354350156655,
+  "min_dwell_span_s": 2.0,
+  "max_dwell_speed_mps": 0.9999169366267978,
+  "max_dwell_gap_s": 0.040000000000020464,
+  "n_pairs_per_duration": 1,
+  "confidence_interval": null
+}

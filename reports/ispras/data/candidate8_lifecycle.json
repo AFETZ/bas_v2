@@ -1,0 +1,141 @@
+{
+  "method": "Independent count of raw GCS takeoff/landing-disarm observations; physical firstpostfault goals reviewed separately",
+  "records": [
+    {
+      "run_id": "paper-candidate4-unavailable-fixed-20261028-rx",
+      "takeoff_observed_uavs": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "landing_disarm_observed_uavs": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ]
+    },
+    {
+      "run_id": "paper-candidate4-unavailable-failover-20261028-rx",
+      "takeoff_observed_uavs": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "landing_disarm_observed_uavs": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ]
+    },
+    {
+      "run_id": "paper-candidate4-unavailable-fixed-20261028-rx-d5",
+      "takeoff_observed_uavs": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "landing_disarm_observed_uavs": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ]
+    },
+    {
+      "run_id": "paper-candidate4-unavailable-failover-20261028-rx-d5",
+      "takeoff_observed_uavs": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "landing_disarm_observed_uavs": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ]
+    },
+    {
+      "run_id": "paper-candidate4-unavailable-fixed-20261028-rx-d30",
+      "takeoff_observed_uavs": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "landing_disarm_observed_uavs": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ]
+    },
+    {
+      "run_id": "paper-candidate4-unavailable-failover-20261028-rx-d30",
+      "takeoff_observed_uavs": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "landing_disarm_observed_uavs": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ]
+    },
+    {
+      "run_id": "paper-candidate4-unavailable-fixed-20261028-rx-d2",
+      "takeoff_observed_uavs": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "landing_disarm_observed_uavs": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ]
+    },
+    {
+      "run_id": "paper-candidate4-unavailable-failover-20261028-rx-d2",
+      "takeoff_observed_uavs": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "landing_disarm_observed_uavs": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ]
+    }
+  ]
+}
