@@ -11,6 +11,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import sys
 from zipfile import ZipFile
 
 from docx import Document
@@ -19,6 +20,8 @@ from docx.shared import Cm, Pt
 
 HERE = Path(__file__).resolve().parent
 PAPER = HERE.parent
+sys.path.insert(0, str(HERE))
+import study_inputs
 SPEC = importlib.util.spec_from_file_location("old_paper_styles", PAPER / "tools/build_docx.py")
 STYLE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(STYLE)
@@ -46,11 +49,24 @@ class Revision:
         self.kind = self.manifest.get("kind", "preparation")
         if self.kind not in ("preparation", "engineering_pilot", "partial_series", "frozen_series"):
             raise ValueError("unknown dataset kind")
+        self.freeze = self.read_json(resolved(self.manifest["freeze_path"], self.base)) if self.manifest.get("freeze_path") else {}
+        self.study_path = resolved(self.manifest["study_json"], self.base) if self.manifest.get("study_json") else None
+        self.study = self.read_json(self.study_path) if self.study_path else None
         self.runs = []
         for index, entry in enumerate(self.manifest.get("analyses", []), 1):
             path = resolved(entry["path"], self.base)
             result = self.read_json(path)
             self.runs.append((entry.get("label", f"U{index:02d}"), entry.get("group", "unspecified"), result))
+        seen = {run["run_id"] for _, _, run in self.runs}
+        if self.study:
+            for index, record in enumerate(self.study.get("runs", []), 1):
+                path = resolved(record["input_paths"]["analysis"], self.study_path.parent)
+                if path.is_file() and record["run_id"] not in seen:
+                    result = self.read_json(path)
+                    if result.get("run_id") != record["run_id"]:
+                        raise ValueError("study/per-run identity mismatch")
+                    self.runs.append((f"U{index:02d}", record.get("cohort", "unspecified"), result))
+                    seen.add(record["run_id"])
         if args.final:
             if self.kind != "frozen_series" or not self.runs:
                 raise ValueError("--final requires frozen_series with actual analysis inputs")
@@ -58,6 +74,11 @@ class Revision:
             self.read_json(freeze)
             if not self.manifest.get("source_commit"):
                 raise ValueError("frozen version is required")
+            if self.manifest["source_commit"] != self.freeze.get("source_commit"):
+                raise ValueError("frozen and manuscript runtime versions differ")
+            if self.study and (self.study.get("observed_attempts") != self.study.get("planned_attempts")
+                               or self.study.get("freeze_sha256") != sha(freeze)):
+                raise ValueError("final document requires every planned attempt and the matching freeze")
             for label, _group, run in self.runs:
                 checks = run.get("physical_checks", {})
                 full_window = run.get("observation_window", {}).get("complete") is True
@@ -117,14 +138,23 @@ class Revision:
         STYLE.figure_caption(self.doc, f"Fig. {self.figure_number}. {caption_en}", english=True)
 
     def methodology(self):
+        cases = self.freeze.get("cases", [])
+        cohorts = {name: sum(r.get("cohort") == name for r in cases)
+                   for name in ("main", "sensitivity", "engineering_boundary")}
+        blocks = {r["block_id"] for r in cases if r.get("cohort") == "main"}
+        repeats = (f"{len(blocks)} блока, {cohorts['main']} основных; "
+                   f"+{cohorts['sensitivity']} sensitivity +{cohorts['engineering_boundary']} boundaries") if cases else "не прочитан freeze"
         rows = self.manifest.get("methodology", [
             ["Политика", "fixed / failover", "host-monotonic", "параметры протокола сохранены"],
             ["Радиоконтроль", "geometry / LOS-only", "native ns-3", "одна физическая сцена"],
-            ["Повторения", "НЕ ЗАФИКСИРОВАНЫ", "отдельные блоки", "требуется freeze до серии"],
-            ["Горизонт", "НЕ ЗАФИКСИРОВАН", "часы источника поз", "до просмотра эффекта политики"],
-            ["Цели", "последовательные waypoint", "автопилот time_boot_ms", "доставленная по радио телеметрия"],
+            ["Повторения", repeats, "независимый seed block", "вспомогательные когорты отдельно"],
+            ["Горизонт", fmt(self.freeze.get("observation_horizon_source_sim_time_s")) + " с",
+             "часы источника поз", "до просмотра эффекта политики"],
+            ["Цели", "27 waypoint; барьеры", "автопилот time_boot_ms", "продвижение по радио, dwell3с"],
+            ["Физический hold", "2 с", "source_sim_time", "отдельно от route dwell"],
             ["Timely", "250 мс", "command.created → UART", "offered остаётся знаменателем"],
-            ["Модель канала", "эмпирические гипотезы", "actual geometry", "полевая калибровка не заявляется"],
+            ["Канал", "n_LOS=2; n_NLOS=3", "2,412ГГц / 10dBm", "чувствительность2,7/3,3; без калибровки"],
+            ["WP_SPD", "3 м/с", "полный MAVLink snapshot", "не жёсткая граница actual speed"],
         ])
         self.table(["Фактор", "Значение", "Шкала / источник", "Ограничение"], rows,
                    "Методика новой серии; незаполненные параметры не являются результатами.",
@@ -159,7 +189,9 @@ class Revision:
                   r["via_relay_received_unique"]] for r in probe["results"]],
                 "Реальные компонентные пробы; уникальные sequence IDs проверены по PCAP.",
                 "Measured component probes; unique sequence IDs checked against PCAP.")
-        if self.runs:
+        if self.study:
+            self.study_results()
+        if self.runs and self.manifest.get("per_run_table", not bool(self.study)):
             rows = []
             for label, group, run in self.runs:
                 rate = run.get("rates", {}).get("all_five", {})
@@ -191,6 +223,51 @@ class Revision:
             if not source:
                 raise ValueError("empty numerical table")
             self.table(source[0], source[1:], table["caption_ru"], table["caption_en"])
+
+    def study_results(self):
+        study = self.study
+        self.para(f"В экспортированном новом наборе: {study['planned_attempts']} запланированных попыток, "
+                  f"{study['observed_attempts']} наблюдённых, {study['failed_attempts']} failed и "
+                  f"{study['valid_full_window_attempts']} допустимых полных окон. Failed после полного окна "
+                  "остаётся failed, хотя его сетевое наблюдение может быть допустимо. Неполное окно не получает нулевой прогресс.")
+        cell_rows = study_inputs.cells(study)
+        effect_rows = study_inputs.contrasts(study, study_inputs.PRIMARY_METRICS + ("restricted_post_NLOS_UART_60s",))
+        interaction_rows = study_inputs.interactions(study)
+        analyses = {run["run_id"]: run for _, _, run in self.runs}
+        stages = study_inputs.stage_counts(study, analyses)
+        self.presentation_tables = dict(cells=cell_rows, contrasts=effect_rows,
+                                       interactions=interaction_rows, stage_counts=stages)
+        names = {"main": "main", "sensitivity": "sensitivity", "engineering_boundary": "boundary"}
+        self.table(["Когорта / модель", "Радио / политика", "План / failed / valid", "Timely, % (n)", "Точки, % (n)"],
+            [[f"{names.get(r['cohort'], r['cohort'])}/{r['parameter_variant']}/{r['scenario_variant']}",
+              r["radio_mode"] + "/" + r["policy"], f"{r['planned']}/{r['failed']}/{r['eligible']}",
+              (fmt(100*r["timely_per_offered"]) + f" ({r['timely_per_offered_n']})") if r["timely_per_offered"] is not None else "—",
+              (fmt(100*r["completed_waypoint_fraction"]) + f" ({r['completed_waypoint_fraction_n']})") if r["completed_waypoint_fraction"] is not None else "—"]
+             for r in cell_rows],
+            "Новая серия; средние по допустимым полным окнам, n — число наблюдений показателя. Вспомогательные когорты описательные.",
+            "New study; means over eligible complete windows, with metric-specific n. Auxiliary cohorts are descriptive.")
+        def interval_text(value):
+            return "—" if value is None else "[" + "; ".join(fmt(x) for x in value) + "]"
+        self.table(["Радиорежим / показатель", "Полных / план пар", "Failover−fixed", "95% интервал", "Bounds пропусков"],
+            [[r["radio_mode"] + "/" + r["metric_label"], f"{r['complete_pairs']}/{r['planned_pairs']}",
+              fmt(r["mean"]), interval_text(r["interval_95"]), interval_text(r["missing_bounds"])]
+             for r in effect_rows if r["cohort"] == "main"],
+            "Основная новая серия: парные эффекты; интервалы разведочные. Bounds — границы чувствительности к отсутствующим исходам, не CI.",
+            "New main study: paired effects with exploratory intervals. Missing-outcome bounds are not confidence intervals.")
+        self.table(["Показатель", "Полных / план блоков", "Interaction, п.п.", "95% интервал", "Bounds пропусков"],
+            [[r["metric_label"], f"{r['complete_blocks']}/{r['planned_blocks']}", fmt(r["mean"]),
+              interval_text(r["interval_95"]), interval_text(r["missing_bounds"])] for r in interaction_rows],
+            "Разность эффектов geometry−LOS-only требует четырёх случаев одного блока. Отсутствующее значение не заменено нулём.",
+            "Geometry-minus-LOS-only policy interaction requires all four cases of a seed block. Missing is not zero.")
+        self.table(["Радио / политика", "n stage / valid", "Offered / created", "App receive", "UART / validUART", "Цели"],
+            [[r["radio_mode"] + "/" + r["policy"], f"{r['complete_stage_runs']}/{r['eligible_runs']}",
+              f"{r['offered']} / {r['target_CIDs_created_in_window']}" if r["offered"] is not None else "—",
+              r["follower_application_receive_CIDs"],
+              f"{r['UART_write_end_CIDs']} / {r['audited_valid_UART_CIDs']}" if r["UART_write_end_CIDs"] is not None else "—",
+              r["independently_verified_unique_inspection_goals"]] for r in stages if r["cohort"] == "main"],
+            "Суммы по полным stage-экспортам основной серии. App receive — валидированный прикладной приём CID; это не PHY Rx/ACK. Цели — уникальные waypoint.",
+            "Sums over complete stage exports of the main study. Application CID receipt is not PHY reception or ACK; goals are unique waypoints.")
+        self.para("Сетевые счётчики выше относятся к target CID, созданным в измерительном окне, с проверенной идентичностью run/UAV/CID/epoch/relay, payload и цели. Общий счёт UART включает также служебные кадры и приводится в полных артефактах. Native PHY-доказательство обеих передач и обратной телеметрии получено отдельно для всех четырёх follower диагностической пары; оно не подменяет покадровый аудит всех попыток новой серии.")
 
     def figures(self):
         for entry in self.manifest.get("figures", []):
@@ -257,6 +334,8 @@ class Revision:
             docx_sha256=sha(dest), old_paper_build_written=False,
             note="document rendering validates presentation inputs, not scientific truth or model calibration")
         (output / "build_manifest.json").write_text(json.dumps(result, indent=2) + "\n")
+        if hasattr(self, "presentation_tables"):
+            (output / "presentation_tables.json").write_text(json.dumps(self.presentation_tables, indent=2) + "\n")
         print(dest)
 
 

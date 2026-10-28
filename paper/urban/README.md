@@ -34,6 +34,14 @@ Manifest содержит `kind`: `preparation`, `engineering_pilot`, `partial_s
 `analyses`: список `{label,path,group}` к настоящим `urban_analysis.json`;
 `figures`: список `{path,caption_ru,caption_en,measured:true}`;
 `tables`: список `{csv,caption_ru,caption_en}` к готовым численным таблицам.
+Дополнительно `study_json` указывает на реальный `urban_study.json` агрегатора.
+Он добавляет все доступные per-run exports через их `input_paths.analysis`;
+planned/failed/missing строки остаются в агрегированном представлении. Таблицы
+содержат число valid окон, средние показателей, парные эффекты, interaction и
+отдельные worst/best bounds пропусков. CI переносятся из агрегатора и не
+пересчитываются в builder. `per_run_table:false` сохраняет все строки в CSV/JSON,
+не раздувая основной текст таблицей из56 строк. Без `study_json` эффект серии не
+заполняется. `build/presentation_tables.json` фиксирует ровно показанные значения.
 Пути разрешаются относительно manifest; абсолютные пути допустимы и остаются
 только во внутреннем build manifest, не в тексте DOCX. Label выбирать анонимный U01…
 Поле `group` должно различать pilot/main/sensitivity/boundary; когорты не объединяются.
@@ -54,3 +62,27 @@ analysis inputs. Он отклоняет неподтверждённые физ
 
 Тяжёлый рендер во время live не выполнялся автором подготовки. Рецепт требует
 проверки DOCX/PDF/пагинации в интеграции после измерений. Сборщик не публикует статью.
+
+Методика в новом тексте приведена к freeze4d96d19: 27 waypoint, подготовительный
+relay70м, горизонтальное вхождение в тень на60м, последующий фасадный12м; барьеры
+используют только доставленную телеметрию. При критическом событии follower в
+основном удерживают точки. Physical hold2source s и route hold3boot s различаются.
+Установленные Sionna-пакеты/fork остаются в образе, новый канал их не вызывает.
+Хэши прочитанных frozen/model/review источников — `preparation_sources.json`;
+новые main результаты туда не копировались.
+
+Лёгкая проверка presentation transforms, без Docker/Matplotlib и runtime:
+
+```bash
+python3 -m unittest discover -s paper/urban -p 'test_study_inputs.py' -v
+```
+
+После завершения запуска/реального агрегирования подготовить manifest:
+
+```bash
+python3 paper/urban/prepare_manifest.py --study FINAL_AGGREGATE/urban_study.json \
+  --freeze runs/urban-ns3-20261028/freeze.json --output paper/urban/results-manifest.json
+```
+
+Реальные графики/подписи добавить после построения по контракту `FIGURES.md`.
+Утилита не рисует пустые графики и не создаёт результаты отсутствующих запусков.

@@ -1,0 +1,11 @@
+{
+  "status": "frozen-methodology-preparation-only; no main-series results copied",
+  "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+  "inputs": {
+    "runs/urban-ns3-20261028/freeze.json": "8590f67b3acd2ce536e06eacfa518da65f024da4d73b02435aafc87c0945daed",
+    "network/config/urban_north_inspection.json": "a7c12ddf5bd3608a389593099d960323fa2943c53a5cacf7df5a9ae7d7a0f88d",
+    "reports/ispras/urban_ns3/PILOT_PAIR_REVIEW.md": "44728feb2ebc0d7fa5f581bc9901760909b40c49017906a72e6f42a7bce8a991",
+    "reports/ispras/urban_ns3/MODEL.md": "357bd0857378c84c61a1932b14c0e7f8d6b123339d832b4f7c647cb4dc7797ae",
+    "reports/ispras/urban_ns3/STUDY_ANALYSIS_METHOD.md": "06b57d28d42fbe989e32a6851e8229e8d42bba6d2135f0ccd901eacd96216775"
+  }
+}
