@@ -22,6 +22,28 @@ def test_restricted_loss_requires_full60s_and_does_not_impute_recovery():
     assert S.bounded_endpoint(observed,0,100*NS,complete=True,recording_valid=False)["value"] is None
 
 
+def test_crash_before_observed_trigger_has_unknown_applicability_not_full_window_NA():
+    endpoint=S.bounded_endpoint({},None,70*NS,complete=False,recording_valid=False)
+    assert endpoint["status"]=="interrupted_before_observed_trigger"
+    assert endpoint["unknown_applicability"] is True and endpoint["value"] is None
+    bounds=S.missing_bounds([dict(fixed=60,failover=None,unknown_applicability=True)],"restricted_post_NLOS_UART_60s")
+    assert bounds["status"]=="not_identified_due_unknown_trigger_applicability"
+    assert "mean_difference_bounds" not in bounds
+    full=S.bounded_endpoint({},None,240*NS,complete=True,recording_valid=True)
+    assert full["status"]=="not_applicable_no_trigger" and not full.get("unknown_applicability")
+
+
+def test_reviewed_endpoint_scope_preserves_original_label_and_never_changes_observed_event():
+    original=dict(status="not_applicable_no_direct_probe_detection",time_s=None)
+    reviewed=S.interrupted_endpoint(original,complete=False,trigger=None,origin="direct_GCS_probe_timeout")
+    assert original["status"]=="not_applicable_no_direct_probe_detection"
+    assert reviewed["original_status"]==original["status"] and reviewed["unknown_applicability"] is True
+    assert reviewed["status"]=="interrupted_before_observed_trigger"
+    assert S.interrupted_endpoint(original,complete=True,trigger=None,origin="direct")==original
+    observed=dict(status="observed",time_s=3,event_host_ns=3*NS)
+    assert S.interrupted_endpoint(observed,complete=False,trigger=0,origin="direct")==observed
+
+
 def test_whole_pair_bootstrap_has_exact5_and_deterministic10():
     exact=S.interval([2]*5)
     assert exact["resamples"]==3125 and exact["interval_95"]==[2,2]
@@ -217,3 +239,12 @@ def test_main_native_executable_identity_missing_or_changed_cannot_be_pooled(tmp
         result=S.run_record(case,frozen,export,controller)
         assert result["attempted"] and not result["primary_eligible"]
         assert any("executable digest" in error for error in result["provenance_errors"])
+
+
+def test_missing_final_radio_stats_are_not_a_measured_model_mismatch(tmp_path):
+    case,frozen,export,controller=fixture_case(tmp_path,"missing-stats",complete=False,status="failed")
+    path=export/"relay_audit/metrics/relay_analysis.json"
+    common=json.loads(path.read_text());common["metadata"]["native_stats"]={};path.write_text(json.dumps(common))
+    result=S.run_record(case,frozen,export,controller)
+    assert "effective geometry propagation/mode not recorded in final native stats" in result["provenance_errors"]
+    assert "effective geometry propagation/mode differs" not in result["provenance_errors"]

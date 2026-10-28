@@ -120,7 +120,8 @@ def bounded_endpoint(endpoint, trigger, end, *, complete, recording_valid, tau=R
     """Known min(T,tau), with administrative censoring distinct from interruption."""
     base = dict(value=None, observed_time_s=None, censor_time_s=None, status="not_applicable_no_trigger", tau_host_s=tau)
     if trigger is None:
-        return base
+        return dict(base, status="interrupted_before_observed_trigger", unknown_applicability=True,
+                    interpretation="interruption prevents determining whether a trigger would occur within the full horizon") if not complete else base
     if not recording_valid or end is None or end < trigger:
         return dict(base,status="unverifiable")
     t = A.finite(endpoint.get("time_s"))
@@ -138,6 +139,15 @@ def bounded_endpoint(endpoint, trigger, end, *, complete, recording_valid, tau=R
     return dict(base,censor_time_s=observed,status="administrative_short_followup" if complete else "interrupted_before_tau")
 
 
+def interrupted_endpoint(endpoint, *, complete, trigger, origin):
+    """Overlay scope on saved endpoint labels without changing measured events."""
+    if not complete and trigger is None and str(endpoint.get("status", "")).startswith("not_applicable"):
+        return dict(endpoint, original_status=endpoint["status"], status="interrupted_before_observed_trigger",
+                    unknown_applicability=True, trigger_kind=origin,
+                    interpretation="trigger was not observed before interruption; full-horizon applicability is unknown")
+    return endpoint
+
+
 def after_detection(run_dir, export_dir, result, complete, valid):
     """Re-anchor verified target CIDs on the actual direct-probe timeout event."""
     error = []
@@ -146,9 +156,12 @@ def after_detection(run_dir, export_dir, result, complete, valid):
     start, end = window.get("start_host_monotonic_ns"),window.get("end_host_monotonic_ns")
     initial = int(A.read_json(run_dir/"metrics/relay_experiment_config.json").get("initial_master",1))
     detection = next((r for r in rows if U.stage(r)=="link_failure_detected" and r.get("leader_id")==initial
+                      and r.get("reason")=="direct_GCS_probe_timeout"
                       and start is not None and end is not None and start <= U.stamp(r) <= end), None)
     if detection is None:
-        return dict(trigger_event=None,endpoint=dict(status="not_applicable_no_direct_probe_detection",time_s=None,recovered=None),errors=error)
+        return dict(trigger_event=None,endpoint=interrupted_endpoint(
+            dict(status="not_applicable_no_direct_probe_detection",time_s=None,recovered=None),
+            complete=complete,trigger=None,origin="direct_GCS_probe_timeout"),errors=error)
     commands = A.read_csv(export_dir/"relay_audit/metrics/relay_commands.csv")
     for row in commands:
         for key in ("created_ns","admitted_ns"):
@@ -209,10 +222,14 @@ def run_record(case, frozen, export_dir, controller, *, runs_root=None):
     for key in ("rng_seed","rng_run"):
         if A.finite(stats.get(key,env.get("ns3_"+key))) != A.finite(case.get(key)):
             problems.append(f"effective {key} differs/not recorded")
-    if stats.get("geometry_radio_mode") != case.get("radio_mode") or stats.get("selected_propagation_profile") != "geometry_logdistance":
+    if stats.get("geometry_radio_mode") is None or stats.get("selected_propagation_profile") is None:
+        problems.append("effective geometry propagation/mode not recorded in final native stats")
+    elif stats.get("geometry_radio_mode") != case.get("radio_mode") or stats.get("selected_propagation_profile") != "geometry_logdistance":
         problems.append("effective geometry propagation/mode differs")
-    if cfg.get("fault_profile") != "none" or stats.get("fault_profile") != "none":
-        problems.append("artificial fault present/unknown in geometric experiment")
+    if cfg.get("fault_profile") is None or stats.get("fault_profile") is None:
+        problems.append("fault profile not recorded in final native stats or experiment config")
+    elif cfg.get("fault_profile") != "none" or stats.get("fault_profile") != "none":
+        problems.append("artificial fault present in geometric experiment")
     if A.finite(cfg.get("duration_s")) != A.finite(case.get("duration_s")):
         problems.append("measurement horizon differs from frozen case")
     record["recording_errors"] = list(result.get("data_quality_errors",[]))+list(result.get("missing_measurements",[]))
@@ -244,7 +261,7 @@ def run_record(case, frozen, export_dir, controller, *, runs_root=None):
     # observations never enter the fixed-horizon primary outcomes.
     record["restricted_post_NLOS"]=restricted
     record["outcomes"]["restricted_post_NLOS_UART_60s"]=restricted["value"] if valid else None
-    record["post_NLOS_UART"]=uart
+    record["post_NLOS_UART"]=interrupted_endpoint(uart,complete=complete,trigger=trigger_host,origin="CP_initial_relay_LOS_to_NLOS")
     record["post_NLOS_label"]="first update latency; impairment/recovery is not inferred from NLOS alone"
     record["authority_audit"]=result.get("authority",{})
     raw=Path(runs_root)/case["run_id"] if runs_root else Path(result.get("raw_run_dir", "/nonexistent"))
@@ -261,6 +278,9 @@ def missing_bounds(pair_rows, metric):
         return None
     if any(r.get("not_applicable") for r in pair_rows):
         return dict(status="not_identified_due_nonapplicable_trigger",planned_pairs=len(pair_rows))
+    if any(r.get("unknown_applicability") for r in pair_rows):
+        return dict(status="not_identified_due_unknown_trigger_applicability",planned_pairs=len(pair_rows),
+                    interpretation="no numerical range bounds without assuming that the unobserved trigger would occur")
     lo,hi=bounds
     low,high=[],[]
     for row in pair_rows:
@@ -287,9 +307,11 @@ def contrasts(records):
             x=policies.get("fixed",{}).get("outcomes",{}).get(metric)
             na=metric=="restricted_post_NLOS_UART_60s" and any(
                 r.get("restricted_post_NLOS",{}).get("status")=="not_applicable_no_trigger" for r in policies.values())
+            unknown=metric=="restricted_post_NLOS_UART_60s" and any(
+                r.get("restricted_post_NLOS",{}).get("unknown_applicability") is True for r in policies.values())
             pair=dict(cohort=cohort,scenario_variant=scenario,parameter_variant=parameter,radio_mode=mode,block_id=block,
                 metric=metric,fixed=x,failover=f,difference=f-x if f is not None and x is not None else None,
-                complete=f is not None and x is not None,not_applicable=na,
+                complete=f is not None and x is not None,not_applicable=na,unknown_applicability=unknown,
                 fixed_run_id=policies.get("fixed",{}).get("run_id"),failover_run_id=policies.get("failover",{}).get("run_id"))
             pairs.append(pair)
             summary_groups[key[:4]+(metric,)].append(pair)
@@ -305,6 +327,7 @@ def contrasts(records):
         summaries.append(dict(cohort=cohort,scenario_variant=scenario,parameter_variant=parameter,radio_mode=mode,metric=metric,
             planned_pairs=len(rows),complete_pairs=len(values),missing_pair_ids=[r["block_id"] for r in rows if not r["complete"]],
             nonapplicable_pair_ids=[r["block_id"] for r in rows if r["not_applicable"]],
+            unknown_applicability_pair_ids=[r["block_id"] for r in rows if r["unknown_applicability"]],
             failover_minus_fixed=estimate,missing_outcome_sensitivity=missing_bounds(rows,metric)))
     interactions=[]
     for metric in METRICS:
@@ -319,7 +342,7 @@ def contrasts(records):
         for (scenario,parameter,block),cells in blocks.items():
             g,l=cells.get("geometry",{}).get("difference"),cells.get("los_only",{}).get("difference")
             limits=[]
-            if metric in BOUNDS and not any(cell.get("not_applicable") for cell in cells.values()):
+            if metric in BOUNDS and not any(cell.get("not_applicable") or cell.get("unknown_applicability") for cell in cells.values()):
                 lo,hi=BOUNDS[metric]
                 for mode,policy,sign in [("geometry","failover",1),("geometry","fixed",-1),
                                           ("los_only","failover",-1),("los_only","fixed",1)]:
@@ -357,7 +380,7 @@ def aggregate(freeze_path,analysis_root,controllers_root,output,*,runs_root=None
             extras.append(dict(run_id=row["run_id"],controller=str(path),returncode=row.get("returncode"),
                 status="unplanned_attempt_not_pooled",controller_sha256=digest(path)))
     output.mkdir(parents=True,exist_ok=True)
-    result=dict(analysis_version=1,freeze_path=str(freeze_path.resolve()),freeze_sha256=digest(freeze_path),
+    result=dict(analysis_version=3,freeze_path=str(freeze_path.resolve()),freeze_sha256=digest(freeze_path),
         analyzer_sha256=digest(__file__),planned_attempts=len(cases),observed_attempts=sum(r["attempted"] for r in records),
         failed_attempts=sum(r["attempt_failed"] for r in records),valid_full_window_attempts=sum(r["primary_eligible"] for r in records),
         recorded_status_counts=dict(Counter(r["recorded_status"] for r in records)),runs=records,

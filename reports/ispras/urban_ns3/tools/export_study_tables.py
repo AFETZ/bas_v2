@@ -72,8 +72,14 @@ def main():
                       if endpoint_name == 'new_goal_after_NLOS' else source)
             for scope in ('all_five', '1', '2', '3', '4', '5'):
                 value = values.get(scope if scope == 'all_five' or endpoint_name == 'new_goal_after_NLOS' else 'uav' + scope, {})
+                if (result.get('observation_window', {}).get('complete') is not True
+                        and result.get('trigger', {}).get('event') is None
+                        and str(value.get('status', '')).startswith('not_applicable')):
+                    value = dict(value, original_status=value['status'], status='interrupted_before_observed_trigger',
+                                 unknown_applicability=True, trigger_kind='CP_initial_relay_LOS_to_NLOS')
                 endpoints.append(dict(base, endpoint=endpoint_name, scope=scope,
                     result=value or None, endpoint_status=value.get('status', 'not_recorded'),
+                    original_endpoint_status=value.get('original_status', value.get('status')),
                     time_s=value.get('time_s'), censor_time_s=value.get('censor_time_s'),
                     event_host_ns=value.get('event_host_ns'), leader_id=value.get('leader_id'), epoch=value.get('epoch'),
                     goal_id=value.get('goal_id'), command_ids=value.get('command_ids'),
@@ -83,6 +89,7 @@ def main():
         direct = record.get('after_direct_probe_detection', {})
         endpoints.append(dict(base, endpoint='after_direct_probe_detection', scope='all_five',
                               result=direct or None, endpoint_status=direct.get('endpoint', {}).get('status', direct.get('status', 'not_recorded')),
+                              original_endpoint_status=direct.get('endpoint', {}).get('original_status', direct.get('endpoint', {}).get('status')),
                               time_s=direct.get('endpoint', {}).get('time_s')))
         captured = {}
         for stage in ('before', 'after'):
