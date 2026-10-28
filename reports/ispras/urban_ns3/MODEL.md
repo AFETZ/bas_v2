@@ -65,6 +65,18 @@ ENU→LOCAL_NED следует явному gazeboXYZToNED в upstream-моде�
 фактические оси и datum residual требуют отдельного пилота.
 Spherical/home heading10deg сохраняет существующую конфигурацию среды.
 
+## Поправка скорости до freeze
+
+Независимый replay исходного return-route пилота показал actual горизонтальную
+скорость около10m/s при `mission.speed_mps=3`: принятая до взлёта штатная
+DO_CHANGE_SPEED сбрасывается при начале позиционного Guided. Пилоты до исправления
+сохраняются с этим расхождением, их нельзя описывать как полёт3m/s.
+Pinned ArduCopter4.8 использует `WP_SPD` в m/s, по умолчанию10, а не старый
+`WPNAV_SPEED` в cm/s. Генератор нового профиля добавляет `WP_SPD=3` в отдельные
+SITL defaults. Значение и actual speed требуют новой проверки до freeze.
+Источник: pinned `libraries/AC_WPNav/AC_WPNav.cpp` SPD/units/default и
+`ArduCopter/mode_guided.cpp` `pva_control_start`/`get_default_speed_NE_ms`.
+
 ## Воспроизведение подготовки (не измерение полёта)
 
 ```bash

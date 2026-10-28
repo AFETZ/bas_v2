@@ -111,6 +111,16 @@ def prepare(config: Path, output: Path):
     ET.indent(sdf)
     ET.ElementTree(sdf).write(output / "world.sdf", encoding="utf-8", xml_declaration=True)
     launch = yaml.safe_load((ROOT / "network/config/scenario_5uav_town01_native_product.yaml").read_text())
+    # Pinned ArduCopter4.8 uses WP_SPD in m/s. A pre-takeoff
+    # DO_CHANGE_SPEED is reset when Guided enters position control; set the
+    # upstream persistent default rather than introducing a control law.
+    speed = float(data["mission"]["speed_mps"])
+    if not math.isfinite(speed) or speed <= 0:
+        raise ValueError("positive native WP_SPD required")
+    defaults = output / "urban_sitl.parm"
+    defaults.write_text((ROOT / "network/config/town01_sitl.parm").read_text()
+                        + f"\n# Pinned ArduCopter4.8 native waypoint speed, m/s\nWP_SPD {speed:.9g}\n")
+    launch["base_simulation"]["sitl_defaults"] = str(defaults.resolve().relative_to(ROOT))
     launch["scenario"]["name"] = data["scenario"]
     launch["scenario"]["map"] = dict(id=data["scenario"], kind="idealized_shared_building_boxes", customer_survey_asset=False,
                                       world_file=str((output / "world.sdf").resolve().relative_to(ROOT)), scene_xml="not_used_no_rt.xml",
