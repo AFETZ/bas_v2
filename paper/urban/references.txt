@@ -1,0 +1,10 @@
+[1] ArduPilot Development Team. Using SITL with Gazebo. https://ardupilot.org/dev/docs/sitl-with-gazebo.html .
+[2] Lee J., Grey M. X., Ha S., Kunz T., Jain S., Ye Y., Srinivasa S. S., Stilman M., Liu C. K. DART: Dynamic Animation and Robotics Toolkit. Journal of Open Source Software, vol. 3, no. 22, 2018, article 500. DOI: 10.21105/joss.00500.
+[3] ns-3 Project. Model Library: Buildings design. https://www.nsnam.org/docs/models/html/buildings-design.html . Параметры и поведение проверяются по закреплённому исходному коду используемой версии.
+[4] ns-3 Project. Model Library: Propagation. https://www.nsnam.org/docs/models/html/propagation.html .
+[5] ArduPilot Development Team. Copter Commands in Guided Mode. https://ardupilot.org/dev/docs/copter-commands-in-guided-mode.html .
+[6] MAVLink Project. Parameter Protocol. https://mavlink.io/en/services/parameter.html .
+[7] Baidya S., Shaikh Z., Levorato M. FlyNetSim: An Open Source Synchronized UAV Network Simulator based on ns-3 and Ardupilot. MSWiM, 2018, pp. 37–45. https://arxiv.org/abs/1808.04967 .
+[8] Calvo-Fullana M., Mox D., Pyattaev A., Fink J., Kumar V., Ribeiro A. ROS-NetSim: A Framework for the Integration of Robotic and Network Simulators. 2021. DOI: 10.48550/arXiv.2101.10113.
+[9] Song Y., Naji S., Kaufmann E., Loquercio A., Scaramuzza D. Flightmare: A Flexible Quadrotor Simulator. PMLR, vol. 155, 2021, pp. 1147–1157. https://proceedings.mlr.press/v155/song21a.html .
+[10] Gray C. G., Cheriton D. R. Leases: An Efficient Fault-Tolerant Mechanism for Distributed File Cache Consistency. SOSP, 1989, pp. 202–210. DOI: 10.1145/74850.74870.
