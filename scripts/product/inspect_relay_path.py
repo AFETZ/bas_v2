@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read TAP PCAPs with tcpdump and correlate native relay hops with real UART logs.
+"""Read TAP or native radio PCAPs using tcpdump and correlate real UART logs.
 
 This is an offline packet-path inspection. UART admission does not establish
 flight completion; subsequent telemetry is not assigned to a command ACK.
@@ -29,6 +29,7 @@ MAC = r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}"
 ADDRESS = r"\d+\.\d+\.\d+\.\d+"
 IP_HEADER = re.compile(rf"({ADDRESS})\.(\d+) > ({ADDRESS})\.(\d+):")
 MAC_HEADER = re.compile(rf"({MAC}) > ({MAC}),", re.I)
+WIFI_MAC_HEADER = re.compile(rf"\bDA:({MAC})\s+SA:({MAC})\b", re.I)
 HEX = re.compile(r"^\s*0x[0-9a-f]+:\s+([0-9a-f ]+)$", re.I)
 
 
@@ -69,13 +70,15 @@ def packet(header: str, hex_words: list[str]) -> dict | None:
     if udp_length < 8 or len(raw) < offset + udp_length:
         raise ValueError("truncated UDP payload")
     mac = MAC_HEADER.search(header)
+    wifi_mac = WIFI_MAC_HEADER.search(header)
     return dict(pcap_unix_s=header.split()[0], src_ip=addresses[1],
                 src_port=int(addresses[2]), dst_ip=addresses[3], dst_port=int(addresses[4]),
-                src_mac=mac[1] if mac else None, dst_mac=mac[2] if mac else None,
+                src_mac=mac[1] if mac else wifi_mac[2] if wifi_mac else None,
+                dst_mac=mac[2] if mac else wifi_mac[1] if wifi_mac else None,
                 payload=raw[offset + 8:offset + udp_length])
 
 
-def captured_udp(path: Path, port: int, errors: Counter) -> Iterator[dict]:
+def captured_udp(path: Path, port: int, errors: Counter, *, capture_kind="tap") -> Iterator[dict]:
     if not path.is_file():
         errors[f"missing_pcap:{path.name}"] += 1
         return
@@ -95,6 +98,8 @@ def captured_udp(path: Path, port: int, errors: Counter) -> Iterator[dict]:
                     try:
                         value = packet(header, words)
                         if value and value["src_port"] == port and value["dst_port"] == port:
+                            if capture_kind == "native":
+                                value["pcap_sim_s"] = value.pop("pcap_unix_s")
                             yield {**value, "capture": path.name, "packet_index": number}
                     except ValueError:
                         errors[f"unsupported_or_truncated_packet:{path.name}"] += 1
@@ -104,6 +109,8 @@ def captured_udp(path: Path, port: int, errors: Counter) -> Iterator[dict]:
             try:
                 value = packet(header, words)
                 if value and value["src_port"] == port and value["dst_port"] == port:
+                    if capture_kind == "native":
+                        value["pcap_sim_s"] = value.pop("pcap_unix_s")
                     yield {**value, "capture": path.name, "packet_index": number}
             except ValueError:
                 errors[f"unsupported_or_truncated_packet:{path.name}"] += 1
@@ -132,7 +139,17 @@ def on_hop(observation: dict, source: int, destination: int) -> bool:
             and observation["sender_id"] == source)
 
 
-def inspect(run: Path, *, command_id=None, epoch=None, port=15000, telemetry_wait_s=2) -> dict:
+def capture_name(index: int, kind: str) -> str:
+    if kind == "native":
+        # Ghost ingress node0 has no Wi-Fi: CP=node1/interface1; UAVi=node(i+1)/interface0.
+        return f"native_radio.pcap.radiotap-{index+1}-{1 if index==0 else 0}.pcap"
+    return f"tap_{'gcs' if index==0 else 'uav'+str(index)}.pcap"
+
+
+def inspect(run: Path, *, command_id=None, epoch=None, port=15000, telemetry_wait_s=2,
+            capture_kind="tap") -> dict:
+    if capture_kind not in ("tap", "native"):
+        raise ValueError("capture_kind must be tap or native")
     errors = Counter()
     events = [row for name in ("gcs", *(f"uav{i}" for i in range(1, 6)))
               for row in records(run / f"logs/coordination_{name}.jsonl", errors)]
@@ -168,9 +185,10 @@ def inspect(run: Path, *, command_id=None, epoch=None, port=15000, telemetry_wai
     wanted = {r["command_id"] for r in selected}
     command_packets = defaultdict(list)
     telemetry = defaultdict(lambda: defaultdict(list))
-    for name in ("gcs", *(f"uav{i}" for i in range(1, 6))):
-        capture = run / f"pcap/tap_{name}.pcap"
-        for observed in captured_udp(capture, port, errors):
+    capture_map = {i:capture_name(i,capture_kind) for i in range(6)}
+    for index, filename in capture_map.items():
+        capture = run / "pcap" / filename
+        for observed in captured_udp(capture, port, errors, capture_kind=capture_kind):
             try:
                 value = json.loads(observed["payload"])
                 kind, sender, body = value["kind"], value["sender_id"], value["body"]
@@ -178,6 +196,7 @@ def inspect(run: Path, *, command_id=None, epoch=None, port=15000, telemetry_wai
                     continue
                 wire = base64.b64decode(body["payload"], validate=True)
                 item = {k: v for k, v in observed.items() if k != "payload"}
+                item["capture_node_id"] = index
                 item.update(sender_id=sender, udp_payload_sha256=sha(observed["payload"]),
                             payload_sha256=sha(wire), payload_bytes=len(wire))
                 if kind == "command" and cid(body) in wanted:
@@ -208,6 +227,9 @@ def inspect(run: Path, *, command_id=None, epoch=None, port=15000, telemetry_wai
                          for r in events if r.get("event") == "gcs_receive"}
     uart_raw_hashes = {(r.get("node_id"), r.get("payload_sha256")) for r in events
                        if r.get("event") == "uart_observed"}
+    def both_endpoints(observations, source, destination):
+        return (any(r["capture_node_id"] == source for r in observations)
+                and any(r["capture_node_id"] == destination for r in observations))
     for sent in selected:
         key, master, destination = sent["command_id"], sent["leader_id"], sent["destination_id"]
         admitted = admissions[key]
@@ -216,8 +238,10 @@ def inspect(run: Path, *, command_id=None, epoch=None, port=15000, telemetry_wai
         for label, source, target in [("GCS→master", 0, master),
                                       ("master→follower", master, destination)]:
             captures = [r for r in observations if on_hop(r, source, target)]
+            both = both_endpoints(captures,source,target)
             hops.append(dict(stage=label, observations=captures,
-                             payload_matches_uart_log=bool(captures) and all(
+                             both_endpoint_captures_observed=both,
+                             payload_matches_uart_log=bool(captures) and (capture_kind!="native" or both) and all(
                                  r["payload_sha256"] == admitted.get("payload_sha256")
                                  and r["payload_bytes"] == admitted.get("bytes") for r in captures)))
         returned = None
@@ -237,6 +261,10 @@ def inspect(run: Path, *, command_id=None, epoch=None, port=15000, telemetry_wai
                 down = [r for r in values if on_hop(r, destination, master)]
                 up = [r for r in values if on_hop(r, master, 0)]
                 if not down or not up or down[0]["payload_sha256"] != up[0]["payload_sha256"]:
+                    complete = False
+                    break
+                if capture_kind=="native" and (not both_endpoints(down,destination,master)
+                                               or not both_endpoints(up,master,0)):
                     complete = False
                     break
                 if (destination, up[0]["payload_sha256"]) not in gcs_return_hashes:
@@ -264,12 +292,16 @@ def inspect(run: Path, *, command_id=None, epoch=None, port=15000, telemetry_wai
                             key=lambda r: r["host_monotonic_ns"])
     initial_leader = initial_grants[0]["leader_id"] if initial_grants else None
     return dict(run_id=run_id, epoch=epoch, leader_id=selected[0]["leader_id"],
+                capture_kind=capture_kind,capture_node_mapping={str(k):v for k,v in capture_map.items()},
+                capture_scope="native per-node radiotap PHY captures" if capture_kind=="native" else "TAP boundary captures",
                 initial_leader_id=initial_leader,
                 expected_followers=expected, inspected_destinations=sorted(complete_destinations),
                 target_bearing_commands=sum(r["target_position_m"] is not None for r in result),
                 commands=result, parse_notes=dict(errors), limits=[
-                    "TAP captures observe packets; application delivery is supported separately by UART admission logs.",
-                    "PCAP timestamps are Unix time. Event/producer timestamps are host monotonic; no cross-clock latency is computed.",
+                    "Native radiotap requires both sender and recipient captures per hop; UART logs independently support admission."
+                        if capture_kind=="native" else "TAP captures observe packets; application delivery is supported separately by UART admission logs.",
+                    "Native PCAP timestamps are ns-3 simulator seconds; event/producer timestamps are host monotonic; no cross-clock latency is computed."
+                        if capture_kind=="native" else "PCAP timestamps are Unix time. Event/producer timestamps are host monotonic; no cross-clock latency is computed.",
                     "Subsequent UART telemetry is not attributed to a specific command ACK or completed maneuver.",
                     "Absent matches may reflect packet loss, capture gaps or insufficient telemetry window.",
                     "Automatic selection prefers admitted target-bearing commands and labels diagnostic non-target fallback explicitly."])
@@ -279,6 +311,7 @@ def render(value: dict) -> str:
     lines = [f"Run `{value['run_id']}` — epoch {value['epoch']}, master UAV{value['leader_id']}",
              f"Observed complete packet/UART/telemetry chains: {value['inspected_destinations']}; expected followers {value['expected_followers']}.",
              f"Target-bearing inspected commands: {value['target_bearing_commands']}.", "",
+             f"Capture source: {value.get('capture_scope','TAP boundary captures')}.", "",
              "| Command | Stage | Capture / log | Source → destination | MAC source → destination | Bytes | Payload SHA-256 prefix | Time |",
              "|---|---|---|---|---|---:|---|---|"]
     if value['target_bearing_commands'] == 0:
@@ -289,14 +322,15 @@ def render(value: dict) -> str:
     def row(command, stage, item, *, event=False):
         if event:
             return f"| {command} | {stage} | {item['log_file']}:{item['log_line']} | UART UAV{item.get('node_id')} | — | {item.get('bytes', '—')} | {item.get('payload_sha256', '—')[:16]} | mono {item['host_monotonic_ns']} ns |"
-        return f"| {command} | {stage} | {item['capture']} #{item['packet_index']} | {item['src_ip']}:{item['src_port']} → {item['dst_ip']}:{item['dst_port']} | {item['src_mac']} → {item['dst_mac']} | {item['payload_bytes']} | {item['payload_sha256'][:16]} | Unix {item['pcap_unix_s']} s |"
+        clock = f"ns-3 {item['pcap_sim_s']}" if 'pcap_sim_s' in item else f"Unix {item['pcap_unix_s']}"
+        return f"| {command} | {stage} | {item['capture']} #{item['packet_index']} | {item['src_ip']}:{item['src_port']} → {item['dst_ip']}:{item['dst_port']} | {item['src_mac']} → {item['dst_mac']} | {item['payload_bytes']} | {item['payload_sha256'][:16]} | {clock} s |"
     def endpoints(items):
         if not items:
             return []
         selected = []
         for ip in (items[0]['src_ip'], items[0]['dst_ip']):
             index = int(ip.split('.')[2])
-            name = 'tap_gcs.pcap' if index == 0 else f'tap_uav{index}.pcap'
+            name = value.get('capture_node_mapping',{}).get(str(index), capture_name(index,'tap'))
             found = next((r for r in items if r['capture'] == name), None)
             if found is not None:
                 selected.append(found)
@@ -331,6 +365,8 @@ def main() -> int:
     parser.add_argument('--run-dir', type=Path, required=True)
     parser.add_argument('--command-id')
     parser.add_argument('--epoch', type=int)
+    parser.add_argument('--capture-kind', choices=('tap','native'), default='tap',
+                        help='TAP boundaries (default) or actual per-node ns-3 radiotap captures')
     parser.add_argument('--port', type=int, default=15000)
     parser.add_argument('--telemetry-wait-s', type=float, default=2)
     parser.add_argument('--json', type=Path, help='Optional derived report; raw inputs are never modified')
@@ -341,7 +377,7 @@ def main() -> int:
         parser.error('existing tcpdump executable is required; no dependency is installed')
     try:
         value = inspect(args.run_dir.resolve(), command_id=args.command_id, epoch=args.epoch,
-                        port=args.port, telemetry_wait_s=args.telemetry_wait_s)
+                        port=args.port, telemetry_wait_s=args.telemetry_wait_s,capture_kind=args.capture_kind)
     except (OSError, ValueError) as error:
         parser.error(str(error))
     if args.json:

@@ -10,7 +10,7 @@ import tempfile
 import unittest
 
 from network.scripts.serial_transport import Encoder
-from scripts.product.inspect_relay_path import inspect
+from scripts.product.inspect_relay_path import capture_name, inspect, render
 
 
 def digest(data):
@@ -29,15 +29,22 @@ def frame(source, destination, data):
     return ethernet + ip + struct.pack('!HHHH', 15000, 15000, 8 + len(data), 0) + data
 
 
-def pcap(path, packets):
+def pcap(path, packets, *, native=False):
     with path.open('wb') as stream:
-        stream.write(struct.pack('<IHHIIII', 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1))
+        stream.write(struct.pack('<IHHIIII', 0xa1b2c3d4, 2, 4, 0, 0, 65535, 127 if native else 1))
         for i, data in enumerate(packets):
-            stream.write(struct.pack('<IIII', 1700000000, i * 1000, len(data), len(data)))
+            if native:
+                # Synthetic QoS-data/LLC fixture, decoded by upstream tcpdump;
+                # the inspector itself never parses radiotap/802.11 bytes.
+                radiotap = struct.pack('<BBHI',0,0,8,0)
+                destination,source = data[:6],data[6:12]
+                qos = struct.pack('<HH',0x0088,0)+destination+source+source+struct.pack('<HH',0,0)
+                data = radiotap+qos+b'\xaa\xaa\x03\x00\x00\x00\x08\x00'+data[14:]
+            stream.write(struct.pack('<IIII', 0 if native else 1700000000, i * 1000, len(data), len(data)))
             stream.write(data)
 
 
-def fixture(root, *, changed_forward=False, telemetry_origin=1):
+def fixture(root, *, changed_forward=False, telemetry_origin=1, capture_kind='tap'):
     (root / 'logs').mkdir(); (root / 'pcap').mkdir()
     raw = b'opaque native UART command'
     body = dict(run_id='unit-fixture', epoch=2, leader_id=2, destination_id=1, sequence=9,
@@ -53,7 +60,8 @@ def fixture(root, *, changed_forward=False, telemetry_origin=1):
                frame(2, 0, envelope('telemetry', 2, returned))]
     for name, indices in {'gcs': [0, 3], 'uav1': [1, 2], 'uav2': [0, 1, 2, 3],
                           'uav3': [], 'uav4': [], 'uav5': []}.items():
-        pcap(root / f'pcap/tap_{name}.pcap', [packets[i] for i in indices])
+        node = 0 if name=='gcs' else int(name[3:])
+        pcap(root / 'pcap' / capture_name(node,capture_kind), [packets[i] for i in indices],native=capture_kind=='native')
     sent = dict(run_id='unit-fixture', event='gcs_send', command_id='2:1:9', epoch=2,
                 leader_id=2, destination_id=1, host_monotonic_ns=50,
                 target_position_m=[0, 0, 12], payload_sha256=digest(raw))
@@ -89,6 +97,32 @@ class RelayPathInspectionTests(unittest.TestCase):
             value = inspect(root, epoch=2)
             self.assertIsNone(value['commands'][0]['subsequent_telemetry_return'])
             self.assertEqual(value['inspected_destinations'], [])
+
+    def test_native_qos_radiotap_uses_true_files_macs_and_model_clock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);fixture(root,capture_kind='native')
+            value=inspect(root,epoch=2,capture_kind='native')
+            self.assertEqual(value['inspected_destinations'],[1])
+            self.assertEqual(value['parse_notes'],{})
+            self.assertEqual(value['capture_node_mapping']['0'],'native_radio.pcap.radiotap-1-1.pcap')
+            self.assertEqual(value['capture_node_mapping']['1'],'native_radio.pcap.radiotap-2-0.pcap')
+            observation=value['commands'][0]['command_hops'][0]['observations'][0]
+            self.assertEqual(observation['pcap_sim_s'],'0.000000')
+            self.assertNotIn('pcap_unix_s',observation)
+            self.assertEqual(observation['src_mac'],'02:71:00:00:10:10')
+            self.assertEqual(observation['dst_mac'],'02:71:02:00:10:10')
+            self.assertTrue(all(h['both_endpoint_captures_observed'] for h in value['commands'][0]['command_hops']))
+            self.assertIn('ns-3 0.000000',render(value))
+            self.assertNotIn('tap_gcs.pcap',json.dumps(value))
+
+    def test_native_missing_destination_capture_cannot_establish_radio_hop(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);fixture(root,capture_kind='native')
+            pcap(root/'pcap'/capture_name(1,'native'),[],native=True)
+            value=inspect(root,epoch=2,capture_kind='native')
+            self.assertEqual(value['inspected_destinations'],[])
+            self.assertFalse(value['commands'][0]['command_hops'][1]['both_endpoint_captures_observed'])
+            self.assertFalse(value['commands'][0]['command_hops'][1]['payload_matches_uart_log'])
 
 
 if __name__ == '__main__':
