@@ -1,0 +1,533 @@
+{
+  "run_id": "urban-block-pilot01-failover",
+  "raw": "/home/bas/bas_v2-paper-live/runs/native-radio-realtime/urban-block-pilot01-failover",
+  "recorded_status": "failed",
+  "recorded_error": "cleanup ScenarioError: landing/automatic disarm not observed for all five",
+  "runtime_source_commit": "281b6ed9083c5f3c9379c6316a15ab3b9065dca7",
+  "source_dirty_paths": "0",
+  "measured_window_complete": true,
+  "measurement_source_s": 300.00899999999996,
+  "measurement_wall_s": 300.182069543,
+  "primary_NLOS_from_measurement_s": 20.725750933,
+  "post_NLOS_common_UART_s": 8.293289321,
+  "detections": [
+    {
+      "run_id": "urban-block-pilot01-failover",
+      "event": "link_failure_detected",
+      "stage": "link_failure_detected",
+      "host_monotonic_ns": 515153254663689,
+      "clock_domain": "host_monotonic",
+      "source_sim_time_s": null,
+      "uav_id": 0,
+      "node_id": 0,
+      "leader_id": 1,
+      "reason": "direct_GCS_probe_timeout"
+    }
+  ],
+  "selections": [
+    {
+      "run_id": "urban-block-pilot01-failover",
+      "event": "grant_issued",
+      "stage": "grant_issued",
+      "host_monotonic_ns": 515158825033614,
+      "clock_domain": "host_monotonic",
+      "source_sim_time_s": null,
+      "uav_id": 0,
+      "node_id": 0,
+      "leader_id": 3,
+      "epoch": 2,
+      "grant_sequence": 560,
+      "valid_from_ns": 515158825003809,
+      "valid_until_ns": 515160825003809,
+      "reason": "selection"
+    }
+  ],
+  "first_reconstructed_eligible_after_detection": {
+    "host_ns": 515158824330198,
+    "from_measurement_s": 27.082304713,
+    "candidates": [
+      3
+    ]
+  },
+  "maximum_old_issued_expiry_host_ns": 515154997703849,
+  "last_target_UART": [
+    {
+      "uav_id": 1,
+      "last_target_UART_host_ns": "515430754330491.0",
+      "from_measurement_s": 299.012305006,
+      "command_id": "2:1:4640",
+      "goal_id": "waypoint4:uav1"
+    },
+    {
+      "uav_id": 2,
+      "last_target_UART_host_ns": "515430755935114.0",
+      "from_measurement_s": 299.013909629,
+      "command_id": "2:2:4641",
+      "goal_id": "waypoint4:uav2"
+    },
+    {
+      "uav_id": 3,
+      "last_target_UART_host_ns": "515430746085423.0",
+      "from_measurement_s": 299.004059938,
+      "command_id": "2:3:4642",
+      "goal_id": "waypoint4:uav3"
+    },
+    {
+      "uav_id": 4,
+      "last_target_UART_host_ns": "515430756818858.0",
+      "from_measurement_s": 299.014793373,
+      "command_id": "2:4:4643",
+      "goal_id": "waypoint4:uav4"
+    },
+    {
+      "uav_id": 5,
+      "last_target_UART_host_ns": "515172769940486.0",
+      "from_measurement_s": 41.027915001,
+      "command_id": "2:5:2161",
+      "goal_id": "waypoint4:uav5"
+    }
+  ],
+  "lifecycle": {
+    "1": {
+      "armed": true,
+      "takeoff": true,
+      "landed": true,
+      "auto_disarm": true
+    },
+    "2": {
+      "armed": true,
+      "takeoff": true,
+      "landed": true,
+      "auto_disarm": true
+    },
+    "3": {
+      "armed": true,
+      "takeoff": true,
+      "landed": true,
+      "auto_disarm": true
+    },
+    "4": {
+      "armed": true,
+      "takeoff": true,
+      "landed": true,
+      "auto_disarm": true
+    },
+    "5": {
+      "armed": true,
+      "takeoff": true,
+      "landed": false,
+      "auto_disarm": false
+    }
+  },
+  "telemetry_waypoint_marks": 24,
+  "physical_completion_events": 23,
+  "telemetry_without_physical_completion_event": [
+    [
+      3,
+      "waypoint2:uav3"
+    ]
+  ],
+  "physical_checks": {
+    "total": 23,
+    "verified": 23
+  },
+  "authority": {
+    "admission_audit": {
+      "uart_write_invalidated": 0,
+      "valid": 5615
+    },
+    "endpoint_activation_rows_after_LOS_return": 0,
+    "overlapping_issued_grants": [],
+    "role_scopes_activated_after_LOS_return": 0,
+    "role_scopes_activated_after_LOS_return_ids": [],
+    "selection_events": [
+      {
+        "clock_domain": "host_monotonic",
+        "epoch": 2,
+        "event": "grant_issued",
+        "grant_sequence": 560,
+        "host_monotonic_ns": 515158825033614,
+        "leader_id": 3,
+        "node_id": 0,
+        "reason": "selection",
+        "run_id": "urban-block-pilot01-failover",
+        "source_sim_time_s": null,
+        "stage": "grant_issued",
+        "uav_id": 0,
+        "valid_from_ns": 515158825003809,
+        "valid_until_ns": 515160825003809
+      }
+    ],
+    "selections": 1,
+    "total_UART_admissions": 5615,
+    "unverifiable_admissions": 0
+  },
+  "critical_CID": "2:5:2041",
+  "critical_CID_chain": [
+    {
+      "run_id": "urban-block-pilot01-failover",
+      "event": "gcs_send",
+      "stage": "gcs_send",
+      "host_monotonic_ns": 515160752873616,
+      "clock_domain": "host_monotonic",
+      "source_sim_time_s": null,
+      "uav_id": 5,
+      "node_id": 0,
+      "leader_id": 3,
+      "epoch": 2,
+      "grant_sequence": 563,
+      "valid_from_ns": 515160333421739,
+      "valid_until_ns": 515162333421739,
+      "command_id": "2:5:2041",
+      "sequence": 2041,
+      "command_created_host_monotonic_ns": 515160752840333,
+      "destination_id": 5,
+      "payload_sha256": "0143e7d6a9e05c8fdd2a7597abbb8c501b4417914190beb7c6a25bf48dcfe243",
+      "target_position_m": [
+        135.0,
+        85.0,
+        20.0
+      ],
+      "target_frame": "ENU"
+    },
+    {
+      "run_id": "urban-block-pilot01-failover",
+      "event": "master_receive",
+      "stage": "master_receive",
+      "host_monotonic_ns": 515160756247681,
+      "clock_domain": "host_monotonic",
+      "source_sim_time_s": null,
+      "uav_id": 5,
+      "node_id": 3,
+      "leader_id": 3,
+      "epoch": 2,
+      "grant_sequence": 563,
+      "valid_from_ns": 515160333421739,
+      "valid_until_ns": 515162333421739,
+      "command_id": "2:5:2041",
+      "sequence": 2041,
+      "command_created_host_monotonic_ns": 515160752840333,
+      "destination_id": 5,
+      "payload_sha256": "0143e7d6a9e05c8fdd2a7597abbb8c501b4417914190beb7c6a25bf48dcfe243",
+      "target_position_m": [
+        135.0,
+        85.0,
+        20.0
+      ],
+      "target_frame": "ENU"
+    },
+    {
+      "run_id": "urban-block-pilot01-failover",
+      "event": "master_forward",
+      "stage": "master_forward",
+      "host_monotonic_ns": 515160756291202,
+      "clock_domain": "host_monotonic",
+      "source_sim_time_s": null,
+      "uav_id": 5,
+      "node_id": 3,
+      "leader_id": 3,
+      "epoch": 2,
+      "grant_sequence": 563,
+      "valid_from_ns": 515160333421739,
+      "valid_until_ns": 515162333421739,
+      "command_id": "2:5:2041",
+      "sequence": 2041,
+      "command_created_host_monotonic_ns": 515160752840333,
+      "destination_id": 5,
+      "payload_sha256": "0143e7d6a9e05c8fdd2a7597abbb8c501b4417914190beb7c6a25bf48dcfe243",
+      "target_position_m": [
+        135.0,
+        85.0,
+        20.0
+      ],
+      "target_frame": "ENU"
+    },
+    {
+      "run_id": "urban-block-pilot01-failover",
+      "event": "follower_receive",
+      "stage": "follower_receive",
+      "host_monotonic_ns": 515160760940434,
+      "clock_domain": "host_monotonic",
+      "source_sim_time_s": null,
+      "uav_id": 5,
+      "node_id": 5,
+      "leader_id": 3,
+      "epoch": 2,
+      "grant_sequence": 563,
+      "valid_from_ns": 515160333421739,
+      "valid_until_ns": 515162333421739,
+      "command_id": "2:5:2041",
+      "sequence": 2041,
+      "command_created_host_monotonic_ns": 515160752840333,
+      "destination_id": 5,
+      "payload_sha256": "0143e7d6a9e05c8fdd2a7597abbb8c501b4417914190beb7c6a25bf48dcfe243",
+      "target_position_m": [
+        135.0,
+        85.0,
+        20.0
+      ],
+      "target_frame": "ENU"
+    },
+    {
+      "run_id": "urban-block-pilot01-failover",
+      "event": "uart_admitted",
+      "stage": "uart_admitted",
+      "host_monotonic_ns": 515160761083372,
+      "clock_domain": "host_monotonic",
+      "source_sim_time_s": null,
+      "uav_id": 5,
+      "node_id": 5,
+      "leader_id": 3,
+      "epoch": 2,
+      "grant_sequence": 563,
+      "valid_from_ns": 515160333421739,
+      "valid_until_ns": 515162333421739,
+      "command_id": "2:5:2041",
+      "sequence": 2041,
+      "command_created_host_monotonic_ns": 515160752840333,
+      "destination_id": 5,
+      "payload_sha256": "0143e7d6a9e05c8fdd2a7597abbb8c501b4417914190beb7c6a25bf48dcfe243",
+      "target_position_m": [
+        135.0,
+        85.0,
+        20.0
+      ],
+      "target_frame": "ENU",
+      "bytes": 65,
+      "admission_checked_host_monotonic_ns": 515160761080677,
+      "uart_write_started_host_monotonic_ns": 515160761052033,
+      "uart_write_end_host_monotonic_ns": 515160761065739
+    }
+  ],
+  "final_measurement_poses": {
+    "1": {
+      "uav_id": "1",
+      "session_id": "e93aa17d41584edc8da2d07cd4c6dc62",
+      "source_sim_time_s": "562.28",
+      "host_monotonic_ns": "515431918019419.0",
+      "sample_host_ns": "515431903739249.0",
+      "quality": "observed",
+      "x_m": "19.982651563051217",
+      "y_m": "0.027137596875935827",
+      "z_m": "11.990900700250938",
+      "speed_mps": "0.011632901174524916",
+      "sample_age_ms": "14.28017",
+      "altitude_datum": "world_ENU_z"
+    },
+    "2": {
+      "uav_id": "2",
+      "session_id": "e93aa17d41584edc8da2d07cd4c6dc62",
+      "source_sim_time_s": "562.28",
+      "host_monotonic_ns": "515431918019419.0",
+      "sample_host_ns": "515431903721876.0",
+      "quality": "observed",
+      "x_m": "34.98205731874902",
+      "y_m": "0.027744276434938583",
+      "z_m": "14.043486652926482",
+      "speed_mps": "0.012378767319179163",
+      "sample_age_ms": "14.297543",
+      "altitude_datum": "world_ENU_z"
+    },
+    "3": {
+      "uav_id": "3",
+      "session_id": "e93aa17d41584edc8da2d07cd4c6dc62",
+      "source_sim_time_s": "562.28",
+      "host_monotonic_ns": "515431918019419.0",
+      "sample_host_ns": "515431903482939.0",
+      "quality": "observed",
+      "x_m": "14.981965201183721",
+      "y_m": "0.03789537355479515",
+      "z_m": "15.999887893689607",
+      "speed_mps": "0.02083406062105931",
+      "sample_age_ms": "14.53648",
+      "altitude_datum": "world_ENU_z"
+    },
+    "4": {
+      "uav_id": "4",
+      "session_id": "e93aa17d41584edc8da2d07cd4c6dc62",
+      "source_sim_time_s": "562.28",
+      "host_monotonic_ns": "515431918019419.0",
+      "sample_host_ns": "515431903696819.0",
+      "quality": "observed",
+      "x_m": "9.9711189575064",
+      "y_m": "0.02559590600221521",
+      "z_m": "17.999368988699402",
+      "speed_mps": "0.017274711428535122",
+      "sample_age_ms": "14.3226",
+      "altitude_datum": "world_ENU_z"
+    },
+    "5": {
+      "uav_id": "5",
+      "session_id": "e93aa17d41584edc8da2d07cd4c6dc62",
+      "source_sim_time_s": "562.28",
+      "host_monotonic_ns": "515431918019419.0",
+      "sample_host_ns": "515431903538483.0",
+      "quality": "observed",
+      "x_m": "129.9991455061729",
+      "y_m": "71.43205108032716",
+      "z_m": "20.024447226331358",
+      "speed_mps": "0.007386626975624582",
+      "sample_age_ms": "14.480936",
+      "altitude_datum": "world_ENU_z"
+    }
+  },
+  "rates": {
+    "created_to_uart_latency_ms": {
+      "max": 105.890283,
+      "mean": 14.583014640000002,
+      "min": 1.049915,
+      "p5": 2.26578745,
+      "p50": 6.516,
+      "p95": 56.079992049999994,
+      "samples": 1200
+    },
+    "delivered": 1200,
+    "delivered_per_sent": 0.9900990099009901,
+    "offered": 1500,
+    "sent": 1212,
+    "sent_per_offered": 0.808,
+    "sent_to_uart_latency_ms": {
+      "max": 105.852252,
+      "mean": 14.524771030833332,
+      "min": 0.966379,
+      "p5": 2.22549585,
+      "p50": 6.464567,
+      "p95": 56.037375149999995,
+      "samples": 1200
+    },
+    "timely": 1200,
+    "timely_per_offered": 0.8,
+    "timely_per_sent": 0.9900990099009901
+  },
+  "performance": {
+    "GPU_status": "not_recorded_by_this_exporter; do not infer zero load",
+    "GPU_utilization": null,
+    "RTF_window_wall_duration_s": {
+      "max": 1.023921629,
+      "mean": 1.014053287543919,
+      "min": 1.000044707,
+      "p5": 1.000551166,
+      "p50": 1.018313491,
+      "p95": 1.022900518,
+      "samples": 296
+    },
+    "approximately_1s_RTF": {
+      "max": 1.0009229919877418,
+      "mean": 0.9994177080214547,
+      "min": 0.9778665352134421,
+      "p5": 0.9974873782480482,
+      "p50": 0.999774204505521,
+      "p95": 1.0004935338904368,
+      "samples": 296
+    },
+    "clock_segments": 1,
+    "integral_RTF": 0.9994177330586724,
+    "radio_computation_status": "not_inferred_from_packet_count",
+    "radio_computation_time": null,
+    "resource_scope": "recorded components/process RSS only, not all host helpers or tmpfs memory",
+    "resources": {
+      "arducopter": {
+        "CPU_percent_one_core": {
+          "max": 41.862111688036244,
+          "mean": 37.97201735893021,
+          "min": 33.88411557926836,
+          "p5": 35.87870595782703,
+          "p50": 37.88637601157903,
+          "p95": 39.890043792637314,
+          "samples": 300
+        },
+        "process_RSS_bytes": {
+          "max": 46751744.0,
+          "mean": 46751744.0,
+          "min": 46751744.0,
+          "p5": 46751744.0,
+          "p50": 46751744.0,
+          "p95": 46751744.0,
+          "samples": 300
+        }
+      },
+      "gazebo": {
+        "CPU_percent_one_core": {
+          "max": 96.61185106780776,
+          "mean": 92.4793627026671,
+          "min": 87.7074518819552,
+          "p5": 88.73865367022393,
+          "p50": 92.72043782359086,
+          "p95": 95.66592543705661,
+          "samples": 300
+        },
+        "process_RSS_bytes": {
+          "max": 300748800.0,
+          "mean": 300745618.7733333,
+          "min": 300732416.0,
+          "p5": 300732416.0,
+          "p50": 300748800.0,
+          "p95": 300748800.0,
+          "samples": 300
+        }
+      },
+      "native_ns3_sionna": {
+        "CPU_percent_one_core": {
+          "max": 39.88206033248212,
+          "mean": 32.35948197661481,
+          "min": 23.929348168803337,
+          "p5": 26.902124702749038,
+          "p50": 32.90318563272611,
+          "p95": 37.88620512122034,
+          "samples": 300
+        },
+        "process_RSS_bytes": {
+          "max": 62349312.0,
+          "mean": 62163258.02666666,
+          "min": 62013440.0,
+          "p5": 62033920.0,
+          "p50": 62189568.0,
+          "p95": 62337024.0,
+          "samples": 300
+        }
+      }
+    },
+    "scheduler_lag_ms": {
+      "max": 4.683819,
+      "mean": 0.1299809735132434,
+      "min": 0.001458,
+      "p5": 0.0160597,
+      "p50": 0.056946,
+      "p95": 0.5197725,
+      "samples": 6003
+    },
+    "status": "observed",
+    "tracker_publication_gap_s": {
+      "max": 0.027999379,
+      "mean": 0.023219600302699775,
+      "min": 0.022599479,
+      "p5": 0.0228380238,
+      "p50": 0.023181683,
+      "p95": 0.0237125192,
+      "samples": 12927
+    }
+  },
+  "analyzer_provenance": {
+    "command_audit": "reuses existing relay admission/issued-authority/payload lineage audit; urban geometry and pose dwell independently replayed",
+    "common_audit_script_sha256": "83dea947c54a78d26ee81da661edc8afdb581b099639aded3ef1e4a60f6eba60",
+    "physical_evidence": "Gazebo odometry; not command ACK or network receipt; stale/missing intervals are not filled",
+    "scenario_path": "/home/bas/bas_v2-paper-live/runs/native-radio-realtime/urban-block-pilot01-failover/logs/urban_scenario.json",
+    "scenario_sha256": "91ee71603806189fdd666f0b5698eca49ea9f4480d07c9daa4dfd361f023e58f",
+    "script_sha256": "649486f6d701299e1943cf1704e385941641a50c4f01cbf618713be3d9f7e849"
+  },
+  "source_sha256": {
+    "/home/bas/bas_v2-paper-live/runs/native-radio-realtime/urban-block-pilot01-failover/logs/coordination_gcs.jsonl": "ed08d41d961113d044d1d1d5ed91b6ca371d326b49abf1ff9a564d06fab00125",
+    "/home/bas/bas_v2-paper-live/runs/native-radio-realtime/urban-block-pilot01-failover/logs/geometry_links.csv": "3c381b9dfdf97df31f610f00f5a6d1fcd2cc962f153a4092d6c190a09a046b6e",
+    "/home/bas/bas_v2-paper-live/runs/native-radio-realtime/urban-block-pilot01-failover/logs/urban_scenario.json": "91ee71603806189fdd666f0b5698eca49ea9f4480d07c9daa4dfd361f023e58f",
+    "/home/bas/bas_v2-paper-live/runs/native-radio-realtime/urban-block-pilot01-failover/metrics/relay_experiment_summary.json": "ac0a03dc4e7c14b1b14923efa6f07454acd2c326cec444354caf9aa82c1dfb81",
+    "/home/bas/bas-urban-metrics/reports/ispras/urban_ns3/tools/review_pilot_topology.py": "0fbb38fa780c1a1627e483b806bf8b7484d743e44fd77a0ab170f2c167f94089"
+  },
+  "interpretation_limits": [
+    "one development pilot, no fixed/failover causal effect or confidence interval",
+    "geometric NLOS is not packet outage; actual direct-probe timeout is separately observed",
+    "latest log receipt is a proxy for the immediately preceding internal receipt assignment",
+    "candidate values replay the recorded probes, not independent RF reachability or future usability",
+    "measurement-window observations survive failed laboratory teardown; failed attempt remains failed",
+    "telemetry waypoint progression and Gazebo completion events have distinct clock/tolerance checks"
+  ]
+}

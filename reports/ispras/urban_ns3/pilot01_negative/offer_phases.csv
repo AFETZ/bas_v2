@@ -1,0 +1,4 @@
+phase,left_host_ns,right_host_ns,offered,unavailable,unavailable_by_reason
+whole_measurement,515131742025485,515431924095028.0,1500,288,"{""no_active_issued_lease"": 20, ""waiting_fresh_GUIDED_heartbeat"": 268}"
+first_NLOS_to_common_UART,515152467776418.0,515160761065739.0,45,32,"{""no_active_issued_lease"": 20, ""waiting_fresh_GUIDED_heartbeat"": 12}"
+late_peer_shadow_to_end,515173087987588,515431924095028.0,1290,256,"{""waiting_fresh_GUIDED_heartbeat"": 256}"
