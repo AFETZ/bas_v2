@@ -1,0 +1,241 @@
+{
+  "schema_version": 1,
+  "scenario": "urban_north_facade_inspection_v1",
+  "status": "uncalibrated_research_configuration_pilot_required",
+  "frame": {
+    "coordinate_frame": "ENU",
+    "ground_surface_z_m": 0.0,
+    "spherical_heading_deg": 10,
+    "origin_latitude_deg": 46.607213,
+    "origin_longitude_deg": 14.278461,
+    "origin_elevation_m": 446.0,
+    "datum": "flat idealized industrial site, not Town01",
+    "world_enu_to_local_ned": "N=y,E=x,D=-z per iris_radio_headless gazeboXYZToNED"
+  },
+  "gcs": [
+    0,
+    0,
+    2
+  ],
+  "buildings": [
+    {
+      "id": "A",
+      "min": [
+        40,
+        20,
+        0
+      ],
+      "max": [
+        70,
+        65,
+        30
+      ]
+    },
+    {
+      "id": "B",
+      "min": [
+        95,
+        20,
+        0
+      ],
+      "max": [
+        125,
+        65,
+        25
+      ]
+    }
+  ],
+  "spawns": {
+    "1": [
+      20,
+      0,
+      2
+    ],
+    "2": [
+      35,
+      0,
+      2
+    ],
+    "3": [
+      50,
+      0,
+      2
+    ],
+    "4": [
+      65,
+      0,
+      2
+    ],
+    "5": [
+      80,
+      0,
+      2
+    ]
+  },
+  "routes": {
+    "1": [
+      [
+        20,
+        0,
+        12
+      ],
+      [
+        85,
+        0,
+        12
+      ],
+      [
+        85,
+        80,
+        12
+      ],
+      [
+        20,
+        80,
+        12
+      ],
+      [
+        20,
+        80,
+        16
+      ]
+    ],
+    "2": [
+      [
+        35,
+        0,
+        14
+      ],
+      [
+        80,
+        0,
+        14
+      ],
+      [
+        80,
+        85,
+        14
+      ],
+      [
+        35,
+        85,
+        14
+      ],
+      [
+        35,
+        85,
+        18
+      ]
+    ],
+    "3": [
+      [
+        50,
+        0,
+        16
+      ],
+      [
+        20,
+        -10,
+        16
+      ],
+      [
+        20,
+        90,
+        16
+      ],
+      [
+        15,
+        90,
+        16
+      ],
+      [
+        15,
+        90,
+        20
+      ]
+    ],
+    "4": [
+      [
+        65,
+        0,
+        18
+      ],
+      [
+        15,
+        -20,
+        18
+      ],
+      [
+        15,
+        65,
+        18
+      ],
+      [
+        10,
+        65,
+        18
+      ],
+      [
+        10,
+        65,
+        22
+      ]
+    ],
+    "5": [
+      [
+        80,
+        0,
+        20
+      ],
+      [
+        135,
+        0,
+        20
+      ],
+      [
+        135,
+        85,
+        20
+      ],
+      [
+        130,
+        85,
+        20
+      ],
+      [
+        130,
+        85,
+        24
+      ]
+    ]
+  },
+  "mission": {
+    "telemetry_max_age_s": 0.5,
+    "speed_mps": 3.0,
+    "waypoint_dwell_s": 2.0,
+    "world_ground_reference_z_m": 0.195,
+    "ground_reference_source": "iris/model.sdf base_collision poseZ=-.08 minus box halfheight .115; ground topZ=0, contact residual not corrected",
+    "route_design_reason": "Inspect northern facades and finish in northern radio corridor; reserve stayswest/north. Prior returnroute pilot retained separately; protocol and all coefficients unchanged."
+  },
+  "radio": {
+    "parameter_set": "hypothesis_high_v1",
+    "calibration": "uncalibrated_parametric_study",
+    "mode": "geometry",
+    "frequency_hz": 2412000000,
+    "los": {
+      "exponent": 2.0,
+      "reference_distance_m": 1.0,
+      "reference_loss_db": 40.09532929124565
+    },
+    "nlos": {
+      "exponent": 3.3,
+      "reference_distance_m": 1.0,
+      "reference_loss_db": 40.09532929124565
+    },
+    "sensitivity_exponents": [
+      2.7,
+      3.3
+    ],
+    "parameters_source": "Exponents are explicit research hypotheses, not imported field coefficients. Reference follows upstream Friis isotropic free-space at actual frequency; verify by native probe."
+  }
+}

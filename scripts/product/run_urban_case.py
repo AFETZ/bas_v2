@@ -20,6 +20,7 @@ def main():
     p.add_argument("--rng-run", type=int, default=1)
     p.add_argument("--build", action="store_true")
     p.add_argument("--parameters", action="store_true")
+    p.add_argument("--parameter-workers", type=int, choices=range(1, 6), default=5)
     group = p.add_mutually_exclusive_group(required=True)
     group.add_argument("--pilot", action="store_true")
     group.add_argument("--freeze", type=Path, help="Frozen plan containing this exact run/config/version")
@@ -54,6 +55,7 @@ def main():
                BAS_NATIVE_COORDINATION_POLICY=args.policy, BAS_NATIVE_FAULT_PROFILE="none",
                BAS_NATIVE_EXPERIMENT_PROFILE="urban", BAS_NATIVE_EXPERIMENT_DURATION_S=str(args.duration),
                BAS_NATIVE_EXPERIMENT_PILOT="1" if args.pilot else "0", BAS_NATIVE_PARAMETER_SNAPSHOTS="1" if args.parameters else "0",
+               BAS_NATIVE_PARAMETER_WORKERS=str(args.parameter_workers),
                BAS_NATIVE_FIVE_SKIP_BUILD="0" if args.build else "1", BAS_NATIVE_RNG_SEED="1", BAS_NATIVE_RNG_RUN=str(args.rng_run))
     argv = ["flock", "--nonblock", "--conflict-exit-code", "75", "/tmp/bas-paper-runtime.lock",
             "./network/ns3/run_native_radio_five_uav.sh"]
