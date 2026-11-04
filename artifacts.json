@@ -1,0 +1,83 @@
+{
+  "version": "urban-article-v7-20261104",
+  "article": "article_urban_ispras_ready_v7.pdf",
+  "measured_source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+  "source_archive_sha256": "3fe9dc4ceac70f28480e1f645180e29a1a0af69fe0d95fdde3e264fe5c362550",
+  "runtime_image_id": "sha256:89d78eff9914b1644a1b01b793612e9ee8b19916c5a7bf5f578ba6d8bfbfafe5",
+  "native_executable_sha256": "3f2341c4a368553f88d3b13da94e87f968069b824f6fece7fe9d4aa0170281ea",
+  "recorded_runs": 56,
+  "full_measurement_windows": 55,
+  "omitted_raw_formats": [
+    "PCAP",
+    "binary DataFlash"
+  ],
+  "publication_package_rerun": false,
+  "artifacts": [
+    {
+      "name": "journals",
+      "group": "journals",
+      "parts": [
+        {
+          "name": "journals.tar.zst.part00",
+          "bytes": 1490180623,
+          "sha256": "360f0fe9196e65de8fa0bcace18299c6775e2af62b4a07eebceb7a909ab5a10f",
+          "url": "https://github.com/AFETZ/bas_v2/releases/download/urban-article-v7-20261104/journals.tar.zst.part00"
+        }
+      ]
+    },
+    {
+      "name": "native-runtime",
+      "group": "runtime",
+      "parts": [
+        {
+          "name": "native-runtime.tar.zst.part00",
+          "bytes": 1839015220,
+          "sha256": "b2e60ba7b7419ee6dbce45b98763073c48da7af3582dcac894309d530c87065e",
+          "url": "https://github.com/AFETZ/bas_v2/releases/download/urban-article-v7-20261104/native-runtime.tar.zst.part00"
+        }
+      ]
+    },
+    {
+      "name": "runtime-image",
+      "group": "runtime",
+      "parts": [
+        {
+          "name": "runtime-image.tar.zst.part00",
+          "bytes": 1992294400,
+          "sha256": "cb3643bfd854f3826e004393ca7b5423ff1bb7b2ed7e7c9f0762d8694605f6b1",
+          "url": "https://github.com/AFETZ/bas_v2/releases/download/urban-article-v7-20261104/runtime-image.tar.zst.part00"
+        },
+        {
+          "name": "runtime-image.tar.zst.part01",
+          "bytes": 1992294400,
+          "sha256": "94f40f5cf4cc256e6a44342efa92e33c5b4685d2ce1989059e7f2b478b70b5ba",
+          "url": "https://github.com/AFETZ/bas_v2/releases/download/urban-article-v7-20261104/runtime-image.tar.zst.part01"
+        },
+        {
+          "name": "runtime-image.tar.zst.part02",
+          "bytes": 1992294400,
+          "sha256": "8fb9964341847294f727e87117a58bf96ef38a3ec162f17569d9cfee3cb5b9a3",
+          "url": "https://github.com/AFETZ/bas_v2/releases/download/urban-article-v7-20261104/runtime-image.tar.zst.part02"
+        },
+        {
+          "name": "runtime-image.tar.zst.part03",
+          "bytes": 417371013,
+          "sha256": "cd790245ba4871de5c24d7f7ca9f20ee65e1f8a3d745c62d3d57d1b32ba2aa12",
+          "url": "https://github.com/AFETZ/bas_v2/releases/download/urban-article-v7-20261104/runtime-image.tar.zst.part03"
+        }
+      ]
+    },
+    {
+      "name": "native-version",
+      "group": "runtime",
+      "parts": [
+        {
+          "name": "native-version.tar.zst.part00",
+          "bytes": 195443189,
+          "sha256": "5151328ec344e038f4bbfa4c3035ae61d532909245657cd37fbe4ae9c66bfef3",
+          "url": "https://github.com/AFETZ/bas_v2/releases/download/urban-article-v7-20261104/native-version.tar.zst.part00"
+        }
+      ]
+    }
+  ]
+}

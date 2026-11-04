@@ -1,0 +1,5 @@
+radio,policy,n_pairs,q250_percent,waypoints_percent,O,C,A,U,T
+geometry,fixed,9,34.639,54.733,10800,3907,3742,3741,3741
+geometry,failover,9,96.472,99.588,10800,10594,10423,10419,10419
+los_only,fixed,10,99.558,100.000,,,,,
+los_only,failover,10,99.408,99.630,,,,,

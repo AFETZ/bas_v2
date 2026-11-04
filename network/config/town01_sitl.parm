@@ -1,3 +1,0 @@
-# Town01 does not simulate an IR-LOCK precision-landing target.  Use the
-# ordinary ArduCopter LAND detector for this scenario.
-PLND_ENABLED 0

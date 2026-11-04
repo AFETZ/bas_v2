@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "Cite the exact package version and the accompanying article."
+type: software
+title: "BAS v2: Urban UAV relay experiment"
+authors:
+  - family-names: Fizulin
+    given-names: Andrey
+version: urban-article-v7-20261104
+date-released: 2026-11-04
+repository-code: "https://github.com/AFETZ/bas_v2"
+url: "https://github.com/AFETZ/bas_v2/releases/tag/urban-article-v7-20261104"
+license: GPL-3.0

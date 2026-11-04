@@ -1,5 +1,0 @@
-<include>
-  <uri>model://rock_demo_spire</uri>
-  <name>rock_demo_spire</name>
-  <pose>125 -80 0 0 0 0</pose>
-</include>
