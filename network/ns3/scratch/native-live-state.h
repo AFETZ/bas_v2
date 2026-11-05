@@ -1,0 +1,179 @@
+// A measured-state adapter, not another motion or propagation simulator.
+#pragma once
+#include "pybind11/embed.h"
+#include "pybind11/stl.h"
+#include "ns3/mobility-model.h"
+#include "ns3/vector.h"
+#include <algorithm>
+#include <cmath>
+#include <chrono>
+#include <fstream>
+#include <map>
+#include <limits>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+namespace bas {
+using namespace ns3;
+namespace py = pybind11;
+
+struct MeasuredState {
+    Vector position, velocity, orientation; // ENU m, ENU m/s, yaw/pitch/roll rad
+    int64_t sampleNs{0};
+    double sourceTime{0};
+};
+
+class MeasuredMobility : public MobilityModel {
+public:
+    static TypeId GetTypeId() {
+        static TypeId tid = TypeId("bas::MeasuredMobility").SetParent<MobilityModel>()
+            .AddConstructor<MeasuredMobility>()
+            .AddAttribute("Orientation", "Measured body yaw/pitch/roll in ENU radians",
+                VectorValue(), MakeVectorAccessor(&MeasuredMobility::m_orientation), MakeVectorChecker());
+        return tid;
+    }
+    void Apply(const MeasuredState& state) {
+        m_position=state.position; m_velocity=state.velocity; m_orientation=state.orientation;
+        NotifyCourseChange();
+    }
+    Ptr<MobilityModel> Copy() const override { return CreateObject<MeasuredMobility>(*this); }
+private:
+    Vector DoGetPosition() const override { return m_position; }
+    Vector DoGetVelocity() const override { return m_velocity; }
+    void DoSetPosition(const Vector& p) override { m_position=p; NotifyCourseChange(); }
+    Vector m_position, m_velocity, m_orientation;
+};
+
+inline Vector ReadVector(py::handle object, const char* key) {
+    auto v = object[key].cast<std::vector<double>>();
+    if (v.size()!=3 || !std::all_of(v.begin(),v.end(),[](double x){return std::isfinite(x);}))
+        throw std::runtime_error(std::string("invalid vector: ")+key);
+    return {v[0],v[1],v[2]};
+}
+
+inline MeasuredState DecodeState(py::handle object) {
+    MeasuredState state;
+    state.position=ReadVector(object,"position_m");
+    state.velocity=ReadVector(object,"velocity_enu_mps");
+    auto q=object["orientation_quat_xyzw"].cast<std::vector<double>>();
+    if (q.size()!=4 || !std::all_of(q.begin(),q.end(),[](double x){return std::isfinite(x);}))
+        throw std::runtime_error("invalid orientation");
+    double norm=0;
+    for (auto x:q) norm+=x*x;
+    if (std::abs(norm-1)>1e-3) throw std::runtime_error("orientation is not normalized");
+    const double x=q[0],y=q[1],z=q[2],w=q[3];
+    state.orientation={std::atan2(2*(w*z+x*y),1-2*(y*y+z*z)),
+        std::asin(std::clamp(2*(w*y-z*x),-1.,1.)),
+        std::atan2(2*(w*x+y*z),1-2*(x*x+y*y))};
+    return state;
+}
+
+class ClockAlignment {
+public:
+    void Check(double sourceS, double eventS, double maxDriftS) {
+        if (!m_anchored) {
+            m_anchored=true; m_sourceOrigin=sourceS; m_eventOrigin=eventS;
+        }
+        if (!std::isfinite(sourceS) || !std::isfinite(eventS) ||
+            std::abs((sourceS-m_sourceOrigin)-(eventS-m_eventOrigin))>maxDriftS)
+            throw std::runtime_error("Gazebo/ns-3 clock drift exceeds state budget");
+    }
+private:
+    bool m_anchored{false};
+    double m_sourceOrigin{0}, m_eventOrigin{0};
+};
+
+class LiveStateReader {
+public:
+    // Retain session identity: a tracker/clock reset requires a whole-run restart.
+    std::vector<MeasuredState> Read(const std::string& path, const std::vector<std::string>& names,
+                                   int64_t eventNs, int64_t wallNs, int64_t maxAgeNs,
+                                   double sourceEventS = -1, int64_t publicationMaxAgeNs = 0) {
+        const bool lockstep = sourceEventS >= 0;
+        std::ifstream stream(path, std::ios::binary | std::ios::ate);
+        const auto size=stream.tellg();
+        if (size<=0 || size>1024*1024) throw std::runtime_error("missing/oversized state snapshot");
+        stream.seekg(0);
+        std::string json((std::istreambuf_iterator<char>(stream)),{});
+        if (json.empty() || json.size()>1024*1024) throw std::runtime_error("missing/oversized state snapshot");
+        // Runtime callers sample receipt AFTER reading: the atomic publisher can
+        // otherwise replace the file between a caller's clock sample and open().
+        // A nonzero wallNs is reserved for controlled clock fixtures.
+        if (wallNs==0) wallNs=std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        auto root=py::module_::import("json").attr("loads")(json).cast<py::dict>();
+        const auto sourceKind=root["source"].cast<std::string>();
+        if (root["schema_version"].cast<int>()!=2 || (sourceKind!="ros_odometry" && sourceKind!="gazebo_odometry")
+            || root["coordinate_frame"].cast<std::string>()!="ENU" || !root["fault"].is_none())
+            throw std::runtime_error("invalid state contract or source clock reset");
+        if (lockstep && (!root.contains("simulation_mode") || root["simulation_mode"].cast<std::string>()!="lockstep"))
+            throw std::runtime_error("tracker is using a different clock domain");
+        const auto session=root["session_id"].cast<std::string>();
+        if (!m_session.empty() && m_session!=session) throw std::runtime_error("tracker restarted");
+        for (auto field:{"published_monotonic_ns","clock_received_monotonic_ns"}) {
+            if (lockstep && std::string(field)=="clock_received_monotonic_ns") continue;
+            auto stamp=root[field].cast<int64_t>();
+            const auto hostBudget=lockstep && publicationMaxAgeNs>0 ? publicationMaxAgeNs : maxAgeNs;
+            if (stamp>wallNs || wallNs-stamp>hostBudget) throw std::runtime_error(std::string("stale clock: ")+field);
+        }
+        std::map<std::string,py::dict> nodes;
+        for (auto item:root["nodes"]) {
+            auto node=py::reinterpret_borrow<py::dict>(item);
+            if (!nodes.emplace(node["id"].cast<std::string>(),node).second)
+                throw std::runtime_error("duplicate node identity");
+        }
+        std::vector<MeasuredState> states;
+        // Choose a measured slice shared by independently delivered ROS streams.
+        // If a history has a gap, move the window back until every source fits.
+        int64_t sourceLimitNs=std::numeric_limits<int64_t>::max();
+        for (;;) {
+        states.clear();
+        double oldest=1e100,newest=-1e100;
+        for (const auto& name:names) {
+            auto found=nodes.find(name);
+            if (found==nodes.end()) throw std::runtime_error("missing node: "+name);
+            auto node=found->second;
+            if (node["role"].cast<std::string>()=="command_post") {
+                auto state=DecodeState(node); state.sampleNs=eventNs; states.push_back(state); continue;
+            }
+            auto history=node["history"].cast<py::list>();
+            if (history.size()>32) throw std::runtime_error("unbounded pose history");
+            py::dict selected;
+            int64_t selectedNs=-1;
+            double selectedSource=-1;
+            for (auto sample:history) {
+                auto stamp=sample["sample_monotonic_ns"].cast<int64_t>();
+                auto source=sample["source_sim_time_s"].cast<double>();
+                if (!std::isfinite(source) || source<0) throw std::runtime_error("invalid source time");
+                if (std::llround(source*1e9)>sourceLimitNs) continue;
+                if ((lockstep ? std::llround(source*1e9)<=std::llround(sourceEventS*1e9)
+                              : stamp<=eventNs) && source>selectedSource) {
+                    selected=py::reinterpret_borrow<py::dict>(sample); selectedNs=stamp;
+                    selectedSource=source;
+                }
+            }
+            if (selectedNs<0 || (lockstep ? std::llround(sourceEventS*1e9)-std::llround(selectedSource*1e9)>maxAgeNs
+                                         : wallNs-selectedNs>maxAgeNs))
+                throw std::runtime_error("no timely causal pose for "+name);
+            auto state=DecodeState(selected);
+            state.sampleNs=selectedNs; state.sourceTime=selected["source_sim_time_s"].cast<double>();
+            if (!std::isfinite(state.sourceTime)) throw std::runtime_error("invalid source time");
+            oldest=std::min(oldest,state.sourceTime); newest=std::max(newest,state.sourceTime);
+            states.push_back(state);
+        }
+        // Source stamps originate as integer ROS nanoseconds. Compare in that
+        // domain so an exact 100 ms difference is not rejected by double rounding.
+        if (states.size() && newest>=0 && std::llround(newest*1e9)-std::llround(oldest*1e9)>100000000LL) {
+            sourceLimitNs=std::llround(oldest*1e9)+100000000LL;
+            continue;
+        }
+        break;
+        }
+        m_session=session;
+        return states;
+    }
+private:
+    std::string m_session;
+};
+} // namespace bas

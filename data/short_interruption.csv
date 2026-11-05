@@ -1,0 +1,3 @@
+outage_duration_s,policy,planned_runs,common_UART_observed_count,common_UART_mean_observed_eligible_recovery_s
+2.0,fixed,3,3,3.602386173333333
+2.0,failover,3,3,3.943489608666667

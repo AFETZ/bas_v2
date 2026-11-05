@@ -1,0 +1,29 @@
+diff --git a/src/spectrum/model/multi-model-spectrum-channel.cc b/src/spectrum/model/multi-model-spectrum-channel.cc
+index 3c03dccc9..ef931e5ce 100644
+--- a/src/spectrum/model/multi-model-spectrum-channel.cc
++++ b/src/spectrum/model/multi-model-spectrum-channel.cc
+@@ -489,8 +489,22 @@ MultiModelSpectrumChannel::StartRx(const RxInfo& rxInfo)
+         }
+         else if (m_phasedArraySpectrumPropagationLoss)
+         {
+-            auto txPhasedArrayModel = DynamicCast<PhasedArrayModel>(rxParams->txPhy->GetAntenna());
+-            auto rxPhasedArrayModel = DynamicCast<PhasedArrayModel>(rxInfo.receiver->GetAntenna());
++            auto txAntenna = rxParams->txPhy->GetAntenna();
++            auto rxAntenna = rxInfo.receiver->GetAntenna();
++            auto txPhasedArrayModel = DynamicCast<PhasedArrayModel>(txAntenna);
++            auto rxPhasedArrayModel = DynamicCast<PhasedArrayModel>(rxAntenna);
++
++            // SpectrumPhy implementations such as SpectrumWifiPhy expose an AntennaModel.
++            // Permit a PhasedArrayModel aggregated to that antenna to supply the array data
++            // required by a phased-array propagation loss model.
++            if (!txPhasedArrayModel && txAntenna)
++            {
++                txPhasedArrayModel = txAntenna->GetObject<PhasedArrayModel>();
++            }
++            if (!rxPhasedArrayModel && rxAntenna)
++            {
++                rxPhasedArrayModel = rxAntenna->GetObject<PhasedArrayModel>();
++            }
+ 
+             NS_ASSERT_MSG(txPhasedArrayModel && rxPhasedArrayModel,
+                           "PhasedArrayModel instances should be installed at both TX and RX "

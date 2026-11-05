@@ -1,0 +1,7 @@
+.external/
+build/
+install/
+log/
+runs/
+__pycache__/
+*.pyc

@@ -1,0 +1,105 @@
+diff --git a/src/tap-bridge/model/tap-bridge.cc b/src/tap-bridge/model/tap-bridge.cc
+--- a/src/tap-bridge/model/tap-bridge.cc
++++ b/src/tap-bridge/model/tap-bridge.cc
+@@ -24,6 +28,8 @@
+ #include "ns3/string.h"
+ #include "ns3/uinteger.h"
+ 
++#include <poll.h>
++#include <stdexcept>
+ #include <cerrno>
+ #include <cstdlib>
+ #include <limits>
+@@ -60,6 +66,38 @@
+     }
+ 
+     return FdReader::Data(buf, len);
++}
++
++uint32_t
++TapBridgeFdReader::ReadAvailable(int fd, Callback<void, uint8_t*, ssize_t> callback,
++                                uint32_t maxFrames)
++{
++    m_fd = fd;
++    uint32_t frames = 0;
++    for (;;)
++    {
++        pollfd descriptor{fd, POLLIN, 0};
++        const auto ready = poll(&descriptor, 1, 0);
++        if (ready < 0 && errno == EINTR) continue;
++        if (ready < 0 || (descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)))
++            throw std::runtime_error("lockstep TAP read failed");
++        if (ready == 0) return frames;
++        if (frames == maxFrames)
++            throw std::runtime_error("lockstep TAP ingress exceeded the boundary frame limit");
++        auto data = DoRead();
++        if (data.m_len <= 0)
++            throw std::runtime_error("lockstep TAP closed during boundary exchange");
++        callback(data.m_buf, data.m_len);
++        ++frames;
++    }
++}
++
++uint32_t
++TapBridge::ReadTap(uint32_t maxFrames)
++{
++    NS_ABORT_MSG_IF(!m_synchronousRead, "ReadTap requires SynchronousRead");
++    return m_fdReader ? m_fdReader->ReadAvailable(
++        m_sock, MakeCallback(&TapBridge::ReadCallback, this), maxFrames) : 0;
+ }
+ 
+ #define TAP_MAGIC 95549
+@@ -132,6 +170,11 @@
+                                           "UseLocal",
+                                           USE_BRIDGE,
+                                           "UseBridge"))
++            .AddAttribute("SynchronousRead",
++                          "Read TAP at explicit exchange boundaries instead of a host thread",
++                          BooleanValue(false),
++                          MakeBooleanAccessor(&TapBridge::m_synchronousRead),
++                          MakeBooleanChecker())
+             .AddAttribute("Verbose",
+                           "Enable verbose output from tap-creator child process",
+                           BooleanValue(false),
+@@ -235,7 +278,8 @@
+     NS_LOG_LOGIC("Spinning up read thread");
+ 
+     m_fdReader = Create<TapBridgeFdReader>();
+-    m_fdReader->Start(m_sock, MakeCallback(&TapBridge::ReadCallback, this));
++    if (!m_synchronousRead)
++        m_fdReader->Start(m_sock, MakeCallback(&TapBridge::ReadCallback, this));
+ }
+ 
+ void
+diff --git a/src/tap-bridge/model/tap-bridge.h b/src/tap-bridge/model/tap-bridge.h
+--- a/src/tap-bridge/model/tap-bridge.h
++++ b/src/tap-bridge/model/tap-bridge.h
+@@ -31,6 +31,11 @@
+  */
+ class TapBridgeFdReader : public FdReader
+ {
++  public:
++    // Main-thread alternative to Start(), using the same native DoRead().
++    // The caller must freeze producers and must not start a reader thread.
++    uint32_t ReadAvailable(int fd, Callback<void, uint8_t*, ssize_t> callback,
++                           uint32_t maxFrames);
+   private:
+     FdReader::Data DoRead() override;
+ };
+@@ -97,6 +102,8 @@
+ class TapBridge : public NetDevice
+ {
+   public:
++    // Drain frames ready at a lockstep boundary into stock ns-3 events.
++    uint32_t ReadTap(uint32_t maxFrames = 65536);
+     /**
+      * @brief Get the type ID.
+      * @return the object TypeId
+@@ -367,6 +374,7 @@
+      * corresponding to the host device.
+      */
+     Ptr<TapBridgeFdReader> m_fdReader;
++    bool m_synchronousRead{false};
+ 
+     /**
+      * The operating mode of the bridge.  Tells basically who creates and

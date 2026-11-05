@@ -1,0 +1,362 @@
+[
+  {
+    "path": "network/config/communication_qos.yaml",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "e08948f2c07862435deb9470cd4b2d0c10b2e163d4dd64c75f9988bc05a05e49"
+  },
+  {
+    "path": "network/config/native_wifi_80211n_spectrum_product.yaml",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "4335a61f48dcb9392f9bfc3dbaf2a66499c64f6a92e194965445cec537dda590"
+  },
+  {
+    "path": "network/config/scenario_5uav_town01_native_product.yaml",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "887162c36ceef3732d4954e904fbacc26ccaf52e52fad991a20357400c97911e"
+  },
+  {
+    "path": "network/config/town01_sitl.parm",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "be7bd937605853bd3e0ef2c34b89380538c614c7e0d6c56930b7e62936c59f02"
+  },
+  {
+    "path": "network/config/urban_high.json",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "b1219f96804482b1ca3da8d9a0b43bf60b332d062a5c8b598b17f412680d474a"
+  },
+  {
+    "path": "network/config/urban_los_only.json",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "8bc63c71c6756590248471fc7817e5c84ff5dcc64a6170943a63cf083cdab868"
+  },
+  {
+    "path": "network/config/urban_low.json",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "94887c3ae27a79330a1aff5286d9ab9a7c18c0352341608864f5de6dd5adb931"
+  },
+  {
+    "path": "network/config/urban_no_candidate.json",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "99d75fe73b5c52d74e6ec6c6518c07c1a79f2b534d4b1311848e6831181db066"
+  },
+  {
+    "path": "network/config/urban_north_inspection.json",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "a7c12ddf5bd3608a389593099d960323fa2943c53a5cacf7df5a9ae7d7a0f88d"
+  },
+  {
+    "path": "network/config/urban_short_occlusion.json",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "3e065c0d694ed50ceaf0b67f9911df579a993eb7e7edcd3c242fc5f328a84afb"
+  },
+  {
+    "path": "network/coordination/__init__.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "4956ffba02d39da7c95d6709d244b5600839d9beee5972d8d71c89c71c92d3c8"
+  },
+  {
+    "path": "network/coordination/policy.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "e34ce1db939acd9857b3c09e8c9e0f00a5bd931fc9206e20bc45a3a222671d07"
+  },
+  {
+    "path": "network/coordination/service.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "71c53c58f11e9750d4f9af203ec0caf49ba05f6a8e1b2addab64de95d0f6aa8f"
+  },
+  {
+    "path": "network/ns3/patches/mr2608-lockstep-tap-read.patch",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "8c88701c3f3191031b7ea6a30d52c4a2f1f44d09bebdf331a1ff9f5bc7309d99"
+  },
+  {
+    "path": "network/ns3/patches/mr2608-realtime-scene-cache.patch",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "8243c714c1e9ec9fa16e719fcb887947f0de805121352bf56904a90f355d12f8"
+  },
+  {
+    "path": "network/ns3/patches/mr2608-spectrumwifi-phased-array-adapter.patch",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "45fe829ec9a399b683c4f7feebcdaf7bd661dbba47952f7c8b4711cd0f568b21"
+  },
+  {
+    "path": "network/ns3/patches/mr2608-spike-compatibility.patch",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "b3f4d7f892883f31c1f6f65d5a661aa54c6da844093bb06345c29837a1e53771"
+  },
+  {
+    "path": "network/ns3/run_native_radio_five_uav.sh",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "13b6365c5fe55f64d27662dc01fbfd7731bfa2e4defac7755c8d3e0ad6bced4d"
+  },
+  {
+    "path": "network/ns3/runtime_live_cameras.sdf.inc",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "fdc5eb738e9e56226bc8c7a2237e20530747323b57fb20ca851e2a3e9dd0cfa8"
+  },
+  {
+    "path": "network/ns3/scratch/native-geometry-loss.h",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "014586acc0f1186ecc8df0547ae822a284dde666b2f3f8216fa82540237162a6"
+  },
+  {
+    "path": "network/ns3/scratch/native-live-state.h",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "2441cfa9a1fd7352c2e6586c4f4917fec9ea9d3965b73f3286ebba12c16b248d"
+  },
+  {
+    "path": "network/ns3/scratch/native-lockstep.h",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "78bf087e10a26e3e629475c902deb973574acf0fc5f6b8a8c6d70c004b8fe824"
+  },
+  {
+    "path": "network/ns3/scratch/native-spectrum-sources.h",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "979686febf1387f391f59ddbd196a76c73fe67ad7bd623358399c3c94b64449b"
+  },
+  {
+    "path": "network/ns3/scratch/upstream-sionna-tap-spike.cc",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "7ac2d8bd544f27043d5562f4975ae8bb8cfac772b64986aab2e8e179dc6f9a2a"
+  },
+  {
+    "path": "network/position_tracker/__init__.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "54f6690ca63c72c6bbe0471d18f3bcab56757292402a8c938f63b31ef0f75152"
+  },
+  {
+    "path": "network/position_tracker/lockstep.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "dc0ae0359be04760f500ab3ed9813aa7f94e65fe8cb0d7723b56c5ef00252aed"
+  },
+  {
+    "path": "network/position_tracker/tracker.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "80b9ad9a76527ebd6f93f843f7c408c9d0828e2b8d142d1e7e31d9ac646efba2"
+  },
+  {
+    "path": "network/scripts/communication_qos.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "1087f8c1a3e6708528f1e4b829217aea3e29a5dcd34a51c65adf3a1608f424a1"
+  },
+  {
+    "path": "network/scripts/communication_vertical.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "0f0528c9ebbbf559e71aa81a7bb3f67a93c0109cb5f17cb60cac5b1671ba923f"
+  },
+  {
+    "path": "network/scripts/data_transport.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "b84efa675d6ffc06bd0f63ab3d4f622abcd23d4dc9075ee36162aedf68967fe7"
+  },
+  {
+    "path": "network/scripts/external_endpoint.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "b093ac7128b3dd31e3c866a952e69ce39cb9cb6ba51dd0dddb991eb499196483"
+  },
+  {
+    "path": "network/scripts/serial_transport.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "1048a9a8f84c3fc31d0612c587646175bc0a46d48fab0c411f6d04867e475aeb"
+  },
+  {
+    "path": "network/scripts/simulation_clock.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "d536d3cabdbe20d4dd6c7c6d0e85408a81033cb93a1a651669f14f2eb3a7f86f"
+  },
+  {
+    "path": "scripts/product/analyze_relay_experiment.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "83dea947c54a78d26ee81da661edc8afdb581b099639aded3ef1e4a60f6eba60"
+  },
+  {
+    "path": "scripts/product/analyze_urban_experiment.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "38645cc5386bd88f8964cfbb65b841e40cf3d87308677bb2cff09e50402dc6bf"
+  },
+  {
+    "path": "scripts/product/analyze_urban_study.py",
+    "source_commit": "31502a8197f4545e6b4edc0b016062cc9ce00cef",
+    "sha256": "d7831f9580f889bb59537c0da54368e3877492add740bc4cf47f311ca828c3f9"
+  },
+  {
+    "path": "scripts/product/capture_autopilot_params.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "842251d994bc96facbadbc44d8f5424f14806230346301f2d34148fcfa16a6f3"
+  },
+  {
+    "path": "scripts/product/capture_effective_config.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "091a8e5b646381efee6f79f862e3e668302d486b47fd169ddfba90dc4959aa37"
+  },
+  {
+    "path": "scripts/product/capture_live_gazebo_screenshots.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "bedc332b9019f7823f6bb504bebc5c60079be9bc2b16603e7e044c160784880a"
+  },
+  {
+    "path": "scripts/product/inject_native_radio_runtime_cameras.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "7603b8d82b526f4bef1b10217061ccd39ac5e5c6a6e188f92445941048cbcc20"
+  },
+  {
+    "path": "scripts/product/native_operator_bridge.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "f21bc7167cfe52516e4c2feb68cc1cb268a945660b735b4cc7fad1bedc671ecd"
+  },
+  {
+    "path": "scripts/product/native_radio_five_uav_scenario.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "9a71a77499117692ead7ec87a151bc94736b989debb860eb847674cbe0e49cbd"
+  },
+  {
+    "path": "scripts/product/prepare_native_sources.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "7cab4a703531bcd104d4ffb0bbb686f7eb87fe1a88a60be614e5c4ebfe378626"
+  },
+  {
+    "path": "scripts/product/prepare_urban_gazebo.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "45e1eb9e55fae529a0e652a4ffe0c111ce07bbbcadd504076da12dca1e8ff714"
+  },
+  {
+    "path": "scripts/product/relay_experiment.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "68e1d6d5506abf3aee3d2c5e543ef1aca281c80b310d21538d096c0ac2cc0871"
+  },
+  {
+    "path": "scripts/product/run_frozen_urban_study.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "386b2d70611d42e1ff76b738c6c7420b724360d8ecc0cd85ed233d222ee334f0"
+  },
+  {
+    "path": "scripts/product/run_urban_case.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "6a2dc858cdc3199f719a174e5257306dbb27e974db939ccd258d75fb29a6b0f8"
+  },
+  {
+    "path": "scripts/product/summarize_native_radio_five_uav.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "7079e8cb3b813dd4c18791df7fbf997b2040339d6a0e69d876f0759b1c3b3fc5"
+  },
+  {
+    "path": "scripts/product/summarize_native_radio_product.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "c82b1a7720e11a6b98a6569d2b8dbf367ca228617e5a3263301ed1b878a91f89"
+  },
+  {
+    "path": "scripts/product/town01_full_stack_scenario.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "e039790c047a14e8b42d9600ad338b30e09a6e79d45770be079387655758ee53"
+  },
+  {
+    "path": "scripts/product/town01_runtime_monitor.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "9b22563ff7e1902e1ed2bd95557875bffcca2ea7fc0198c5db99c0fa0bd189e4"
+  },
+  {
+    "path": "scripts/product/town01_stack_health.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "243e0def9fc811dfbecb9baafad8cd28948d6f117a07408349572960d01f9160"
+  },
+  {
+    "path": "scripts/product/urban_mission.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "dc7bf9cf48efd4fc9c044dd8f4f91827b45b8622848c07cb9d1e1c52ae5f2adc"
+  },
+  {
+    "path": "src/multiagent_simulation/config/gazebo-iris.parm",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "9544a1a6229418e262f3c765646bf966b314a22d855ad9c548aca097e2240586"
+  },
+  {
+    "path": "src/multiagent_simulation/config/multiagent_lidar_camera_bridge.yaml",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "527965d8203039d0cd6b845a9fa10abbaeda6fac14fd775da1fc5e4cc178c761"
+  },
+  {
+    "path": "src/multiagent_simulation/config/robots.yaml",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "2a24a09588bf0ee9033a0fdb1d91bf2fe4901562884dbf0321fb1ffa74c0fe6c"
+  },
+  {
+    "path": "src/multiagent_simulation/launch/multiagent_simulation.launch.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "9cedc52b3046a2a27ce0197e9487b59dd63626abe4826f5b980131bd559c6dfc"
+  },
+  {
+    "path": "src/multiagent_simulation/models/iris/meshes/iris.dae",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "697956cfc0fe608afc52a0f688de50354b89e5201056451cf6bb767de8f46323"
+  },
+  {
+    "path": "src/multiagent_simulation/models/iris/meshes/iris_prop_ccw.dae",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "5f8b01668ee24a5b663ca8c4dd56e294fd6480db7eec1e5a7c11e45ba9004e99"
+  },
+  {
+    "path": "src/multiagent_simulation/models/iris/meshes/iris_prop_cw.dae",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "6cbc686772dccd46253fb65ece000e7ffa6a74b9c097bda349884bd1e78cd879"
+  },
+  {
+    "path": "src/multiagent_simulation/models/iris/model.config",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "e419cc7681f730edf14398baa577a4f05cd34e2cebaa764c508119c4465b34b7"
+  },
+  {
+    "path": "src/multiagent_simulation/models/iris/model.sdf",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "5ada79cdf95aba6277fab3c04768accb2cda1f4b19fdb01337d69ca83f2755d3"
+  },
+  {
+    "path": "src/multiagent_simulation/models/iris_radio_headless/model.config",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "7c7d3ad73181a8137acefd3bb635e2574cad341552ce42302a34778b78aed7b8"
+  },
+  {
+    "path": "src/multiagent_simulation/models/iris_radio_headless/model.sdf",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "d0dea92c9941a9be7c14159ddfcd0b438e9cb0120b876e5f653b03d4bca26b7e"
+  },
+  {
+    "path": "src/multiagent_simulation/multiagent_simulation/.gitignore",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "1941bc131eff1a4859c4384d69c3e30ed716bfb311865a85bfc9cef6a2d3ca3a"
+  },
+  {
+    "path": "src/multiagent_simulation/multiagent_simulation/__init__.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "src/multiagent_simulation/multiagent_simulation/move_drone.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "fa27df162a8facf8f1e703065ebfeaddfbf3d736d315e6dd6b72809478293983"
+  },
+  {
+    "path": "src/multiagent_simulation/package.xml",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "5f745246ed5bc75b412619a4f7ba4d2a317bc77db5e973d8b0b39c62cba8c490"
+  },
+  {
+    "path": "src/multiagent_simulation/resource/multiagent_simulation",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "src/multiagent_simulation/setup.cfg",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "dd41a5e8ca4003a53f3d38bcbdbd273c6642e5a722319b28046176eab74349da"
+  },
+  {
+    "path": "src/multiagent_simulation/setup.py",
+    "source_commit": "4d96d196e29792e8fd508f97994b78251efaee12",
+    "sha256": "e19e08137b99c21fecc6ed2c4f897591cce4b3692dd193d9be438ba3b09062b5"
+  },
+  {
+    "path": "scripts/product/plot_urban_study.py",
+    "source_commit": "31502a8197f4545e6b4edc0b016062cc9ce00cef",
+    "sha256": "5ba60356276a2dec9af68003775a52dbdc7b742aaa79aef3e6d1abd10721974d"
+  }
+]
