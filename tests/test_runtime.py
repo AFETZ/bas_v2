@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import Mock
 
 import bas
-from scripts.product.relay_experiment import RelayExperiment, StopRequested
+from scripts.product.relay_experiment import RelayExperiment, ScenarioError, StopRequested
 
 
 class RuntimeTests(unittest.TestCase):
@@ -86,6 +86,40 @@ class RuntimeTests(unittest.TestCase):
         with self.assertRaises(StopRequested):
             mission.pump()
         mission.gcs.step.assert_not_called()
+
+    def stopped_mission(self, landing_error=None):
+        mission = object.__new__(RelayExperiment)
+        mission.args = SimpleNamespace(parameter_snapshots=False, fault_profile='none', run_dir=self.root)
+        (self.root / 'metrics').mkdir()
+        mission.summary = {'uavs': {str(i): dict(armed=False, takeoff=False, landed=False, auto_disarm=False)
+                                   for i in range(1, 6)}}
+        mission.prepare = Mock(side_effect=StopRequested)
+        mission.measure = Mock()
+        mission.land = Mock(side_effect=landing_error)
+        mission.source_s = 0
+        mission.observer = SimpleNamespace(completed={})
+        mission.urban = None
+        mission.phase = Mock()
+        mission.emit = Mock()
+        mission.csv_handle = Mock()
+        mission.gcs = Mock()
+        return mission
+
+    def test_requested_stop_lands_and_is_not_a_completed_experiment(self):
+        mission = self.stopped_mission()
+        result = mission.run()
+        mission.land.assert_called_once()
+        mission.measure.assert_not_called()
+        self.assertEqual(result['status'], 'stopped')
+        self.assertFalse(result['criteria']['five_uav_lifecycle'])
+
+    def test_landing_failure_remains_failure_after_stop(self):
+        mission = self.stopped_mission(ScenarioError('no disarm observed'))
+        with self.assertRaises(ScenarioError):
+            mission.run()
+        result = json.loads((self.root / 'metrics/relay_experiment_summary.json').read_text())
+        self.assertEqual(result['status'], 'failed')
+        self.assertIn('no disarm observed', result['error'])
 
 
 if __name__ == '__main__':

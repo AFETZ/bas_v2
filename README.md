@@ -120,3 +120,5 @@ colcon build --packages-select multiagent_simulation --symlink-install
 проверка времени изменения исходников запрещает молча запускать старый бинарник.
 Для текущих Python-изменений: `python3 -m unittest discover -s tests` в runtime-образе.
 Архивы, зависимости и результаты исключены из Git.
+
+Проверки этой версии и наблюдаемые ограничения: [network/STATUS.md](network/STATUS.md).
