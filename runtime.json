@@ -1,0 +1,12 @@
+{
+  "environment": {"engine": "gazebo", "scene": "network/config/urban_low.json"},
+  "drone": {"autopilot": "ardupilot_sitl", "count": 5},
+  "propagation": {"model": "geometry_logdistance"},
+  "network": {"engine": "ns3", "topology": "adhoc"},
+  "experiment": {"policy": "failover", "duration_s": 240, "seed": 1, "run": 1},
+  "runtime": {
+    "clock": "realtime",
+    "image": "sha256:89d78eff9914b1644a1b01b793612e9ee8b19916c5a7bf5f578ba6d8bfbfafe5",
+    "land_timeout_s": 120
+  }
+}

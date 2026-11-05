@@ -1,0 +1,258 @@
+#!/usr/bin/env python3
+"""One-host BAS runtime: explicit configuration, owned lifecycle, raw event views."""
+import argparse
+import datetime
+import fcntl
+import hashlib
+import heapq
+import json
+import math
+import os
+from pathlib import Path
+import re
+import signal
+import subprocess
+import sys
+import time
+
+ROOT = Path(__file__).resolve().parent
+LOCK = Path('/tmp/bas-paper-runtime.lock')
+SHAPE = {
+    'environment': {'engine', 'scene'}, 'drone': {'autopilot', 'count'},
+    'propagation': {'model'}, 'network': {'engine', 'topology'},
+    'experiment': {'policy', 'duration_s', 'seed', 'run'},
+    'runtime': {'clock', 'image', 'land_timeout_s'},
+}
+MILESTONES = {'service_started', 'phase_requested', 'takeoff_observed',
+              'waypoint_reached_telemetry', 'barrier_released', 'experiment_failed',
+              'stop_requested', 'urban_measurement_window_closed',
+              'urban_laboratory_cleanup_started', 'landing_completed'}
+
+
+def write_json(path, value):
+    temporary = path.with_suffix('.tmp')
+    temporary.write_text(json.dumps(value, indent=2, allow_nan=False) + '\n')
+    temporary.replace(path)
+
+
+def identifier(value):
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,79}', value):
+        raise ValueError('run ID must contain 1..80 letters, digits, underscores or hyphens')
+    return value
+
+
+def load_config(path, root=ROOT):
+    config = json.loads(path.read_text())
+    if set(config) != set(SHAPE):
+        raise ValueError('runtime config has missing or unknown sections')
+    for section, keys in SHAPE.items():
+        if not isinstance(config[section], dict) or set(config[section]) != keys:
+            raise ValueError(f'expected {section} fields: {sorted(keys)}')
+    supported = [('environment', 'engine', 'gazebo'), ('drone', 'autopilot', 'ardupilot_sitl'),
+                 ('drone', 'count', 5), ('propagation', 'model', 'geometry_logdistance'),
+                 ('network', 'engine', 'ns3'), ('network', 'topology', 'adhoc'),
+                 ('runtime', 'clock', 'realtime')]
+    for section, key, value in supported:
+        if config[section][key] != value:
+            raise ValueError(f'this profile requires {section}.{key}={value}')
+    if config['experiment']['policy'] not in ('fixed', 'failover'):
+        raise ValueError('policy must be fixed or failover')
+    for section, key in [('experiment', 'duration_s'), ('runtime', 'land_timeout_s')]:
+        value = config[section][key]
+        if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+            raise ValueError(f'{section}.{key} must be finite and positive')
+    for key, minimum in [('seed', 1), ('run', 0)]:
+        value = config['experiment'][key]
+        if type(value) is not int or value < minimum:
+            raise ValueError(f'experiment.{key} must be an integer >= {minimum}')
+    if not re.fullmatch(r'sha256:[0-9a-f]{64}', config['runtime']['image']):
+        raise ValueError('runtime.image must be an immutable Docker image ID')
+    scene = (root / config['environment']['scene']).resolve()
+    scene.relative_to(root.resolve())
+    if not scene.is_file():
+        raise ValueError(f'scene does not exist: {scene}')
+    config['environment']['scene'] = str(scene.relative_to(root.resolve()))
+    return config
+
+
+def environment(config, run_id, inherited=None):
+    # Do not let an old terminal session silently activate faults, GUI or another backend.
+    env = {k: v for k, v in (os.environ if inherited is None else inherited).items()
+           if not k.startswith(('BAS_', 'ROS_', 'GZ_', 'IGN_', 'RMW_'))}
+    settings = {
+        'CONTAINER_IMAGE': config['runtime']['image'], 'SIMULATION_MODE': 'realtime',
+        'NATIVE_FIVE_CONTAINER_NAME': 'bas-core-' + run_id,
+        'NATIVE_FIVE_RUN_ID': run_id, 'NATIVE_FIVE_SCENARIO': 'urban',
+        'NATIVE_URBAN_CONFIG': config['environment']['scene'],
+        'NATIVE_PROPAGATION_PROFILE': 'geometry_logdistance',
+        'NATIVE_COORDINATION_POLICY': config['experiment']['policy'],
+        'NATIVE_EXPERIMENT_DURATION_S': config['experiment']['duration_s'],
+        'NATIVE_RNG_SEED': config['experiment']['seed'], 'NATIVE_RNG_RUN': config['experiment']['run'],
+        'NATIVE_LAND_TIMEOUT_S': config['runtime']['land_timeout_s'],
+        'NATIVE_UAV_COUNT': 5, 'NATIVE_FIVE_GUI': 0, 'NATIVE_CAPTURE_IMAGES': 0,
+        'NATIVE_CAPTURE_STORAGE': 'tmpfs', 'NATIVE_EVENT_LOGGING': 'metrics_only',
+        'NATIVE_FIVE_SKIP_BUILD': 1, 'NATIVE_PHYSICS_PROFILE': 'stock',
+        'NATIVE_WIFI_TOPOLOGY': 'adhoc', 'NATIVE_WIFI_AGGREGATION': 0,
+        'NATIVE_WIFI_EXPLICIT_BAR': 0, 'NATIVE_UART_CHANNELS': 'control',
+        'NATIVE_FAULT_PROFILE': 'none', 'NATIVE_EXPERIMENT_PROFILE': 'urban',
+        'NATIVE_EXPERIMENT_PILOT': 1, 'NATIVE_PARAMETER_SNAPSHOTS': 0,
+        'NATIVE_COMMAND_PERIOD_S': 1, 'NATIVE_TASK_PERIOD_S': 20,
+    }
+    env.update({'BAS_' + k: str(v) for k, v in settings.items()})
+    return env
+
+
+def control_dir(run_id):
+    return ROOT / 'runs/control' / identifier(run_id)
+
+
+def raw_dir(run_id):
+    return ROOT / 'runs/native-radio-realtime' / identifier(run_id)
+
+
+def request_stop(run_id):
+    folder = control_dir(run_id)
+    state = json.loads((folder / 'run.json').read_text())
+    if state['status'] != 'running':
+        raise ValueError(f'run is not active: {state["status"]}')
+    (folder / 'stop.request').touch()
+    print('Stop requested; the mission will attempt LAND through ns-3. Check status for the outcome.')
+
+
+def run(config, run_id):
+    folder, raw = control_dir(run_id), raw_dir(run_id)
+    LOCK.parent.mkdir(parents=True, exist_ok=True)
+    with LOCK.open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print('Another BAS runtime owns the host lock.', file=sys.stderr)
+            return 75
+        if folder.exists() or raw.exists():
+            raise ValueError('run already exists; choose a new ID')
+        for path in ['install/setup.bash', '.external/ns-3-sionna-native/build/scratch/ns3.48-upstream-sionna-tap-spike-default']:
+            if not (ROOT / path).is_file():
+                raise ValueError(f'missing runtime dependency: {path}; see README')
+        subprocess.run(['docker', 'image', 'inspect', config['runtime']['image']],
+                       check=True, stdout=subprocess.DEVNULL)
+        folder.mkdir(parents=True)
+        env = environment(config, run_id)
+        scene = ROOT / config['environment']['scene']
+        write_json(folder / 'config.json', config)
+        scene_bytes = scene.read_bytes()
+        (folder / 'scene.json').write_bytes(scene_bytes)
+        # Both generators consume this per-run snapshot, even if the working scene is edited later.
+        env['BAS_NATIVE_URBAN_CONFIG'] = str((folder / 'scene.json').relative_to(ROOT))
+        argv = ['./network/ns3/run_native_radio_five_uav.sh']
+        record = dict(run_id=run_id, status='running', argv=argv,
+                      source_commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
+                      source_dirty=bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT)),
+                      scene_sha256=hashlib.sha256(scene_bytes).hexdigest(),
+                      environment={k: v for k, v in env.items() if k.startswith('BAS_')},
+                      started_host_monotonic_ns=time.monotonic_ns(),
+                      started_utc=datetime.datetime.now(datetime.timezone.utc).isoformat())
+        write_json(folder / 'run.json', record)
+        previous = {}
+        def on_stop(signum, frame):
+            (folder / 'stop.request').touch()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            previous[sig] = signal.signal(sig, on_stop)
+        print(f'Run {run_id}: {folder / "runtime.log"}', flush=True)
+        try:
+            with (folder / 'runtime.log').open('x') as log:
+                child = subprocess.Popen(argv, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT,
+                                         start_new_session=True, pass_fds=(lock.fileno(),))
+                code = child.wait()
+            summary_path = raw / 'metrics/relay_experiment_summary.json'
+            summary = json.loads(summary_path.read_text()) if summary_path.exists() else {}
+            status = summary.get('status', 'failed') if code == 0 else 'failed'
+            record.update(status=status, returncode=code, mission_error=summary.get('error'))
+        except Exception as error:
+            record.update(status='failed', error=str(error))
+            raise
+        finally:
+            record['ended_host_monotonic_ns'] = time.monotonic_ns()
+            write_json(folder / 'run.json', record)
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
+        print(json.dumps({'run_id': run_id, 'status': record['status'], 'returncode': code}))
+        return code if code else (0 if record['status'] == 'completed' else 130 if record['status'] == 'stopped' else 1)
+
+
+def events(paths, command_id=None, event=None, limit=50):
+    latest, serial = [], 0
+    for path in paths:
+        with path.open() as stream:
+            for line_number, line in enumerate(stream, 1):
+                if not line.endswith('\n'):
+                    print(f'{path.name}:{line_number}: incomplete final record skipped', file=sys.stderr)
+                    continue
+                row = json.loads(line)  # A corrupt complete record must not disappear silently.
+                if command_id is not None and row.get('command_id') != command_id:
+                    continue
+                if event is not None and row.get('event') != event:
+                    continue
+                if command_id is None and event is None and row.get('event') not in MILESTONES:
+                    continue
+                stamp = row['host_monotonic_ns']
+                row['log_file'] = path.name
+                serial += 1
+                heapq.heappush(latest, (stamp, serial, row))
+                if len(latest) > limit:
+                    heapq.heappop(latest)
+    return [row for _, _, row in sorted(latest)]
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest='command', required=True)
+    for name in ('inspect', 'run'):
+        p = commands.add_parser(name)
+        p.add_argument('--config', type=Path, default=ROOT / 'runtime.json')
+        p.add_argument('--run-id', default='core-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
+        p.add_argument('--duration', type=float)
+    for name in ('status', 'stop', 'events'):
+        p = commands.add_parser(name)
+        p.add_argument('run_id')
+        if name == 'events':
+            p.add_argument('--command-id')
+            p.add_argument('--event')
+            p.add_argument('--limit', type=int, default=50)
+    args = parser.parse_args()
+    identifier(args.run_id)
+    if args.command in ('inspect', 'run'):
+        config = load_config(args.config)
+        if args.duration is not None:
+            if not math.isfinite(args.duration) or args.duration <= 0:
+                raise ValueError('duration must be finite and positive')
+            config['experiment']['duration_s'] = args.duration
+        if args.command == 'run':
+            return run(config, args.run_id)
+        print(json.dumps({'config': config, 'environment': {k: v for k, v in environment(config, args.run_id).items()
+                                                          if k.startswith('BAS_')}}, indent=2))
+    elif args.command == 'stop':
+        request_stop(args.run_id)
+    elif args.command == 'status':
+        record = json.loads((control_dir(args.run_id) / 'run.json').read_text())
+        phase = raw_dir(args.run_id) / 'logs/current_phase.txt'
+        record['phase'] = phase.read_text().strip() if phase.exists() else None
+        summary = raw_dir(args.run_id) / 'metrics/relay_experiment_summary.json'
+        record['mission'] = json.loads(summary.read_text()) if summary.exists() else None
+        print(json.dumps(record, indent=2))
+    else:
+        if not 1 <= args.limit <= 10000:
+            raise ValueError('limit must be between 1 and 10000')
+        paths = sorted((raw_dir(args.run_id) / 'logs').glob('coordination_*.jsonl'))
+        if not paths:
+            raise ValueError('no coordination journals for this run')
+        for row in events(paths, args.command_id, args.event, args.limit):
+            print(json.dumps(row, ensure_ascii=False))
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
+        print(f'BAS: {exc}', file=sys.stderr)
+        sys.exit(2)

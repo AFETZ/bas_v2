@@ -37,6 +37,10 @@ class ScenarioError(RuntimeError):
     pass
 
 
+class StopRequested(Exception):
+    """Operator requested bounded LAND and simulator teardown."""
+
+
 @dataclasses.dataclass(frozen=True)
 class Pose:
     position: tuple[float, float, float]
@@ -361,6 +365,9 @@ class RelayExperiment:
         return self.send(i, self.tx.command_long_encode(i, 1, command, 0, *params))
 
     def pump(self, *, strict_pose=True, observe=True):
+        stop = getattr(self.args, "stop_file", None)
+        if stop is not None and stop.exists() and not getattr(self, "stopping", False):
+            raise StopRequested()
         self.gcs.step()
         if not self.gcs.running:
             raise ScenarioError("GCS service interrupted")
@@ -808,6 +815,7 @@ class RelayExperiment:
                 waypoints_telemetry_reached=self.urban_reached)
 
     def land(self):
+        self.stopping = True
         self.phase("experiment_landing")  # native fault is explicitly removed for bounded cleanup
         if getattr(self, "urban", None):
             self.emit("urban_laboratory_cleanup_started", source_sim_time_s=self.source_s,
@@ -861,9 +869,14 @@ class RelayExperiment:
     def run(self):
         error = None
         landed = False
+        stopped = False
         try:
             self.prepare()
             self.measure()
+        except StopRequested:
+            stopped = True
+            self.summary["stop_requested_source_sim_time_s"] = self.source_s
+            self.emit("stop_requested", source_sim_time_s=self.source_s)
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
             self.emit("experiment_failed", reason=error)
@@ -882,7 +895,7 @@ class RelayExperiment:
                 status="skipped", reason="controlled LAND/disarm was not completed")
         self.summary["completed_goals"] = list(self.observer.completed.values())
         self.summary["error"] = error
-        self.summary["status"] = "completed" if error is None else "failed"
+        self.summary["status"] = "failed" if error else "stopped" if stopped else "completed"
         self.summary["task_failures_are_outcomes"] = True
         completed = self.summary["completed_goals"]
         self.summary["criteria"] = dict(
@@ -897,7 +910,7 @@ class RelayExperiment:
         if self.urban:
             self.summary["criteria"]["urban_routes_telemetry_completed"] = all(
                 self.summary.get("urban_routes_telemetry_completed", {}).get(str(i), False) for i in UAV_IDS)
-        self.phase("experiment_done" if error is None else "experiment_failed")
+        self.phase("experiment_failed" if error else "experiment_stopped" if stopped else "experiment_done")
         output = self.args.run_dir / "metrics/relay_experiment_summary.json"
         output.write_text(json.dumps(self.summary, indent=2, allow_nan=False) + "\n")
         self.csv_handle.close()
@@ -934,6 +947,7 @@ def main(argv=None):
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--node-state", type=Path, required=True)
     parser.add_argument("--phase-file", type=Path, required=True)
+    parser.add_argument("--stop-file", type=Path, help="request controlled LAND and stop; not a completed measurement")
     parser.add_argument("--policy", choices=("fixed", "failover"), required=True)
     parser.add_argument("--run-id")
     parser.add_argument("--initial-master", type=int, choices=UAV_IDS, default=1)

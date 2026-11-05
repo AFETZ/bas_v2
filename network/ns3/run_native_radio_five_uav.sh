@@ -1277,6 +1277,7 @@ set +e
 if [[ "$COORDINATION_POLICY" != off ]]; then
   experiment_args=(
     --run-dir "$RUN_DIR" --node-state "$NODE_STATE" --phase-file "$PHASE_FILE"
+    --stop-file "$ROOT_DIR/runs/control/$RUN_ID/stop.request"
     --policy "$COORDINATION_POLICY" --run-id "$RUN_ID" --fault-profile "$FAULT_PROFILE"
     --initial-master "$FAULT_MASTER_ID" --radio-watchdog-file "$NS3_READY.heartbeat"
     --duration-s "${BAS_NATIVE_EXPERIMENT_DURATION_S:-180}"
