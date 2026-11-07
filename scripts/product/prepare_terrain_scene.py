@@ -184,7 +184,9 @@ def prepare(config, output):
     (output / 'licenses').mkdir()
     (output / 'licenses/trimesh-MIT.txt').write_bytes(Path(license_file).read_bytes())
     for name, mesh in [('terrain', terrain), ('buildings', buildings)]:
-        mesh.export(output / (name + '.obj'), file_type='obj', include_normals=False,
+        # Gazebo's DART CustomMeshShape requires a normal for each loaded
+        # vertex; an OBJ without normals is discarded before collision setup.
+        mesh.export(output / (name + '.obj'), file_type='obj', include_normals=True,
                     include_color=False, include_texture=False, digits=9)
     np.savez_compressed(output / 'terrain-grid.npz', **grid)
     (output / 'source.json').write_text(json.dumps(config, indent=2, allow_nan=False) + '\n')

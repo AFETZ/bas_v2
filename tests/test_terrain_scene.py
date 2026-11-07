@@ -67,6 +67,16 @@ class TerrainSceneTests(unittest.TestCase):
                 self.assertIsNone(shape.find('transform'))
                 digest = hashlib.sha256((output / (name + '.obj')).read_bytes()).hexdigest()
                 self.assertEqual(result['files'][name + '.obj']['sha256'], digest)
+                lines = (output / (name + '.obj')).read_text().splitlines()
+                vertices = [line for line in lines if line.startswith('v ')]
+                normals = [line for line in lines if line.startswith('vn ')]
+                self.assertEqual(len(normals), len(vertices), 'DART rejects submeshes without per-vertex normals')
+                for line in lines:
+                    if line.startswith('f '):
+                        for corner in line.split()[1:]:
+                            fields = corner.split('/')
+                            self.assertEqual(len(fields), 3)
+                            self.assertTrue(1 <= int(fields[2]) <= len(normals))
             loaded = trimesh.load(output / 'terrain.obj', process=False)
             self.assertEqual(len(loaded.faces), result['terrain_triangles'])
             with np.load(output / 'terrain-grid.npz') as grid:
