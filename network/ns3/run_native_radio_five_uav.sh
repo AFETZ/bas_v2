@@ -411,6 +411,7 @@ PHASED_ARRAY_ADAPTER_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-spectrumwifi-ph
 LOCKSTEP_TAP_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-lockstep-tap-read.patch"
 SOLVER_BUDGET_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-solver-budget.patch"
 BASEBAND_PHASE_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-baseband-spectrum-phase.patch"
+DOPPLER_EPOCH_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-doppler-epoch.patch"
 RECEIVER_BATCH_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-receiver-batch.patch"
 TAP_QUEUE_SELECTION_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-tap-device-queue-selection.patch"
 if [[ "$SCENARIO_KEY" == urban ]]; then
@@ -484,7 +485,7 @@ MAP_ID="${SCENARIO_VALUES[5]}"
 
 for required_file in "$ROOT_DIR/scripts/product/capture_effective_config.py" \
   "$PROJECT_SOURCE" "$PATCH_FILE" "$REALTIME_CACHE_PATCH" \
-    "$PHASED_ARRAY_ADAPTER_PATCH" "$LOCKSTEP_TAP_PATCH" "$SOLVER_BUDGET_PATCH" "$BASEBAND_PHASE_PATCH" "$RECEIVER_BATCH_PATCH" "$TAP_QUEUE_SELECTION_PATCH" "$RADIO_CONFIG" "$WORLD" "$CAMERA_FRAGMENT" "$SITL_DEFAULTS"; do
+    "$PHASED_ARRAY_ADAPTER_PATCH" "$LOCKSTEP_TAP_PATCH" "$SOLVER_BUDGET_PATCH" "$BASEBAND_PHASE_PATCH" "$DOPPLER_EPOCH_PATCH" "$RECEIVER_BATCH_PATCH" "$TAP_QUEUE_SELECTION_PATCH" "$RADIO_CONFIG" "$WORLD" "$CAMERA_FRAGMENT" "$SITL_DEFAULTS"; do
   [[ -f "$required_file" ]] || { printf 'Missing input: %s\n' "$required_file" >&2; exit 2; }
 done
 if [[ "$REQUIRES_RT" == 1 && ! -f "$SCENE" ]]; then
@@ -642,6 +643,9 @@ fi
 if ! git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply --reverse --check "$BASEBAND_PHASE_PATCH" >/dev/null 2>&1; then
   git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply "$BASEBAND_PHASE_PATCH"
 fi
+if ! git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply --reverse --check "$DOPPLER_EPOCH_PATCH" >/dev/null 2>&1; then
+  git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply "$DOPPLER_EPOCH_PATCH"
+fi
 if ! git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply --reverse --check "$RECEIVER_BATCH_PATCH" >/dev/null 2>&1; then
   git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply "$RECEIVER_BATCH_PATCH"
 fi
@@ -747,7 +751,11 @@ if [[ ( -n "${BAS_NATIVE_EXTERNAL_CONFIG:-}" || -n "$EXTERNAL_BUNDLE" ) && "$SCE
 fi
 if [[ "${BAS_NATIVE_FIVE_SKIP_BUILD:-0}" == 1 ]]; then
   [[ -x "$BINARY" ]] || { printf 'Requested binary reuse but binary is absent.\n' >&2; exit 2; }
-  [[ "$BINARY" -nt "$PROJECT_SOURCE" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-geometry-loss.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-live-state.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-lockstep.h" && "$BINARY" -nt "$REALTIME_CACHE_PATCH" && "$BINARY" -nt "$LOCKSTEP_TAP_PATCH" && "$BINARY" -nt "$SOLVER_BUDGET_PATCH" && "$BINARY" -nt "$BASEBAND_PHASE_PATCH" && "$BINARY" -nt "$RECEIVER_BATCH_PATCH" && "$BINARY" -nt "$TAP_QUEUE_SELECTION_PATCH" ]] || {
+  # SDK-only fixes rebuild shared libraries without necessarily relinking the
+  # launcher. Check the artifact that actually implements each patched method.
+  SPECTRUM_LIBRARY="$NS3_DIR/build/lib/libns3.48-spectrum-default.so"
+  TAP_LIBRARY="$NS3_DIR/build/lib/libns3.48-tap-bridge-default.so"
+  [[ "$BINARY" -nt "$PROJECT_SOURCE" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-geometry-loss.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-live-state.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-lockstep.h" && "$SPECTRUM_LIBRARY" -nt "$REALTIME_CACHE_PATCH" && "$TAP_LIBRARY" -nt "$LOCKSTEP_TAP_PATCH" && "$SPECTRUM_LIBRARY" -nt "$SOLVER_BUDGET_PATCH" && "$SPECTRUM_LIBRARY" -nt "$BASEBAND_PHASE_PATCH" && "$SPECTRUM_LIBRARY" -nt "$DOPPLER_EPOCH_PATCH" && "$SPECTRUM_LIBRARY" -nt "$RECEIVER_BATCH_PATCH" && "$TAP_LIBRARY" -nt "$TAP_QUEUE_SELECTION_PATCH" && "$SPECTRUM_LIBRARY" -nt "$PHASED_ARRAY_ADAPTER_PATCH" ]] || {
     printf 'Binary predates native source/header; rerun without BAS_NATIVE_FIVE_SKIP_BUILD.\n' >&2; exit 2;
   }
   printf 'Reused focused native target after exact project/upstream source synchronization.\n' \
@@ -892,6 +900,7 @@ capture_effective_configuration() {
     --config "native_capture_storage=$RUN_DIR/logs/native_capture_storage.json"
     --config "sionna_solver_budget_patch=$SOLVER_BUDGET_PATCH"
     --config "sionna_baseband_phase_patch=$BASEBAND_PHASE_PATCH"
+    --config "sionna_doppler_epoch_patch=$DOPPLER_EPOCH_PATCH"
     --config "sionna_receiver_batch_patch=$RECEIVER_BATCH_PATCH"
     --config "tap_queue_selection_patch=$TAP_QUEUE_SELECTION_PATCH"
   )

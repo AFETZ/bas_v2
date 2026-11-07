@@ -17,6 +17,10 @@ from typing import Any
 
 UAVS = tuple(range(1, 6))
 CONDITIONS = ("none", "selective", "total_GCS")
+ENGINEERING_DELIVERY_V1 = dict(criterion_set="engineering-delivery-v1", deadline_ms=250.,
+    latency_p95_max_ms=100., latency_p99_max_ms=150., jitter_p95_max_ms=50.,
+    jitter_p99_max_ms=100., timely_per_offered_min=.999, minimum_samples_per_uav=10000,
+    minimum_distinct_rng_seeds=10)
 
 
 def finite(value: Any) -> float | None:
@@ -118,8 +122,114 @@ def distribution(values: list[float]) -> dict[str, Any]:
         low, high = math.floor(at), math.ceil(at)
         return ordered[low] + (ordered[high] - ordered[low]) * (at - low)
     return dict(samples=len(values), mean=statistics.fmean(values) if values else None,
-                p5=percentile(5), p50=percentile(50), p95=percentile(95),
+                p5=percentile(5), p50=percentile(50), p95=percentile(95), p99=percentile(99),
                 min=min(values) if values else None, max=max(values) if values else None)
+
+
+def engineering_delivery(offers, commands, uav_ids, period_s, *, observation_end_ns=None):
+    """Use audited CID/UART joins, retaining every unique offered slot."""
+    index = {str(row['command_id']): row for row in commands}
+    result = {}
+    period_ns = period_s * 1e9 if period_s is not None and period_s > 0 else None
+    for uav in uav_ids:
+        selected = sorted((r for r in offers if identifier(r.get('uav_id')) == uav),
+            key=lambda r: finite(r.get('scheduled_host_monotonic_ns')) or finite(r.get('host_monotonic_ns')) or 0)
+        counts = Counter(dict(timely=0, late=0, missing=0, unavailable=0, unverifiable=0))
+        latency, jitter, seen = [], [], set()
+        previous = None
+        excluded = Counter()
+        censored = 0
+        for offer in selected:
+            cid = str(offer.get('command_id'))
+            command = index.get(cid)
+            delay = finite(command.get('latency_ms')) if command else None
+            verified = bool(command and offer.get('request_id') and cid not in seen
+                and command.get('uav_id') == uav and command.get('lease_status') == 'valid'
+                and command.get('lineage_status') == 'valid' and command.get('application_chain_complete')
+                and command.get('policy_allowed') and delay is not None and delay >= 0)
+            category = ('unverifiable' if not offer.get('request_id') or command and cid in seen else 'unavailable' if command is None else
+                        'missing' if command.get('admitted_ns') is None else 'unverifiable' if not verified else
+                        'timely' if delay <= ENGINEERING_DELIVERY_V1['deadline_ms'] else 'late')
+            created = finite(command.get('created_ns')) if command else None
+            if (category == 'missing' and created is not None and observation_end_ns is not None
+                    and created + ENGINEERING_DELIVERY_V1['deadline_ms'] * 1e6 > observation_end_ns):
+                category = 'unverifiable'
+                censored += 1
+            counts[category] += 1
+            if command:
+                seen.add(cid)
+            scheduled = finite(offer.get('scheduled_host_monotonic_ns'))
+            flow = (uav, command.get('leader_id'), command.get('epoch')) if command else None
+            if verified:
+                latency.append(delay)
+                if previous is not None:
+                    if previous[0] != flow:
+                        excluded['changed_flow'] += 1
+                    elif scheduled is None or previous[1] is None or period_ns is None:
+                        excluded['unrecorded_schedule'] += 1
+                    elif not math.isclose(scheduled - previous[1], period_ns, rel_tol=0, abs_tol=1.):
+                        excluded['nonconsecutive_offered_slots'] += 1
+                    else:
+                        jitter.append(abs(delay - previous[2]))
+                previous = (flow, scheduled, delay)
+            else:
+                previous = None  # Never bridge a missing/unavailable/unverifiable offer.
+                excluded['undelivered_or_unverifiable_slot'] += 1
+        result[str(uav)] = dict(offered=len(selected), **counts, right_censored_deadline_slots=censored,
+            timely_per_offered=counts['timely'] / len(selected) if selected else None,
+            created_to_uart_latency_ms=distribution(latency), consecutive_delay_variation_ms=distribution(jitter),
+            excluded_jitter_slots_or_pairs=dict(excluded))
+    return result
+
+
+def delivery_limit_checks(metrics):
+    limits = ENGINEERING_DELIVERY_V1
+    values = {'latency_p95': (metrics['created_to_uart_latency_ms']['p95'], limits['latency_p95_max_ms']),
+              'latency_p99': (metrics['created_to_uart_latency_ms']['p99'], limits['latency_p99_max_ms']),
+              'jitter_p95': (metrics['consecutive_delay_variation_ms']['p95'], limits['jitter_p95_max_ms']),
+              'jitter_p99': (metrics['consecutive_delay_variation_ms']['p99'], limits['jitter_p99_max_ms'])}
+    checks = {name: value <= high if value is not None else None for name, (value, high) in values.items()}
+    timely = metrics['timely_per_offered']
+    checks['timely_per_offered'] = timely >= limits['timely_per_offered_min'] if timely is not None else None
+    return checks
+
+
+def engineering_delivery_series(records):
+    """Conservative per-run limits; never average quantiles or join across runs."""
+    grouped = defaultdict(list)
+    for record in records:
+        grouped[(record['policy'], record['fault_profile'])].append(record)
+    result = []
+    for (policy, fault), members in sorted(grouped.items()):
+        blocks = [r.get('engineering_delivery_v1', {}) for r in members]
+        rosters = {tuple(sorted(b.get('per_uav', {}))) for b in blocks if b}
+        usable = bool(len(rosters) == 1 and rosters != {()} and all(
+            r.get('network_eligible') and b.get('measurement_eligible') and b.get('limits') == ENGINEERING_DELIVERY_V1
+            for r, b in zip(members, blocks)))
+        seeds = {r.get('actual_rng_seed') for r in members if r.get('actual_rng_seed') is not None}
+        per_uav = {}
+        for uav in sorted(set().union(*(set(b.get('per_uav', {})) for b in blocks))):
+            observations = [b['per_uav'][uav] for b in blocks if uav in b.get('per_uav', {})]
+            counts = {key: sum(m[key] for m in observations) for key in
+                      ('offered', 'timely', 'late', 'missing', 'unavailable', 'unverifiable', 'right_censored_deadline_slots')}
+            checks = [delivery_limit_checks(m) for m in observations]
+            complete = len(observations) == len(members) and all(v is not None for c in checks for v in c.values())
+            numeric = complete and all(v for c in checks for v in c.values())
+            latency_n = sum(m['created_to_uart_latency_ms']['samples'] for m in observations)
+            jitter_n = sum(m['consecutive_delay_variation_ms']['samples'] for m in observations)
+            enough = min(latency_n, jitter_n) >= ENGINEERING_DELIVERY_V1['minimum_samples_per_uav']
+            per_uav[uav] = dict(**counts, latency_samples=latency_n, jitter_samples=jitter_n,
+                timely_per_offered=counts['timely'] / counts['offered'] if counts['offered'] else None,
+                every_run_limits_satisfied=numeric if complete else None, sufficient_samples=enough)
+        failed = any(v is False for b in blocks for m in b.get('per_uav', {}).values()
+                     for v in delivery_limit_checks(m).values())
+        sufficient = usable and len(seeds) >= ENGINEERING_DELIVERY_V1['minimum_distinct_rng_seeds'] and all(
+            m['sufficient_samples'] and m['every_run_limits_satisfied'] for m in per_uav.values())
+        result.append(dict(policy=policy, fault_profile=fault, limits=ENGINEERING_DELIVERY_V1,
+            status='observed_limits_failed' if failed else 'passed' if sufficient else 'insufficient_evidence',
+            comparable_measurements=usable, distinct_actual_rng_seeds=sorted(seeds), per_uav=per_uav,
+            percentile_policy='Every comparable run must satisfy the limits; quantiles are not averaged or pooled.'))
+    return result
 
 
 def decompose_goal(completion: dict[str, Any], commands: list[dict[str, Any]], fault_ns: float | None) -> dict[str, Any]:
@@ -508,7 +618,8 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
             no_new_leader_selection=len(selected_during) == 0 if condition == "total_GCS" and fault is not None else None),
         criteria=meta.get("criteria", {}), metadata=dict(environment=environment, config=config, native_stats=stats,
             configuration_snapshot=read_json(run_dir / "configuration/final/manifest.json") or read_json(run_dir / "configuration/initial/manifest.json"),
-            physics_runtime=read_json(run_dir / "logs/physics_runtime.json")),
+            physics_runtime=read_json(run_dir / "logs/physics_runtime.json"),
+            native_sources=read_json(run_dir / 'logs/native_sources.json')),
         data_quality_errors=errors,
         definitions=dict(deadline_ms=deadline_ms, latency_clock="host monotonic; command creation to actual UART write end; send-event latency reported separately",
             restricted_horizon_s=restricted_s,
@@ -525,6 +636,25 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
             total_GCS="renewals before failure detection can be issued but lost; new leader selection must remain absent"))
     if not meta:
         errors.append("relay_experiment_summary.json missing; no successful experiment inferred")
+    declared_roster = meta.get('uav_ids')
+    roster_verified = (isinstance(declared_roster, list) and bool(declared_roster) and
+        all(type(i) is int and i in UAVS for i in declared_roster) and len(set(declared_roster)) == len(declared_roster))
+    roster = sorted(declared_roster) if roster_verified else sorted({identifier(o.get('uav_id')) for o in offers} - {None})
+    delivery = engineering_delivery(offers, commands, roster, finite(config.get('command_period_s')), observation_end_ns=end)
+    delivery_checks = {uav: delivery_limit_checks(row) for uav, row in delivery.items()}
+    numeric_failed = any(v is False for checks in delivery_checks.values() for v in checks.values())
+    measured = bool(roster_verified and full_window and not errors and admission_age_limit_ms == ENGINEERING_DELIVERY_V1['deadline_ms']
+        and meta.get('measurement_validity') == 'valid' and not any(value for key, value in audit.items() if key != 'valid')
+        and not result['command_lineage_errors'] and not any(row['unverifiable'] for row in delivery.values()))
+    result['engineering_delivery_v1'] = dict(limits=ENGINEERING_DELIVERY_V1,
+        status='observed_limits_failed' if numeric_failed else 'insufficient_evidence',
+        measurement_eligible=measured, per_uav=delivery, observed_limit_checks=delivery_checks,
+        scope='Control creation to audited UART write end, not pure RF delay, ACK RTT, physical completion or payload SLA.',
+        evidence_policy='A single run cannot establish the required ten independent RNG seeds; series criteria also require 10000 latency and jitter samples per UAV.',
+        jitter_definition='Absolute delay difference for adjacent recorded scheduled offers of one UAV/leader/epoch; missing, unavailable or unverifiable slots and schedule gaps break pairs.',
+        denominator_definition='All unique measurement-window offers partition into timely at <=250ms, late verified admission, sent but missing admission, unavailable send, or unverifiable lineage/identity. Missing admissions without a fully observed deadline horizon are unverifiable, not asserted losses.')
+    result['definitions']['engineering_delivery_limits'] = ENGINEERING_DELIVERY_V1
+    result['definitions']['engineering_delivery_roster'] = roster
     result["rtf"] = {}
     if live_export and (run_dir / "logs/node_state.jsonl").is_file():
         spec = importlib.util.spec_from_file_location("bas_live_report", Path(__file__).with_name("summarize_native_radio_five_uav.py"))
@@ -563,6 +693,7 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
         f"Raw: `{run_dir}`.", "", "[Numerical outcomes and definitions](metrics/relay_analysis.json).",
         "[Commands, including missing delivery](metrics/relay_commands.csv); [censored recovery](metrics/relay_recovery.csv).",
         "Renewals issued before detecting total GCS loss are reported separately from new leader appointments."]
+    report_lines.append(f"Engineering delivery v1: `{result['engineering_delivery_v1']['status']}`; this single run does not establish a series SLA. See per-UAV counts, p95/p99, jitter and eligibility in the numerical outcomes.")
     if plots:
         report_lines += ["", "![Relay outcomes](plots/relay_outcomes.png)"]
     if errors:
@@ -743,13 +874,17 @@ def campaign_record(plan_row: dict[str, Any], result: dict[str, Any] | None) -> 
         mission={key: cfg.get(key) for key in MISSION_FIELDS},
         service={key: service.get(key) for key in SERVICE_FIELDS},
         radio={key: stats.get(key) for key in RADIO_FIELDS}, physics_runtime=metadata.get("physics_runtime", {}),
+        native_sources=metadata.get('native_sources', {}),
         analysis=result.get("definitions", {}))
+    actual_seed = finite(stats.get('rng_seed', env.get('ns3_rng_seed')))
     record.update(recorded=terminal, has_artifacts=True, run_status=result.get("run_status", "not_recorded"),
         run_error=result.get("run_error"), raw_run_dir=result.get("raw_run_dir"),
         analysis_path=str(Path(result["output_dir"]) / "metrics/relay_analysis.json"),
         network_eligible=not reasons, exclusion_reasons=reasons, outcomes=outcomes, comparability=signature,
         study_eligible=not study_reasons,
-        admission_audit=result.get("admission_audit", {}), criteria=criteria)
+        admission_audit=result.get("admission_audit", {}), criteria=criteria,
+        engineering_delivery_v1=result.get('engineering_delivery_v1', {}),
+        actual_rng_seed=int(actual_seed) if actual_seed is not None and actual_seed >= 1 and actual_seed.is_integer() else None)
     return record
 
 
@@ -798,6 +933,7 @@ def aggregate_campaign(records: list[dict[str, Any]]) -> dict[str, Any]:
         records=records, paired_points=points, paired_estimates=estimates, pair_exclusions=exclusions,
         global_configuration_signature_count=len(signatures),
         global_frozen_configuration_consistent=len(signatures) == 1,
+        engineering_delivery_v1=engineering_delivery_series(records),
         campaign_status=("all_recorded_comparable" if all(row["network_eligible"] for row in records)
                          else "all_recorded_with_conditional_limits") if records and all(row["recorded"] for row in records) else "incomplete_campaign",
         methods=["Independent repetition is a whole paired run, never a packet or UAV.",
@@ -884,6 +1020,10 @@ def analyze_campaign(plan_path: Path, runs_root: Path, output: Path, *, plots: b
         f"Recorded {result['recorded_runs']} of {result['planned_runs']} planned runs; statuses: `{result['run_status_counts']}`.",
         "", "[All runs and exclusions](metrics/relay_campaign_runs.csv); [all paired points](metrics/relay_campaign_pairs.csv); "
         "[exploratory intervals](metrics/relay_campaign_intervals.csv).", ""] + result["methods"]
+    report.extend(f"Engineering delivery v1, policy `{row['policy']}`, fault `{row['fault_profile']}`: "
+                  f"`{row['status']}` ({len(row['distinct_actual_rng_seeds'])} actual seeds). "
+                  "Per-UAV evidence and fixed limits are in metrics/relay_campaign_analysis.json."
+                  for row in result['engineering_delivery_v1'])
     if plots:
         report += ["", "![Paired outcomes](plots/relay_campaign_pairs.png)"]
     (output / "relay_campaign_analysis.md").write_text("\n".join(report) + "\n")

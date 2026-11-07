@@ -1,0 +1,181 @@
+diff --git a/src/spectrum/CMakeLists.txt b/src/spectrum/CMakeLists.txt
+index 23a9e40..2b7935c 100644
+--- a/src/spectrum/CMakeLists.txt
++++ b/src/spectrum/CMakeLists.txt
+@@ -152,6 +152,7 @@ else()
+   add_compile_definitions(SIONNA_RT=1)
+   set(sionna_test_sources
+       test/sionna-channel-model-test.cc
++      test/sionna-doppler-epoch-test.cc
+   )
+ 
+ endif()
+diff --git a/src/spectrum/model/sionna-rt-spectrum-propagation-loss-model.cc b/src/spectrum/model/sionna-rt-spectrum-propagation-loss-model.cc
+index e55a426..edba589 100644
+--- a/src/spectrum/model/sionna-rt-spectrum-propagation-loss-model.cc
++++ b/src/spectrum/model/sionna-rt-spectrum-propagation-loss-model.cc
+@@ -233,8 +233,12 @@ SionnaRtSpectrumPropagationLossModel::CalcBeamformingGain(
+ 
+     NS_ASSERT(numCluster <= longTerm->GetNumPages());
+ 
+-    double slotTime = Simulator::Now().GetSeconds();
+-    double factor = 2 * M_PI * slotTime * GetFrequency() / 3e8;
++    // Paths.doppler already contains Hz, and Paths.cir is the baseband CIR
++    // at this realization's generation time. Advance only from that epoch;
++    // multiplying by carrier/c again would convert the same Doppler twice.
++    const double elapsedSeconds =
++        (Simulator::Now() - channelMatrix->m_generatedTime).GetSeconds();
++    const double factor = 2 * M_PI * elapsedSeconds;
+     for (size_t cIndex = 0; cIndex < numCluster; cIndex++)
+     {
+         doppler[cIndex] =
+diff --git a/src/spectrum/test/sionna-doppler-epoch-test.cc b/src/spectrum/test/sionna-doppler-epoch-test.cc
+new file mode 100644
+index 0000000..76bbdb5
+--- /dev/null
++++ b/src/spectrum/test/sionna-doppler-epoch-test.cc
+@@ -0,0 +1,144 @@
++/*
++ * SPDX-License-Identifier: GPL-2.0-only
++ */
++
++#include "ns3/double.h"
++#include "ns3/simulator.h"
++#include "ns3/sionna-rt-channel-model.h"
++#include "ns3/sionna-rt-spectrum-propagation-loss-model.h"
++#include "ns3/spectrum-model.h"
++#include "ns3/spectrum-signal-parameters.h"
++#include "ns3/spectrum-value.h"
++#include "ns3/test.h"
++
++#include <array>
++#include <complex>
++#include <vector>
++
++using namespace ns3;
++
++namespace
++{
++
++class DopplerSpectrumProbe : public SionnaRtSpectrumPropagationLossModel
++{
++  public:
++    using SionnaRtSpectrumPropagationLossModel::CalcBeamformingGain;
++};
++
++// Exercise the actual CIR -> frequency response -> RX PSD boundary on CPU.
++// No Python interpreter, GPU, scene solver, clock override or mocked RF model.
++// Pinned Sionna RT 1.2.0 Paths.cir() defines exp(j*2*pi*doppler_Hz*elapsed_s).
++class SionnaDopplerEpochTest : public TestCase
++{
++  public:
++    SionnaDopplerEpochTest()
++        : TestCase("Sionna Doppler uses Hz and elapsed time from each CIR generation epoch")
++    {
++    }
++
++  private:
++    using ComplexRow = std::array<std::complex<double>, 3>;
++    Ptr<DopplerSpectrumProbe> m_model;
++    Ptr<MatrixBasedChannelModel::ChannelMatrix> m_channel;
++    Ptr<SionnaRtChannelModel::SionnaRtChannelParams> m_parameters;
++    Ptr<MatrixBasedChannelModel::Complex3DVector> m_longTerm;
++    Ptr<SpectrumSignalParameters> m_signal;
++
++    void Observe(unsigned quarterTurn)
++    {
++        // Two baseband coefficients at the generation epoch: 1 and -j/2.
++        // At 25 Hz the delayed path rotates by exactly +j every 10 ms.
++        // Delay=100 ns gives +/-pi/2 for the +/-2.5 MHz baseband bins.
++        const std::array<ComplexRow, 4> expected{
++            ComplexRow{{{1.5, 0.0}, {1.0, -0.5}, {0.5, 0.0}}},
++            ComplexRow{{{1.0, 0.5}, {1.5, 0.0}, {1.0, -0.5}}},
++            ComplexRow{{{0.5, 0.0}, {1.0, 0.5}, {1.5, 0.0}}},
++            ComplexRow{{{1.0, -0.5}, {0.5, 0.0}, {1.0, 0.5}}}
++        };
++        const std::array<std::array<double, 3>, 4> expectedPsd{
++            std::array<double, 3>{9.0, 1.25, 2.25},
++            std::array<double, 3>{5.0, 2.25, 11.25},
++            std::array<double, 3>{1.0, 1.25, 20.25},
++            std::array<double, 3>{5.0, 0.25, 11.25}
++        };
++        const auto result = m_model->CalcBeamformingGain(m_signal, m_longTerm, m_channel,
++            m_parameters, Vector(), Vector(), 1, 1, false);
++        NS_TEST_ASSERT_MSG_EQ(result->spectrumChannelMatrix->GetNumPages(), 3U,
++                              "Unexpected number of native frequency bins");
++        for (unsigned bin = 0; bin < 3; ++bin)
++        {
++            const auto actual = (*result->spectrumChannelMatrix)(0, 0, bin);
++            NS_TEST_ASSERT_MSG_EQ_TOL(std::real(actual), std::real(expected[quarterTurn][bin]),
++                                      1e-10, "Wrong Doppler/epoch in complex CFR real part");
++            NS_TEST_ASSERT_MSG_EQ_TOL(std::imag(actual), std::imag(expected[quarterTurn][bin]),
++                                      1e-10, "Wrong Doppler/epoch in complex CFR imaginary part");
++            NS_TEST_ASSERT_MSG_EQ_TOL((*result->psd)[bin], expectedPsd[quarterTurn][bin],
++                                      1e-10, "Native RX PSD disagrees with analytic two-path Doppler");
++        }
++        // Repeating a call at the same time must not advance the phase twice.
++        const auto warm = m_model->CalcBeamformingGain(m_signal, m_longTerm, m_channel,
++            m_parameters, Vector(), Vector(), 1, 1, false);
++        for (unsigned bin = 0; bin < 3; ++bin)
++            NS_TEST_ASSERT_MSG_EQ_TOL((*warm->psd)[bin], expectedPsd[quarterTurn][bin],
++                                      1e-10, "Warm call changed Doppler phase or reapplied loss");
++    }
++
++    void BeginEpoch(double carrierHz, bool moving)
++    {
++        m_model->SetChannelModelAttribute("Frequency", DoubleValue(carrierHz));
++        m_channel->m_generatedTime = Simulator::Now();
++        m_parameters->m_generatedTime = Simulator::Now();
++        m_parameters->m_doppler = {0.0, moving ? 25.0 : 0.0}; // Hz, unchanged SDK input.
++        Bands bands;
++        for (const double offset : {-2500000.0, 0.0, 2500000.0})
++            bands.push_back({carrierHz + offset - 500000.0, carrierHz + offset,
++                             carrierHz + offset + 500000.0});
++        m_signal = Create<SpectrumSignalParameters>();
++        m_signal->psd = Create<SpectrumValue>(Create<SpectrumModel>(bands));
++        (*m_signal->psd)[0] = 4.0; (*m_signal->psd)[1] = 1.0; (*m_signal->psd)[2] = 9.0;
++        Observe(0); // A fresh realization must have zero extra Doppler phase.
++        for (unsigned turn = 1; turn <= 3; ++turn)
++            Simulator::Schedule(MilliSeconds(10 * turn), &SionnaDopplerEpochTest::Observe,
++                                this, moving ? turn : 0);
++    }
++
++    void DoRun() override
++    {
++        m_model = CreateObject<DopplerSpectrumProbe>();
++        m_parameters = Create<SionnaRtChannelModel::SionnaRtChannelParams>();
++        m_parameters->m_delay = {0.0, 100e-9};
++        m_parameters->m_angle.assign(4, std::vector<double>(2, 0.0));
++        m_channel = Create<MatrixBasedChannelModel::ChannelMatrix>();
++        m_channel->m_channel = MatrixBasedChannelModel::Complex3DVector(1, 1, 2);
++        m_channel->m_channel(0, 0, 0) = {1.0, 0.0};
++        m_channel->m_channel(0, 0, 1) = {0.0, -0.5};
++        m_longTerm = Create<MatrixBasedChannelModel::Complex3DVector>(m_channel->m_channel);
++        // Different nonzero generation epochs expose use of absolute time.
++        Simulator::Schedule(MilliSeconds(123), &SionnaDopplerEpochTest::BeginEpoch,
++                            this, 2412000000.0, true);
++        Simulator::Schedule(MilliSeconds(1457), &SionnaDopplerEpochTest::BeginEpoch,
++                            this, 2412000000.0, true);
++        // Identical Hz must evolve identically when the carrier changes.
++        Simulator::Schedule(MilliSeconds(3012), &SionnaDopplerEpochTest::BeginEpoch,
++                            this, 5180000000.0, true);
++        Simulator::Schedule(MilliSeconds(4250), &SionnaDopplerEpochTest::BeginEpoch,
++                            this, 2412000000.0, false);
++        Simulator::Run();
++        m_model->Dispose();
++        Simulator::Destroy();
++    }
++};
++
++class SionnaDopplerEpochSuite : public TestSuite
++{
++  public:
++    SionnaDopplerEpochSuite() : TestSuite("sionna-doppler-epoch", TestSuite::Type::UNIT)
++    {
++        AddTestCase(new SionnaDopplerEpochTest, TestCase::Duration::QUICK);
++    }
++};
++
++static SionnaDopplerEpochSuite g_sionnaDopplerEpochSuite;
++
++} // namespace

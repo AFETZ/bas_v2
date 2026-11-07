@@ -158,6 +158,9 @@ python3 bas.py stop urban-01
 с периодом `flows.payload_attitude_interval_s` через тот же native эфир.
 Прикладные команды полёта остаются в control. Метрики payload —
 `metrics/payload_channel.json`. Это не подтверждение аппаратной пропускной способности.
+ToS 184 для control и 40 для payload передаются штатному selector ns-3 и на
+TAP-входе UAV: очереди AC_VI и AC_BK соответственно. Это EDCA; сквозные задержки
+и доставку проверяют под нагрузкой отдельно от правильного выбора очереди.
 
 Результаты разделены на `runtime_status`, `mission_outcome` и
 `measurement_validity`. Завершение окна не подтверждает прохождение маршрута.
@@ -165,6 +168,14 @@ python3 bas.py stop urban-01
 снижению, земле и disarm. Если радио-подтверждение потеряно, используется свежая
 локальная UART-запись для наблюдения; источник указан в результате, управление
 продолжает проходить через радио. Lease failsafe сохраняет наблюдаемый LAND.
+
+Инженерные критерии `delivery-v1` закреплены в `plans/customer-delivery.md`.
+Существующий анализатор сохраняет per-UAV latency/jitter и все offered исходы:
+`python3 scripts/product/analyze_relay_experiment.py --run-dir <raw-run>
+--output-dir <new-analysis-directory> --no-plots --skip-live-export`.
+Одиночный короткий запуск получает статус недостаточности доказательств;
+он не подтверждает SLA серии. Отсутствующие ACK/payload измерения не заменяются
+оценкой задержки control до UART.
 
 Последовательная серия использует тот же конфиг и контроллер:
 
