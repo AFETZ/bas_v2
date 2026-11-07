@@ -354,14 +354,17 @@ def probe():
     args.output.mkdir(parents=True, exist_ok=False)
     def save(path, value):
         path.write_text(json.dumps(value, indent=2, allow_nan=False)+'\n', encoding='utf-8')
+    native_root = next((parent for parent in args.worker.resolve().parents
+                        if (parent/'.git').exists()), None)
+    if native_root is None:
+        raise ValueError('probe requires the native source checkout for dependency provenance')
+    native_git = ['git', '-c', f'safe.directory={native_root}', '-C', str(native_root)]
     summary = {'schema': 1, 'scope': 'stationary_saved_pose_replay_throughput; no live flight or hardware',
         'config': config, 'mission': str(args.mission.resolve()), 'poll_period_ns': 20_000_000,
         'source_commit': subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip(),
         'source_dirty': bool(subprocess.check_output(['git','status','--porcelain'], text=True).strip()),
-        'native_source_commit': subprocess.check_output(['git','-C',str(args.worker.resolve().parent),
-            'rev-parse','HEAD'], text=True).strip(),
-        'native_source_dirty': bool(subprocess.check_output(['git','-C',str(args.worker.resolve().parent),
-            'status','--porcelain'], text=True).strip()),
+        'native_source_commit': subprocess.check_output(native_git+['rev-parse','HEAD'], text=True).strip(),
+        'native_source_dirty': bool(subprocess.check_output(native_git+['status','--porcelain'], text=True).strip()),
         'worker_sha256': hashlib.sha256(args.worker.read_bytes()).hexdigest(),
         'config_sha256': hashlib.sha256(args.config.read_bytes()).hexdigest(),
         'mission_sha256': hashlib.sha256(args.mission.read_bytes()).hexdigest(),
