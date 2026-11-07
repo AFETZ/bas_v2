@@ -1368,7 +1368,7 @@ managed_pids+=("$!")
 setsid ip netns exec ams-ns3 env \
   LD_LIBRARY_PATH="$NS3_DIR/build/lib:${LD_LIBRARY_PATH:-}" \
   PATH="$NS3_DIR/build/src/tap-bridge:$PATH" \
-  PYTHONPATH="$PYTHON_DEPS" MPLCONFIGDIR="$RUNTIME_DIR/matplotlib" \
+  PYTHONPATH="$ROOT_DIR:$PYTHON_DEPS" MPLCONFIGDIR="$RUNTIME_DIR/matplotlib" \
   SIONNA_MITSUBA_VARIANT=cuda_ad_mono_polarized \
   NS_LOG="SionnaRtChannelModel=level_${SIONNA_LOG_LEVEL}|prefix_time" \
   taskset -c "$RADIO_CPUSET" stdbuf -oL -eL "$BINARY" \

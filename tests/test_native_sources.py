@@ -11,7 +11,7 @@ import unittest
 
 import yaml
 
-from scripts.product.prepare_native_sources import prepare
+from scripts.product.prepare_native_sources import prepare, materialize
 from scripts.product.summarize_native_radio_five_uav import native_events, summarize_native_sources
 
 
@@ -30,6 +30,62 @@ def source(**overrides):
 
 
 class NativeSourceTests(unittest.TestCase):
+    def test_default_absolute_clock_is_unchanged_and_materializes_only_at_time_zero(self):
+        default = prepare({'sources': [source()]})
+        explicit = prepare({'time_reference': 'simulation_start', 'sources': [source()]})
+        self.assertEqual(default, explicit)
+        actual = materialize(default, 0, 123, 'simulation_start')
+        self.assertEqual(actual['clock'], 'ns3_simulation_seconds')
+        self.assertEqual(actual['segments'][0]['start_ns'], 10_000_000_000)
+        self.assertEqual(actual['segments'][0]['stop_ns'], 20_000_000_000)
+        self.assertNotIn('anchor', default)
+        self.assertEqual(actual['anchor']['host_monotonic_ns'], 123)
+        with self.assertRaises(ValueError):
+            materialize(default, 1, 123, 'simulation_start')
+
+    def test_measurement_relative_clock_requires_observed_phase_and_exact_native_anchor(self):
+        pending = prepare({'time_reference': 'measurement_start', 'sources': [source()]})
+        self.assertEqual(pending['clock'], 'measurement_elapsed_seconds')
+        before = json.dumps(pending, sort_keys=True)
+        for phase in ('experiment_prepare', 'experiment_takeoff_uav1', 'experiment_landing'):
+            self.assertIsNone(materialize(pending, 99_000_000_000, 123, phase))
+        anchor = 123_400_000_007
+        actual = materialize(pending, anchor, 456, 'experiment_normal')
+        self.assertEqual(actual['clock'], 'ns3_simulation_seconds')
+        self.assertEqual(actual['input_clock'], 'measurement_elapsed_seconds')
+        self.assertEqual(actual['anchor'], dict(phase='experiment_normal', simulation_ns=anchor,
+            simulation_s=anchor/1e9, host_monotonic_ns=456))
+        item = actual['segments'][0]
+        self.assertEqual(item['start_ns'], anchor+10_000_000_000)
+        self.assertEqual(item['stop_ns'], anchor+20_000_000_000)
+        self.assertEqual(item['period_ns'], 10_000_000)
+        self.assertEqual(json.dumps(pending, sort_keys=True), before)
+        with self.assertRaises(ValueError):
+            materialize(actual, anchor, 456, 'experiment_normal')
+
+    def test_all_sweep_intervals_share_one_anchor_and_keep_period_closure(self):
+        pending = prepare({'time_reference': 'measurement_start', 'sources': [source(
+            mode='sweep', sweep_hz=[2412000000, 2437000000], dwell_s=5)]})
+        actual = materialize(pending, 30_000_000_003, 123, 'experiment_normal')
+        self.assertEqual([(row['start_ns'], row['stop_ns']) for row in actual['segments']],
+                         [(40_000_000_003, 45_000_000_003), (45_000_000_003, 50_000_000_003)])
+        self.assertTrue(all((s['stop_ns']-s['start_ns']) % s['period_ns'] == 0 for s in actual['segments']))
+        # The exported clock is directly compatible with map snapshot activity.
+        from scripts.product.compute_radio_maps import active_at
+        self.assertTrue(active_at(actual['segments'][0], 42.))
+        self.assertFalse(active_at(actual['segments'][0], 50.))
+
+    def test_time_reference_and_native_anchor_types_are_strict(self):
+        for value in (None, True, [], 'wall_clock', 'experiment_normal'):
+            with self.subTest(reference=value), self.assertRaises(ValueError):
+                prepare({'time_reference': value, 'sources': [source()]})
+        pending = prepare({'time_reference': 'measurement_start', 'sources': [source()]})
+        for simulation, host in ((True, 1), (1., 1), (-1, 1), (0, True), (0, -1), (2**63, 1)):
+            with self.subTest(simulation=simulation, host=host), self.assertRaises(ValueError):
+                materialize(pending, simulation, host, 'experiment_normal')
+        with self.assertRaisesRegex(ValueError, 'exceeds'):
+            materialize(pending, 2**63-1, 1, 'experiment_normal')
+
     def test_unknown_missing_root_and_source_fields_are_rejected(self):
         for value in (None, [], {}, {'sources': []}, {'sources': {}},
                       {'sources': [source()], 'unknown': 1},

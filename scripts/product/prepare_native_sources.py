@@ -37,12 +37,15 @@ def vector(value, length, name):
 
 
 def prepare(config):
-    if not isinstance(config, dict) or not {'sources'} <= set(config) <= {'sources', 'schema_version'}:
-        raise ValueError("source configuration requires sources and optional schema_version only")
+    if not isinstance(config, dict) or not {'sources'} <= set(config) <= {'sources', 'schema_version', 'time_reference'}:
+        raise ValueError("source configuration requires sources and optional schema_version/time_reference only")
     if 'schema_version' in config and (type(config['schema_version']) is not int or config['schema_version'] != 1):
         raise ValueError("source schema_version must be integer 1")
     if not isinstance(config['sources'], list) or not config['sources']:
         raise ValueError("sources must be a nonempty list")
+    reference = config.get('time_reference', 'simulation_start')
+    if reference not in ('simulation_start', 'measurement_start'):
+        raise ValueError('time_reference must be simulation_start or measurement_start')
     segments = []
     ids = set()
     for source in config["sources"]:
@@ -119,9 +122,55 @@ def prepare(config):
             if len(segments) > 512:
                 raise ValueError("source schedule exceeds 512 segments")
             t, index = end, index+1
-    return {"schema_version": 1, "clock": "ns3_simulation_seconds",
+    return {"schema_version": 1, "clock": ("ns3_simulation_seconds" if reference == 'simulation_start'
+                                           else "measurement_elapsed_seconds"),
             "propagation": "native Sionna RT at each source center frequency",
             "segments": segments}
+
+
+def materialize(resolved, simulation_ns, host_monotonic_ns, phase):
+    """Called by native simulator at its observed anchor; never invent an epoch.
+
+    Integer nanoseconds returned here also feed Simulator::Schedule, so the
+    exported intervals describe the actual native ticks rather than rounded
+    estimates of bootstrap duration. An unobserved measurement phase has no
+    absolute schedule and must not produce an *_actual.json file.
+    """
+    if (not isinstance(resolved, dict) or type(resolved.get('schema_version')) is not int
+            or resolved.get('schema_version') != 1
+            or resolved.get('clock') not in ('ns3_simulation_seconds', 'measurement_elapsed_seconds')
+            or not isinstance(resolved.get('segments'), list) or not resolved['segments']
+            or 'anchor' in resolved):
+        raise ValueError('expected an unresolved source schedule with a supported clock')
+    if (type(simulation_ns) is not int or not 0 <= simulation_ns < 2**63
+            or type(host_monotonic_ns) is not int or host_monotonic_ns < 0
+            or not isinstance(phase, str) or not phase):
+        raise ValueError('anchor requires native simulation/host integer ns and an observed phase')
+    relative = resolved['clock'] == 'measurement_elapsed_seconds'
+    if relative and phase != 'experiment_normal':
+        return None
+    if not relative and simulation_ns != 0:
+        raise ValueError('simulation_start schedule must be armed at native time zero')
+    actual = dict(resolved, clock='ns3_simulation_seconds', input_clock=resolved['clock'],
+                  anchor=dict(phase=phase, simulation_s=simulation_ns / 1e9,
+                              simulation_ns=simulation_ns, host_monotonic_ns=host_monotonic_ns), segments=[])
+    for source in resolved['segments']:
+        item = dict(source)
+        for field in ('start', 'stop', 'period'):
+            seconds = number(source[field + '_s'], field + '_s', 0)
+            ticks = math.floor(seconds * 1e9 + .5)
+            if relative and field != 'period':
+                ticks += simulation_ns
+            if ticks >= 2**63:
+                raise ValueError('anchored source time exceeds native signed-64-bit nanoseconds')
+            item[field + '_ns'] = ticks
+            item[field + '_s'] = ticks / 1e9
+        if item['period_ns'] <= 0 or item['stop_ns'] <= item['start_ns']:
+            raise ValueError('anchored source interval must be nonempty with a positive period')
+        if (item['stop_ns'] - item['start_ns']) % item['period_ns']:
+            raise ValueError('anchored interval does not contain whole native periods')
+        actual['segments'].append(item)
+    return actual
 
 
 class UniqueSafeLoader(yaml.SafeLoader):

@@ -14,12 +14,27 @@
 #include <filesystem>
 #include <memory>
 #include <map>
+#include <chrono>
+#include <vector>
+#include <stdexcept>
 
 namespace bas
 {
 using namespace ns3;
 using EventSink = std::function<void(const std::string&, const std::string&, double,
                                      const std::string&)>;
+
+inline void ObserveSourcePhase(std::function<std::string()> phaseProvider,
+                               std::function<void(std::string)> commit)
+{
+    const auto phase = phaseProvider();
+    if (phase == "experiment_normal")
+    {
+        commit(phase); // One common observed anchor; no further polling after commit.
+        return;
+    }
+    Simulator::Schedule(MilliSeconds(20), &ObserveSourcePhase, phaseProvider, commit);
+}
 
 // Select exactly one upstream propagation model per transmission. No loss formula,
 // packet-error decision, or fallback is implemented in this dispatcher.
@@ -78,14 +93,26 @@ inline Ptr<SourcePropagation> InstallSpectrumSources(
     Ptr<MultiModelSpectrumChannel> channel, const std::string& config,
     const std::string& scene, const SionnaRtChannelModel::RtPathSolverConfig& solver,
     double maxPaths, const std::string& profile, EventSink emit,
-    bool referenceUsesReceiverBatch = false)
+    bool referenceUsesReceiverBatch = false,
+    std::function<std::string()> phaseProvider = {})
 {
     namespace py = pybind11;
     auto router = CreateObject<SourcePropagation>();
     router->reference = reference;
     router->profile = profile;
     auto text = py::module_::import("pathlib").attr("Path")(config).attr("read_text")();
-    py::list entries = py::module_::import("json").attr("loads")(text)["segments"];
+    auto json = py::module_::import("json");
+    py::dict resolved = json.attr("loads")(text);
+    py::list entries = resolved["segments"];
+    const auto clock = resolved["clock"].cast<std::string>();
+    const bool relative = clock == "measurement_elapsed_seconds";
+    NS_ABORT_MSG_IF(clock != "ns3_simulation_seconds" && !relative, "unsupported source clock");
+    NS_ABORT_MSG_IF(relative && !phaseProvider, "measurement sources require a phase observer");
+    NS_ABORT_MSG_IF(Time::GetResolution() != Time::NS, "source schedule requires native 1 ns resolution");
+    // Preload project validation/materialization before Run/HardLimit. The
+    // runner supplies ROOT in PYTHONPATH; no cold PyYAML import at measurement.
+    py::object materialize = py::module_::import("scripts.product.prepare_native_sources").attr("materialize");
+    std::vector<std::function<void(Time, Time, Time)>> schedule;
     auto active = std::make_shared<unsigned>(0);
     auto state = [config, active](bool start) {
         if (start) ++*active;
@@ -196,17 +223,52 @@ inline Ptr<SourcePropagation> InstallSpectrumSources(
             ";gain_dbi=" + std::to_string(gain) + ";pattern=" + pattern +
             ";azimuth_rad=" + std::to_string(angles[0]) + ";downtilt_rad=" + std::to_string(angles[1]) +
             ";duty_cycle=" + std::to_string(duty) + ";period_s=" + std::to_string(period);
-        Simulator::Schedule(Seconds(start), [generator, emit, id, power, details, state]() {
-            state(true);
-            emit("jammer_on", id, power, details);
-            generator->Start();
-        });
-        Simulator::Schedule(Seconds(stop), [generator, emit, id, details, state]() {
-            state(false);
-            generator->Stop();
-            emit("jammer_off", id, 0.0, details);
+        schedule.push_back([generator, emit, id, power, details, state, router](Time begin, Time end, Time interval) {
+            NS_ABORT_MSG_IF(begin < Simulator::Now() || end <= begin, "invalid actual source interval");
+            generator->SetPeriod(interval);
+            router->sourceTimes[generator][0] = begin.GetSeconds();
+            router->sourceTimes[generator][1] = end.GetSeconds();
+            Simulator::Schedule(begin - Simulator::Now(), [generator, emit, id, power, details, state]() {
+                state(true);
+                emit("jammer_on", id, power, details);
+                generator->Start();
+            });
+            Simulator::Schedule(end - Simulator::Now(), [generator, emit, id, details, state]() {
+                state(false);
+                generator->Stop();
+                emit("jammer_off", id, 0.0, details);
+            });
         });
     }
+    std::function<void(std::string)> commit = [resolved, materialize, json, schedule, config, emit](std::string phase) {
+        const auto now = Simulator::Now();
+        const auto host = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        py::dict actual = materialize(resolved, now.GetNanoSeconds(), host, phase);
+        py::list intervals = actual["segments"];
+        NS_ABORT_MSG_IF(intervals.size() != schedule.size(), "source materialization changed segment count");
+        auto destination = std::filesystem::path(config);
+        destination.replace_filename(destination.stem().string() + "_actual.json");
+        const auto temporary = destination.string() + ".tmp";
+        std::ofstream output(temporary);
+        output << json.attr("dumps")(actual, py::arg("indent") = 2, py::arg("allow_nan") = false).cast<std::string>() << '\n';
+        output.close();
+        if (!output) throw std::runtime_error("cannot publish actual source schedule");
+        std::filesystem::rename(temporary, destination);
+        emit("source_time_anchor", "ns3", now.GetSeconds(),
+             "phase=" + phase + ";clock=ns3_simulation_seconds;actual=" + destination.string());
+        for (size_t i = 0; i < schedule.size(); ++i)
+        {
+            auto interval = py::reinterpret_borrow<py::dict>(intervals[i]);
+            schedule[i](NanoSeconds(interval["start_ns"].cast<int64_t>()),
+                        NanoSeconds(interval["stop_ns"].cast<int64_t>()),
+                        NanoSeconds(interval["period_ns"].cast<int64_t>()));
+        }
+    };
+    if (relative)
+        Simulator::ScheduleNow([phaseProvider, commit]() { ObserveSourcePhase(phaseProvider, commit); });
+    else
+        Simulator::ScheduleNow([commit]() { commit("simulation_start"); });
     return router;
 }
 } // namespace bas

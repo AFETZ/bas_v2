@@ -797,6 +797,13 @@ class LivePositionSource
 
     void Poll()
     {
+        if (!Refresh()) return;
+        if (g_executionMode == "realtime")
+            Simulator::Schedule(MilliSeconds(20), &LivePositionSource::Poll, this);
+    }
+
+    bool Refresh()
+    {
         const int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
         const int64_t eventNs = g_runtimeOperational
@@ -838,11 +845,10 @@ class LivePositionSource
                 std::filesystem::remove(g_runtimeHeartbeat);
                 LogEvent("fail_closed", "tracker", "", 0);
                 Simulator::Stop();
-                return;
+                return false;
             }
         }
-        if (g_executionMode == "realtime")
-            Simulator::Schedule(MilliSeconds(20), &LivePositionSource::Poll, this);
+        return true;
     }
   private:
     std::string m_path;
@@ -1731,6 +1737,7 @@ main(int argc, char* argv[])
         Simulator::ScheduleNow(&PollFaultMatrix, extraLoss, cpMobility, uavMobility);
     }
     Ptr<SionnaRtSpectrumPropagationLossModel> sionna;
+    Ptr<bas::SourcePropagation> sourceRouter;
     SionnaRtChannelModel::RtPathSolverConfig solver;
     if (requiresRt)
     {
@@ -1772,13 +1779,13 @@ main(int argc, char* argv[])
         channel->AddPhasedArraySpectrumPropagationLossModel(sionna);
     else
     {
-        Ptr<bas::SourcePropagation> router;
+        auto& router = sourceRouter;
         if (sourceConfig.empty()) { router=CreateObject<bas::SourcePropagation>(); router->reference=sionna; }
         else router = bas::InstallSpectrumSources(sionna, channel, sourceConfig, scene,
             solver, sionnaMaxNumberOfPaths, g_propagationProfile,
             [](const std::string& event, const std::string& id, double value,
                const std::string& details) { LogEvent(event, id, "", 0, value, details); },
-            sionnaReceiverBatchMode == "receiver_batch");
+            sionnaReceiverBatchMode == "receiver_batch", []() { return ReadPhase(); });
         router->profile=g_propagationProfile;
         channel->AddPhasedArraySpectrumPropagationLossModel(router);
         LogEvent("source_propagation_dispatch", "ns3", "", 0, router->sources.size(),
@@ -2071,6 +2078,38 @@ main(int argc, char* argv[])
         NS_ABORT_MSG_IF(!model->GetReceiverBatchEnabled(), "receiver_batch mode was not applied");
         LogEvent("sionna_receiver_batch_config", "ns3", "", 0, cohort.size(),
                  "mode=receiver_batch;path_capacity=receiver_count_times_per_link_cap;samples_per_src_unchanged=true");
+    }
+    if (sourceRouter && !sourceRouter->sources.empty())
+    {
+        // Prime the actual emitter channels, not a separate diagnostic solver.
+        // Cold scene/JIT preparation happens before the wall-clock epoch and
+        // readiness. No waveform is transmitted and no interval is shortened.
+        NS_ABORT_MSG_IF(g_executionMode != "realtime" || !g_liveStateValid,
+                        "source RT warmup requires current realtime poses");
+        const auto started = std::chrono::steady_clock::now();
+        uint64_t links = 0;
+        for (const auto& [sourcePhy, propagation] : sourceRouter->sources)
+        {
+            auto model = propagation->GetChannelModel();
+            auto sourceArray = sourcePhy->GetAntenna()->GetObject<PhasedArrayModel>();
+            NS_ABORT_MSG_IF(!sourceArray, "source has no phased array");
+            for (uint32_t index = 0; index < radioDevices.GetN(); ++index)
+            {
+                auto device = DynamicCast<WifiNetDevice>(radioDevices.Get(index));
+                NS_ABORT_MSG_IF(!device, "source RT warmup requires the supported Wi-Fi radios");
+                auto phy = DynamicCast<SpectrumWifiPhy>(device->GetPhy());
+                auto receiverArray = phy->GetAntenna()->GetObject<PhasedArrayModel>();
+                NS_ABORT_MSG_IF(!receiverArray, "receiver has no phased array");
+                model->GetChannel(sourcePhy->GetMobility(), mobility.at(index), sourceArray, receiverArray);
+                ++links;
+            }
+        }
+        const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+        LogEvent("source_rt_warmup", "ns3", "", 0, elapsed,
+                 "scope=actual_source_channels;receiver_links=" + std::to_string(links) +
+                 ";clock=host_monotonic_seconds;before_realtime_epoch=true");
+        positions.Refresh(); // A cold solve may outlive the allowed pose age.
+        NS_ABORT_MSG_IF(!g_liveStateValid, "source warmup ended without a current pose snapshot");
     }
     Simulator::ScheduleNow(&NativeRuntimeSampler::PollLag, &metrics);
     Simulator::Schedule(Seconds(1), &NativeRuntimeSampler::PollSionnaPaths, &metrics);
