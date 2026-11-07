@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
-from collections import deque
+from collections import Counter, deque
 import hashlib
 import json
 import os
@@ -374,6 +374,7 @@ class GCSService(Network):
         self.telemetry_provenance = {i: {} for i in self.uav_ids}
         self.telemetry_scope = {}
         self.stream_provenance = {i: deque() for i in self.uav_ids}
+        self.telemetry_rejections = {i: Counter() for i in self.uav_ids}
         self.mavutil = mavlink_api()
         self.transmitter = self.mavutil.mavlink.MAVLink(None, srcSystem=255, srcComponent=190)
         self.uart_parsers = {}
@@ -545,10 +546,6 @@ class GCSService(Network):
         self.stream_provenance[i].append((record, producer_ns, grant))
         messages = self.uart_parsers[i].parse_buffer(record) or []
         for message in messages:
-            if message.get_type() != "BAD_DATA" and int(message.get_srcSystem()) != i:
-                self.emit("telemetry_source_rejected", uav_id=i,
-                          observed_system_id=int(message.get_srcSystem()))
-                raise ProtocolError("MAVLink SYSID disagrees with native UART origin")
             native_frame = bytes(message.get_msgbuf())
             pending = b"".join(part[0] for part in self.stream_provenance[i])
             offset = pending.find(native_frame)
@@ -556,7 +553,20 @@ class GCSService(Network):
                 raise RuntimeError("MAVLink bytes lost their UART production provenance")
             self.consume_provenance(i, offset)
             parts = self.consume_provenance(i, len(native_frame))
+            # ArduPilot can route other systems' MAVLink frames across its UARTs.
+            # Every parsed byte consumes its production provenance, including
+            # rejected frames, so the next own frame cannot inherit old stamps.
             if message.get_type() == "BAD_DATA":
+                self.telemetry_rejections[i]["invalid_mavlink"] += 1
+                self.emit("telemetry_message_rejected", uav_id=i, reason="invalid_MAVLink_frame",
+                          bytes=len(native_frame), rejected_total=self.telemetry_rejections[i]["invalid_mavlink"])
+                continue
+            if int(message.get_srcSystem()) != i:
+                self.telemetry_rejections[i]["foreign_sysid"] += 1
+                self.emit("telemetry_source_rejected", uav_id=i, reason="MAVLink_SYSID_disagrees_with_UART_origin",
+                          observed_system_id=int(message.get_srcSystem()),
+                          observed_component_id=int(message.get_srcComponent()), message_type=message.get_type(),
+                          bytes=len(native_frame), rejected_total=self.telemetry_rejections[i]["foreign_sysid"])
                 continue
             now = time.monotonic_ns()
             if not all(self.telemetry_eligible(g, stamp, now) for stamp, g in parts):
