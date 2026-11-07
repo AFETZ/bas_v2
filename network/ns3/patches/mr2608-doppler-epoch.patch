@@ -105,7 +105,7 @@ index 0000000..76bbdb5
 +                              "Unexpected number of native frequency bins");
 +        for (unsigned bin = 0; bin < 3; ++bin)
 +        {
-+            const auto actual = (*result->spectrumChannelMatrix)(0, 0, bin);
++            const auto actual = (*result->spectrumChannelMatrix)(0, 0, bin) / std::sqrt((*m_signal->psd)[bin]); // Native H includes sqrt(Tx PSD).
 +            NS_TEST_ASSERT_MSG_EQ_TOL(std::real(actual), std::real(expected[quarterTurn][bin]),
 +                                      1e-10, "Wrong Doppler/epoch in complex CFR real part");
 +            NS_TEST_ASSERT_MSG_EQ_TOL(std::imag(actual), std::imag(expected[quarterTurn][bin]),
