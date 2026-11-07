@@ -29,7 +29,7 @@ VERSIONS = {'sionna_rt': '1.2.0', 'mitsuba': '3.7.1', 'drjit': '1.2.0'}
 def validate_config(value):
     """Explicit frozen input for the public native SDK worker; no defaults."""
     keys = {'schema', 'root', 'scene', 'normalize_delays', 'cohort', 'radio'}
-    if type(value) is not dict or set(value) != keys or type(value['schema']) is not int or value['schema'] != 1:
+    if type(value) is not dict or set(value) not in (keys, keys | {'source_profiles'}) or type(value['schema']) is not int or value['schema'] != 1:
         raise ValueError('invalid native worker config schema/fields')
     root = Path(value['root']).resolve(strict=True)
     if not Path(value['root']).is_absolute() or not root.is_dir():
@@ -59,6 +59,25 @@ def validate_config(value):
             raise ValueError(f'{key} must be finite and positive')
     if not 500e6 <= radio['frequency_hz'] <= 100e9:
         raise ValueError('carrier outside the native SDK supported range')
+    if 'source_profiles' in value:
+        profiles = value['source_profiles']
+        if type(profiles) is not list or not profiles:
+            raise ValueError('source_profiles must be a nonempty immutable registry')
+        if cohort[0]['id'] != 'cp':
+            raise ValueError('source STAR requires CP at cohort index0')
+        identities = set()
+        for profile in profiles:
+            if type(profile) is not dict or set(profile) != {'id', 'frequency_hz', 'pattern'}:
+                raise ValueError('source profile requires only id, exact frequency_hz and pattern')
+            identity = profile['id']
+            if type(identity) is not str or not identity or identity in identities:
+                raise ValueError('source profile IDs must be nonempty and unique')
+            identities.add(identity)
+            frequency = profile['frequency_hz']
+            if type(frequency) not in (int, float) or not math.isfinite(frequency) or not 500e6 <= frequency <= 100e9:
+                raise ValueError('source carrier outside the native SDK supported range')
+            if profile['pattern'] not in ('iso', 'tr38901'):
+                raise ValueError('source pattern must be iso or fixed TR38901 OUTDOOR V1x1')
     solver = radio['solver']
     flags = {'los', 'specular_reflection', 'diffuse_reflection', 'refraction', 'diffraction',
         'edge_diffraction', 'synthetic_array'}
@@ -82,16 +101,28 @@ def integer(value, name, minimum=0):
     return value
 
 
-def validate_job(job, count):
+def validate_job(job, count, config=None):
     expected = {'kind', 'request_id', 'sample_native_ns', 'sample_host_monotonic_ns', 'anchor_index', 'poses'}
+    source = type(job) is dict and ('profile_id' in job or 'peer_index' in job)
+    if source:
+        expected |= {'profile_id', 'peer_index'}
     if type(job) is not dict or set(job) != expected or job['kind'] != 'solve':
         raise ValueError('invalid solve message fields')
     integer(job['request_id'], 'request_id', 1)
     integer(job['sample_native_ns'], 'sample_native_ns')
     host = integer(job['sample_host_monotonic_ns'], 'sample_host_monotonic_ns', 1)
-    if not 0 <= integer(job['anchor_index'], 'anchor_index') < count:
+    if source:
+        if (type(config) is not dict or type(config.get('source_profiles')) is not list or
+                type(job['profile_id']) is not str or not any(
+                    profile['id'] == job['profile_id'] for profile in config['source_profiles'])):
+            raise ValueError('source job requires a known immutable profile_id')
+        if integer(job['anchor_index'], 'anchor_index') != count:
+            raise ValueError('source STAR anchor must follow the complete desired cohort')
+        if not 0 <= integer(job['peer_index'], 'peer_index') < count:
+            raise ValueError('source STAR peer must be one of CP/UAV receivers')
+    elif not 0 <= integer(job['anchor_index'], 'anchor_index') < count:
         raise ValueError('anchor_index outside the cohort')
-    if type(job['poses']) is not list or len(job['poses']) != count:
+    if type(job['poses']) is not list or len(job['poses']) != count + source:
         raise ValueError('poses must match the full cohort')
     for pose in job['poses']:
         if type(pose) is not dict or set(pose) != {'position_m', 'velocity_m_s', 'orientation_rad', 'sample_host_ns'}:
@@ -229,14 +260,14 @@ class NativeRtWorkerPool:
             raise RuntimeError(f'worker {worker_id} failed: {worker.failed}')
         if worker.pending is not None:
             return False
-        validate_job(job, self.count)
+        validate_job(job, self.count, getattr(self, 'applied_config', None))
         if job['request_id'] <= self._last_request_id:
             raise ValueError('request_id must be strictly increasing across the pool lifetime')
         frozen = copy.deepcopy(job)
         self._last_request_id = frozen['request_id']
         worker.pending, worker.submitted_ns = frozen, time.monotonic_ns()
         try:
-            # Validated fixed-size 2..6-pose messages and one in-flight job bound
+            # Validated fixed-size 2..7-pose messages and one in-flight job bound
             # the write; no result read or result wait occurs on this path.
             worker.connection.send(frozen)
         except (OSError, EOFError, ValueError) as error:

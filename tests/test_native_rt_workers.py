@@ -14,6 +14,7 @@ import time
 from types import SimpleNamespace
 import unittest
 import queue
+import copy
 
 from scripts.product.native_rt_workers import NativeRtWorkerPool, validate_config, validate_job
 
@@ -46,6 +47,83 @@ def job(identity=1):
     pose = dict(position_m=[0., 0., 20.], velocity_m_s=[0., 0., 0.], orientation_rad=[0., 0., 0.], sample_host_ns=now)
     return dict(kind='solve', request_id=identity, sample_native_ns=identity*1_000_000,
         sample_host_monotonic_ns=now, anchor_index=0, poses=[dict(pose), dict(pose)])
+
+
+def source_config(root):
+    scene=root/'scene.xml'; scene.write_text('<scene/>')
+    return dict(schema=1,root=str(root),scene=dict(path='scene.xml',
+        sha256=hashlib.sha256(scene.read_bytes()).hexdigest()),normalize_delays=True,
+        cohort=[{'id':'cp'}]+[{'id':'uav'+str(i)} for i in range(1,6)],
+        radio=dict(frequency_hz=2.412e9,samples_per_source=20000,max_paths_per_source=1000,
+            max_number_of_paths=90,merge_shapes=True,solver=dict(max_depth=2,seed=42,los=True,
+                specular_reflection=True,diffuse_reflection=False,refraction=False,diffraction=True,
+                edge_diffraction=True,synthetic_array=True)),
+        source_profiles=[dict(id='cochannel_iso',frequency_hz=2.412e9,pattern='iso'),
+                         dict(id='offset_directional',frequency_hz=2.422e9,pattern='tr38901')])
+
+
+def source_job(peer=0,profile='cochannel_iso'):
+    value=job(); value.update(profile_id=profile,peer_index=peer,anchor_index=6)
+    value['poses']=[copy.deepcopy(value['poses'][0]) for _ in range(7)]
+    return value
+
+
+class SourceStarValidationTests(unittest.TestCase):
+    def setUp(self):
+        self.directory=tempfile.TemporaryDirectory()
+        self.root=Path(self.directory.name)
+        self.config=source_config(self.root)
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    def test_registry_is_optional_and_freezes_exact_source_profiles(self):
+        frozen=validate_config(self.config)
+        self.assertEqual(frozen['source_profiles'],self.config['source_profiles'])
+        self.config['source_profiles'][0]['frequency_hz']=2.5e9
+        self.assertEqual(frozen['source_profiles'][0]['frequency_hz'],2.412e9)
+        plain=copy.deepcopy(self.config); del plain['source_profiles']
+        self.assertNotIn('source_profiles',validate_config(plain))
+
+    def test_registry_rejects_unknown_fields_patterns_carriers_and_duplicate_ids(self):
+        invalids=[None,{},[],[dict(id='x',frequency_hz=True,pattern='iso')],
+                  [dict(id='x',frequency_hz=float('nan'),pattern='iso')],
+                  [dict(id='x',frequency_hz=2.412e9,pattern='indoor')],
+                  [dict(id='x',frequency_hz=2.412e9,pattern='tr38901',gain_dbi=8)],
+                  [dict(id='x',frequency_hz=2.412e9,pattern='iso')]*2]
+        for profiles in invalids:
+            value=copy.deepcopy(self.config);value['source_profiles']=profiles
+            with self.subTest(profiles=profiles),self.assertRaises(ValueError):validate_config(value)
+        value=copy.deepcopy(self.config);value['cohort'][0]['id']='missing_cp'
+        with self.assertRaisesRegex(ValueError,'CP|cp'):validate_config(value)
+
+    def test_all_six_star_peers_include_cp_without_allowing_receiver_receiver_jobs(self):
+        frozen=validate_config(self.config)
+        for peer in range(6):validate_job(source_job(peer),6,frozen)
+        for field,value in [('peer_index',6),('peer_index',True),('anchor_index',0),
+                            ('profile_id','unknown'),('poses',source_job()['poses'][:6])]:
+            item=source_job();item[field]=value
+            with self.subTest(field=field),self.assertRaises(ValueError):validate_job(item,6,frozen)
+        for field in ('peer_index','profile_id'):
+            item=source_job();del item[field]
+            with self.subTest(missing=field),self.assertRaises(ValueError):validate_job(item,6,frozen)
+
+    def test_sources_require_a_frozen_registry_and_preserve_the_desired_job_contract(self):
+        with self.assertRaises(ValueError):validate_job(source_job(),6)
+        desired=source_job();del desired['profile_id'];del desired['peer_index']
+        desired['anchor_index']=0;desired['poses']=desired['poses'][:6]
+        validate_job(desired,6,validate_config(self.config))
+        desired['poses'].append(copy.deepcopy(desired['poses'][0]))
+        with self.assertRaises(ValueError):validate_job(desired,6,validate_config(self.config))
+
+    def test_source_rosters_one_to_five_uavs_and_source_pose_are_validated(self):
+        for count in range(2,7):
+            config=copy.deepcopy(self.config);config['cohort']=config['cohort'][:count]
+            value=source_job();value['anchor_index']=count;value['peer_index']=0
+            value['poses']=value['poses'][:count+1]
+            validate_job(value,count,validate_config(config))
+            value['poses'][-1]['orientation_rad']=[0,float('nan'),0]
+            with self.subTest(uavs=count-1),self.assertRaises(ValueError):validate_job(value,count,validate_config(config))
 
 
 class JobValidationTests(unittest.TestCase):

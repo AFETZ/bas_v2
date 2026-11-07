@@ -6,6 +6,7 @@
 #include "ns3/mobility-module.h"
 #include "ns3/antenna-module.h"
 #include "ns3/sionna-rt-channel-model.h"
+#include "ns3/three-gpp-antenna-model.h"
 #include "native-live-state.h"
 #include <cmath>
 #include <iostream>
@@ -17,6 +18,14 @@ namespace py = pybind11;
 using namespace pybind11::literals;
 
 namespace {
+// Worker-only access to the stock phased-array invalidation mechanism. Source
+// jobs can refresh an ordinary pair before expiry, even at the same native0.
+class SourceArray : public UniformPlanarArray
+{
+  public:
+    void ForceFresh() const { InvalidateChannels(); }
+};
+
 void Require(bool condition, const std::string& reason)
 {
     if (!condition) throw std::runtime_error(reason);
@@ -57,6 +66,7 @@ int main(int argc, char** argv)
     py::scoped_interpreter python;
     py::object connection = py::none();
     Ptr<SionnaRtChannelModel> model;
+    std::map<double,Ptr<SionnaRtChannelModel>> sourceModels;
     int64_t requestId = 0;
     try
     {
@@ -84,6 +94,7 @@ int main(int argc, char** argv)
         std::vector<Ptr<const MobilityModel>> mobility;
         std::vector<Ptr<const PhasedArrayModel>> antennas;
         const auto cohort = config["cohort"].cast<py::list>();
+        const auto baseCount = cohort.size();
         std::map<uint32_t, size_t> semanticIds;
         for (size_t i = 0; i < cohort.size(); ++i)
         {
@@ -99,20 +110,6 @@ int main(int argc, char** argv)
             PhasedArrayModel::ComplexVector weights(1); weights[0] = {1., 0.};
             array->SetBeamformingVector(weights); antennas.push_back(array);
         }
-        model = CreateObject<SionnaRtChannelModel>();
-        model->SetAttribute("Frequency", DoubleValue(radio["frequency_hz"].cast<double>()));
-        model->SetAttribute("Scenario", StringValue(config["scene"]["path"].cast<std::string>()));
-        model->SetAttribute("IsMergeShapeEnabled", BooleanValue(radio["merge_shapes"].cast<bool>()));
-        model->SetAttribute("IsImageRenderedEnabled", BooleanValue(false));
-        model->SetAttribute("NormalizeDelays", BooleanValue(config["normalize_delays"].cast<bool>()));
-        model->SetAttribute("SamplesPerSource", UintegerValue(radio["samples_per_source"].cast<uint32_t>()));
-        model->SetAttribute("MaxNumPathsPerSource", UintegerValue(radio["max_paths_per_source"].cast<uint32_t>()));
-        model->SetAttribute("MaxNumberOfPaths", DoubleValue(radio["max_number_of_paths"].cast<double>()));
-        // Producer clock follows sampled job times. Serving freshness belongs to
-        // the consumer, not this producer's reusable native cache.
-        model->SetAttribute("UpdatePeriod", TimeValue(NanoSeconds(1)));
-        model->SetUpdateDistanceThreshold(0.);
-        model->SetUpdateJitterFraction(0.);
         SionnaRtChannelModel::RtPathSolverConfig settings;
         settings.maxDepth = solver["max_depth"].cast<int>();
         settings.seed = solver["seed"].cast<int>();
@@ -123,25 +120,86 @@ int main(int argc, char** argv)
         settings.diffraction = solver["diffraction"].cast<bool>();
         settings.edgeDiffraction = solver["edge_diffraction"].cast<bool>();
         settings.syntheticArray = solver["synthetic_array"].cast<bool>();
-        model->SetRtPathSolverConfig(settings);
+        const auto makeModel = [&](double frequency) {
+            auto value=CreateObject<SionnaRtChannelModel>();
+            value->SetReceiverBatchEnabled(false);
+            value->SetAttribute("Frequency", DoubleValue(frequency));
+            value->SetAttribute("Scenario", StringValue(config["scene"]["path"].cast<std::string>()));
+            value->SetAttribute("IsMergeShapeEnabled", BooleanValue(radio["merge_shapes"].cast<bool>()));
+            value->SetAttribute("IsImageRenderedEnabled", BooleanValue(false));
+            value->SetAttribute("NormalizeDelays", BooleanValue(config["normalize_delays"].cast<bool>()));
+            value->SetAttribute("SamplesPerSource", UintegerValue(radio["samples_per_source"].cast<uint32_t>()));
+            value->SetAttribute("MaxNumPathsPerSource", UintegerValue(radio["max_paths_per_source"].cast<uint32_t>()));
+            value->SetAttribute("MaxNumberOfPaths", DoubleValue(radio["max_number_of_paths"].cast<double>()));
+            // Producer time follows the job; the consumer owns serving freshness.
+            value->SetAttribute("UpdatePeriod", TimeValue(NanoSeconds(1)));
+            value->SetUpdateDistanceThreshold(0.); value->SetUpdateJitterFraction(0.);
+            value->SetRtPathSolverConfig(settings);
+            return value;
+        };
+        model=makeModel(radio["frequency_hz"].cast<double>());
         model->SetReceiverBatchEndpoints(mobility, antennas);
         model->SetReceiverBatchEnabled(true);
+        struct SourceProfile { double frequency; Ptr<SourceArray> array; };
+        std::map<std::string,SourceProfile> sourceProfiles;
+        if(config.contains("source_profiles"))
+        {
+            // CP and every desired receiver retain indices0..baseCount-1.
+            // Only source jobs append the measured source at indexbaseCount.
+            auto node=CreateObject<Node>(); auto pose=CreateObject<bas::MeasuredMobility>();
+            node->AggregateObject(pose); measured.push_back(pose); mobility.push_back(pose);
+            semanticIds.emplace(node->GetId(),baseCount);
+            for(auto item:config["source_profiles"].cast<py::list>())
+            {
+                auto profile=py::reinterpret_borrow<py::dict>(item);
+                const auto id=profile["id"].cast<std::string>();
+                const auto frequency=profile["frequency_hz"].cast<double>();
+                if(!sourceModels.count(frequency)) sourceModels.emplace(frequency,makeModel(frequency));
+                auto array=CreateObject<SourceArray>(); array->SetNumRows(1); array->SetNumColumns(1);
+                if(profile["pattern"].cast<std::string>()=="tr38901")
+                {
+                    auto element=CreateObject<ThreeGppAntennaModel>();
+                    element->SetRadiationPattern(ThreeGppAntennaModel::RadiationPattern::OUTDOOR);
+                    array->SetAntennaElement(element);
+                }
+                else array->SetAntennaElement(CreateObject<IsotropicAntennaModel>());
+                PhasedArrayModel::ComplexVector weights(1); weights[0]={1.,0.};
+                array->SetBeamformingVector(weights);
+                Require(array->GetNumElems()==1 && array->GetNumPorts()==1 &&
+                    array->GetNumPols()==1 && array->GetPolSlant()==0,"Source requires fixed V1x1 array");
+                sourceProfiles.emplace(id,SourceProfile{frequency,array});
+            }
+        }
+        std::map<std::pair<std::string,size_t>,Ptr<const MatrixBasedChannelModel::ChannelMatrix>> previousSourceMatrices;
         connection = py::module_::import("multiprocessing.connection").attr("Client")(
             socketPath, "family"_a="AF_UNIX", "authkey"_a=py::none());
         auto time = py::module_::import("time");
         const auto hostNow = [&]() { return time.attr("monotonic_ns")().cast<int64_t>(); };
-        connection.attr("send")(py::dict("schema"_a=1, "kind"_a="ready", "worker_id"_a=workerId,
+        auto ready=py::dict("schema"_a=1, "kind"_a="ready", "worker_id"_a=workerId,
             "pid"_a=py::module_::import("os").attr("getpid")(), "versions"_a=versions,
             "mitsuba_variant"_a=variant, "gpu_solve_verified"_a=false,
             "applied_config"_a=config, "worker_cache_update_period_ns"_a=1, "render_images"_a=false,
-            "scope"_a="public_native_sdk_rt_producer_probe"));
+            "scope"_a="public_native_sdk_rt_producer_probe");
+        if(!sourceProfiles.empty())
+        {
+            std::vector<double> actualFrequencies;
+            for(const auto& entry:sourceModels)
+            {
+                DoubleValue actual; entry.second->GetAttribute("Frequency",actual);
+                Require(actual.Get()==entry.first,"Source model carrier changed at readiness");
+                actualFrequencies.push_back(actual.Get());
+            }
+            ready["source_model_frequencies_hz"]=actualFrequencies;
+            ready["source_profile_count"]=sourceProfiles.size();
+        }
+        connection.attr("send")(ready);
         int64_t lastRequestId = 0;
         while (true)
         {
             auto message = connection.attr("recv")();
             if (py::isinstance<py::dict>(message) && message.cast<py::dict>().contains("kind") &&
                 message["kind"].cast<std::string>() == "stop") break;
-            contract.attr("validate_job")(message, measured.size());
+            contract.attr("validate_job")(message, baseCount, config);
             py::dict job = message.cast<py::dict>();
             requestId = job["request_id"].cast<int64_t>();
             Require(requestId > lastRequestId, "request_id must be strictly increasing for this worker");
@@ -154,7 +212,7 @@ int main(int argc, char** argv)
             py::dict result;
             Simulator::Schedule(NanoSeconds(sampleNs - Simulator::Now().GetNanoSeconds()), [&]() {
                 const auto poses = job["poses"].cast<py::list>();
-                for (size_t i = 0; i < measured.size(); ++i)
+                for (size_t i = 0; i < poses.size(); ++i)
                 {
                     auto pose = poses[i];
                     bas::MeasuredState state;
@@ -165,20 +223,36 @@ int main(int argc, char** argv)
                     measured[i]->Apply(state);
                 }
                 const auto anchor = job["anchor_index"].cast<size_t>();
+                const bool sourceJob=job.contains("profile_id");
+                const auto profileId=sourceJob ? job["profile_id"].cast<std::string>() : std::string();
+                auto activeModel=sourceJob ? sourceModels.at(sourceProfiles.at(profileId).frequency) : model;
+                Ptr<const PhasedArrayModel> anchorArray;
+                if(sourceJob) anchorArray=sourceProfiles.at(profileId).array;
+                else anchorArray=antennas[anchor];
                 py::list pairs;
                 const auto callsBefore = model->GetReceiverBatchStats().completedCalls;
                 // Our minimal SDK extension forces prefetch even at the same
                 // simulation timestamp or before ordinary cache expiry.
-                model->RefreshReceiverBatch(mobility[anchor], antennas[anchor]);
-                for (size_t peer = 0; peer < measured.size(); ++peer)
+                if(sourceJob) sourceProfiles.at(profileId).array->ForceFresh();
+                else model->RefreshReceiverBatch(mobility[anchor], antennas[anchor]);
+                std::vector<size_t> peers;
+                if(sourceJob) peers.push_back(job["peer_index"].cast<size_t>());
+                else for(size_t peer=0;peer<baseCount;++peer) if(peer!=anchor) peers.push_back(peer);
+                for (const auto peer : peers)
                 {
-                    if (peer == anchor) continue;
-                    auto matrix = model->GetChannel(mobility[anchor], mobility[peer], antennas[anchor], antennas[peer]);
+                    auto matrix = activeModel->GetChannel(mobility[anchor], mobility[peer], anchorArray, antennas[peer]);
                     auto params = DynamicCast<const SionnaRtChannelModel::SionnaRtChannelParams>(
-                        model->GetParams(mobility[anchor], mobility[peer]));
+                        activeModel->GetParams(mobility[anchor], mobility[peer]));
                     Require(matrix && params, "Public SDK returned missing channel/parameters");
                     Require(matrix->m_generatedTime.GetNanoSeconds() == sampleNs,
                         "Refresh did not publish the sampled channel epoch");
+                    if(sourceJob)
+                    {
+                        const auto key=std::make_pair(profileId,peer);
+                        Require(!previousSourceMatrices.count(key) || previousSourceMatrices.at(key)!=matrix,
+                            "Stock pairwise channel did not refresh after array invalidation");
+                        previousSourceMatrices[key]=matrix;
+                    }
                     const auto rows = matrix->m_channel.GetNumRows(), cols = matrix->m_channel.GetNumCols();
                     const auto paths = matrix->m_channel.GetNumPages();
                     Require(rows == 1 && cols == 1 && params->m_delay.size() == paths &&
@@ -216,12 +290,25 @@ int main(int argc, char** argv)
                     pair["fresh_for_request"] = true;
                     pairs.append(pair);
                 }
-                Require(model->GetReceiverBatchStats().completedCalls - callsBefore == 1,
+                if(!sourceJob) Require(model->GetReceiverBatchStats().completedCalls - callsBefore == 1,
                     "Solve job must perform exactly one explicit fresh batch");
                 result = py::dict("schema"_a=1, "kind"_a="result", "worker_id"_a=workerId,
-                    "request_id"_a=requestId, "pairs"_a=pairs,
-                    "new_batch_calls"_a=model->GetReceiverBatchStats().completedCalls - callsBefore,
-                    "batch_stats"_a=BatchStats(model->GetReceiverBatchStats()));
+                    "request_id"_a=requestId, "pairs"_a=pairs);
+                if(sourceJob)
+                {
+                    DoubleValue actualFrequency; activeModel->GetAttribute("Frequency",actualFrequency);
+                    Require(actualFrequency.Get()==sourceProfiles.at(profileId).frequency,"Source carrier was changed");
+                    result["profile_id"]=profileId; result["channel_mode"]="source_star";
+                    result["new_pairwise_calls"]=1; result["frequency_hz"]=actualFrequency.Get();
+                    result["allocated_candidate_cap"]=radio["max_paths_per_source"];
+                    result["candidate_count"]=py::none();
+                    result["candidate_count_scope"]="not_exposed_by_public_pairwise_api";
+                }
+                else
+                {
+                    result["new_batch_calls"]=model->GetReceiverBatchStats().completedCalls - callsBefore;
+                    result["batch_stats"]=BatchStats(model->GetReceiverBatchStats());
+                }
             });
             Simulator::Run(); // Default scheduler advances directly to sampled time; never wall-clock pacing.
             const auto finished = hostNow();
@@ -232,7 +319,9 @@ int main(int argc, char** argv)
             connection.attr("send")(result);
             requestId = 0;
         }
-        model->Dispose(); Simulator::Destroy(); connection.attr("close")();
+        model->Dispose();
+        for(auto& entry:sourceModels) entry.second->Dispose();
+        Simulator::Destroy(); connection.attr("close")();
         return 0;
     }
     catch (const std::exception& error)
@@ -245,6 +334,7 @@ int main(int argc, char** argv)
         }
         catch (const std::exception&) {}
         if (model) model->Dispose();
+        for(auto& entry:sourceModels) entry.second->Dispose();
         Simulator::Destroy();
         return 1;
     }
