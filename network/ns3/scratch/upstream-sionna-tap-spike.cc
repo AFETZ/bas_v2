@@ -623,11 +623,11 @@ WifiMonitorRx(uint32_t nodeIndex,
 {
     // Exact ns-3.48 public trace, also used by the standalone reference.
     // This is a successfully decoded MPDU sample, not an outage RSSI probe.
+    if (g_eventLogging == "metrics_only") return;
     Ptr<Packet> payload = packet->Copy();
     WifiMacHeader header;
     payload->RemoveHeader(header);
     ObserveWifiPath(nodeIndex, header.GetAddr2(), packet);
-    if (g_eventLogging == "metrics_only") return;
     std::ostringstream peer;
     peer << header.GetAddr2();
     std::ostringstream details;
@@ -925,7 +925,7 @@ class NativeRuntimeSampler
 
     void ObserveReceivedPath(uint32_t receiverIndex, Ptr<const Packet> packet)
     {
-        if (!m_channelModel) return;
+        if (!m_channelModel || g_eventLogging == "metrics_only") return;
         Ptr<Packet> copy = packet->Copy();
         AlohaNoackMacHeader aloha;
         if (copy->RemoveHeader(aloha) == 0)
@@ -971,7 +971,7 @@ class NativeRuntimeSampler
 
     void ObserveWifiPath(uint32_t receiver, uint32_t transmitter, Ptr<const Packet> packet)
     {
-        if (!m_channelModel || receiver == transmitter) return;
+        if (!m_channelModel || receiver == transmitter || g_eventLogging == "metrics_only") return;
         auto params = m_channelModel->GetParams(m_mobility.at(transmitter), m_mobility.at(receiver));
         if (params) EmitPathObservation(transmitter, receiver, params,
             "sample=decoded_wifi_mpdu;packet_uid=" + std::to_string(packet->GetUid()));
@@ -1298,6 +1298,8 @@ WriteStats(const std::string& path)
            << "  \"pose_updates\": " << g_poseSnapshots << ",\n"
            << "  \"stale_pose_samples\": " << g_stalePoseSamples << ",\n"
            << "  \"path_observations\": " << g_pathObservations << ",\n"
+           << "  \"path_observation_scope\": \""
+           << (g_eventLogging == "metrics_only" ? "periodic_cp_uav" : "periodic_and_decoded_packet_pairs") << "\",\n"
            << "  \"realtime_lag_samples\": " << g_realtimeLagSamples << ",\n"
            << "  \"readiness_lag_max_ms\": " << g_readinessLagMaxMs << ",\n"
            << "  \"readiness_consecutive_samples\": " << g_readinessConsecutiveSamples << ",\n"
