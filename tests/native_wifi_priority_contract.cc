@@ -5,6 +5,8 @@
 // UART, modem, realtime scheduler or customer latency criterion is exercised.
 #include "ns3/core-module.h"
 #include "ns3/internet-module.h"
+#include "ns3/ethernet-header.h"
+#include "ns3/llc-snap-header.h"
 #include "ns3/mobility-module.h"
 #include "ns3/tap-bridge-module.h"
 #include "ns3/wifi-module.h"
