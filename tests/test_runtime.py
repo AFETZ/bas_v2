@@ -1,5 +1,6 @@
 import copy
 import json
+import math
 from pathlib import Path
 import subprocess
 import sys
@@ -78,6 +79,107 @@ class RuntimeTests(unittest.TestCase):
             self.config['runtime']['event_logging'] = value
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'event_logging'):
                 self.load()
+
+    def test_duration_bounds_and_explicit_long_trace_storage_profile(self):
+        self.config['runtime']['capture_storage'] = 'disk'
+        for duration in (1e-9, 28800, 86400):
+            self.config['experiment']['duration_s'] = duration
+            self.assertEqual(self.load()['experiment']['duration_s'], duration)
+        for duration in (0, 1e-10, 86400.1, float('inf'), float('nan'), True):
+            self.config['experiment']['duration_s'] = duration
+            with self.subTest(duration=duration), self.assertRaises(ValueError):
+                self.load()
+        self.config['experiment']['duration_s'] = 28800
+        for mode in ('metrics_only', 'batched_trace'):
+            self.config['runtime']['event_logging'] = mode
+            self.config['runtime'].pop('capture_storage', None)
+            with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, 'requires.*disk'):
+                self.load()
+            self.config['runtime']['capture_storage'] = 'disk'
+            self.assertEqual(self.load()['runtime']['capture_storage'], 'disk')
+        resolved = self.load()
+        self.assertEqual(bas.environment(resolved, 'long', {'BAS_NATIVE_CAPTURE_STORAGE': 'tmpfs'})
+                         ['BAS_NATIVE_CAPTURE_STORAGE'], 'disk')
+        for value in ('ram', '', None, True, [], {}):
+            self.config['runtime']['capture_storage'] = value
+            with self.subTest(storage=value), self.assertRaisesRegex(ValueError, 'capture_storage'):
+                self.load()
+
+    def test_capture_storage_default_and_selection_survive_configuration_snapshot(self):
+        self.assertEqual(self.load()['runtime']['capture_storage'], 'tmpfs')
+        self.config['runtime']['capture_storage'] = 'disk'
+        resolved = self.load()
+        folder = self.root / 'snapshot'
+        folder.mkdir()
+        env = bas.environment(resolved, 'disk')
+        with patch.object(bas, 'ROOT', self.root):
+            bas.snapshot_inputs(resolved, folder, env)
+        self.assertEqual(json.loads((folder / 'config.json').read_text())['runtime']['capture_storage'], 'disk')
+
+    def test_runtime_lifetimes_cover_measurement_and_existing_phases_without_relaxing_guards(self):
+        cap = bas.runtime_duration_limits(28800, 120, 5, ['control', 'payload'])
+        self.assertEqual(cap['native_duration_s'], 33437)
+        self.assertEqual(cap['service_duration_s'], 34802)
+        self.assertGreater(cap['service_duration_s'], cap['native_duration_s'])
+        self.assertEqual(cap['native_budgets']['landing_s'], 120)
+        self.assertEqual(cap['native_budgets']['arm_per_uav_s'], 120)
+        self.assertEqual(cap['native_budgets']['native_readiness_s'], 180)
+        with_params = bas.runtime_duration_limits(28800, 120, 5, ['control', 'payload'], parameter_snapshots=True)
+        self.assertEqual(with_params['native_duration_s'] - cap['native_duration_s'], 1206)
+        maximum = bas.runtime_duration_limits(86400, 120, 5, ['control', 'payload'])
+        self.assertGreater(maximum['native_duration_s'], math.ceil(86400 * 1.1 + 10 + 120))
+        for mode in ('latency_diagnostic', 'flight_diagnostic', 'product'):
+            legacy = bas.runtime_duration_limits(86400, 120, 5, ['control', 'payload'], mode=mode)
+            self.assertEqual((legacy['native_duration_s'], legacy['service_duration_s']), (2400, 3600))
+
+    def test_runner_budget_python_is_executable_and_bound_to_actual_child_arguments(self):
+        script = (bas.ROOT / 'network/ns3/run_native_radio_five_uav.sh').read_text(encoding='utf-8')
+        block = script.split("<<'PYRUNTIMEBUDGET'\n", 1)[1].split('\nPYRUNTIMEBUDGET', 1)[0]
+        result = subprocess.run([sys.executable, '-X', 'utf8', '-', str(bas.ROOT), 'relay_experiment',
+            '28800', '120', '5', 'control,payload', '0'], input=block, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        native, service, raw = result.stdout.splitlines()
+        budget = json.loads(raw)
+        self.assertEqual((int(native), int(service)), (budget['native_duration_s'], budget['service_duration_s']))
+        self.assertIn('--duration="$NATIVE_DURATION_S"', script)
+        self.assertIn('--duration-s "$SERVICE_DURATION_S"', script)
+        self.assertIn('runtime_duration_budget=%s', script)
+        # Bash source retains the exact bounded readiness and clean-stop loops.
+        self.assertIn('for _ in $(seq 1 1800); do', script)
+        self.assertIn('for _ in $(seq 1 1200); do', script)
+        profile = script.split("<<'PYDURATIONPROFILE'\n", 1)[1].split('\nPYDURATIONPROFILE', 1)[0]
+        for duration, mode, storage, allowed in (('28800', 'batched_trace', 'disk', True),
+                ('28800', 'metrics_only', 'disk', True), ('28800', 'metrics_only', 'tmpfs', False),
+                ('28800', 'batched_trace', 'tmpfs', False), ('86401', 'metrics_only', 'disk', False)):
+            checked = subprocess.run([sys.executable, '-X', 'utf8', '-', str(bas.ROOT), duration, mode, storage],
+                                     input=profile, text=True, capture_output=True)
+            with self.subTest(duration=duration, storage=storage):
+                self.assertEqual(checked.returncode == 0, allowed)
+
+    def test_inspect_duration_override_cannot_bypass_limit_or_long_capture_storage(self):
+        for duration in ('86400.1', '0.0000000001'):
+            result = subprocess.run([sys.executable, str(bas.ROOT / 'bas.py'), 'inspect', '--duration', duration],
+                                    text=True, capture_output=True)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn('86400', result.stderr)
+        long_default = subprocess.run([sys.executable, str(bas.ROOT / 'bas.py'), 'inspect', '--duration', '28800'],
+                                      text=True, capture_output=True)
+        self.assertEqual(long_default.returncode, 2)
+        self.assertIn('capture_storage=disk', long_default.stderr)
+        explicit = json.loads((bas.ROOT / 'runtime.json').read_text())
+        explicit['runtime']['capture_storage'] = 'disk'
+        path = self.root / 'disk-cli.json'
+        for mode in ('metrics_only', 'batched_trace'):
+            explicit['runtime']['event_logging'] = mode
+            path.write_text(json.dumps(explicit))
+            result = subprocess.run([sys.executable, str(bas.ROOT / 'bas.py'), 'inspect',
+                '--config', str(path), '--duration', '28800'], text=True, capture_output=True)
+            with self.subTest(mode=mode):
+                self.assertEqual(result.returncode, 0, result.stderr)
+                output = json.loads(result.stdout)
+                self.assertEqual(output['config']['experiment']['duration_s'], 28800)
+                self.assertEqual(output['environment']['BAS_NATIVE_CAPTURE_STORAGE'], 'disk')
+                self.assertEqual(output['environment']['BAS_NATIVE_EVENT_LOGGING'], mode)
 
     def test_invalid_json_shapes_and_field_types_are_rejected(self):
         for config in (None, [], [dict(self.config)], 'runtime', 5, True):

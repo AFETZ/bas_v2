@@ -7,7 +7,6 @@ import copy
 import hashlib
 import itertools
 import json
-import math
 from pathlib import Path
 import signal
 import sys
@@ -56,9 +55,8 @@ def plan_batch(config, batch_id, seeds, rng_runs, repeats=1, duration=None, *, r
         raise ValueError(f'batch has {count} cases; maximum is {MAX_CASES}')
     config = copy.deepcopy(config)
     if duration is not None:
-        if type(duration) not in (int, float) or not math.isfinite(duration) or duration <= 0:
-            raise ValueError('duration must be finite and positive')
-        config['experiment']['duration_s'] = duration
+        config['experiment']['duration_s'] = bas.validate_duration(duration)
+    bas.validate_capture_storage(config)
     paths = dict(scene=config['environment']['scene'])
     if config['propagation']['model'] == 'sionna':
         paths['radio'] = config['propagation']['radio_config']

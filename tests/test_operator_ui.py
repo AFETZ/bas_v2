@@ -172,6 +172,24 @@ class OperatorUITests(unittest.TestCase):
         payload['config']['runtime']['event_logging'] = 'full'
         self.assertEqual(self.request('/api/validate', payload)[0], 400)
 
+    def test_long_duration_and_capture_storage_use_real_http_validation_and_frozen_config(self):
+        payload = self.payload()
+        self.assertEqual(payload['config']['runtime']['capture_storage'], 'tmpfs')
+        payload['config']['experiment']['duration_s'] = 28800
+        self.assertEqual(self.request('/api/validate', payload)[0], 400)  # metrics_only also needs disk.
+        payload['config']['runtime']['event_logging'] = 'batched_trace'
+        self.assertEqual(self.request('/api/validate', payload)[0], 400)
+        payload['config']['runtime']['capture_storage'] = 'disk'
+        code, result, _ = self.request('/api/validate', payload)
+        self.assertEqual(code, 200)
+        self.assertEqual(result['config']['experiment']['duration_s'], 28800)
+        self.assertEqual(self.request('/api/start', payload)[0], 202)
+        saved = bas.load_config(self.launches[0][1] / 'config.json', root=self.root)
+        self.assertEqual(saved['runtime']['capture_storage'], 'disk')
+        self.assertEqual(saved['experiment']['duration_s'], 28800)
+        payload['config']['experiment']['duration_s'] = 86401
+        self.assertEqual(self.request('/api/validate', payload)[0], 400)
+
     def test_start_freezes_scene_and_config_and_uses_existing_controller(self):
         original = (self.root / self.config['environment']['scene']).read_bytes()
         code, result, _ = self.request('/api/start', self.payload(scene=self.scene))

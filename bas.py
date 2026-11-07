@@ -20,7 +20,7 @@ SHAPE = {
     'environment': {'engine', 'scene'}, 'drone': {'autopilot', 'count'},
     'propagation': {'model'}, 'network': {'engine', 'topology'},
     'experiment': {'policy', 'duration_s', 'seed', 'run'},
-    'runtime': {'clock', 'image', 'land_timeout_s', 'sionna_log_level', 'event_logging'},
+    'runtime': {'clock', 'image', 'land_timeout_s', 'sionna_log_level', 'event_logging', 'capture_storage'},
     'flows': {'channels', 'payload_attitude_interval_s'},
     'interference': {'sources'},
 }
@@ -57,6 +57,58 @@ def unique_json_fields(pairs):
 
 def reject_json_constant(value):
     raise ValueError(f'non-finite JSON value is not allowed: {value}')
+
+
+def validate_duration(value):
+    try:
+        valid = type(value) in (int, float) and math.isfinite(value) and 1e-9 <= value <= 86400
+    except OverflowError:
+        valid = False
+    if not valid:
+        raise ValueError('experiment.duration_s must be a finite number from 1 ns to 86400 s')
+    return value
+
+
+def validate_capture_storage(config):
+    duration = validate_duration(config['experiment']['duration_s'])
+    runtime = config['runtime']
+    storage = runtime.get('capture_storage', 'tmpfs')
+    if storage not in ('tmpfs', 'disk'):
+        raise ValueError('runtime.capture_storage must be tmpfs or disk')
+    if duration > 2400 and storage != 'disk':
+        raise ValueError('duration beyond 2400 s requires runtime.capture_storage=disk; long tmpfs capture volume is not qualified')
+
+
+def runtime_duration_limits(duration, land_timeout_s, uav_count, channels, *, mode='relay_experiment', parameter_snapshots=False):
+    """Lifetimes only: existing readiness/flight/stop deadlines remain unchanged."""
+    validate_duration(duration)
+    if mode != 'relay_experiment':
+        return dict(mode=mode, native_duration_s=2400, service_duration_s=3600,
+                    basis='legacy product/diagnostic/operator bounds; no extension from measurement duration')
+    if (type(uav_count) is not int or not 1 <= uav_count <= 5
+            or channels not in (['control'], ['control', 'payload'])
+            or type(land_timeout_s) not in (int, float) or not math.isfinite(land_timeout_s) or land_timeout_s <= 0):
+        raise ValueError('invalid lifecycle roster, channels or landing budget')
+    # Source: runner readiness loops; relay_experiment argparse defaults and
+    # prepare/capture_parameters/measure; runner post-scenario stop/TERM grace.
+    native_budgets = dict(native_readiness_s=180, flight_ready_s=120,
+        guided_per_uav_s=30, arm_per_uav_s=120, takeoff_per_uav_s=90,
+        all_uav_prepare_s=uav_count * (30 + 120 + 90),
+        parameter_capture_before_after_s=2 * (600 + 3) if parameter_snapshots else 0,
+        measurement_wall_watchdog_s=duration * 1.1 + 10, landing_s=land_timeout_s,
+        native_stop_wait_s=120, post_capture_wait_s=2, process_term_grace_s=5)
+    native_total = (180 + 120 + native_budgets['all_uav_prepare_s'] +
+        native_budgets['parameter_capture_before_after_s'] + native_budgets['measurement_wall_watchdog_s'] +
+        land_timeout_s + 120 + 2 + 5)
+    # UAV services start before Gazebo/native readiness, unlike native ns-3.
+    before_native = dict(endpoint_readiness_s=15 * len(channels) * uav_count,
+        gazebo_odometry_readiness_s=240, stack_health_s=180,
+        ros_odometry_discovery_s=uav_count * 30 * (5 + .2), ros_topic_export_s=15)
+    native = max(2400, math.ceil(native_total))
+    return dict(mode=mode, declared_measurement_s=duration, native_duration_s=native,
+        service_duration_s=max(3600, math.ceil(native + sum(before_native.values()))),
+        native_budgets=native_budgets, service_before_native_budgets=before_native,
+        basis='max(legacy cap, declared wall watchdog + unchanged bounded lifecycle budgets)')
 
 
 def _interference_input(config, root):
@@ -104,6 +156,7 @@ def load_config(path, root=ROOT):
     if isinstance(config['runtime'], dict):
         config['runtime'].setdefault('sionna_log_level', 'info')
         config['runtime'].setdefault('event_logging', 'metrics_only')
+        config['runtime'].setdefault('capture_storage', 'tmpfs')
     for section, keys in SHAPE.items():
         if section == 'propagation' and isinstance(config[section], dict):
             model = config[section].get('model')
@@ -145,6 +198,7 @@ def load_config(path, root=ROOT):
             valid = False
         if not valid:
             raise ValueError(f'{section}.{key} must be finite and positive')
+    validate_capture_storage(config)
     for key, minimum in [('seed', 1), ('run', 0)]:
         value = config['experiment'][key]
         if type(value) is not int or value < minimum:
@@ -207,6 +261,7 @@ def load_config(path, root=ROOT):
 
 
 def environment(config, run_id, inherited=None):
+    validate_capture_storage(config)
     # Do not let an old terminal session silently activate faults, GUI or another backend.
     env = {k: v for k, v in (os.environ if inherited is None else inherited).items()
            if not k.startswith(('BAS_', 'ROS_', 'GZ_', 'IGN_', 'RMW_'))}
@@ -221,7 +276,7 @@ def environment(config, run_id, inherited=None):
         'NATIVE_RNG_SEED': config['experiment']['seed'], 'NATIVE_RNG_RUN': config['experiment']['run'],
         'NATIVE_LAND_TIMEOUT_S': config['runtime']['land_timeout_s'],
         'NATIVE_UAV_COUNT': config['drone']['count'], 'NATIVE_FIVE_GUI': 0, 'NATIVE_CAPTURE_IMAGES': 0,
-        'NATIVE_CAPTURE_STORAGE': 'tmpfs',
+        'NATIVE_CAPTURE_STORAGE': config['runtime'].get('capture_storage', 'tmpfs'),
         'NATIVE_EVENT_LOGGING': config['runtime'].get('event_logging', 'metrics_only'),
         'NATIVE_FIVE_SKIP_BUILD': 1, 'NATIVE_PHYSICS_PROFILE': 'stock',
         'NATIVE_WIFI_TOPOLOGY': 'adhoc', 'NATIVE_WIFI_AGGREGATION': 0,
@@ -347,6 +402,7 @@ def request_stop(run_id):
 
 
 def run(config, run_id):
+    validate_capture_storage(config)
     if sys.platform != 'linux':
         raise ValueError('simulation runtime requires Linux; inspect, status and events are available on this host')
     import fcntl  # Host preparation and observation do not require the Linux runtime.
@@ -462,9 +518,8 @@ def main():
     if args.command in ('inspect', 'run'):
         config = load_config(args.config)
         if args.duration is not None:
-            if not math.isfinite(args.duration) or args.duration <= 0:
-                raise ValueError('duration must be finite and positive')
-            config['experiment']['duration_s'] = args.duration
+            config['experiment']['duration_s'] = validate_duration(args.duration)
+            validate_capture_storage(config)
         if args.command == 'run':
             return run(config, args.run_id)
         print(json.dumps({'config': config, 'environment': {k: v for k, v in environment(config, args.run_id).items()

@@ -15,7 +15,7 @@
 <div class="panel">
 <div class="row"><label for="config-path">Конфигурация в проекте<input id="config-path" value="runtime.json" spellcheck="false"></label><button id="load" type="button">Загрузить</button><button id="copy" type="button">Создать копию</button></div>
 <label for="configuration">Параметры запуска · JSON<textarea id="configuration" rows="20" spellcheck="false" aria-describedby="config-help"></textarea></label>
-<small id="config-help">Меняйте поддержанные поля. Проверка выявит неизвестные параметры и несовместимые настройки. runtime.event_logging: metrics_only — общие счётчики; batched_trace — пакетные наблюдения, включая приём помех. Режим применяется при новом запуске; трассировка увеличивает объём журналов и нагрузку.</small>
+<small id="config-help">Меняйте поддержанные поля. Проверка выявит неизвестные параметры и несовместимые настройки. runtime.event_logging: metrics_only — общие счётчики; batched_trace — пакетные наблюдения, включая приём помех. runtime.capture_storage: tmpfs — память (4 ГиБ), disk — диск; для любого опыта дольше 2400 с нужен disk. Допустимый объём длительной записи в tmpfs пока не подтверждён. Длительность опыта — до 86400 с. Настройки применяются при новом запуске.</small>
 <details><summary>Создать вариант геометрии и маршрутов</summary>
 <label><input type="checkbox" id="use-scene">Сохранить этот вариант сцены вместе с запуском</label>
 <label for="scene">Сцена · JSON<textarea id="scene" rows="14" spellcheck="false"></textarea></label>

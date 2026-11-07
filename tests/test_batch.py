@@ -50,6 +50,23 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(plan['config']['experiment']['duration_s'], 20)
         self.assertEqual(self.config, original)
 
+    def test_duration_override_uses_shared_limit_and_long_trace_storage_validation(self):
+        with self.assertRaisesRegex(ValueError, 'requires.*disk'):
+            self.plan(duration=28800)  # Default metrics_only cannot qualify long tmpfs capture.
+        self.config['runtime']['capture_storage'] = 'disk'
+        self.assertEqual(self.plan(duration=28800)['config']['experiment']['duration_s'], 28800)
+        self.assertEqual(self.plan(duration=86400)['config']['experiment']['duration_s'], 86400)
+        for duration in (1e-10, 86400.1, float('nan'), 10**1000):
+            with self.subTest(duration=duration), self.assertRaises(ValueError):
+                self.plan(duration=duration)
+        self.config['runtime']['event_logging'] = 'batched_trace'
+        self.config['runtime'].pop('capture_storage')
+        with self.assertRaisesRegex(ValueError, 'requires.*disk'):
+            self.plan(duration=28800)
+        self.config['runtime']['capture_storage'] = 'disk'
+        self.assertEqual(self.plan(duration=28800)['config']['runtime']['capture_storage'], 'disk')
+        self.assertFalse((self.root / 'runs').exists())
+
     def test_sequential_execution_preserves_seed_run_and_records_all_cases(self):
         run = self.runner([(0, 'completed', 'succeeded', 'valid')] * 2)
         result = execute(self.plan(), root=self.root, run_fn=run)

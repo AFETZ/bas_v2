@@ -110,6 +110,14 @@ import math, sys
 step, timeout = int(sys.argv[1]), float(sys.argv[2])
 assert 1 <= step <= 50 and math.isfinite(timeout) and timeout > 0, 'Invalid lockstep step/timeout'
 PYMODE
+python3 - "$ROOT_DIR" "${BAS_NATIVE_EXPERIMENT_DURATION_S:-180}" \
+  "${BAS_NATIVE_EVENT_LOGGING:-batched_trace}" "$CAPTURE_STORAGE" <<'PYDURATIONPROFILE'
+import sys
+sys.path.insert(0, sys.argv[1])
+from bas import validate_capture_storage
+validate_capture_storage(dict(experiment=dict(duration_s=float(sys.argv[2])),
+    runtime=dict(event_logging=sys.argv[3], capture_storage=sys.argv[4])))
+PYDURATIONPROFILE
 
 [[ "$SCENARIO_KEY" == town01 || "$SCENARIO_KEY" == rock_demo || "$SCENARIO_KEY" == customer || "$SCENARIO_KEY" == urban ]] || {
   printf 'Scenario must be town01, rock_demo, customer or urban: %s\n' "$SCENARIO_KEY" >&2
@@ -377,6 +385,25 @@ fi
   printf 'The product flight proof requires five UAVs; one UAV is diagnostic-only.\n' >&2
   exit 2
 }
+# Lifetimes cover declared measurement plus existing bounded phases. This does
+# not change any readiness, ACK, ARM, takeoff, landing or real-time guard.
+mapfile -t RUNTIME_DURATION_VALUES < <(python3 - "$ROOT_DIR" "$SCENARIO_MODE" \
+  "${BAS_NATIVE_EXPERIMENT_DURATION_S:-180}" "${BAS_NATIVE_LAND_TIMEOUT_S:-180}" \
+  "$UAV_COUNT" "$ACTIVE_UART_CHANNELS" "${BAS_NATIVE_PARAMETER_SNAPSHOTS:-0}" <<'PYRUNTIMEBUDGET'
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from bas import runtime_duration_limits
+value = runtime_duration_limits(float(sys.argv[3]), float(sys.argv[4]), int(sys.argv[5]),
+    sys.argv[6].split(','), mode=sys.argv[2], parameter_snapshots=sys.argv[7] == '1')
+print(value['native_duration_s'])
+print(value['service_duration_s'])
+print(json.dumps(value, sort_keys=True, separators=(',', ':')))
+PYRUNTIMEBUDGET
+)
+[[ "${#RUNTIME_DURATION_VALUES[@]}" == 3 ]] || { printf 'Invalid runtime duration budget.\n' >&2; exit 2; }
+NATIVE_DURATION_S="${RUNTIME_DURATION_VALUES[0]}"
+SERVICE_DURATION_S="${RUNTIME_DURATION_VALUES[1]}"
+RUNTIME_BUDGET_JSON="${RUNTIME_DURATION_VALUES[2]}"
 UAV_INDICES=()
 for ((index=1; index<=UAV_COUNT; ++index)); do UAV_INDICES+=("$index"); done
 TAP_UAVS=""
@@ -836,6 +863,8 @@ PY
     "$CARRIER_HZ" "$WIFI_CHANNEL_NUMBER" "$WIFI_CHANNEL_WIDTH_MHZ" "$WIFI_DATA_MODE" "$WIFI_CONTROL_MODE"
   printf 'phy_rate_bps=%s\ntx_power_w=%s\nwifi_ssid=%s\n' "$PHY_RATE_BPS" "$TX_POWER_W" "$WIFI_SSID"
   printf 'event_logging=%s\nactive_uart_channels=%s\nlatency_mode=%s\n' "$EVENT_LOGGING" "$ACTIVE_UART_CHANNELS" "$LATENCY_MODE"
+  printf 'native_duration_s=%s\nservice_duration_s=%s\nruntime_duration_budget=%s\n' \
+    "$NATIVE_DURATION_S" "$SERVICE_DURATION_S" "$RUNTIME_BUDGET_JSON"
   printf 'native_capture_storage_requested=%s\nnative_capture_storage_effective=%s\n' "$CAPTURE_STORAGE" "$CAPTURE_STORAGE"
   printf 'native_capture_tmpfs_limit_bytes=%s\nnative_capture_mount_fstype=%s\nnative_capture_mount_total_bytes=%s\n' \
     "$NATIVE_CAPTURE_TMPFS_LIMIT_BYTES" "${NATIVE_CAPTURE_MOUNT[0]}" "${NATIVE_CAPTURE_MOUNT[1]}"
@@ -1168,7 +1197,7 @@ for index in "${UAV_INDICES[@]}"; do
       if [[ "$channel" == control ]]; then
         setsid python3 -u "$ROOT_DIR/scripts/product/test_radio_hitl.py" \
           --config "$ROOT_DIR/$EXTERNAL_BUNDLE" --run-adapters --native-uav-count "$UAV_COUNT" \
-          --radio-watchdog-file "$NS3_READY.heartbeat" --duration-s 3600 --readiness-timeout-s 10 \
+          --radio-watchdog-file "$NS3_READY.heartbeat" --duration-s "$SERVICE_DURATION_S" --readiness-timeout-s 10 \
           --output "$RUN_DIR/external_endpoints" > "$RUN_DIR/logs/external_endpoints.log" 2>&1 &
         EXTERNAL_BUNDLE_PID=$!
         managed_pids+=("$EXTERNAL_BUNDLE_PID")
@@ -1181,7 +1210,7 @@ for index in "${UAV_INDICES[@]}"; do
         --run-id "$RUN_ID" --uav-count "$UAV_COUNT" --uav-id "$index" --tty "$UART_DIR/control-adapter-$instance" \
         --event-log "$RUN_DIR/logs/coordination_uav$index.jsonl" \
         --ready-file "$RUN_DIR/logs/coordination_uav$index.ready" \
-        --radio-watchdog-file "$NS3_READY.heartbeat" --watchdog-s 0.3 --duration-s 3600 \
+        --radio-watchdog-file "$NS3_READY.heartbeat" --watchdog-s 0.3 --duration-s "$SERVICE_DURATION_S" \
         > "$RUN_DIR/logs/coordination_uav$index.log" 2>&1 &
       managed_pids+=("$!")
       continue
@@ -1417,7 +1446,7 @@ setsid ip netns exec ams-ns3 env \
   --attributeDump="$RUN_DIR/logs/ns3_attributes.txt" \
   --executionMode="$BAS_SIMULATION_MODE" --clockFile="$BAS_SIM_CLOCK" \
   --couplingStepMs="$BAS_LOCKSTEP_STEP_MS" --stepTimeoutS="$BAS_LOCKSTEP_TIMEOUT_S" \
-  --readyFile="$NS3_READY" --duration=2400 --txPowerW="$TX_POWER_W" \
+  --readyFile="$NS3_READY" --duration="$NATIVE_DURATION_S" --txPowerW="$TX_POWER_W" \
   "${source_args[@]}" \
   --phyRateBps="$PHY_RATE_BPS" --eventLogging="$EVENT_LOGGING" \
   --stateMaxAgeS="$STATE_MAX_AGE_S" --runtimeLagMaxMs="$RUNTIME_LAG_MAX_MS" \
