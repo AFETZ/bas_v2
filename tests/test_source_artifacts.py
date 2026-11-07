@@ -1,5 +1,6 @@
 """Source clock evidence/copying; no native runtime or activation is synthesized."""
 import copy
+import csv
 import json
 from pathlib import Path
 import subprocess
@@ -10,7 +11,7 @@ import unittest
 from scripts.product.capture_effective_config import capture_snapshot
 from scripts.product.prepare_native_sources import materialize, prepare
 from scripts.product.summarize_native_radio_five_uav import (
-    _native_source_report_lines, summarize_native_sources,
+    _native_source_report_lines, export_live_metrics, summarize_native_sources,
 )
 
 
@@ -130,6 +131,91 @@ class SourceArtifactTests(unittest.TestCase):
                 self.assertEqual(result['actual_schedule_status'], 'invalid')
                 self.assertTrue(result['actual_schedule_error'])
                 self.assertEqual(result['windows'], {})
+
+    def logging(self, native=None, configured=None):
+        if native is not None:
+            (self.run / 'metrics/native_radio_stats.json').write_text(json.dumps(
+                dict(event_logging=native, phy_rx_ok_total=42, phy_rx_error_total=7)))
+        if configured is not None:
+            (self.run / 'environment.txt').write_text('event_logging=' + configured + '\n')
+
+    def test_metrics_only_explicitly_disables_phase_decoder_and_foreign_measurements(self):
+        self.actual()
+        self.logging(native='metrics_only', configured='metrics_only')
+        result = summarize_native_sources(self.run, self.switches(110, 120))
+        observation = result['trace_observations']
+        self.assertEqual(observation['event_logging'], 'metrics_only')
+        self.assertEqual(observation['mode_source'], 'metrics/native_radio_stats.json:event_logging')
+        self.assertEqual(observation['decoder']['status'], 'unavailable_logging_disabled')
+        self.assertEqual(observation['foreign_signal']['status'], 'unavailable_logging_disabled')
+        active = result['windows']['active']
+        for field in ('decoded_mpdu_samples', 'decoder_success_attempts', 'decoder_failure_attempts',
+                      'decoder_attempt_per', 'other_phy_drops'):
+            self.assertIsNone(active[field], field)
+        self.assertIsNone(active['application_pdr'])
+        self.assertIn('unavailable_logging_disabled', '\n'.join(_native_source_report_lines(result)))
+
+    def test_enabled_empty_trace_is_explicitly_unobserved_not_disabled_or_per_zero(self):
+        self.actual()
+        self.logging(native='batched_trace', configured='batched_trace')
+        result = summarize_native_sources(self.run, self.switches(110, 120))
+        self.assertEqual(result['trace_observations']['decoder']['status'], 'unavailable_no_observations')
+        self.assertEqual(result['trace_observations']['foreign_signal']['status'], 'unavailable_no_observations')
+        self.assertEqual(result['windows']['active']['decoder_success_attempts'], 0)
+        self.assertIsNone(result['windows']['active']['decoder_attempt_per'])
+
+    def test_actual_logging_conflict_is_visible_and_does_not_produce_phase_measurements(self):
+        self.actual()
+        self.logging(native='metrics_only', configured='batched_trace')
+        event = dict(event='phy_rx_error', time_s=111)
+        result = summarize_native_sources(self.run, self.switches(110, 120) + [event])
+        self.assertEqual(result['trace_observations']['metadata_status'], 'conflict')
+        self.assertEqual(result['trace_observations']['decoder']['observed_event_rows'], 1)
+        self.assertEqual(result['trace_observations']['decoder']['status'], 'unavailable_logging_metadata_conflict')
+        self.assertIsNone(result['windows']['active']['decoder_failure_attempts'])
+
+    def test_batched_native_events_are_exported_with_live_metrics_into_separate_output(self):
+        self.actual()
+        self.logging(native='batched_trace', configured='batched_trace')
+        fields = 'time_s,wall_monotonic_ns,phase,event,node,peer,bytes,x,y,z,value,details'.split(',')
+        path = self.run / 'logs/native_radio_events.csv'
+        with path.open('w', newline='') as stream:
+            writer = csv.DictWriter(stream, fieldnames=fields)
+            writer.writeheader()
+            for when, event, value, details in (
+                    (110, 'jammer_on', '', ''), (111, 'phy_rx_ok', 2, ''),
+                    (112, 'phy_rx_error', 1, ''), (113, 'spectrum_signal_arrival', -75, 'foreign_signal=1'),
+                    (114, 'wifi_monitor_rx', 1, 'noise_interference_dbm=-85;sinr_db=10'),
+                    (120, 'jammer_off', '', '')):
+                writer.writerow(dict(time_s=when, wall_monotonic_ns=int(when * 1e9),
+                    phase='experiment_normal', event=event, node='cp', peer='', bytes=64,
+                    x=0, y=0, z=1, value=value, details=details))
+        before = {str(p.relative_to(self.run)): p.read_bytes() for p in self.run.rglob('*') if p.is_file()}
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            result = export_live_metrics(self.run, output, plots=False)
+            summary = json.loads((output / 'metrics/native_source_summary.json').read_text())
+            self.assertEqual(result['native_sources'], summary)
+            active = summary['windows']['active']
+            self.assertEqual((active['decoder_success_attempts'], active['decoder_failure_attempts']), (1, 1))
+            self.assertEqual(active['decoder_attempt_per'], .5)
+            self.assertEqual(active['decoded_mpdu_samples'], 1)
+            self.assertEqual(active['foreign_power_dbm_by_receiver']['cp']['mean'], -75)
+            self.assertEqual(summary['trace_observations']['decoder']['status'], 'observed')
+            self.assertEqual(summary['trace_observations']['foreign_signal']['status'], 'observed')
+            report = (output / 'live_metrics.md').read_text()
+            self.assertIn('metrics/native_source_summary.json', report)
+            self.assertIn('native_sources_actual.json', report)
+        after = {str(p.relative_to(self.run)): p.read_bytes() for p in self.run.rglob('*') if p.is_file()}
+        self.assertEqual(before, after)
+
+    def test_live_export_in_run_writes_source_summary_with_disabled_reason(self):
+        self.actual()
+        self.logging(native='metrics_only')
+        result = export_live_metrics(self.run, plots=False)
+        saved = json.loads((self.run / 'metrics/native_source_summary.json').read_text())
+        self.assertEqual(result['native_sources'], saved)
+        self.assertEqual(saved['trace_observations']['decoder']['status'], 'unavailable_logging_disabled')
 
 
 if __name__ == '__main__':

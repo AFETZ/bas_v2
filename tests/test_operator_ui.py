@@ -156,6 +156,22 @@ class OperatorUITests(unittest.TestCase):
         saved = bas.load_config(self.launches[0][1] / 'config.json', root=self.root)
         self.assertEqual(saved['interference']['sources'], 'sources.yaml')
 
+    def test_event_logging_is_resolved_validated_and_saved_through_http(self):
+        code, loaded, _ = self.request('/api/bootstrap')
+        self.assertEqual(code, 200)
+        self.assertEqual(loaded['config']['runtime']['event_logging'], 'metrics_only')
+        payload = self.payload()
+        payload['config']['runtime']['event_logging'] = 'batched_trace'
+        code, result, _ = self.request('/api/validate', payload)
+        self.assertEqual(code, 200)
+        self.assertEqual(result['config']['runtime']['event_logging'], 'batched_trace')
+        self.assertEqual(self.request('/api/start', payload)[0], 202)
+        saved = bas.load_config(self.launches[0][1] / 'config.json', root=self.root)
+        self.assertEqual(saved['runtime']['event_logging'], 'batched_trace')
+        self.assertEqual(bas.environment(saved, 'ui-test')['BAS_NATIVE_EVENT_LOGGING'], 'batched_trace')
+        payload['config']['runtime']['event_logging'] = 'full'
+        self.assertEqual(self.request('/api/validate', payload)[0], 400)
+
     def test_start_freezes_scene_and_config_and_uses_existing_controller(self):
         original = (self.root / self.config['environment']['scene']).read_bytes()
         code, result, _ = self.request('/api/start', self.payload(scene=self.scene))

@@ -8,6 +8,7 @@ import csv
 import hashlib
 import json
 import math
+import os
 import re
 import statistics
 import struct
@@ -3350,8 +3351,10 @@ def export_live_metrics(
         wall_span = gazebo[-1]["gazebo_real_time_s"] - gazebo[0]["gazebo_real_time_s"]
         if wall_span > 0:
             integral_rtf = (gazebo[-1]["gazebo_sim_time_s"] - gazebo[0]["gazebo_sim_time_s"]) / wall_span
+    native_sources = summarize_native_sources(run_dir, native_events(native_path), output_dir=output)
     summary = {
         "raw_run_dir": str(run_dir), "output_dir": str(output),
+        "native_sources": native_sources,
         "scenario_status": scenario.get("status"), "analysis_window": analysis_window,
         "trajectory_quality_rows": dict(quality),
         "input_errors": dict(input_errors),
@@ -3469,6 +3472,8 @@ def export_live_metrics(
               "[admitted target CSV](metrics/uav_admitted_targets.csv)."]
     if not plots:
         report = [line for line in report if not line.startswith("![")]
+    raw_prefix = Path(os.path.relpath(run_dir, output)).as_posix()
+    report.extend(_native_source_report_lines(native_sources, raw_prefix=raw_prefix))
     (output / "live_metrics.md").write_text("\n".join(report) + "\n", encoding="utf-8")
     return summary
 
@@ -3511,27 +3516,70 @@ def _native_source_schedule(run_dir):
     return result
 
 
-def _native_source_report_lines(summary):
+def _native_source_report_lines(summary, *, raw_prefix='.'):
     if not (summary['sources'] or summary['configured_sources'] or summary['actual_sources']
             or summary['actual_schedule_status'] != 'not_recorded'):
         return []
     lines = ['', '## Native Spectrum sources', '',
         f"- Absolute schedule: `{summary['actual_schedule_status']}`; activation: `{summary['source_activity_status']}`.",
-        '- [Configured input, original clock](logs/native_sources.json); [source observations and window availability](metrics/native_source_summary.json).']
+        f'- [Configured input, original clock]({raw_prefix}/logs/native_sources.json); [source observations and window availability](metrics/native_source_summary.json).']
     if summary['actual_sources'] is not None or summary['actual_schedule_status'] == 'invalid':
-        lines.append('- [Native committed absolute schedule](logs/native_sources_actual.json).')
+        lines.append(f'- [Native committed absolute schedule]({raw_prefix}/logs/native_sources_actual.json).')
     if summary['time_anchor'] is not None:
         anchor = summary['time_anchor']
         lines.append(f"- Observed anchor: phase `{anchor['phase']}`, native time `{anchor['simulation_ns']}` ns; committed intervals alone do not prove source activation.")
     if summary['actual_schedule_error']:
         lines.append('- Schedule unavailable: ' + summary['actual_schedule_error'])
+    trace = summary['trace_observations']
+    lines.append(f"- Packet logging: `{trace['event_logging']}` ({trace['mode_source']}); decoder: `{trace['decoder']['status']}`; foreign signals: `{trace['foreign_signal']['status']}`. Unavailable traces do not imply zero losses or application PDR.")
     return lines
 
 
-def summarize_native_sources(run_dir: Path, events: list[dict[str, Any]]) -> dict[str, Any]:
+def _source_trace_groups(logging, events):
+    groups = {
+        'decoder': sum(e['event'] in ('phy_rx_ok', 'phy_rx_error') for e in events),
+        'decoded_mpdu': sum(e['event'] == 'wifi_monitor_rx' for e in events),
+        'foreign_signal': sum(e['event'] == 'spectrum_signal_arrival' and
+                              'foreign_signal=1' in str(e.get('details')) for e in events),
+    }
+    result = {}
+    for name, count in groups.items():
+        mode = logging['event_logging']
+        status = ('unavailable_logging_metadata_conflict' if logging['metadata_status'] == 'conflict' else
+                  'unavailable_logging_disabled' if mode == 'metrics_only' else
+                  'unavailable_logging_mode' if mode not in ('batched_trace', 'unrecorded') else
+                  'observed' if count else 'unavailable_no_observations' if mode == 'batched_trace' else
+                  'unavailable_logging_unrecorded')
+        result[name] = dict(status=status, observed_event_rows=count)
+    return result
+
+
+def _native_source_trace_observations(run_dir, events):
+    stats = read_json(run_dir / 'metrics/native_radio_stats.json', {})
+    native = stats.get('event_logging') if isinstance(stats, dict) else None
+    path = run_dir / 'environment.txt'
+    environment = path.read_text(encoding='utf-8', errors='replace') if path.is_file() else ''
+    match = re.search(r'^event_logging=(.+)$', environment, re.M)
+    configured = match.group(1).strip() if match else None
+    mode = native if native is not None else configured if configured is not None else 'unrecorded'
+    conflict = native is not None and configured is not None and native != configured
+    result = dict(event_logging=mode, native_event_logging=native, configured_event_logging=configured,
+                  metadata_status='conflict' if conflict else 'consistent' if native is not None and configured is not None else 'partial',
+                  mode_source='metrics/native_radio_stats.json:event_logging' if native is not None else
+                              'environment.txt:event_logging' if configured is not None else 'unrecorded')
+    result['packet_trace_available'] = (not conflict and (mode == 'batched_trace' or
+        mode == 'unrecorded' and any(e['event'] in ('phy_rx_ok', 'phy_rx_error', 'wifi_phy_rx_drop',
+                                                  'wifi_monitor_rx', 'spectrum_signal_arrival') for e in events)))
+    result.update(_source_trace_groups(result, events))
+    return result
+
+
+def summarize_native_sources(run_dir: Path, events: list[dict[str, Any]], *,
+                             output_dir: Path | None = None) -> dict[str, Any]:
     switches=[dict(e, x=None, y=None, z=None, coordinate_reason="source switch has no mobility trace; position is configured in logs/native_sources.json") for e in events if e["event"] in {"jammer_on","jammer_off"}]
     result={"sources":switches, **_native_source_schedule(run_dir),"windows":{},"measurement_scope":"native decoder/SignalArrival samples; application PDR needs distinct application offers",
         "units":{"time":"ns-3 seconds","foreign_power":"dBm, native SpectrumWifiPhy.SignalArrival","noise_interference":"dBm, native decoded MPDU sample","sinr":"dB, derived S/(I+N) on decoded samples"}}
+    trace = result['trace_observations'] = _native_source_trace_observations(run_dir, events)
     configured = result['configured_sources']
     relative = isinstance(configured, dict) and configured.get('clock') == 'measurement_elapsed_seconds'
     anchor = result['time_anchor']
@@ -3556,18 +3604,21 @@ def summarize_native_sources(run_dir: Path, events: list[dict[str, Any]]) -> dic
         result['active_window_definition'] = 'earliest observed on to latest observed off envelope; gaps, pulses and overlaps may occur'
         for name,low,high in (("baseline",max(anchor_s,on-10),on),("active",on,off),("recovery",off,off+10)):
             selected=[e for e in events if low<=e["time_s"]<high]
-            decoded=[e for e in selected if e["event"]=="wifi_monitor_rx"]
-            ok=sum(e["event"]=="phy_rx_ok" for e in selected)
-            error=sum(e["event"]=="phy_rx_error" for e in selected)
-            result["windows"][name]={"start_sim_s":low,"stop_sim_s":high,"decoded_mpdu_samples":len(decoded),
+            observed = selected if trace['packet_trace_available'] else []
+            decoded=[e for e in observed if e["event"]=="wifi_monitor_rx"]
+            ok=sum(e["event"]=="phy_rx_ok" for e in observed) if trace['packet_trace_available'] else None
+            error=sum(e["event"]=="phy_rx_error" for e in observed) if trace['packet_trace_available'] else None
+            result["windows"][name]={"start_sim_s":low,"stop_sim_s":high,
+                "trace_observations":_source_trace_groups(trace, selected),
+                "decoded_mpdu_samples":len(decoded) if trace['packet_trace_available'] else None,
                 "noise_interference_dbm":distribution([e["noise_interference_dbm"] for e in decoded if e.get("noise_interference_dbm") is not None]),
                 "sinr_db":distribution([e["sinr_db"] for e in decoded if e.get("sinr_db") is not None]),
-                "foreign_power_dbm_by_receiver":{node:distribution([e["value"] for e in selected if e["event"]=="spectrum_signal_arrival" and e["node"]==node and "foreign_signal=1" in str(e.get("details")) and e.get("value") is not None and math.isfinite(e["value"])]) for node in ("cp",*UAVS)},
-                "decoder_success_attempts":ok,"decoder_failure_attempts":error,"decoder_attempt_per":error/(ok+error) if ok+error else None,
+                "foreign_power_dbm_by_receiver":{node:distribution([e["value"] for e in observed if e["event"]=="spectrum_signal_arrival" and e["node"]==node and "foreign_signal=1" in str(e.get("details")) and e.get("value") is not None and math.isfinite(e["value"])]) for node in ("cp",*UAVS)},
+                "decoder_success_attempts":ok,"decoder_failure_attempts":error,"decoder_attempt_per":error/(ok+error) if ok is not None and error is not None and ok+error else None,
                 "decoder_per_denominator":"all RxOk + RxError callbacks in window, retries retained; preamble/CCA drops excluded",
-                "other_phy_drops":sum(e["event"]=="wifi_phy_rx_drop" for e in selected),
+                "other_phy_drops":sum(e["event"]=="wifi_phy_rx_drop" for e in observed) if trace['packet_trace_available'] else None,
                 "application_pdr":None,"application_pdr_reason":"no phase-specific offered-unique-message set; see separate source campaign"}
-    write_json(run_dir/"metrics/native_source_summary.json",result)
+    write_json((output_dir or run_dir)/"metrics/native_source_summary.json",result)
     return result
 
 

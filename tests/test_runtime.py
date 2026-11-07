@@ -6,7 +6,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import bas
 from scripts.product.relay_experiment import RelayExperiment, ScenarioError, StopRequested
@@ -59,6 +59,25 @@ class RuntimeTests(unittest.TestCase):
         self.config['runtime']['sionna_log_level'] = 'debug:OtherComponent=all'
         with self.assertRaises(ValueError):
             self.load()
+
+    def test_event_logging_default_enum_environment_and_input_snapshot(self):
+        resolved = self.load()
+        self.assertEqual(resolved['runtime']['event_logging'], 'metrics_only')
+        self.assertEqual(bas.environment(resolved, 'logging', {'BAS_NATIVE_EVENT_LOGGING': 'batched_trace'})
+                         ['BAS_NATIVE_EVENT_LOGGING'], 'metrics_only')
+        self.config['runtime']['event_logging'] = 'batched_trace'
+        resolved = self.load()
+        env = bas.environment(resolved, 'logging', {'BAS_NATIVE_EVENT_LOGGING': 'metrics_only'})
+        self.assertEqual(env['BAS_NATIVE_EVENT_LOGGING'], 'batched_trace')
+        folder = self.root / 'runs/control/logging'
+        folder.mkdir(parents=True)
+        with patch.object(bas, 'ROOT', self.root):
+            bas.snapshot_inputs(resolved, folder, env)
+        self.assertEqual(json.loads((folder / 'config.json').read_text())['runtime']['event_logging'], 'batched_trace')
+        for value in ('trace', '', None, True, 0, [], {}):
+            self.config['runtime']['event_logging'] = value
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'event_logging'):
+                self.load()
 
     def test_invalid_json_shapes_and_field_types_are_rejected(self):
         for config in (None, [], [dict(self.config)], 'runtime', 5, True):

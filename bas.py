@@ -20,7 +20,7 @@ SHAPE = {
     'environment': {'engine', 'scene'}, 'drone': {'autopilot', 'count'},
     'propagation': {'model'}, 'network': {'engine', 'topology'},
     'experiment': {'policy', 'duration_s', 'seed', 'run'},
-    'runtime': {'clock', 'image', 'land_timeout_s', 'sionna_log_level'},
+    'runtime': {'clock', 'image', 'land_timeout_s', 'sionna_log_level', 'event_logging'},
     'flows': {'channels', 'payload_attitude_interval_s'},
     'interference': {'sources'},
 }
@@ -103,6 +103,7 @@ def load_config(path, root=ROOT):
         raise ValueError('runtime config has missing or unknown sections')
     if isinstance(config['runtime'], dict):
         config['runtime'].setdefault('sionna_log_level', 'info')
+        config['runtime'].setdefault('event_logging', 'metrics_only')
     for section, keys in SHAPE.items():
         if section == 'propagation' and isinstance(config[section], dict):
             model = config[section].get('model')
@@ -120,6 +121,8 @@ def load_config(path, root=ROOT):
     count = config['drone']['count']
     if config['runtime']['sionna_log_level'] not in ('info', 'debug'):
         raise ValueError('runtime.sionna_log_level must be info or debug')
+    if config['runtime']['event_logging'] not in ('metrics_only', 'batched_trace'):
+        raise ValueError('runtime.event_logging must be metrics_only or batched_trace')
     if type(count) is not int or not 1 <= count <= 5:
         raise ValueError('drone.count must be an integer from 1 to 5')
     channels = config['flows']['channels']
@@ -218,7 +221,8 @@ def environment(config, run_id, inherited=None):
         'NATIVE_RNG_SEED': config['experiment']['seed'], 'NATIVE_RNG_RUN': config['experiment']['run'],
         'NATIVE_LAND_TIMEOUT_S': config['runtime']['land_timeout_s'],
         'NATIVE_UAV_COUNT': config['drone']['count'], 'NATIVE_FIVE_GUI': 0, 'NATIVE_CAPTURE_IMAGES': 0,
-        'NATIVE_CAPTURE_STORAGE': 'tmpfs', 'NATIVE_EVENT_LOGGING': 'metrics_only',
+        'NATIVE_CAPTURE_STORAGE': 'tmpfs',
+        'NATIVE_EVENT_LOGGING': config['runtime'].get('event_logging', 'metrics_only'),
         'NATIVE_FIVE_SKIP_BUILD': 1, 'NATIVE_PHYSICS_PROFILE': 'stock',
         'NATIVE_WIFI_TOPOLOGY': 'adhoc', 'NATIVE_WIFI_AGGREGATION': 0,
         'NATIVE_WIFI_EXPLICIT_BAR': 0, 'NATIVE_UART_CHANNELS': ','.join(config['flows']['channels']),
