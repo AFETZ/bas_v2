@@ -186,7 +186,9 @@ void SetupHost(const std::string& tapName)
     {
         g_linuxReceivers[flow] = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
         sockaddr_in address{};
-        address.sin_family = AF_INET; address.sin_addr.s_addr = htonl(kUavIp.Get());
+        // Native downlink is subnet broadcast, so receive on all addresses of
+        // this isolated namespace rather than binding a unicast-only socket.
+        address.sin_family = AF_INET; address.sin_addr.s_addr = htonl(INADDR_ANY);
         address.sin_port = htons(flow == 0 ? kControlPort + 10 : kPayloadPort + 10);
         if (g_linuxReceivers[flow] < 0 ||
             bind(g_linuxReceivers[flow], reinterpret_cast<sockaddr*>(&address), sizeof(address)))
@@ -264,7 +266,8 @@ int main(int argc, char** argv)
     phy.Set("ChannelSettings", StringValue("{1, 20, BAND_2_4GHZ, 0}"));
     WifiHelper wifi; wifi.SetStandard(WIFI_STANDARD_80211n);
     wifi.SetRemoteStationManager("ns3::ConstantRateWifiManager", "DataMode", StringValue("HtMcs0"),
-                                 "ControlMode", StringValue("ErpOfdmRate6Mbps"));
+                                 "ControlMode", StringValue("ErpOfdmRate6Mbps"),
+                                 "NonUnicastMode", StringValue("ErpOfdmRate6Mbps"));
     WifiMacHelper mac; mac.SetType("ns3::AdhocWifiMac", "QosSupported", BooleanValue(true));
     auto devices = wifi.Install(phy, mac, nodes);
     wifi.AssignStreams(devices, 10);
@@ -331,7 +334,7 @@ int main(int argc, char** argv)
     std::ofstream report(output / "result.json");
     report << "{\"schema\":1,\"passed\":" << (g_failures.empty() ? "true" : "false")
            << ",\"scope\":\"CPU TAP and stock YansWifi EDCA regression; no realtime or hardware qualification\""
-           << ",\"seed\":1,\"run\":1,\"data_mode\":\"HtMcs0\",\"exact_frames\":" << g_exact.size()
+           << ",\"seed\":1,\"run\":1,\"data_mode\":\"HtMcs0\",\"non_unicast_mode\":\"ErpOfdmRate6Mbps\",\"exact_frames\":" << g_exact.size()
            << ",\"control_tos\":184,\"payload_tos\":40,\"control_expected_tid\":5,\"payload_expected_tid\":1"
            << ",\"payload_useful_offered_bps_per_direction\":6144000,\"nodes\":[";
     for (unsigned node = 0; node < 2; ++node)
