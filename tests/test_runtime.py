@@ -203,6 +203,8 @@ class RuntimeTests(unittest.TestCase):
         (raw / 'logs/native_sources.json').write_text(json.dumps(configured))
         actual = materialize(configured, 100_000_000_000, 1000, 'experiment_normal')
         (raw / 'logs/native_sources_actual.json').write_text(json.dumps(actual))
+        (raw / 'logs/native_radio_events.csv').write_text(
+            'time_s,wall_monotonic_ns,phase,event,node,peer,bytes,x,y,z,value,details\n')
         summarize_native_sources(raw, [])
         summary = dict(runtime_status='completed', mission_outcome='succeeded', measurement_validity='valid')
         return raw, summary
@@ -214,6 +216,19 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result['runtime_status'], 'failed')
         self.assertEqual(result['measurement_validity'], 'invalid')
         self.assertIn('native_source_summary_missing', result['runtime_verification_errors'])
+
+    def test_source_export_before_capture_publication_cannot_qualify_later_capture(self):
+        from scripts.product.summarize_native_radio_five_uav import summarize_native_sources
+        raw, summary = self.qualified_source_run()
+        capture = raw / 'logs/native_radio_events.csv'
+        original = capture.read_bytes()
+        capture.unlink()
+        summarize_native_sources(raw, [])  # Actual old runner order: no published capture yet.
+        capture.write_bytes(original)
+        result = bas.recorded_outcome(raw, 0, summary)
+        self.assertEqual(result['runtime_status'], 'failed')
+        self.assertEqual(result['measurement_validity'], 'invalid')
+        self.assertIn('native_source_export_invalid', result['runtime_verification_errors'])
 
     def test_anchored_out_of_window_source_needs_no_switches_or_effect(self):
         raw, summary = self.qualified_source_run()

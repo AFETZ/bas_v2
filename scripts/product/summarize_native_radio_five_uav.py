@@ -3478,6 +3478,21 @@ def export_live_metrics(
     return summary
 
 
+def _native_source_capture(run_dir):
+    path = run_dir / 'logs/native_radio_events.csv'
+    if not path.is_file():
+        return dict(status='not_recorded', path='logs/native_radio_events.csv')
+    before = path.stat()
+    digest = hashlib.sha256()
+    with path.open('rb') as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(block)
+    after = path.stat()
+    return dict(status='observed' if (before.st_size, before.st_mtime_ns) ==
+                (after.st_size, after.st_mtime_ns) else 'changing',
+                path='logs/native_radio_events.csv', bytes=after.st_size, sha256=digest.hexdigest())
+
+
 def _native_source_schedule(run_dir):
     configured_path = run_dir / 'logs/native_sources.json'
     actual_path = run_dir / 'logs/native_sources_actual.json'
@@ -3577,7 +3592,7 @@ def _native_source_trace_observations(run_dir, events):
 def summarize_native_sources(run_dir: Path, events: list[dict[str, Any]], *,
                              output_dir: Path | None = None) -> dict[str, Any]:
     switches=[dict(e, x=None, y=None, z=None, coordinate_reason="source switch has no mobility trace; position is configured in logs/native_sources.json") for e in events if e["event"] in {"jammer_on","jammer_off"}]
-    result={"sources":switches, **_native_source_schedule(run_dir),"windows":{},"measurement_scope":"native decoder/SignalArrival samples; application PDR needs distinct application offers",
+    result={"sources":switches, **_native_source_schedule(run_dir),"event_capture":_native_source_capture(run_dir),"windows":{},"measurement_scope":"native decoder/SignalArrival samples; application PDR needs distinct application offers",
         "units":{"time":"ns-3 seconds","foreign_power":"dBm, native SpectrumWifiPhy.SignalArrival","noise_interference":"dBm, native decoded MPDU sample","sinr":"dB, derived S/(I+N) on decoded samples"}}
     trace = result['trace_observations'] = _native_source_trace_observations(run_dir, events)
     stats = read_json(run_dir / 'metrics/native_radio_stats.json', {})
@@ -3663,6 +3678,8 @@ def main() -> int:
         if (args.latency_diagnostic or args.one_uav_run or args.observer_reference_run or
                 args.live_start_sim_time is not None or args.live_start_phase is not None):
             parser.error("source-only export cannot be combined with mission or trajectory options")
+        if not (run_dir / "logs/native_radio_events.csv").is_file():
+            parser.error("publish the closed native event capture before exporting source observations")
         output = args.output_dir.resolve() if args.output_dir else run_dir
         summary = summarize_native_sources(run_dir, native_events(run_dir / "logs/native_radio_events.csv"),
                                            output_dir=output)

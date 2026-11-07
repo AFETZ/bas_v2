@@ -118,6 +118,15 @@ class SourceArtifactTests(unittest.TestCase):
         self.assertFalse((self.run / 'metrics/native_source_summary.json').exists())
         self.assertTrue(all((self.run / p).read_bytes() == contents for p, contents in before.items()))
 
+    def test_source_cli_cannot_publish_an_empty_report_before_tmpfs_capture_is_copied(self):
+        self.actual()
+        script = Path(__file__).resolve().parents[1] / 'scripts/product/summarize_native_radio_five_uav.py'
+        result = subprocess.run([sys.executable, str(script), '--run-dir', str(self.run),
+                                 '--native-sources-only'], capture_output=True, text=True, timeout=5)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('publish the closed native event capture', result.stderr)
+        self.assertFalse((self.run / 'metrics/native_source_summary.json').exists())
+
     def test_anchored_native_switches_use_absolute_time_and_keep_relative_input(self):
         actual = self.actual()
         start, stop = (actual['segments'][0][key] for key in ('start_s', 'stop_s'))

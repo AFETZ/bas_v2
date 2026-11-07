@@ -318,11 +318,13 @@ def recorded_outcome(raw, code, summary, *, source_configured=False):
                 try:
                     # Validate existing evidence only: never create an export or
                     # infer source activity/effect from its configured interval.
-                    from scripts.product.summarize_native_radio_five_uav import _native_source_schedule
+                    from scripts.product.summarize_native_radio_five_uav import _native_source_schedule, _native_source_capture
                     expected = _native_source_schedule(raw)
+                    capture = _native_source_capture(raw)
                     observed = json.loads(source_summary.read_text(encoding='utf-8'),
                         object_pairs_hook=unique_json_fields, parse_constant=reject_json_constant)
-                    if (expected['actual_schedule_status'] != 'observed' or not isinstance(observed, dict)
+                    if (expected['actual_schedule_status'] != 'observed' or capture['status'] != 'observed'
+                            or not isinstance(observed, dict) or observed.get('event_capture') != capture
                             or any(observed.get(key) != expected[key] for key in expected)):
                         raise ValueError('source export does not match the validated native schedule')
                 except (OSError, ValueError, TypeError, KeyError):

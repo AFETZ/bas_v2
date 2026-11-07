@@ -994,6 +994,15 @@ PYPUBLISH
     printf 'Native raw publication failed; inspect logs/native_capture_publish.log and storage JSON.\n' >&2
     ((status != 0)) || status=1
   fi
+  # Source windows must be derived from the closed, published capture. With
+  # tmpfs storage the public CSV does not exist until the preceding step.
+  if [[ -n "${BAS_NATIVE_SOURCES:-}" ]]; then
+    if ! python3 "$ROOT_DIR/scripts/product/summarize_native_radio_five_uav.py" \
+      --run-dir "$RUN_DIR" --native-sources-only > "$RUN_DIR/logs/source_summary.log" 2>&1; then
+      printf 'Source observation export failed; inspect logs/source_summary.log.\n' >&2
+      ((status != 0)) || status=1
+    fi
+  fi
   for namespace in "${created_namespaces[@]}"; do
     ip netns del "$namespace" 2>/dev/null || true
   done
@@ -1542,10 +1551,6 @@ capture_pids=()
 touch "$MONITOR_STOP"
 sleep 2
 if [[ "$SCENARIO_MODE" == flight_diagnostic || "$SCENARIO_MODE" == relay_experiment ]]; then
-  if [[ -n "${BAS_NATIVE_SOURCES:-}" ]]; then
-    python3 "$ROOT_DIR/scripts/product/summarize_native_radio_five_uav.py" \
-      --run-dir "$RUN_DIR" --native-sources-only > "$RUN_DIR/logs/source_summary.log" 2>&1
-  fi
   printf 'Selected %s completed; inspect its summary and raw logs.\n' "$SCENARIO_MODE"
   exit 0
 fi
