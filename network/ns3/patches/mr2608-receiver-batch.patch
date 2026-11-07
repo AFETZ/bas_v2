@@ -31,7 +31,7 @@
              .AddAttribute("Scenario",
                            "The Sionna RT scenario name used to create scenes",
                            StringValue("munich"),
-@@ -186,6 +196,227 @@
+@@ -186,6 +196,244 @@
  {
      NS_LOG_FUNCTION(this);
      m_sceneConfigs.mergeShapes = cond;
@@ -185,9 +185,6 @@
 +        py::arg("edge_diffraction") = m_RtPathSolverConfig.edgeDiffraction,
 +        py::arg("synthetic_array") = m_RtPathSolverConfig.syntheticArray,
 +        py::arg("seed") = m_RtPathSolverConfig.seed);
-+    if (DoesNumberOfPathsExceedMaximum(GetNumberOfPathsFromCir(paths)))
-+        throw std::runtime_error("Sionna batch retained-path limit exceeded; no automatic reduction");
-+    if (m_isImageRendered) SceneRenderImageToFile(rt, paths, scene);
 +    NS_LOG_INFO("Receiver batch paths computed: nrx=" << receiverCount
 +        << " samples_per_src=" << m_samplesPerSource
 +        << " allocated_max_num_paths_per_src=" << stats.lastAllocatedMaxPathsPerSource
@@ -228,6 +225,21 @@
 +    if (py::len(scene.attr("receivers")) != receivers.size() || py::len(scene.attr("transmitters")) != 1)
 +        throw std::runtime_error("Receiver batch scene contains unexpected endpoints");
 +    auto paths = CalculateReceiverBatchPaths(rt, scene, receivers.size());
++    auto np = py::module_::import("numpy");
++    py::tuple cir = paths.attr("cir")(py::arg("normalize_delays") = m_normalizeDelays,
++                                      py::arg("out_type") = "numpy");
++    py::object coefficients = np.attr("ascontiguousarray")(cir[0], py::arg("dtype") = np.attr("complex128"));
++    py::object delays = np.attr("ascontiguousarray")(cir[1], py::arg("dtype") = np.attr("float64"));
++    py::object doppler = np.attr("ascontiguousarray")(paths.attr("doppler"), py::arg("dtype") = np.attr("float64"));
++    std::vector<py::object> angles;
++    for (const auto* name : {"phi_r", "theta_r", "phi_t", "theta_t"})
++        angles.push_back(np.attr("ascontiguousarray")(paths.attr(name), py::arg("dtype") = np.attr("float64")));
++    const auto coefficientShape = py::buffer(coefficients).request();
++    if (coefficientShape.ndim != 6 || static_cast<size_t>(coefficientShape.shape[0]) != receivers.size())
++        throw std::runtime_error("Receiver batch CIR shape does not match the registered receivers");
++    if (DoesNumberOfPathsExceedMaximum(coefficientShape.shape[4]))
++        throw std::runtime_error("Sionna batch retained-path limit exceeded; no automatic reduction");
++    if (m_isImageRendered) SceneRenderImageToFile(rt, paths, scene);
 +    // Extract/validate all receiver tensors before publishing fresh matrices.
 +    // Any exception propagates to the existing fail-closed simulator boundary.
 +    std::vector<Ptr<ChannelMatrix>> matrices;
@@ -236,11 +248,16 @@
 +    {
 +        auto rxMob = m_receiverBatchMobility[receivers[index]];
 +        auto rxAntenna = m_receiverBatchAntennas[receivers[index]];
-+        auto matrix = CreateNewMatrixChannel(CalculateCirFromPaths(paths, index), txMob,
++        auto matrix = CreateNewMatrixChannel(ConvertCirArray(coefficients, index), txMob,
 +                                               rxMob, txAntenna, rxAntenna);
 +        matrix->m_antennaPair = {txAntenna->GetId(), rxAntenna->GetId()};
 +        matrices.push_back(matrix);
-+        parameters.push_back(CalculateChannelParamsFromPaths(paths, txMob, rxMob, index));
++        Double2DVector receiverAngles;
++        for (const auto& direction : angles)
++            receiverAngles.push_back(ConvertScalarPathArray(direction, index));
++        parameters.push_back(CreateChannelParams(txMob, rxMob,
++            ConvertScalarPathArray(delays, index), ConvertScalarPathArray(doppler, index),
++            std::move(receiverAngles)));
 +    }
 +    for (size_t index = 0; index < receivers.size(); ++index)
 +    {
@@ -259,7 +276,7 @@
  }
  
  void
-@@ -360,6 +591,11 @@
+@@ -360,6 +608,11 @@
  {
      NS_LOG_FUNCTION(this);
  
@@ -271,7 +288,7 @@
      // Compute the channel matrix key. The key is reciprocal, i.e., key (a, b) = key (b, a)
      uint64_t channelMatrixKey = GetKey(aAntenna->GetId(), bAntenna->GetId());
  
-@@ -389,6 +625,11 @@
+@@ -389,6 +642,11 @@
      // generate a new realization
      if (notFound || update)
      {
@@ -283,37 +300,56 @@
          // channel matrix not found or has to be updated, generate a new one
          py::module_ rt = py::module_::import("sionna.rt");
          NS_LOG_INFO("Building scene for antenna pair ("
-@@ -622,7 +863,8 @@
+@@ -622,27 +880,28 @@
  Ptr<SionnaRtChannelModel::SionnaRtChannelParams>
  SionnaRtChannelModel::CalculateChannelParamsFromPaths(const py::object paths,
                                                        Ptr<const MobilityModel> aMob,
 -                                                      Ptr<const MobilityModel> bMob) const
+-{
+-    NS_LOG_FUNCTION(this);
+-    NS_LOG_DEBUG("Calculating ChannelParams from paths");
+-    Ptr<SionnaRtChannelModel::SionnaRtChannelParams> channelParams =
+-        Create<SionnaRtChannelModel::SionnaRtChannelParams>();
+-
+-    channelParams->m_nodeIds =
+-        std::make_pair(aMob->GetObject<Node>()->GetId(), bMob->GetObject<Node>()->GetId());
+-
+-    py::module_ np = py::module_::import("numpy");
+-
 +                                                      Ptr<const MobilityModel> bMob,
 +                                                      size_t receiverIndex) const
- {
-     NS_LOG_FUNCTION(this);
-     NS_LOG_DEBUG("Calculating ChannelParams from paths");
-@@ -636,13 +878,13 @@
- 
++{
++    auto np = py::module_::import("numpy");
++    Double2DVector angles;
++    for (const auto* direction : {"AOA", "ZOA", "AOD", "ZOD"})
++        angles.push_back(CalculateAnglesFromPaths(np, paths, direction, receiverIndex));
++    return CreateChannelParams(aMob, bMob, CalculateTauFromPaths(np, paths, receiverIndex),
++                               CalculateDopplerFromPaths(np, paths, receiverIndex), std::move(angles));
++}
++
++Ptr<SionnaRtChannelModel::SionnaRtChannelParams>
++SionnaRtChannelModel::CreateChannelParams(Ptr<const MobilityModel> aMob,
++                                         Ptr<const MobilityModel> bMob, DoubleVector delays,
++                                         std::vector<double> doppler, Double2DVector angles) const
++{
++    auto channelParams = Create<SionnaRtChannelModel::SionnaRtChannelParams>();
++    channelParams->m_nodeIds = {aMob->GetObject<Node>()->GetId(), bMob->GetObject<Node>()->GetId()};
      channelParams->m_generatedTime = Simulator::Now();
- 
+-
 -    channelParams->m_delay = CalculateTauFromPaths(np, paths);
 -    channelParams->m_doppler = CalculateDopplerFromPaths(np, paths);
-+    channelParams->m_delay = CalculateTauFromPaths(np, paths, receiverIndex);
-+    channelParams->m_doppler = CalculateDopplerFromPaths(np, paths, receiverIndex);
-     channelParams->m_angle.clear();
+-    channelParams->m_angle.clear();
 -    channelParams->m_angle.push_back(CalculateAnglesFromPaths(np, paths, "AOA")); // AOA
 -    channelParams->m_angle.push_back(CalculateAnglesFromPaths(np, paths, "ZOA")); // ZOA
 -    channelParams->m_angle.push_back(CalculateAnglesFromPaths(np, paths, "AOD")); // AOD
 -    channelParams->m_angle.push_back(CalculateAnglesFromPaths(np, paths, "ZOD")); // ZOD
-+    channelParams->m_angle.push_back(CalculateAnglesFromPaths(np, paths, "AOA", receiverIndex));
-+    channelParams->m_angle.push_back(CalculateAnglesFromPaths(np, paths, "ZOA", receiverIndex));
-+    channelParams->m_angle.push_back(CalculateAnglesFromPaths(np, paths, "AOD", receiverIndex));
-+    channelParams->m_angle.push_back(CalculateAnglesFromPaths(np, paths, "ZOD", receiverIndex));
++    channelParams->m_delay = std::move(delays);
++    channelParams->m_doppler = std::move(doppler);
++    channelParams->m_angle = std::move(angles);
  
      // Precompute angles sincos
      channelParams->m_cachedAngleSincos.resize(channelParams->m_angle.size());
-@@ -845,7 +1087,7 @@
+@@ -845,7 +1104,7 @@
  }
  
  MatrixBasedChannelModel::Complex3DVector
@@ -322,13 +358,20 @@
  {
      NS_LOG_FUNCTION(this);
      py::module_ np = py::module_::import("numpy");
-@@ -853,9 +1095,14 @@
+@@ -853,9 +1112,20 @@
      py::tuple cir = paths.attr("cir")(py::arg("normalize_delays") = m_normalizeDelays,
                                        py::arg("out_type") = "numpy");
  
 -    py::object a_py = np.attr("asarray")(cir[0], py::arg("dtype") = np.attr("complex128"));
+-    py::buffer_info a_info = py::buffer(a_py).request();
 +    py::object a_py = np.attr("ascontiguousarray")(cir[0], py::arg("dtype") = np.attr("complex128"));
-     py::buffer_info a_info = py::buffer(a_py).request();
++    return ConvertCirArray(a_py, receiverIndex);
++}
++
++MatrixBasedChannelModel::Complex3DVector
++SionnaRtChannelModel::ConvertCirArray(const py::object coefficients, size_t receiverIndex) const
++{
++    py::buffer_info a_info = py::buffer(coefficients).request();
 +    if (a_info.ndim != 6 || receiverIndex >= static_cast<size_t>(a_info.shape[0]) ||
 +        a_info.shape[2] != 1 || a_info.shape[5] != 1)
 +        throw std::out_of_range("CIR extraction requires one TX/time sample and a valid RX index");
@@ -338,7 +381,7 @@
  
      // Generate channel coefficients for each cluster n and each receiver
      //  and transmitter element pair u,s.
-@@ -883,16 +1130,20 @@
+@@ -883,56 +1153,33 @@
  }
  
  MatrixBasedChannelModel::DoubleVector
@@ -351,17 +394,20 @@
      py::tuple cir = paths.attr("cir")(py::arg("normalize_delays") = m_normalizeDelays,
                                        py::arg("out_type") = "numpy");
 -    py::object tau_py = np.attr("asarray")(cir[1], py::arg("dtype") = np.attr("float64"));
+-    // Buffer info
+-    py::buffer_info tau_info = py::buffer(tau_py).request();
+-    auto* data = static_cast<double*>(tau_info.ptr);
+-    // Shape of array in case syntheticarray differs in sionna
+-    if (m_RtPathSolverConfig.syntheticArray)
+-    {
+-        return DoubleVector(data, data + tau_info.shape[2]);
+-    }
+-    else
+-    {
+-        return DoubleVector(data, data + tau_info.shape[4]);
+-    }
 +    py::object tau_py = np.attr("ascontiguousarray")(cir[1], py::arg("dtype") = np.attr("float64"));
-     // Buffer info
-     py::buffer_info tau_info = py::buffer(tau_py).request();
-+    if (receiverIndex >= static_cast<size_t>(tau_info.shape[0]))
-+        throw std::out_of_range("Invalid RX index for path delays");
-     auto* data = static_cast<double*>(tau_info.ptr);
-+    data += receiverIndex * (tau_info.size / tau_info.shape[0]);
-     // Shape of array in case syntheticarray differs in sionna
-     if (m_RtPathSolverConfig.syntheticArray)
-     {
-@@ -905,16 +1156,20 @@
++    return ConvertScalarPathArray(tau_py, receiverIndex);
  }
  
  std::vector<double>
@@ -373,18 +419,27 @@
      py::tuple doppler = paths.attr("doppler");
      // Convert doppler (DrJit tensor) to numpy complex128 array
 -    py::object d_py = np.attr("asarray")(doppler, py::arg("dtype") = np.attr("float64"));
+-
+-    // Buffer info
+-    py::buffer_info d_info = py::buffer(d_py).request();
+-    auto* data = static_cast<double*>(d_info.ptr);
+-
+-    // Shape of array in case syntheticarray differs in sionna
+-    size_t dopplerSize =
+-        (m_RtPathSolverConfig.syntheticArray) ? size_t(d_info.shape[2]) : size_t(d_info.shape[4]);
+-
+-    std::vector<double> dopplerVector(dopplerSize);
+-    for (size_t i = 0; i < dopplerSize; i++)
+-    {
+-        dopplerVector[i] = data[i];
+-    }
+-
+-    return dopplerVector;
 +    py::object d_py = np.attr("ascontiguousarray")(doppler, py::arg("dtype") = np.attr("float64"));
++
++    return ConvertScalarPathArray(d_py, receiverIndex);
+ }
  
-     // Buffer info
-     py::buffer_info d_info = py::buffer(d_py).request();
-+    if (receiverIndex >= static_cast<size_t>(d_info.shape[0]))
-+        throw std::out_of_range("Invalid RX index for Doppler");
-     auto* data = static_cast<double*>(d_info.ptr);
-+    data += receiverIndex * (d_info.size / d_info.shape[0]);
- 
-     // Shape of array in case syntheticarray differs in sionna
-     size_t dopplerSize =
-@@ -932,7 +1187,7 @@
  MatrixBasedChannelModel::DoubleVector
  SionnaRtChannelModel::CalculateAnglesFromPaths(const py::module_ np,
                                                 py::object paths,
@@ -393,22 +448,47 @@
  {
      py::object angle_py;
      if (Angle == "ZOA")
-@@ -958,11 +1213,14 @@
+@@ -958,24 +1205,22 @@
      }
  
      // Convert to numpy float64 array
 -    py::object angle_np = np.attr("asarray")(angle_py, py::arg("dtype") = py::dtype("float64"));
+-    // Buffer info
+-
+-    py::buffer_info angle_info = py::buffer(angle_np).request();
+-    auto* data = static_cast<double*>(angle_info.ptr);
+-
+-    // Shape of array in case syntheticarray differs in sionna
+-    size_t angelSize = (m_RtPathSolverConfig.syntheticArray) ? size_t(angle_info.shape[2])
+-                                                             : size_t(angle_info.shape[4]);
+-
+-    MatrixBasedChannelModel::DoubleVector angleVector;
+-    for (size_t i = 0; i < angelSize; ++i)
+-    {
+-        angleVector.push_back(data[i]);
+-    }
+-    NS_LOG_DEBUG("Extracted " << angleVector.size() << " values for angle type " << Angle);
+-
+-    return angleVector;
 +    py::object angle_np = np.attr("ascontiguousarray")(angle_py, py::arg("dtype") = py::dtype("float64"));
-     // Buffer info
++    return ConvertScalarPathArray(angle_np, receiverIndex);
++}
++
++
++MatrixBasedChannelModel::DoubleVector
++SionnaRtChannelModel::ConvertScalarPathArray(const py::object values, size_t receiverIndex) const
++{
++    const auto info = py::buffer(values).request();
++    const auto dimensions = m_RtPathSolverConfig.syntheticArray ? 3 : 5;
++    if (info.ndim != dimensions || receiverIndex >= static_cast<size_t>(info.shape[0]))
++        throw std::out_of_range("Scalar path extraction requires a valid receiver and path tensor");
++    const auto paths = info.shape[dimensions - 1];
++    if (paths == 0) return DoubleVector{};
++    const auto* data = static_cast<const double*>(info.ptr) + receiverIndex * (info.size / info.shape[0]);
++    return DoubleVector(data, data + paths);
+ }
  
-     py::buffer_info angle_info = py::buffer(angle_np).request();
-+    if (receiverIndex >= static_cast<size_t>(angle_info.shape[0]))
-+        throw std::out_of_range("Invalid RX index for path angles");
-     auto* data = static_cast<double*>(angle_info.ptr);
-+    data += receiverIndex * (angle_info.size / angle_info.shape[0]);
- 
-     // Shape of array in case syntheticarray differs in sionna
-     size_t angelSize = (m_RtPathSolverConfig.syntheticArray) ? size_t(angle_info.shape[2])
+ size_t
 --- a/src/spectrum/model/sionna-rt-channel-model.h
 +++ b/src/spectrum/model/sionna-rt-channel-model.h
 @@ -70,6 +70,27 @@
@@ -439,10 +519,16 @@
       * @brief Constructor.
       */
      SionnaRtChannelModel();
-@@ -488,6 +509,16 @@
+@@ -488,6 +509,22 @@
      RtPathSolverConfig GetRtPathSolverConfig() const;
  
    protected:
++    Complex3DVector ConvertCirArray(const py::object coefficients, size_t receiverIndex) const;
++    DoubleVector ConvertScalarPathArray(const py::object values, size_t receiverIndex) const;
++    Ptr<SionnaRtChannelParams> CreateChannelParams(Ptr<const MobilityModel> aMob,
++                                                  Ptr<const MobilityModel> bMob,
++                                                  DoubleVector delays, std::vector<double> doppler,
++                                                  Double2DVector angles) const;
 +    void ValidateReceiverBatchEndpoints() const;
 +    void ValidateReceiverBatchPair(Ptr<const MobilityModel> aMob,
 +                                   Ptr<const MobilityModel> bMob,
@@ -456,7 +542,7 @@
      /**
       * @brief Load a Sionna RT scene using the configured scenario name.
       *
-@@ -574,7 +605,7 @@
+@@ -574,7 +611,7 @@
       * @param paths Python object representing computed paths
       * @return Complex3DVector containing CIRs for Rx/Tx element pairs
       */
@@ -465,7 +551,7 @@
  
      /**
       * @brief Extract delays (tau) per path from RS paths object.
-@@ -586,7 +617,7 @@
+@@ -586,7 +623,7 @@
       * @return Vector of delays [s], ordered to match CIR taps
       */
      MatrixBasedChannelModel::DoubleVector CalculateTauFromPaths(const py::module_ np,
@@ -474,7 +560,7 @@
      /**
       * @brief Extract Doppler shifts per path from the Python paths object.
       *
-@@ -597,7 +628,8 @@
+@@ -597,7 +634,8 @@
       * @param paths Python paths object computed by Sionna RT
       * @return Complex vector of per-path Doppler shifts (one per path)
       */
@@ -484,7 +570,7 @@
      /**
       * @brief Extract angular measurements (AOD/AOA/ZOA/ZOD) from the paths.
       *
-@@ -615,7 +647,7 @@
+@@ -615,7 +653,7 @@
       */
      MatrixBasedChannelModel::DoubleVector CalculateAnglesFromPaths(const py::module_ np,
                                                                     py::object paths,
@@ -493,7 +579,7 @@
  
      // void CreateOnePath(py::object& paths);
  
-@@ -634,7 +666,8 @@
+@@ -634,7 +672,8 @@
  
      Ptr<SionnaRtChannelParams> CalculateChannelParamsFromPaths(const py::object paths,
                                                                 Ptr<const MobilityModel> aMob,
@@ -503,7 +589,7 @@
  
      /**
       * @brief Extract the number of propagation paths from the CIR tensor.
-@@ -715,6 +748,11 @@
+@@ -715,6 +754,11 @@
      /** Whether Sionna RT should normalize path delays in CIR output. */
      bool m_normalizeDelays;
      double m_maxNumberOfPaths; //!< Maximum number of paths to be generated by the path solver
