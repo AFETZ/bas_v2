@@ -240,8 +240,30 @@ class LiveState:
             rejection_reasons=dict(self.rejection_reasons))
 
 
+def _publish_periodically(stop, period_ns: int, publish) -> None:
+    """Publish on absolute host deadlines; missed ticks are skipped, not replayed."""
+    deadline_ns = time.monotonic_ns()
+    while not stop.is_set():
+        publish()
+        deadline_ns += period_ns
+        now_ns = time.monotonic_ns()
+        if deadline_ns <= now_ns:
+            deadline_ns += ((now_ns - deadline_ns) // period_ns + 1) * period_ns
+        if stop.wait((deadline_ns - now_ns) / 1e9):
+            break
+
+
 def run_gazebo_tracker(args: argparse.Namespace) -> int:
     """Read the same native odometry without a DDS bridge in the clock path."""
+    rate = args.rate_hz
+    if type(rate) not in (int, float) or not 0 < rate <= sys.float_info.max:
+        raise ValueError('rate_hz must be a finite positive number')
+    period_s = 1 / rate
+    if not 0 < period_s <= threading.TIMEOUT_MAX:
+        raise ValueError('rate_hz period exceeds the interruptible wait range')
+    period_ns = round(period_s * 1e9)
+    if period_ns < 1:
+        raise ValueError('rate_hz period must be at least one monotonic nanosecond')
     from gz.transport13 import Node
     from gz.msgs10.clock_pb2 import Clock
     from gz.msgs10.odometry_pb2 import Odometry
@@ -271,12 +293,12 @@ def run_gazebo_tracker(args: argparse.Namespace) -> int:
             raise RuntimeError(f'cannot subscribe to Gazebo odometry: {name}')
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
+    def publish():
+        with mutex:
+            value = state.snapshot(time.monotonic_ns())
+        write_state(Path(args.output_json), Path(args.output_jsonl) if args.output_jsonl else None, value)
     try:
-        while not stop.is_set():
-            with mutex:
-                value = state.snapshot(time.monotonic_ns())
-            write_state(Path(args.output_json), Path(args.output_jsonl) if args.output_jsonl else None, value)
-            stop.wait(1 / args.rate_hz)
+        _publish_periodically(stop, period_ns, publish)
     finally:
         # Release native callbacks while Python is still running, before
         # interpreter teardown races Gazebo Transport's receiving threads.
