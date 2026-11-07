@@ -917,6 +917,11 @@ PY
   printf 'reason=%s\npacket_outcome_affected=derived_from_runtime_propagation_chain\n' "$RADIO_REASON"
 } > "$RUN_DIR/environment.txt"
 
+# A fresh inherited registration survives launch pipes and redirected worker I/O.
+# Never accept a marker inherited from another run's shell/container environment.
+BAS_NATIVE_PROCESS_OWNER="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+[[ "$BAS_NATIVE_PROCESS_OWNER" =~ ^[0-9a-f]{64}$ ]] || { printf 'Cannot register run process ownership.\n' >&2; exit 1; }
+export BAS_NATIVE_PROCESS_OWNER
 managed_pids=()
 created_namespaces=()
 NS3_PID=""
@@ -928,7 +933,7 @@ stop_pid() {
   local pid="${1:-}"
   [[ -n "$pid" ]] || return 0
   # setsid leaders can die before their workers. Confirm the surviving session
-  # through a run-owned open stdout/stderr, not the presence of the leader PID.
+  # through the fresh inherited marker or run-owned stdout/stderr, never PID alone.
   if python3 - "$pid" "${RUN_DIR:-}" "${RUNTIME_DIR:-}" <<'PYSTOPOWNED'
 import os, signal, sys, time
 from pathlib import Path
@@ -945,6 +950,9 @@ except OSError:
     raise SystemExit(1)
 if not roots:
     raise SystemExit(1)
+owner = os.environ.get('BAS_NATIVE_PROCESS_OWNER', '')
+marker = ('BAS_NATIVE_PROCESS_OWNER=' + owner).encode('ascii') if len(owner) == 64 and all(
+    c in '0123456789abcdef' for c in owner) else None
 
 def members():
     present, owned = False, False
@@ -958,14 +966,22 @@ def members():
             present = True
             if entry.stat().st_uid != os.geteuid():
                 return True, False
+            if marker is not None:
+                try:
+                    owned |= marker in (entry / 'environ').read_bytes().split(b'\0')
+                except OSError:
+                    pass  # Unreadable environment supplies no marker proof; FD proof remains independent.
             for descriptor in ('1', '2'):
-                target = os.readlink(entry / 'fd' / descriptor)
-                if target.endswith(' (deleted)'):
-                    target = target[:-10]
-                path = Path(target)
-                if not path.is_absolute():
+                try:
+                    target = os.readlink(entry / 'fd' / descriptor)
+                    if target.endswith(' (deleted)'):
+                        target = target[:-10]
+                    path = Path(target)
+                    if not path.is_absolute():
+                        continue
+                    path = path.resolve()
+                except OSError:
                     continue
-                path = path.resolve()
                 for root in roots:
                     try:
                         path.relative_to(root)
