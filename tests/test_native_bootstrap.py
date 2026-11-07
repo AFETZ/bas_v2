@@ -354,7 +354,11 @@ class NativeSdkPreservationTests(unittest.TestCase):
         self.git('config', 'user.email', 'fixture@example.invalid')
         self.git('config', 'core.autocrlf', 'false')
         (self.sdk / 'source').write_text('value=0\nuntouched\noutside=original\n', newline='\n')
-        self.git('add', 'source')
+        for name in bootstrap.HISTORICAL_MISSING_NON_RUNTIME:
+            path = self.sdk / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('non-runtime fixture\n', newline='\n')
+        self.git('add', '.')
         self.git('commit', '--quiet', '-m', 'fixture')
         self.head = self.git('rev-parse', 'HEAD')
         for number, path in enumerate(bootstrap.patches(self.root), 1):
@@ -370,14 +374,67 @@ class NativeSdkPreservationTests(unittest.TestCase):
     def git(self, *args):
         return bootstrap.command(['git', '-C', self.sdk, *args])
 
-    def test_exact_patched_tree_passes_without_changing_user_index(self):
+    def verify_preserving_git(self):
         index = (self.sdk / '.git/index').read_bytes()
         objects = sorted(str(p.relative_to(self.sdk)) for p in (self.sdk / '.git/objects').rglob('*'))
-        with patch.object(bootstrap, 'NS3_SHA', self.head):
-            bootstrap.verify_sdk(self.root, self.sdk)
-        self.assertEqual(index, (self.sdk / '.git/index').read_bytes())
-        self.assertEqual(objects, sorted(str(p.relative_to(self.sdk)) for p in (self.sdk / '.git/objects').rglob('*')))
+        try:
+            with patch.object(bootstrap, 'NS3_SHA', self.head):
+                return bootstrap.verify_sdk(self.root, self.sdk)
+        finally:
+            self.assertEqual(index, (self.sdk / '.git/index').read_bytes())
+            self.assertEqual(objects, sorted(str(p.relative_to(self.sdk)) for p in (self.sdk / '.git/objects').rglob('*')))
+
+    def test_exact_patched_tree_passes_without_changing_user_index(self):
+        result = self.verify_preserving_git()
+        self.assertEqual(result['ns3_sha'], self.head)
+        self.assertEqual(result['verification_scope'], 'exact_patched_tree')
+        self.assertEqual(result['allowed_missing_non_runtime'], [])
         self.assertEqual(self.git('diff', '--cached'), '')
+
+    def test_only_explicit_absent_non_runtime_paths_pass_and_are_reported(self):
+        for name in bootstrap.HISTORICAL_MISSING_NON_RUNTIME:
+            (self.sdk / name).unlink()
+        result = self.verify_preserving_git()
+        self.assertEqual(result['allowed_missing_non_runtime'], sorted(bootstrap.HISTORICAL_MISSING_NON_RUNTIME))
+        self.assertEqual(result['verification_scope'], 'exact_patched_tree_except_listed_missing_non_runtime_files')
+        self.assertTrue(all(not (self.sdk / p).exists() for p in bootstrap.HISTORICAL_MISSING_NON_RUNTIME))
+
+    def test_unknown_code_deletion_is_rejected_and_not_restored(self):
+        (self.sdk / 'source').unlink()
+        with self.assertRaisesRegex(RuntimeError, 'D source'):
+            self.verify_preserving_git()
+        self.assertFalse((self.sdk / 'source').exists())
+
+    def test_edited_known_non_runtime_file_is_not_excluded(self):
+        path = self.sdk / 'AGENTS.md'
+        path.write_text('user edit\n', newline='\n')
+        with self.assertRaisesRegex(RuntimeError, 'M AGENTS.md'):
+            self.verify_preserving_git()
+        self.assertEqual(path.read_text(), 'user edit\n')
+
+    def test_known_file_replaced_by_directory_is_not_an_allowed_absence(self):
+        path = self.sdk / 'AGENTS.md'
+        path.unlink()
+        path.mkdir()
+        with self.assertRaisesRegex(RuntimeError, 'AGENTS.md'):
+            self.verify_preserving_git()
+        self.assertTrue(path.is_dir())
+
+    def test_staged_only_user_code_edit_is_rejected_and_preserved(self):
+        path = self.sdk / 'source'
+        approved = path.read_bytes()
+        path.write_text(path.read_text().replace('outside=original', 'outside=staged edit'), newline='\n')
+        self.git('add', 'source')
+        path.write_bytes(approved)  # Actual runtime tree alone now matches.
+        with self.assertRaises(RuntimeError):
+            self.verify_preserving_git()
+        self.assertEqual(path.read_bytes(), approved)
+        self.assertNotEqual(self.git('diff', '--cached'), '')
+
+    def test_staging_exact_approved_patches_is_accepted(self):
+        self.git('add', 'source')
+        result = self.verify_preserving_git()
+        self.assertEqual(result['allowed_missing_non_runtime'], [])
 
     def test_extra_user_edit_outside_patch_is_rejected_and_preserved(self):
         p = self.sdk / 'source'

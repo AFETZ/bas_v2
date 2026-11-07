@@ -47,6 +47,10 @@ INPUTS = ('.devcontainer/requirements-native.in', '.devcontainer/requirements-na
 LOCK_NAMES = ('requirements-native.lock', 'requirements-native-tooling.lock')
 RECEIPT = '.external/native-bootstrap.json'
 ACTIVE_LOG = None  # Set only within an explicit mutating CLI attempt.
+HISTORICAL_MISSING_NON_RUNTIME = frozenset((
+    '.vscode/.gitignore', '.vscode/launch.json', '.vscode/tasks.json', 'AGENTS.md',
+    'doc/manual/source/figures', 'doc/tutorial/source/figures',
+))
 
 
 def sha256(path):
@@ -318,7 +322,43 @@ def verify_sdk(root, sdk):
         command(git + ['read-tree', NS3_SHA], env=env)
         for patch in patches(root):
             command(git + ['apply', '--cached', patch], env=env)
-        command(git + ['diff', '--quiet', '--exit-code', '--'], env=env)
+        def entries(output):
+            fields = output.split('\0')
+            if fields[-1] == '':
+                fields.pop()
+            if len(fields) % 2:
+                raise RuntimeError('Malformed NUL-delimited Git name/status output')
+            return list(zip(fields[::2], fields[1::2]))
+
+        def allowed_missing(status, name):
+            path = sdk / name
+            return (status == 'D' and name in HISTORICAL_MISSING_NON_RUNTIME
+                    and not path.exists() and not path.is_symlink())
+
+        differences = entries(command(git + ['diff', '--name-status', '-z', '--no-renames', '--'], env=env))
+        for status, name in differences:
+            if not allowed_missing(status, name):
+                raise RuntimeError(f'Existing SDK differs from the exact patched tree: {status} {name}; left untouched')
+
+        # A staged-only user change must not disappear behind the temporary
+        # index. Staged exact approved patches/deletions remain acceptable.
+        original_index = Path(command(git + ['rev-parse', '--git-path', 'index']))
+        if not original_index.is_absolute():
+            original_index = sdk / original_index
+        original_env = dict(env, GIT_INDEX_FILE=str(original_index.resolve()))
+        staged = entries(command(git + ['diff', '--cached', '--name-status', '-z', '--no-renames', NS3_SHA, '--'],
+                                 env=original_env))
+        if staged:
+            expected_tree = command(git + ['write-tree'], env=env)
+            for status, name in staged:
+                if not allowed_missing(status, name):
+                    command(git + ['diff', '--cached', '--quiet', '--exit-code', expected_tree, '--', name],
+                            env=original_env)
+        missing = sorted(name for _, name in differences)
+        return dict(ns3_sha=NS3_SHA,
+                    verification_scope=('exact_patched_tree_except_listed_missing_non_runtime_files'
+                                        if missing else 'exact_patched_tree'),
+                    allowed_missing_non_runtime=missing)
 
 
 def ensure_sdk(root):
@@ -360,6 +400,7 @@ def verify_cache(root):
 
 def inspect(root, image, bundle):
     gaps = []
+    sdk_verification = {}
     def check(name, fn):
         try:
             fn()
@@ -367,7 +408,7 @@ def inspect(root, image, bundle):
             gaps.append(dict(component=name, reason=str(error)))
     check('image', lambda: image_id(image))
     check('wheel_bundle', lambda: validate_bundle(root, bundle, image))
-    check('ns3', lambda: verify_sdk(root, root / SDK_PATH))
+    check('ns3', lambda: sdk_verification.update(verify_sdk(root, root / SDK_PATH)))
     check('cmake_cache', lambda: verify_cache(root))
     for name in SCRATCH_FILES:
         src, dst = root / 'network/ns3/scratch' / name, root / SDK_PATH / 'scratch' / name
@@ -396,6 +437,7 @@ def inspect(root, image, bundle):
                 check(directory, lambda d=directory, t=tooling: container(root, image,
                       environment_script(f'{SDK_PATH}/{d}', environment_versions(manifest, t)), readonly=True))
     return dict(schema_version=1, mode='check_only', image_id=image, ns3_sha=NS3_SHA,
+                native_sdk_source_verification=sdk_verification or None,
                 ready=not gaps, gaps=gaps, gpu_checked=False, runtime_started=False,
                 clean_machine_acceptance='not_performed')
 
@@ -424,6 +466,7 @@ def bootstrap(root, image, bundle):
             if (root / directory).exists() and environment_hash(root / directory, allow_links=True) != receipt.get('ros_trees', {}).get(directory):
                 raise ValueError(f'Existing ROS outputs changed or incomplete; left untouched: {directory}')
     sdk = ensure_sdk(root)
+    sdk_verification = verify_sdk(root, sdk)
     if (sdk / 'cmake-cache/CMakeCache.txt').exists():
         verify_cache(root)
     for name in SCRATCH_FILES:
@@ -433,6 +476,7 @@ def bootstrap(root, image, bundle):
         if not dst.exists():
             shutil.copyfile(src, dst)
     record = receipt or dict(status='installing', inputs=identity, environments={})
+    record['native_sdk_source_verification'] = sdk_verification
     receipt_path.write_text(json.dumps(record, indent=2) + '\n')
     for directory, lock in [('.python-deps-py310', LOCK_NAMES[0]), ('.tooling-py310', LOCK_NAMES[1])]:
         target = sdk / directory
@@ -474,6 +518,7 @@ def bootstrap(root, image, bundle):
                SDK_PATH + '/build/lib/libns3.48-spectrum-default.so',
                SDK_PATH + '/build/lib/libns3.48-tap-bridge-default.so']
     result = dict(schema_version=1, status='built', inputs=identity,
+                  native_sdk_source_verification=sdk_verification,
                   environments={d: environment_hash(sdk / d) for d in ['.python-deps-py310', '.tooling-py310']},
                   ros_trees={d: environment_hash(root / d, allow_links=True) for d in ['build', 'install']},
                   outputs={p: sha256(root / p) for p in outputs}, runtime_started=False,

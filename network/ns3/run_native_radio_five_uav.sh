@@ -651,16 +651,18 @@ reject_product_override BAS_NATIVE_UPDATE_DISTANCE_THRESHOLD_M "${BAS_NATIVE_UPD
 # Later patches legitimately modify earlier added hunks. Verify the complete
 # pinned tree using a temporary Git index; never reapply an older hunk or change
 # an engineer's dependency checkout while starting a scenario.
-PYTHONPATH="$ROOT_DIR:${PYTHONPATH:-}" python3 - "$ROOT_DIR" "$NS3_DIR" <<'PYSDK'
-import sys
+NATIVE_SDK_VERIFICATION="$(PYTHONPATH="$ROOT_DIR:${PYTHONPATH:-}" python3 - "$ROOT_DIR" "$NS3_DIR" <<'PYSDK'
+import json, sys
 from pathlib import Path
 from scripts.product.bootstrap_native_runtime import verify_sdk
 try:
-    verify_sdk(Path(sys.argv[1]), Path(sys.argv[2]))
+    result = verify_sdk(Path(sys.argv[1]), Path(sys.argv[2]))
+    print(json.dumps(result, sort_keys=True))
 except (OSError, RuntimeError, ValueError) as error:
     raise SystemExit(f'Native SDK does not match the pinned patched tree: {error}. '
                      'Use bootstrap_native_runtime.py in a separate clean workspace.')
 PYSDK
+)"
 PYTHONPATH="$PYTHON_DEPS" python3 - "$PROPAGATION_PROFILE" <<'PY'
 import sys
 from importlib.metadata import version
@@ -673,6 +675,7 @@ PY
 [[ -x "$PYTHON_TOOLING/bin/cmake" ]] || { printf 'Pinned CMake tooling is absent.\n' >&2; exit 2; }
 
 mkdir -p "$RUN_DIR"/{logs,metrics,pcap,screenshots,plots} "$UART_DIR" "$WORK_DIR"
+printf '%s\n' "$NATIVE_SDK_VERIFICATION" > "$RUN_DIR/logs/native_sdk_source_verification.json"
 mkdir -p "$(dirname "$NATIVE_EVENT_CSV")" "$(dirname "$NATIVE_PCAP_PREFIX")"
 mapfile -t NATIVE_CAPTURE_MOUNT < <(python3 - "$CAPTURE_STORAGE" "$NATIVE_CAPTURE_TMPFS_LIMIT_BYTES" \
   "$NATIVE_EVENT_CSV" "$NATIVE_PCAP_PREFIX" "$NATIVE_CAPTURE_SPOOL" \
@@ -1026,6 +1029,7 @@ capture_effective_configuration() {
     --config "sionna_doppler_epoch_patch=$DOPPLER_EPOCH_PATCH"
     --config "sionna_receiver_batch_patch=$RECEIVER_BATCH_PATCH"
     --config "sionna_dynamic_rt_inputs_patch=$DYNAMIC_RT_INPUTS_PATCH"
+    --observed-params "native_sdk_sources=$RUN_DIR/logs/native_sdk_source_verification.json"
     --config "tap_queue_selection_patch=$TAP_QUEUE_SELECTION_PATCH"
     --config "native_rt_pool_source=$ROOT_DIR/network/ns3/scratch/native-rt-pool.h"
     --config "native_rt_cache_source=$ROOT_DIR/network/ns3/scratch/native-rt-cache.h"
