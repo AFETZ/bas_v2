@@ -574,7 +574,7 @@ class RelayExperiment:
             relative = self.args.base_altitude_m + (i - 1) * self.args.altitude_separation_m
             target = (*self.initial[i].position[:2], self.anchors[i]["world_z_offset_m"] + relative)
             if self.urban:
-                relative = self.urban.routes[i][0][2] - self.urban.ground_reference_z_m
+                relative = self.urban.routes[i][0][2] - self.urban.ground_for(i)
                 target = (*self.urban.spawns[i][:2], self.urban.routes[i][0][2])
             hold = RegionHold(target, self.args.hold_s, self.args.z_tolerance_m,
                               self.args.xy_tolerance_m, self.args.hold_speed_mps)
@@ -585,7 +585,7 @@ class RelayExperiment:
                 control_pose = self.telemetry_pose(i) if self.urban else self.poses[i]
                 if control_pose is None:
                     return
-                ground = self.urban.ground_reference_z_m if self.urban else self.initial[i].position[2]
+                ground = self.urban.ground_for(i) if self.urban else self.initial[i].position[2]
                 climb = control_pose.position[2] - ground
                 if not self.armed(i):
                     if climb >= 2:
@@ -736,7 +736,7 @@ class RelayExperiment:
         target = self.urban.routes[i][index]
         identity = f"waypoint{index}:uav{i}"
         goal = Goal(identity, i, time.monotonic_ns(), self.source_s,
-                    target[2] - self.urban.ground_reference_z_m, target,
+                    target[2] - self.urban.ground_for(i), target,
                     waypoint_index=index, waypoint_id=identity, maneuver_kind="horizontal")
         self.urban_holds[i] = RegionHold(target, self.urban.waypoint_dwell_s,
             self.args.z_tolerance_m, self.args.xy_tolerance_m, self.args.hold_speed_mps)

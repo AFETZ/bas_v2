@@ -23,6 +23,10 @@ SHAPE = {
     'runtime': {'clock', 'image', 'land_timeout_s'},
     'flows': {'channels', 'payload_attitude_interval_s'},
 }
+PROPAGATION_FIELDS = {
+    'geometry_logdistance': {'model'},
+    'sionna': {'model', 'radio_config', 'ground_material', 'building_material', 'thickness_m'},
+}
 MILESTONES = {'service_started', 'phase_requested', 'takeoff_observed',
               'waypoint_reached_telemetry', 'barrier_released', 'experiment_failed',
               'stop_requested', 'urban_measurement_window_closed',
@@ -60,10 +64,14 @@ def load_config(path, root=ROOT):
     if not isinstance(config, dict) or set(config) != set(SHAPE):
         raise ValueError('runtime config has missing or unknown sections')
     for section, keys in SHAPE.items():
+        if section == 'propagation' and isinstance(config[section], dict):
+            model = config[section].get('model')
+            if not isinstance(model, str) or model not in PROPAGATION_FIELDS:
+                raise ValueError('propagation.model must be geometry_logdistance or sionna; hybrid is not qualified')
+            keys = PROPAGATION_FIELDS[model]
         if not isinstance(config[section], dict) or set(config[section]) != keys:
             raise ValueError(f'expected {section} fields: {sorted(keys)}')
     supported = [('environment', 'engine', 'gazebo'), ('drone', 'autopilot', 'ardupilot_sitl'),
-                 ('propagation', 'model', 'geometry_logdistance'),
                  ('network', 'engine', 'ns3'), ('network', 'topology', 'adhoc'),
                  ('runtime', 'clock', 'realtime')]
     for section, key, value in supported:
@@ -112,8 +120,41 @@ def load_config(path, root=ROOT):
         raise ValueError(f'scene does not exist: {scene}')
     config['environment']['scene'] = scene.relative_to(root).as_posix()
     from scripts.product.urban_mission import UrbanScenario
-    if tuple(sorted(UrbanScenario.load(scene).spawns)) != tuple(range(1, count + 1)):
+    scenario = UrbanScenario.load(scene, root=root)
+    if tuple(sorted(scenario.spawns)) != tuple(range(1, count + 1)):
         raise ValueError('scene UAV roster must match drone.count exactly')
+    if scenario.terrain_bundle_path is not None and config['propagation']['model'] != 'sionna':
+        raise ValueError('terrain_bundle requires Sionna; flat geometry propagation cannot represent terrain')
+    if config['propagation']['model'] == 'sionna':
+        propagation = config['propagation']
+        radio_name = propagation['radio_config']
+        if not isinstance(radio_name, str) or not radio_name:
+            raise ValueError('propagation.radio_config must be a nonempty path string')
+        radio_file = (root / radio_name.replace('\\', '/')).resolve()
+        try:
+            radio_file.relative_to(root)
+        except ValueError:
+            raise ValueError('propagation.radio_config must stay inside the workspace') from None
+        if not radio_file.is_file():
+            raise ValueError('propagation.radio_config does not exist')
+        from scripts.product.prepare_urban_gazebo import read_rt_radio_profile
+        from scripts.product.prepare_sionna_scene import ITU_FREQUENCIES_GHZ
+        raw_scene = scenario.raw
+        read_rt_radio_profile(radio_file, raw_scene)
+        thickness = propagation['thickness_m']
+        if type(thickness) not in (int, float) or not 0 < thickness <= sys.float_info.max:
+            raise ValueError('propagation.thickness_m must be finite and positive')
+        frequency = raw_scene['radio']['frequency_hz'] / 1e9
+        for field in ('ground_material', 'building_material'):
+            material = propagation[field]
+            if not isinstance(material, str) or material not in ITU_FREQUENCIES_GHZ or not any(
+                    low <= frequency <= high for low, high in ITU_FREQUENCIES_GHZ[material]):
+                raise ValueError(f'{field} must be an explicit supported ITU material at the scene frequency')
+        if scenario.terrain_manifest is not None and any(
+                propagation[field] != scenario.terrain_manifest['materials'][field]
+                for field in ('ground_material', 'building_material', 'thickness_m')):
+            raise ValueError('RT profile materials/thickness must match the shared terrain bundle')
+        propagation['radio_config'] = radio_file.relative_to(root).as_posix()
     return config
 
 
@@ -126,7 +167,7 @@ def environment(config, run_id, inherited=None):
         'NATIVE_FIVE_CONTAINER_NAME': 'bas-core-' + run_id,
         'NATIVE_FIVE_RUN_ID': run_id, 'NATIVE_FIVE_SCENARIO': 'urban',
         'NATIVE_URBAN_CONFIG': config['environment']['scene'],
-        'NATIVE_PROPAGATION_PROFILE': 'geometry_logdistance',
+        'NATIVE_PROPAGATION_PROFILE': config['propagation']['model'],
         'NATIVE_COORDINATION_POLICY': config['experiment']['policy'],
         'NATIVE_EXPERIMENT_DURATION_S': config['experiment']['duration_s'],
         'NATIVE_RNG_SEED': config['experiment']['seed'], 'NATIVE_RNG_RUN': config['experiment']['run'],
@@ -141,6 +182,13 @@ def environment(config, run_id, inherited=None):
         'NATIVE_EXPERIMENT_PILOT': 1, 'NATIVE_PARAMETER_SNAPSHOTS': 0,
         'NATIVE_COMMAND_PERIOD_S': 1, 'NATIVE_TASK_PERIOD_S': 20,
     }
+    if config['propagation']['model'] == 'sionna':
+        propagation = config['propagation']
+        settings.update(NATIVE_RADIO_CONFIG=propagation['radio_config'],
+                        NATIVE_RT_GROUND_MATERIAL=propagation['ground_material'],
+                        NATIVE_RT_BUILDING_MATERIAL=propagation['building_material'],
+                        NATIVE_RT_THICKNESS_M=propagation['thickness_m'])
+    settings['NATIVE_URBAN_OUTPUT'] = f'runs/control/{run_id}/generated'
     env.update({'BAS_' + k: str(v) for k, v in settings.items()})
     return env
 
@@ -151,6 +199,21 @@ def control_dir(run_id):
 
 def raw_dir(run_id):
     return ROOT / 'runs/native-radio-realtime' / identifier(run_id)
+
+
+def snapshot_inputs(config, folder, env):
+    """Freeze the exact input files consumed by both host preparation and Docker."""
+    write_json(folder / 'config.json', config)
+    scene_bytes = (ROOT / config['environment']['scene']).read_bytes()
+    (folder / 'scene.json').write_bytes(scene_bytes)
+    env['BAS_NATIVE_URBAN_CONFIG'] = (folder / 'scene.json').relative_to(ROOT).as_posix()
+    hashes = dict(scene_sha256=hashlib.sha256(scene_bytes).hexdigest(), radio_sha256=None)
+    if config['propagation']['model'] == 'sionna':
+        radio_bytes = (ROOT / config['propagation']['radio_config']).read_bytes()
+        (folder / 'radio.yaml').write_bytes(radio_bytes)
+        env['BAS_NATIVE_RADIO_CONFIG'] = (folder / 'radio.yaml').relative_to(ROOT).as_posix()
+        hashes['radio_sha256'] = hashlib.sha256(radio_bytes).hexdigest()
+    return hashes
 
 
 def recorded_outcome(raw, code, summary):
@@ -216,17 +279,12 @@ def run(config, run_id):
                        check=True, stdout=subprocess.DEVNULL)
         folder.mkdir(parents=True)
         env = environment(config, run_id)
-        scene = ROOT / config['environment']['scene']
-        write_json(folder / 'config.json', config)
-        scene_bytes = scene.read_bytes()
-        (folder / 'scene.json').write_bytes(scene_bytes)
-        # Both generators consume this per-run snapshot, even if the working scene is edited later.
-        env['BAS_NATIVE_URBAN_CONFIG'] = str((folder / 'scene.json').relative_to(ROOT))
+        hashes = snapshot_inputs(config, folder, env)
         argv = ['./network/ns3/run_native_radio_five_uav.sh']
         record = dict(run_id=run_id, status='running', argv=argv,
                       source_commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
                       source_dirty=bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT)),
-                      scene_sha256=hashlib.sha256(scene_bytes).hexdigest(),
+                      **hashes,
                       environment={k: v for k, v in env.items() if k.startswith('BAS_')},
                       started_host_monotonic_ns=time.monotonic_ns(),
                       started_utc=datetime.datetime.now(datetime.timezone.utc).isoformat())
@@ -288,12 +346,16 @@ def events(paths, command_id=None, event=None, limit=50):
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == 'ui':
+        from scripts.product.operator_ui import main as ui_main
+        return ui_main(['--serve', *sys.argv[2:]])
     if len(sys.argv) > 1 and sys.argv[1] == 'batch':
         from scripts.product.run_batch import main as batch_main
         return batch_main(sys.argv[2:])
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
     commands.add_parser('batch', help='sequential parameter/seed runs; use batch --help')
+    commands.add_parser('ui', help='local operator interface on 127.0.0.1; use ui --help')
     for name in ('inspect', 'run'):
         p = commands.add_parser(name)
         p.add_argument('--config', type=Path, default=ROOT / 'runtime.json')

@@ -77,6 +77,10 @@ REQUIRES_RT=0
 [[ "$PROPAGATION_PROFILE" != sionna && "$PROPAGATION_PROFILE" != hybrid ]] || REQUIRES_RT=1
 GEOMETRY_CONFIG="${BAS_NATIVE_URBAN_CONFIG:-network/config/urban_two_building.json}"
 [[ "$GEOMETRY_CONFIG" == /* ]] || GEOMETRY_CONFIG="$ROOT_DIR/$GEOMETRY_CONFIG"
+URBAN_OUTPUT="${BAS_NATIVE_URBAN_OUTPUT:-.external/urban_ns3}"
+[[ "$URBAN_OUTPUT" == /* ]] || URBAN_OUTPUT="$ROOT_DIR/$URBAN_OUTPUT"
+RADIO_CONFIG_OVERRIDE="${BAS_NATIVE_RADIO_CONFIG:-}"
+[[ -z "$RADIO_CONFIG_OVERRIDE" || "$RADIO_CONFIG_OVERRIDE" == /* ]] || RADIO_CONFIG_OVERRIDE="$ROOT_DIR/$RADIO_CONFIG_OVERRIDE"
 export BAS_SIMULATION_MODE="${BAS_SIMULATION_MODE:-realtime}"
 export BAS_LOCKSTEP_STEP_MS="${BAS_LOCKSTEP_STEP_MS:-20}"
 export BAS_LOCKSTEP_TIMEOUT_S="${BAS_LOCKSTEP_TIMEOUT_S:-60}"
@@ -99,9 +103,15 @@ PYMODE
 [[ "$GUI" == 0 || "$GUI" == 1 ]] || { printf 'BAS_NATIVE_FIVE_GUI must be 0 or 1.\n' >&2; exit 2; }
 [[ "$CAPTURE_IMAGES" == 0 || "$CAPTURE_IMAGES" == 1 ]] || { printf 'BAS_NATIVE_CAPTURE_IMAGES must be 0 or 1.\n' >&2; exit 2; }
 if [[ "$SCENARIO_KEY" == urban ]]; then
-  [[ "$PROPAGATION_PROFILE" == geometry_logdistance && "$FAULT_PROFILE" == none && "$COORDINATION_POLICY" != off ]] || {
-    printf 'Urban mission requires geometry_logdistance, explicit coordinator policy and no injected fault.\n' >&2; exit 2;
+  [[ ( "$PROPAGATION_PROFILE" == geometry_logdistance || "$PROPAGATION_PROFILE" == sionna ) && "$FAULT_PROFILE" == none && "$COORDINATION_POLICY" != off ]] || {
+    printf 'Urban mission requires explicit geometry_logdistance or Sionna, coordinator policy and no injected fault.\n' >&2; exit 2;
   }
+  if [[ "$PROPAGATION_PROFILE" == sionna ]]; then
+    [[ -n "$RADIO_CONFIG_OVERRIDE" && -n "${BAS_NATIVE_RT_GROUND_MATERIAL:-}" &&
+       -n "${BAS_NATIVE_RT_BUILDING_MATERIAL:-}" && -n "${BAS_NATIVE_RT_THICKNESS_M:-}" ]] || {
+      printf 'Urban Sionna requires an explicit radio config and ITU material/thickness profile.\n' >&2; exit 2;
+    }
+  fi
   BAS_NATIVE_EXPERIMENT_PROFILE=urban
 fi
 
@@ -120,13 +130,29 @@ run_in_container() {
     python3 "$ROOT_DIR/scripts/product/prepare_town01_gazebo.py"
   fi
   if [[ "$SCENARIO_KEY" == urban ]]; then
-    python3 "$ROOT_DIR/scripts/product/prepare_urban_gazebo.py" --config "$GEOMETRY_CONFIG" --output "$ROOT_DIR/.external/urban_ns3" --uav-count "$UAV_COUNT"
+    local -a urban_args=(--config "$GEOMETRY_CONFIG" --output "$URBAN_OUTPUT" --uav-count "$UAV_COUNT"
+                         --propagation-profile "$PROPAGATION_PROFILE")
+    if [[ "$PROPAGATION_PROFILE" == sionna ]]; then
+      urban_args+=(--radio-config "$RADIO_CONFIG_OVERRIDE" --ground-material "$BAS_NATIVE_RT_GROUND_MATERIAL"
+                   --building-material "$BAS_NATIVE_RT_BUILDING_MATERIAL" --thickness-m "$BAS_NATIVE_RT_THICKNESS_M")
+    fi
+    python3 "$ROOT_DIR/scripts/product/prepare_urban_gazebo.py" "${urban_args[@]}"
+    GEOMETRY_CONFIG="$URBAN_OUTPUT/mission-scene.json"
   fi
   local container_geometry="$GEOMETRY_CONFIG"
   if [[ "$GEOMETRY_CONFIG" == "$ROOT_DIR/"* ]]; then
     container_geometry="/workspace/multiagent_simulation/${GEOMETRY_CONFIG#"$ROOT_DIR/"}"
-  elif [[ "$PROPAGATION_PROFILE" == geometry_logdistance ]]; then
+  elif [[ "$SCENARIO_KEY" == urban ]]; then
     printf 'Urban config must be inside the mounted repository: %s\n' "$GEOMETRY_CONFIG" >&2; return 2
+  fi
+  local container_urban_output="$URBAN_OUTPUT" container_radio="$RADIO_CONFIG_OVERRIDE"
+  if [[ "$SCENARIO_KEY" == urban ]]; then
+    [[ "$URBAN_OUTPUT" == "$ROOT_DIR/"* ]] || { printf 'Urban output must be inside the mounted repository.\n' >&2; return 2; }
+    container_urban_output="/workspace/multiagent_simulation/${URBAN_OUTPUT#"$ROOT_DIR/"}"
+    if [[ -n "$RADIO_CONFIG_OVERRIDE" ]]; then
+      [[ "$RADIO_CONFIG_OVERRIDE" == "$ROOT_DIR/"* ]] || { printf 'Radio profile must be inside the mounted repository.\n' >&2; return 2; }
+      container_radio="/workspace/multiagent_simulation/${RADIO_CONFIG_OVERRIDE#"$ROOT_DIR/"}"
+    fi
   fi
   local -a gpu_args=()
   if [[ "$REQUIRES_RT" == 1 || "$GUI" == 1 || "$CAPTURE_IMAGES" == 1 ]] && \
@@ -158,6 +184,11 @@ run_in_container() {
     -e BAS_SOURCE_DIRTY="$(git -C "$ROOT_DIR" status --porcelain | wc -l)" \
     -e BAS_NATIVE_PROPAGATION_PROFILE="${BAS_NATIVE_PROPAGATION_PROFILE:-sionna}" \
     -e BAS_NATIVE_URBAN_CONFIG="$container_geometry" \
+    -e BAS_NATIVE_URBAN_OUTPUT="$container_urban_output" \
+    -e BAS_NATIVE_RADIO_CONFIG="$container_radio" \
+    -e BAS_NATIVE_RT_GROUND_MATERIAL="${BAS_NATIVE_RT_GROUND_MATERIAL:-}" \
+    -e BAS_NATIVE_RT_BUILDING_MATERIAL="${BAS_NATIVE_RT_BUILDING_MATERIAL:-}" \
+    -e BAS_NATIVE_RT_THICKNESS_M="${BAS_NATIVE_RT_THICKNESS_M:-}" \
     -e BAS_NATIVE_WIFI_TOPOLOGY="$WIFI_TOPOLOGY" \
     -e BAS_NATIVE_WIFI_EXPLICIT_BAR="$WIFI_EXPLICIT_BAR" \
     -e BAS_NATIVE_WIFI_AGGREGATION="$WIFI_AGGREGATION" \
@@ -257,10 +288,10 @@ if [[ "${BAS_NATIVE_FLIGHT_DIAGNOSTIC:-0}" == 1 ]]; then
 fi
 if [[ "$COORDINATION_POLICY" != off ]]; then
   [[ "$BAS_SIMULATION_MODE" == realtime &&
-     ( "$PROPAGATION_PROFILE" == friis || "$PROPAGATION_PROFILE" == geometry_logdistance ) && "$WIFI_TOPOLOGY" == adhoc &&
+     ( "$PROPAGATION_PROFILE" == friis || "$PROPAGATION_PROFILE" == geometry_logdistance || "$PROPAGATION_PROFILE" == sionna ) && "$WIFI_TOPOLOGY" == adhoc &&
      "$SCENARIO_MODE" == product && ( "$ACTIVE_UART_CHANNELS" == control || "$ACTIVE_UART_CHANNELS" == control,payload ) &&
      -z "${BAS_NATIVE_EXTERNAL_CONFIG:-}" && -z "${BAS_NATIVE_SOURCES:-}" ]] || {
-    printf 'Coordination requires 1..5 realtime UAVs, explicit Friis or geometry_logdistance/ad-hoc, control with optional payload UART, and no other scenario mode.\n' >&2
+    printf 'Coordination requires 1..5 realtime UAVs, explicit Friis/geometry_logdistance/Sionna ad-hoc, control with optional payload UART, and no other scenario mode.\n' >&2
     exit 2
   }
   SCENARIO_MODE="relay_experiment"
@@ -309,7 +340,7 @@ PHASED_ARRAY_ADAPTER_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-spectrumwifi-ph
 LOCKSTEP_TAP_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-lockstep-tap-read.patch"
 SOLVER_BUDGET_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-solver-budget.patch"
 if [[ "$SCENARIO_KEY" == urban ]]; then
-  SCENARIO="$ROOT_DIR/.external/urban_ns3/scenario.yaml"
+  SCENARIO="$URBAN_OUTPUT/scenario.yaml"
 elif [[ "$SCENARIO_KEY" == customer ]]; then
   SCENARIO="$ROOT_DIR/network/config/scenario_5uav_customer_native_product.yaml"
 elif [[ "$SCENARIO_KEY" == rock_demo ]]; then
@@ -609,9 +640,12 @@ export PYTHONPATH="$PYTHON_TOOLING:$PYTHON_DEPS:${PYTHONPATH:-}"
 cp "$PROJECT_SOURCE" "$UPSTREAM_SOURCE"
 cp "$ROOT_DIR/network/ns3/scratch/native-geometry-loss.h" "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" "$ROOT_DIR/network/ns3/scratch/native-live-state.h" "$ROOT_DIR/network/ns3/scratch/native-lockstep.h" "$NS3_DIR/scratch/"
 source_args=()
+if [[ "$SCENARIO_KEY" == urban ]]; then
+  cp "$GEOMETRY_CONFIG" "$RUN_DIR/logs/urban_scenario.json"
+fi
 if [[ "$PROPAGATION_PROFILE" == geometry_logdistance ]]; then
   [[ -f "$GEOMETRY_CONFIG" && "$FAULT_PROFILE" == none ]] || { printf 'Geometry radio requires explicit JSON and no injected fault.\n' >&2; exit 2; }
-  cp "$GEOMETRY_CONFIG" "$RUN_DIR/logs/urban_scenario.json"
+  [[ "$SCENARIO_KEY" == urban ]] || cp "$GEOMETRY_CONFIG" "$RUN_DIR/logs/urban_scenario.json"
   source_args+=(--geometryConfig="$RUN_DIR/logs/urban_scenario.json" --geometryCsv="$RUN_DIR/logs/geometry_links.csv")
 fi
 if [[ -n "${BAS_NATIVE_SOURCES:-}" ]]; then
@@ -773,6 +807,10 @@ capture_effective_configuration() {
     fi
   else
     config_args+=(--config "sionna_scene=$SCENE")
+    if [[ "$SCENARIO_KEY" == urban ]]; then
+      config_args+=(--config "geometry_source=$RUN_DIR/logs/urban_scenario.json"
+                    --config "sionna_geometry_manifest=$(dirname "$SCENE")/scene-manifest.json")
+    fi
   fi
   if [[ "$PHYSICS_PROFILE" == bullet_rotor ]]; then
     config_args+=(--config "physics_runtime=$RUN_DIR/logs/physics_runtime.json")

@@ -23,8 +23,30 @@ MATCHES = {
     "scenario": ("town01_full_stack_scenario.py run",),
     "native_product_scenario": ("native_radio_product_scenario.py run",),
     "native_five_uav_scenario": ("native_radio_five_uav_scenario.py run",),
+    "relay_scenario": ("scripts/product/relay_experiment.py",),
+    "coordination_service": ("network.coordination.service",),
     "traffic_profile": ("town01_communication_profiles.py",),
 }
+
+
+def host_record(proc_root=Path('/proc')):
+    """Clock and kernel-pressure evidence for stalls; missing probes stay null."""
+    record = dict(component='host', monotonic_ns=time.monotonic_ns(), unix_ns=time.time_ns(),
+                  boottime_ns=None, pressure={}, memory_available_bytes=None)
+    if hasattr(time, 'CLOCK_BOOTTIME'):
+        record['boottime_ns'] = time.clock_gettime_ns(time.CLOCK_BOOTTIME)
+    for name in ('cpu', 'io', 'memory'):
+        try:
+            record['pressure'][name] = (proc_root / 'pressure' / name).read_text().strip()
+        except OSError:
+            record['pressure'][name] = None
+    try:
+        for line in (proc_root / 'meminfo').read_text().splitlines():
+            if line.startswith('MemAvailable:'):
+                record['memory_available_bytes'] = int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return record
 
 
 def process_records() -> list[dict[str, Any]]:
@@ -101,8 +123,10 @@ def main() -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     previous: dict[int, tuple[int, int]] = {}
     clock_ticks = os.sysconf("SC_CLK_TCK")
-    with args.output.open("w", encoding="utf-8") as output:
+    with args.output.open("w", encoding="utf-8") as output, args.output.with_name("runtime_host.jsonl").open("w", encoding="utf-8") as host_output:
         while not args.stop_file.exists():
+            host_output.write(json.dumps(host_record(), sort_keys=True, separators=(",", ":")) + "\n")
+            host_output.flush()
             now_ns = time.monotonic_ns()
             gpu = gpu_memory()
             for record in process_records():

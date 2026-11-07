@@ -1,0 +1,144 @@
+"""Explicit RT configuration and preparation; packet/flight qualification runs separately."""
+import copy
+import hashlib
+import json
+from pathlib import Path
+import shutil
+import tempfile
+import unittest
+from unittest.mock import patch
+
+import yaml
+
+import bas
+from scripts.product import prepare_urban_gazebo as generator
+
+
+class RadioProfileTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.scene = json.loads((bas.ROOT / 'network/config/urban_low.json').read_text())
+        self.scene['spawns'] = {'1': self.scene['spawns']['1']}
+        self.scene['routes'] = {'1': self.scene['routes']['1']}
+        self.scene['mission']['barriers'] = {}
+        self.scene_file = self.root / 'scene.json'
+        self.scene_file.write_text(json.dumps(self.scene))
+        self.radio = yaml.safe_load((bas.ROOT / 'network/config/native_wifi_80211n_spectrum_product.yaml').read_text())
+        self.radio['sionna'].update(samples_per_src=20000, max_num_paths_per_src=10000,
+                                    diffraction=True, edge_diffraction=True)
+        self.radio_file = self.root / 'radio.yaml'
+        self.write_radio()
+        self.config = json.loads((bas.ROOT / 'runtime.json').read_text())
+        self.config['environment']['scene'] = 'scene.json'
+        self.config['drone']['count'] = 1
+        self.config['propagation'] = dict(model='sionna', radio_config='radio.yaml',
+                                          ground_material='medium_dry_ground', building_material='concrete', thickness_m=.1)
+        target = self.root / 'network/config'
+        target.mkdir(parents=True)
+        for name in ('scenario_5uav_town01_native_product.yaml', 'town01_sitl.parm'):
+            shutil.copy2(bas.ROOT / 'network/config' / name, target / name)
+
+    def write_radio(self):
+        self.radio_file.write_text(yaml.safe_dump(self.radio))
+
+    def load(self, config=None):
+        path = self.root / 'runtime.json'
+        path.write_text(json.dumps(self.config if config is None else config))
+        return bas.load_config(path, self.root)
+
+    def test_rt_profile_requires_every_explicit_argument_and_rejects_hybrid(self):
+        for field in ('radio_config', 'ground_material', 'building_material', 'thickness_m'):
+            config = copy.deepcopy(self.config)
+            del config['propagation'][field]
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                self.load(config)
+        self.config['propagation'] = {'model': 'hybrid'}
+        with self.assertRaisesRegex(ValueError, 'not qualified'):
+            self.load()
+
+    def test_all_runtime_arguments_are_forwarded_from_selected_profile(self):
+        config = self.load()
+        env = bas.environment(config, 'rt-test', inherited={'BAS_NATIVE_PROPAGATION_PROFILE': 'friis'})
+        self.assertEqual(env['BAS_NATIVE_PROPAGATION_PROFILE'], 'sionna')
+        self.assertEqual(env['BAS_NATIVE_RADIO_CONFIG'], 'radio.yaml')
+        self.assertEqual(env['BAS_NATIVE_RT_GROUND_MATERIAL'], 'medium_dry_ground')
+        self.assertEqual(env['BAS_NATIVE_RT_BUILDING_MATERIAL'], 'concrete')
+        self.assertEqual(env['BAS_NATIVE_RT_THICKNESS_M'], '0.1')
+        self.assertEqual(env['BAS_NATIVE_UART_CHANNELS'], 'control,payload')
+        self.assertEqual(env['BAS_NATIVE_URBAN_OUTPUT'], 'runs/control/rt-test/generated')
+
+    def test_snapshot_and_generator_consume_the_frozen_radio_and_geometry(self):
+        config = self.load()
+        env = bas.environment(config, 'rt-test')
+        folder = self.root / 'runs/control/rt-test'
+        folder.mkdir(parents=True)
+        original_radio = self.radio_file.read_bytes()
+        with patch.object(bas, 'ROOT', self.root):
+            hashes = bas.snapshot_inputs(config, folder, env)
+        self.radio['radio']['tx_power_w'] = .5
+        self.write_radio()
+        self.assertEqual((self.root / env['BAS_NATIVE_RADIO_CONFIG']).read_bytes(), original_radio)
+        self.assertEqual(hashes['radio_sha256'], hashlib.sha256(original_radio).hexdigest())
+        output = self.root / env['BAS_NATIVE_URBAN_OUTPUT']
+        with patch.object(generator, 'ROOT', self.root):
+            generator.prepare(self.root / env['BAS_NATIVE_URBAN_CONFIG'], output, 1,
+                              propagation_profile='sionna', radio_config=self.root / env['BAS_NATIVE_RADIO_CONFIG'],
+                              ground_material=env['BAS_NATIVE_RT_GROUND_MATERIAL'],
+                              building_material=env['BAS_NATIVE_RT_BUILDING_MATERIAL'], thickness_m=.1)
+        scenario = yaml.safe_load((output / 'scenario.yaml').read_text())
+        self.assertEqual(scenario['radio']['config'], env['BAS_NATIVE_RADIO_CONFIG'])
+        scene = self.root / scenario['scenario']['map']['scene_xml']
+        self.assertTrue(scene.is_file())
+        self.assertEqual(scene, output / 'rt/scene.xml')
+        manifest = json.loads((scene.parent / 'scene-manifest.json').read_text())
+        self.assertEqual(manifest['source_json_sha256'], hashes['scene_sha256'])
+
+    def test_scene_carrier_and_actual_native_channel_must_agree(self):
+        for field, number in [('carrier_hz', 2437e6), ('channel_number', 6)]:
+            radio = copy.deepcopy(self.radio)
+            radio['radio'][field] = number
+            self.radio_file.write_text(yaml.safe_dump(radio))
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, 'disagree'):
+                self.load()
+
+    def test_bad_budgets_flags_and_unknown_fields_cannot_be_ignored(self):
+        for field, value in [('samples_per_src', 0), ('max_num_paths_per_src', '10000'),
+                             ('diffraction', 'true'), ('max_depth', True), ('invented', 10)]:
+            radio = copy.deepcopy(self.radio)
+            radio['sionna'][field] = value
+            self.radio_file.write_text(yaml.safe_dump(radio))
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                self.load()
+
+    def test_radio_path_materials_and_thickness_are_checked(self):
+        for field, value in [('radio_config', '../outside.yaml'), ('ground_material', 'invented'),
+                             ('building_material', 'floorboard'), ('thickness_m', 0), ('thickness_m', float('inf'))]:
+            config = copy.deepcopy(self.config)
+            config['propagation'][field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                self.load(config)
+
+    def test_radio_duplicate_and_malformed_yaml_are_rejected(self):
+        self.radio_file.write_text(self.radio_file.read_text() + '\nschema_version: 1\n')
+        with self.assertRaisesRegex(ValueError, 'duplicate'):
+            self.load()
+        self.radio_file.write_text('radio: [broken')
+        with self.assertRaisesRegex(ValueError, 'invalid radio profile YAML'):
+            self.load()
+
+    def test_geometry_profile_remains_compatible_and_does_not_enable_rt(self):
+        self.config['propagation'] = {'model': 'geometry_logdistance'}
+        config = self.load()
+        env = bas.environment(config, 'geometry')
+        self.assertEqual(env['BAS_NATIVE_PROPAGATION_PROFILE'], 'geometry_logdistance')
+        self.assertNotIn('BAS_NATIVE_RADIO_CONFIG', env)
+        with patch.object(generator, 'ROOT', self.root):
+            generator.prepare(self.scene_file, self.root / 'geometry', 1)
+        scenario = yaml.safe_load((self.root / 'geometry/scenario.yaml').read_text())
+        self.assertEqual(scenario['scenario']['map']['scene_xml'], 'not_used_no_rt.xml')
+
+
+if __name__ == '__main__':
+    unittest.main()

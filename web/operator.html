@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="bas-token" content="__TOKEN__"><title>BAS · Оператор стенда</title>
+<style>
+:root{color-scheme:dark;--bg:#111820;--panel:#18232d;--line:#344553;--text:#edf3f7;--muted:#b4c3ce;--accent:#68d5bd;--warn:#ffd284;--error:#ffaaa5}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,sans-serif}header{padding:22px 30px;border-bottom:1px solid var(--line);display:flex;align-items:baseline;gap:22px;flex-wrap:wrap}h1{font-size:23px;margin:0;letter-spacing:.02em}header span{color:var(--muted)}main{max-width:1500px;margin:auto;padding:24px 30px;display:grid;grid-template-columns:minmax(380px,1fr) minmax(340px,1fr);gap:28px}section{min-width:0}h2{font-size:18px;font-weight:650;margin:0 0 14px}.panel{background:var(--panel);border:1px solid var(--line);padding:18px;margin-bottom:20px}.row{display:flex;gap:10px;align-items:end;flex-wrap:wrap}.row>label{flex:1;min-width:140px}label{display:block;margin-bottom:10px;color:var(--muted)}input,select,textarea,button{font:inherit}input,select,textarea{display:block;width:100%;margin-top:5px;background:#101a23;color:var(--text);border:1px solid #526878;padding:9px;border-radius:3px}textarea{resize:vertical;font:13px/1.5 ui-monospace,Consolas,monospace;tab-size:2}button{background:#263c4b;color:var(--text);border:1px solid #668194;border-radius:3px;padding:9px 14px;cursor:pointer;margin-bottom:10px}button.primary{background:var(--accent);border-color:var(--accent);color:#102923;font-weight:650}button.stop{border-color:var(--warn);color:var(--warn)}button:disabled{opacity:.45;cursor:default}:focus-visible{outline:3px solid var(--accent);outline-offset:3px}small,p.note{color:var(--muted)}#message{min-height:34px;padding:10px 0;white-space:pre-wrap}#message.error{color:var(--error)}#message.ok{color:var(--accent)}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:9px 6px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--muted);font-weight:500;width:45%}pre{margin:0;max-height:340px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 ui-monospace,Consolas,monospace}a{color:var(--accent)}ul{padding-left:20px;max-height:230px;overflow:auto}details{margin-top:15px}summary{cursor:pointer;color:var(--muted)}input[type=checkbox]{display:inline;width:auto;margin-right:7px}@media(max-width:850px){main{grid-template-columns:1fr;padding:18px}header{padding:18px}.row>label{min-width:120px}}
+</style></head>
+<body>
+<header><h1>BAS / Оператор стенда</h1><span>Конфигурация → проверка → запуск → наблюдение</span></header>
+<main>
+<section aria-labelledby="config-heading">
+<h2 id="config-heading">Сценарий и параметры</h2>
+<div class="panel">
+<div class="row"><label for="config-path">Конфигурация в проекте<input id="config-path" value="runtime.json" spellcheck="false"></label><button id="load" type="button">Загрузить</button><button id="copy" type="button">Создать копию</button></div>
+<label for="configuration">Параметры запуска · JSON<textarea id="configuration" rows="20" spellcheck="false" aria-describedby="config-help"></textarea></label>
+<small id="config-help">Меняйте поддержанные поля. Проверка выявит неизвестные параметры и несовместимые настройки.</small>
+<details><summary>Создать вариант геометрии и маршрутов</summary>
+<label><input type="checkbox" id="use-scene">Сохранить этот вариант сцены вместе с запуском</label>
+<label for="scene">Сцена · JSON<textarea id="scene" rows="14" spellcheck="false"></textarea></label>
+<small>Количество аппаратов в сцене и конфигурации должно совпадать. Исходная сцена сохраняется при копировании.</small></details>
+</div>
+<div class="panel"><label for="run-id">Новый идентификатор опыта<input id="run-id" maxlength="80" spellcheck="false" autocomplete="off"></label>
+<div class="row"><button id="validate" type="button">Проверить параметры</button><button id="start" class="primary" type="button">Запустить опыт</button></div>
+<div id="message" role="status" aria-live="polite"></div>
+<p id="platform" class="note"></p></div>
+</section>
+<section aria-labelledby="status-heading"><h2 id="status-heading">Наблюдение</h2>
+<div class="panel"><div class="row"><label for="recent">Сохранённые опыты<select id="recent"><option value="">Выберите опыт</option></select></label><button id="refresh" type="button">Обновить</button></div>
+<label for="selected">Текущий опыт<input id="selected" spellcheck="false" autocomplete="off"></label>
+<button id="stop" class="stop" type="button">Запросить посадку и остановку</button>
+<table aria-label="Результаты опыта"><tbody>
+<tr><th scope="row">Состояние стенда</th><td id="runtime">Нет данных</td></tr>
+<tr><th scope="row">Результат миссии</th><td id="mission">Нет данных</td></tr>
+<tr><th scope="row">Пригодность измерений</th><td id="measurement">Нет данных</td></tr>
+<tr><th scope="row">Фаза</th><td id="phase">Нет данных</td></tr>
+<tr><th scope="row">Код завершения запуска</th><td id="exit">Нет данных</td></tr>
+</tbody></table><p class="note">Подтверждение запроса остановки ещё не означает посадку. Закрытие страницы не останавливает опыт.</p>
+<details><summary>Полная запись состояния</summary><pre id="raw-state"></pre></details></div>
+<div class="panel"><h2>Журнал запуска</h2><pre id="log" tabindex="0" aria-label="Последние записи журнала">Выберите или запустите опыт.</pre></div>
+<div class="panel"><h2>Артефакты и отчёты</h2><ul id="artifacts"></ul><p class="note">3D-наблюдение выполняется в Gazebo. Здесь показаны сохранённые данные контроллера и журнал.</p></div>
+</section></main>
+<script nonce="__TOKEN__">
+'use strict';
+const $=id=>document.getElementById(id),token=document.querySelector('meta[name=bas-token]').content;
+const labels={completed:'Завершён',failed:'Ошибка',succeeded:'Выполнена',incomplete:'Не завершена',cancelled:'Отменена',valid:'Пригодны',invalid:'Непригодны',not_evaluated:'Не оценены',running:'Выполняется',stopped:'Остановлен'};
+function message(text,error=false){$('message').textContent=text;$('message').className=error?'error':'ok'}
+async function api(path,body){const options={cache:'no-store'};if(body!==undefined){options.method='POST';options.headers={'Content-Type':'application/json','X-BAS-Token':token};options.body=JSON.stringify(body)}const response=await fetch(path,options),result=await response.json();if(!response.ok)throw new Error(result.error||`HTTP ${response.status}`);return result}
+function payload(){const result={config:JSON.parse($('configuration').value),run_id:$('run-id').value};if($('use-scene').checked)result.scene=JSON.parse($('scene').value);return result}
+function showConfig(data){$('configuration').value=JSON.stringify(data.config,null,2);$('scene').value=JSON.stringify(data.scene,null,2);$('use-scene').checked=false}
+function newId(){return 'ui-'+new Date().toISOString().replace(/[^0-9]/g,'')}
+async function runs(){const data=await api('/api/runs'),selected=$('recent').value;$('recent').replaceChildren(new Option('Выберите опыт',''));for(const id of data.run_ids)$('recent').add(new Option(id,id));$('recent').value=selected}
+async function status(){const id=$('selected').value;if(!id)return;const data=await api('/api/status?run_id='+encodeURIComponent(id)),record=data.controller||{};for(const[field,key]of[['runtime','runtime_status'],['mission','mission_outcome'],['measurement','measurement_validity']])$(field).textContent=labels[record[key]]||record[key]||'Нет данных';if(!record.runtime_status)$('runtime').textContent=record.status?'Контроллер: '+(labels[record.status]||record.status):data.launcher_state==='running'?'Контроллер запущен; ожидается запись состояния':'Состояние стенда не записано';$('phase').textContent=data.phase||'Нет данных';$('exit').textContent=data.launcher_returncode??record.returncode??'Нет данных';$('raw-state').textContent=JSON.stringify(data,null,2);$('log').textContent=data.log_tail||'Журнал пока пуст.';$('artifacts').replaceChildren();for(const file of data.artifacts){const li=document.createElement('li'),link=document.createElement('a');link.href='/artifact?path='+encodeURIComponent(file.path);link.textContent=`${file.path} · ${file.bytes} байт`;li.append(link);$('artifacts').append(li)}}
+function action(fn){return async()=>{try{await fn()}catch(error){message(error.message,true)}}}
+$('load').onclick=action(async()=>{showConfig(await api('/api/config?path='+encodeURIComponent($('config-path').value)));message('Конфигурация загружена. Для копии задайте новый идентификатор опыта.')});
+$('copy').onclick=()=>{$('run-id').value=newId();$('use-scene').checked=true;message('Копия готова к редактированию. Параметры и сцена сохранятся отдельно при запуске.')};
+$('validate').onclick=action(async()=>{await api('/api/validate',payload());message('Параметры проверены. Аппаратные и полётные критерии проверяются запуском.')});
+$('start').onclick=action(async()=>{const data=await api('/api/start',payload());$('selected').value=data.run_id;message('Контроллер запущен. Ожидайте подготовки компонентов.');await runs();await status()});
+$('stop').onclick=action(async()=>{await api('/api/stop',{run_id:$('selected').value});message('Запрос остановки передан. Результат посадки появится в состоянии опыта.')});
+$('refresh').onclick=action(async()=>{await runs();await status()});$('recent').onchange=action(async()=>{$('selected').value=$('recent').value;await status()});
+(async()=>{try{const data=await api('/api/bootstrap');showConfig(data);$('run-id').value=newId();$('start').disabled=!data.can_launch;$('platform').textContent=data.can_launch?'Запуск выполняется существующим контроллером BAS.':'На этом компьютере доступны редактирование и проверка. Симуляция запускается на Linux-хосте.';await runs()}catch(error){message(error.message,true)}})();
+setInterval(()=>{if($('selected').value)status().catch(error=>message(error.message,true))},2000);
+</script></body></html>
