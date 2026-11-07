@@ -16,6 +16,47 @@ except ImportError:  # direct script entrypoint
 
 
 IO_BATCH = 64
+TOS_BY_CHANNEL = {"control": 184, "payload": 40}  # Same native UART boundary as communication_vertical.
+
+
+def open_radio_socket(config):
+    """Bind only the modeled socket in its namespace; physical I/O stays on host."""
+    radio = config['radio']
+    tos = radio.get('tos', TOS_BY_CHANNEL[config['channel']])
+    if type(tos) is not int or not 0 <= tos <= 255:
+        raise ValueError('radio.tos must be an integer in 0..255')
+    namespace = config.get('radio_namespace')
+    saved = target = udp = None
+    entered = False
+    libc = None
+    try:
+        if namespace:
+            saved = os.open('/proc/self/ns/net', os.O_RDONLY)
+            target = os.open('/var/run/netns/' + namespace, os.O_RDONLY)
+            libc = ctypes.CDLL(None, use_errno=True)
+            if libc.setns(target, 0) != 0:
+                raise OSError(ctypes.get_errno(), 'cannot enter radio namespace')
+            entered = True
+        udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        udp.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, tos)
+        if udp.getsockopt(socket.IPPROTO_IP, socket.IP_TOS) != tos:
+            raise RuntimeError('radio socket did not retain requested TOS')
+        udp.bind(tuple(radio['bind']))
+        udp.setblocking(False)
+        return udp
+    except BaseException:
+        if udp is not None:
+            udp.close()
+        raise
+    finally:
+        restored = not entered or libc.setns(saved, 0) == 0
+        for descriptor in (saved, target):
+            if descriptor is not None:
+                os.close(descriptor)
+        if not restored:
+            if udp is not None:
+                udp.close()
+            raise OSError(ctypes.get_errno(), 'cannot restore endpoint namespace')
 
 
 def flush_queue(queue, write, *, datagram=False, limit=IO_BATCH):
@@ -62,23 +103,7 @@ def run(config, output, duration=None):
     peer = tuple(radio["peer"])
     # Socket namespace is fixed at creation. Keep the physical endpoint in the
     # host network namespace, and only the radio socket inside its modeled TAP.
-    radio_namespace = config.get("radio_namespace")
-    saved = os.open("/proc/self/ns/net", os.O_RDONLY) if radio_namespace else None
-    target = os.open("/var/run/netns/"+radio_namespace, os.O_RDONLY) if radio_namespace else None
-    libc = ctypes.CDLL(None, use_errno=True) if radio_namespace else None
-    try:
-        if target is not None and libc.setns(target, 0) != 0:
-            raise OSError(ctypes.get_errno(), "cannot enter radio namespace")
-        udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        udp.bind(tuple(radio["bind"]))
-    finally:
-        if saved is not None:
-            restored = libc.setns(saved, 0)
-            os.close(saved)
-            os.close(target)
-            if restored != 0:
-                raise OSError(ctypes.get_errno(), "cannot restore endpoint namespace")
-    udp.setblocking(False)
+    udp = open_radio_socket(config)
     counters = TransportCounters()
     encoder = Encoder(channel=config["channel"], uav_id=int(config["uav_id"]),
                       direction="uart_to_gcs", max_payload=192)
@@ -101,6 +126,7 @@ def run(config, output, duration=None):
     metrics = dict(endpoint_to_radio_bytes=0, radio_to_endpoint_bytes=0, reconnects=0,
                    io_errors=0, unexpected_peer=0, stale_radio_drops=0, max_queue_delay_ms=0.0,
                    radio_tx_datagrams=0, connection_epoch_drops=0,
+                   radio_tos=udp.getsockopt(socket.IPPROTO_IP, socket.IP_TOS), pid=os.getpid(),
                    controller_kind=kind, hardware_validation="not_performed",
                    framing="BSF1; unchanged endpoint bytes", clock="host_monotonic")
     output.mkdir(parents=True, exist_ok=True)
@@ -113,7 +139,7 @@ def run(config, output, duration=None):
     def event(name, **values):
         log.write(json.dumps(dict(event=name, monotonic_ns=time.monotonic_ns(), **values))+"\n")
     def publish(now, radio_live):
-        metrics.update(connected=device is not None, radio_live=radio_live,
+        metrics.update(sampled_monotonic_ns=time.monotonic_ns(), connected=device is not None, radio_live=radio_live,
             endpoint_silent=now-last_device_rx > watchdog, radio_silent=now-last_radio_rx > watchdog,
             to_radio_queue_bytes=to_radio.bytes, to_device_queue_bytes=to_device.bytes,
             queue_drops=to_radio.dropped+to_device.dropped,

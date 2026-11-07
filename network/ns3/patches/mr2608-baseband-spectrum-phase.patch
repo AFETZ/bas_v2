@@ -1,0 +1,215 @@
+--- a/src/spectrum/model/sionna-rt-channel-model.h
++++ b/src/spectrum/model/sionna-rt-channel-model.h
+@@ -257,6 +257,10 @@
+          * Doppler shifts per cluster/path (complex vector indexed by path).
+          */
+         std::vector<double> m_doppler;
++
++        /** Full spectrum identity and CIR carrier used by the delay-phase cache. */
++        mutable uint32_t m_cachedSpectrumModelUid{0};
++        mutable double m_cachedCirCarrierHz{0.0};
+     };
+ 
+     /** Configuration for the Sionna RT PathSolver */
+--- a/src/spectrum/model/sionna-rt-spectrum-propagation-loss-model.cc
++++ b/src/spectrum/model/sionna-rt-spectrum-propagation-loss-model.cc
+@@ -319,7 +319,7 @@
+     PhasedArrayModel::ComplexVector doppler,
+     uint8_t numTxPorts,
+     uint8_t numRxPorts,
+-    const bool isReverse)
++    const bool isReverse) const
+ {
+     const size_t numCluster = channelMatrix->m_channel.GetNumPages();
+     const auto numRb = inPsd->GetValuesN();
+@@ -333,21 +333,31 @@
+                                                          numTxPorts,
+                                                          static_cast<uint16_t>(numRb));
+ 
+-    // Precompute the delay until numRb, numCluster or RB width changes
+-    // Whenever the channelParams is updated, the number of numRbs, numClusters
+-    // and RB width (12*SCS) are reset, ensuring these values are updated too
++    const auto sionnaParams =
++        DynamicCast<const SionnaRtChannelModel::SionnaRtChannelParams>(channelParams);
++    NS_ASSERT_MSG(sionnaParams, "Expected Sionna CIR parameters");
++    const double carrierHz = GetFrequency();
++
++    // A spectrum with the same RB count/width can have different bin centers.
++    // The immutable SpectrumModel UID and CIR carrier identify every offset.
+ 
+     if (const double rbWidth = inPsd->ConstBandsBegin()->fh - inPsd->ConstBandsBegin()->fl;
+         channelParams->m_cachedDelaySincos.GetNumRows() != numRb ||
+         channelParams->m_cachedDelaySincos.GetNumCols() != numCluster ||
+-        channelParams->m_cachedRbWidth != rbWidth)
++        channelParams->m_cachedRbWidth != rbWidth ||
++        sionnaParams->m_cachedSpectrumModelUid != inPsd->GetSpectrumModelUid() ||
++        sionnaParams->m_cachedCirCarrierHz != carrierHz)
+     {
+         channelParams->m_cachedRbWidth = rbWidth;
++        sionnaParams->m_cachedSpectrumModelUid = inPsd->GetSpectrumModelUid();
++        sionnaParams->m_cachedCirCarrierHz = carrierHz;
+         channelParams->m_cachedDelaySincos = ComplexMatrixArray(numRb, numCluster);
+         auto sbit = inPsd->ConstBandsBegin(); // band iterator
+         for (unsigned i = 0; i < numRb; i++)
+         {
+-            const double fsb = sbit->fc; // center frequency of the sub-band
++            // Paths.cir() already includes exp(-j*2*pi*carrier*tau).
++            // As in Paths.cfr(), only the baseband frequency offset remains.
++            const double fsb = sbit->fc - carrierHz;
+             for (std::size_t cIndex = 0; cIndex < numCluster; cIndex++)
+             {
+                 const double delay = -2 * M_PI * fsb * channelParams->m_delay[cIndex];
+--- a/src/spectrum/model/sionna-rt-spectrum-propagation-loss-model.h
++++ b/src/spectrum/model/sionna-rt-spectrum-propagation-loss-model.h
+@@ -153,7 +153,7 @@
+      * @param isReverse true if params and longTerm were computed with RX->TX switched
+      * @return 3D spectrum channel matrix with dimensions numRxPorts * numTxPorts * numRBs
+      */
+-    static Ptr<MatrixBasedChannelModel::Complex3DVector> GenSpectrumChannelMatrix(
++    Ptr<MatrixBasedChannelModel::Complex3DVector> GenSpectrumChannelMatrix(
+         Ptr<SpectrumValue> inPsd,
+         Ptr<const MatrixBasedChannelModel::Complex3DVector> longTerm,
+         Ptr<const MatrixBasedChannelModel::ChannelMatrix> channelMatrix,
+@@ -161,7 +161,7 @@
+         PhasedArrayModel::ComplexVector doppler,
+         const uint8_t numTxPorts,
+         const uint8_t numRxPorts,
+-        const bool isReverse);
++        const bool isReverse) const;
+ 
+     /**
+      * Get the operating frequency
+--- a/src/spectrum/test/sionna-channel-model-test.cc
++++ b/src/spectrum/test/sionna-channel-model-test.cc
+@@ -34,6 +34,10 @@
+ #include "ns3/pointer.h"
+ #include "ns3/simulator.h"
+ #include "ns3/sionna-rt-channel-model.h"
++#include "ns3/sionna-rt-spectrum-propagation-loss-model.h"
++#include "ns3/spectrum-model.h"
++#include "ns3/spectrum-signal-parameters.h"
++#include "ns3/spectrum-value.h"
+ #include "ns3/string.h"
+ #include "ns3/test.h"
+ #include "ns3/uinteger.h"
+@@ -234,3 +238,120 @@
+ };
+ 
+ static SionnaSolverBudgetTestSuite g_sionnaSolverBudgetTestSuite;
++
++// Exercise the production CIR-to-spectrum boundary without Python or ray tracing.
++// Paths.cir() supplies complex BASEBAND coefficients, including carrier phase.
++class SionnaSpectrumPhaseProbe : public SionnaRtSpectrumPropagationLossModel
++{
++  public:
++    using SionnaRtSpectrumPropagationLossModel::CalcBeamformingGain;
++    using SionnaRtSpectrumPropagationLossModel::GenSpectrumChannelMatrix;
++};
++
++class SionnaBasebandSpectrumPhaseTest : public TestCase
++{
++  public:
++    SionnaBasebandSpectrumPhaseTest()
++        : TestCase("Sionna CIR carrier phase is applied once, including offset bins and cache changes")
++    {
++    }
++
++  private:
++    Ptr<SpectrumValue> Psd(double shiftHz, const std::vector<double>& powers)
++    {
++        constexpr double carrierHz = 2412000000.0;
++        Bands bands;
++        for (double offset : {-2500000.0, 0.0, 2500000.0})
++        {
++            const double center = carrierHz + shiftHz + offset;
++            bands.push_back({center - 500000.0, center, center + 500000.0});
++        }
++        auto psd = Create<SpectrumValue>(Create<SpectrumModel>(bands));
++        for (size_t i = 0; i < powers.size(); ++i) (*psd)[i] = powers[i];
++        return psd;
++    }
++
++    void Check(Ptr<const MatrixBasedChannelModel::Complex3DVector> actual,
++               const std::vector<std::complex<double>>& expected)
++    {
++        NS_TEST_ASSERT_MSG_EQ(actual->GetNumRows(), 1U, "Unexpected RX port count");
++        NS_TEST_ASSERT_MSG_EQ(actual->GetNumCols(), 1U, "Unexpected TX port count");
++        NS_TEST_ASSERT_MSG_EQ(actual->GetNumPages(), expected.size(), "Unexpected spectrum size");
++        for (size_t i = 0; i < expected.size(); ++i)
++        {
++            NS_TEST_ASSERT_MSG_EQ_TOL(std::real((*actual)(0, 0, i)),
++                                      std::real(expected[i]), 1e-10, "Incorrect baseband real part");
++            NS_TEST_ASSERT_MSG_EQ_TOL(std::imag((*actual)(0, 0, i)),
++                                      std::imag(expected[i]), 1e-10, "Incorrect baseband imaginary part");
++        }
++    }
++
++    void DoRun() override
++    {
++        constexpr double carrierHz = 2412000000.0;
++        auto model = CreateObject<SionnaSpectrumPhaseProbe>();
++        model->SetChannelModelAttribute("Frequency", DoubleValue(carrierHz));
++        auto params = Create<SionnaRtChannelModel::SionnaRtChannelParams>();
++        // A zero-delay direct path and a delayed reflected path. The complex
++        // reflection coefficient is already the output of Paths.cir().
++        params->m_delay = {0.0, 100e-9}; // Seconds, as returned by Sionna.
++        params->m_doppler = {0.0, 0.0};
++        params->m_angle.assign(4, std::vector<double>(2, 0.0));
++        auto channel = Create<MatrixBasedChannelModel::ChannelMatrix>();
++        channel->m_channel = MatrixBasedChannelModel::Complex3DVector(1, 1, 2);
++        channel->m_channel(0, 0, 0) = {1.0, 0.0};
++        channel->m_channel(0, 0, 1) = {0.0, -0.5};
++        auto longTerm = Create<MatrixBasedChannelModel::Complex3DVector>(channel->m_channel);
++        PhasedArrayModel::ComplexVector doppler(2);
++        doppler[0] = doppler[1] = {1.0, 0.0};
++        auto psd = Psd(0, {1.0, 1.0, 1.0});
++        auto response = model->GenSpectrumChannelMatrix(psd, longTerm, channel, params,
++                                                         doppler, 1, 1, false);
++        // H(-2.5MHz)=1.5, H(0)=1-0.5j, H(+2.5MHz)=0.5.
++        // Using absolute RF instead of offset double-counts carrier phase and
++        // changes the center-bin power from 1.25 to about 0.299.
++        const std::vector<std::complex<double>> nominal{{1.5, 0.0}, {1.0, -0.5}, {0.5, 0.0}};
++        Check(response, nominal);
++        Check(model->GenSpectrumChannelMatrix(psd, longTerm, channel, params,
++                                              doppler, 1, 1, false), nominal); // Warm cache.
++
++        // Width/count are unchanged, but every RF bin is shifted. Reusing the
++        // old delay phases would return nominal instead of these values.
++        auto shifted = Psd(2500000.0, {1.0, 1.0, 1.0});
++        Check(model->GenSpectrumChannelMatrix(shifted, longTerm, channel, params,
++                                              doppler, 1, 1, false),
++              {{1.0, -0.5}, {0.5, 0.0}, {1.0, 0.5}});
++        // A changed CIR reference frequency also changes every offset, even
++        // with exactly the same immutable spectrum object.
++        model->SetChannelModelAttribute("Frequency", DoubleValue(carrierHz + 2500000.0));
++        Check(model->GenSpectrumChannelMatrix(shifted, longTerm, channel, params,
++                                              doppler, 1, 1, false), nominal);
++
++        // Check the actual PSD boundary, not only the complex transfer helper.
++        model->SetChannelModelAttribute("Frequency", DoubleValue(carrierHz));
++        auto signal = Create<SpectrumSignalParameters>();
++        signal->psd = Psd(0, {4.0, 1.0, 9.0});
++        auto received = model->CalcBeamformingGain(signal, longTerm, channel, params,
++                                                    Vector(), Vector(), 1, 1, false);
++        const std::vector<double> receivedPsd{9.0, 1.25, 2.25};
++        for (size_t i = 0; i < receivedPsd.size(); ++i)
++        {
++            NS_TEST_ASSERT_MSG_EQ_TOL((*received->psd)[i], receivedPsd[i], 1e-10,
++                                      "RX PSD disagrees with baseband CFR and TX PSD");
++        }
++        model->Dispose();
++        Simulator::Destroy();
++    }
++};
++
++class SionnaBasebandSpectrumPhaseTestSuite : public TestSuite
++{
++  public:
++    SionnaBasebandSpectrumPhaseTestSuite()
++        : TestSuite("sionna-baseband-spectrum-phase", TestSuite::Type::UNIT)
++    {
++        AddTestCase(new SionnaBasebandSpectrumPhaseTest(), TestCase::Duration::QUICK);
++    }
++};
++
++static SionnaBasebandSpectrumPhaseTestSuite g_sionnaBasebandSpectrumPhaseTestSuite;

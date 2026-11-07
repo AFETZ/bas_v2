@@ -1,6 +1,7 @@
 """Emitter preparation contracts; actual SpectrumWifi reception runs separately."""
 import csv
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -23,10 +24,68 @@ def source(**overrides):
                 power_w=.01, start_s=10, stop_s=20, period_s=.01, duty_cycle=1,
                 mode='continuous', spectral_shape='rectangular')
     item.update(overrides)
+    if item['mode'] == 'sweep' and 'center_hz' not in overrides:
+        del item['center_hz']
     return item
 
 
 class NativeSourceTests(unittest.TestCase):
+    def test_unknown_missing_root_and_source_fields_are_rejected(self):
+        for value in (None, [], {}, {'sources': []}, {'sources': {}},
+                      {'sources': [source()], 'unknown': 1},
+                      {'sources': [source()], 'schema_version': True},
+                      {'sources': [source()], 'schema_version': 2},
+                      {'sources': [None]}):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                prepare(value)
+        for key in source():
+            item = source()
+            del item[key]
+            with self.subTest(missing=key), self.assertRaises(ValueError):
+                prepare({'sources': [item]})
+        with self.assertRaises(ValueError):
+            prepare({'sources': [source(invented_threshold=10)]})
+        self.assertEqual(prepare({'sources': [source()], 'schema_version': 1})['schema_version'], 1)
+
+    def test_numeric_fields_reject_bool_strings_none_and_nonfinite(self):
+        for key in ('gain_dbi', 'power_w', 'center_hz', 'bandwidth_hz', 'start_s',
+                    'stop_s', 'period_s', 'duty_cycle'):
+            for value in (True, False, '1', None, float('nan'), float('inf'), 10**400):
+                with self.subTest(key=key, value=repr(value)), self.assertRaises(ValueError):
+                    prepare({'sources': [source(**{key: value})]})
+
+    def test_vectors_ids_and_native_upa_orientation_bounds_are_checked(self):
+        for key, value in [('position_m', None), ('position_m', '123'), ('position_m', [0, 1]),
+                           ('position_m', [0, True, 2]), ('orientation_rad', [0, '1']),
+                           ('orientation_rad', [0, math.pi+.01]), ('orientation_rad', [-math.pi-.01, 0]),
+                           ('id', 1), ('id', True), ('id', ''), ('id', 'bad,id')]:
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                prepare({'sources': [source(**{key: value})]})
+        self.assertEqual(prepare({'sources': [source(orientation_rad=[-math.pi, math.pi])]} )['segments'][0]['orientation_rad'], [-math.pi, math.pi])
+        with self.assertRaisesRegex(ValueError, 'unique'):
+            prepare({'sources': [source(), source()]})
+
+    def test_mode_specific_fields_cannot_be_silently_ignored(self):
+        for mode in ('continuous', 'pulsed'):
+            for extra in ({'sweep_hz': [2412000000]}, {'dwell_s': 1}):
+                with self.subTest(mode=mode, extra=extra), self.assertRaises(ValueError):
+                    prepare({'sources': [source(mode=mode, **extra)]})
+        for value in ([], '2412000000', [2412000000, '2437000000'], [2412000000, True],
+                      [2412000000, float('nan')], [2412000000, 1]):
+            with self.subTest(sweep=value), self.assertRaises(ValueError):
+                prepare({'sources': [source(mode='sweep', sweep_hz=value, dwell_s=20)]})
+        with self.assertRaises(ValueError):
+            prepare({'sources': [source(mode='sweep', sweep_hz=[2412000000], dwell_s=1, center_hz=2412000000)]})
+
+    def test_empty_or_underflowing_schedule_and_derived_power_fail(self):
+        for overrides in ({'start_s': 0, 'stop_s': 1e-10}, {'power_w': 0},
+                          {'gain_dbi': 1e300}, {'gain_dbi': -1e300},
+                          {'stop_s': 1e308}, {'bandwidth_hz': 1.7e308, 'center_hz': 1.7e308},
+                          {'start_s': 0, 'stop_s': 1.000000001, 'period_s': .0001000000001},
+                          {'mode': 'pulsed', 'period_s': .0001, 'duty_cycle': .000001}):
+            with self.subTest(overrides=overrides), self.assertRaises(ValueError):
+                prepare({'sources': [source(**overrides)]})
+
     def test_continuous_segment_preserves_physical_inputs_and_absolute_schedule(self):
         configured = source()
         value = prepare({'sources': [configured]})
@@ -82,6 +141,23 @@ class NativeSourceTests(unittest.TestCase):
                                     cwd=ROOT, env=os.environ.copy(), capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(output.read_text()), prepare({'sources': [source()]}))
+
+    def test_cli_rejects_duplicate_unknown_malformed_and_wrong_type_yaml(self):
+        wrong = yaml.safe_dump({'sources': [source(power_w=True)]})
+        unknown = yaml.safe_dump({'sources': [source()], 'ignored': 1})
+        duplicate = yaml.safe_dump({'sources': [source()]}) + '\nsources: []\n'
+        for text in (wrong, unknown, duplicate, 'sources: [invalid'):
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as temporary:
+                folder = Path(temporary)
+                config, output = folder / 'input.yaml', folder / 'output.json'
+                config.write_text(text)
+                result = subprocess.run([sys.executable, str(ROOT / 'scripts/product/prepare_native_sources.py'),
+                                         '--config', str(config), '--output', str(output)],
+                                        cwd=ROOT, env=os.environ.copy(), capture_output=True, text=True)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertNotIn('Traceback', result.stderr)
+                self.assertIn('Native sources:', result.stderr)
+                self.assertFalse(output.exists())
 
     def test_actual_native_drop_csv_is_aliased_and_counted_in_source_windows(self):
         # Exact header and event spelling emitted by LogEvent/WifiPhyRxDrop;

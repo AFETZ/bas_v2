@@ -10,7 +10,7 @@ import threading
 import time
 import unittest
 
-from network.scripts.external_endpoint import IO_BATCH, flush_queue
+from network.scripts.external_endpoint import IO_BATCH, flush_queue, open_radio_socket
 from network.scripts.serial_transport import BoundedQueue, Encoder, Reassembler
 
 
@@ -34,6 +34,15 @@ class ExternalEndpointTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.folder = Path(self.temporary.name)
+
+    def test_radio_socket_retains_existing_control_payload_tos(self):
+        for channel, expected in (('control', 184), ('payload', 40)):
+            config = dict(channel=channel, radio=dict(bind=['127.0.0.1', 0]))
+            with self.subTest(channel=channel), open_radio_socket(config) as radio:
+                self.assertEqual(radio.getsockopt(socket.IPPROTO_IP, socket.IP_TOS), expected)
+        for value in (True, -1, 256, '184'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                open_radio_socket(dict(channel='control', radio=dict(bind=['127.0.0.1', 0], tos=value)))
 
     def start_adapter(self, endpoint, peer, duration=2.0):
         radio_address = free_udp_address()

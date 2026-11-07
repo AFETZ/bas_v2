@@ -20,7 +20,7 @@ SHAPE = {
     'environment': {'engine', 'scene'}, 'drone': {'autopilot', 'count'},
     'propagation': {'model'}, 'network': {'engine', 'topology'},
     'experiment': {'policy', 'duration_s', 'seed', 'run'},
-    'runtime': {'clock', 'image', 'land_timeout_s'},
+    'runtime': {'clock', 'image', 'land_timeout_s', 'sionna_log_level'},
     'flows': {'channels', 'payload_attitude_interval_s'},
 }
 PROPAGATION_FIELDS = {
@@ -63,6 +63,8 @@ def load_config(path, root=ROOT):
                         object_pairs_hook=unique_json_fields, parse_constant=reject_json_constant)
     if not isinstance(config, dict) or set(config) != set(SHAPE):
         raise ValueError('runtime config has missing or unknown sections')
+    if isinstance(config['runtime'], dict):
+        config['runtime'].setdefault('sionna_log_level', 'info')
     for section, keys in SHAPE.items():
         if section == 'propagation' and isinstance(config[section], dict):
             model = config[section].get('model')
@@ -78,6 +80,8 @@ def load_config(path, root=ROOT):
         if type(config[section][key]) is not type(value) or config[section][key] != value:
             raise ValueError(f'this profile requires {section}.{key}={value}')
     count = config['drone']['count']
+    if config['runtime']['sionna_log_level'] not in ('info', 'debug'):
+        raise ValueError('runtime.sionna_log_level must be info or debug')
     if type(count) is not int or not 1 <= count <= 5:
         raise ValueError('drone.count must be an integer from 1 to 5')
     channels = config['flows']['channels']
@@ -181,6 +185,7 @@ def environment(config, run_id, inherited=None):
         'NATIVE_FAULT_PROFILE': 'none', 'NATIVE_EXPERIMENT_PROFILE': 'urban',
         'NATIVE_EXPERIMENT_PILOT': 1, 'NATIVE_PARAMETER_SNAPSHOTS': 0,
         'NATIVE_COMMAND_PERIOD_S': 1, 'NATIVE_TASK_PERIOD_S': 20,
+        'NATIVE_SIONNA_LOG_LEVEL': config['runtime'].get('sionna_log_level', 'info'),
     }
     if config['propagation']['model'] == 'sionna':
         propagation = config['propagation']

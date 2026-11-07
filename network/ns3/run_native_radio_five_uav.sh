@@ -7,6 +7,13 @@ CONTAINER_NAME="${BAS_NATIVE_FIVE_CONTAINER_NAME:-bas-v2-native-radio-five-uav}"
 SCENARIO_KEY="${BAS_NATIVE_FIVE_SCENARIO:-town01}"
 UAV_COUNT="${BAS_NATIVE_UAV_COUNT:-5}"
 [[ "$UAV_COUNT" =~ ^[1-5]$ ]] || { printf 'UAV count must be an integer in 1..5: %s\n' "$UAV_COUNT" >&2; exit 2; }
+EXTERNAL_BUNDLE="${BAS_NATIVE_EXTERNAL_BUNDLE:-}"
+EXTERNAL_UAV_ID=""
+EXTERNAL_BUNDLE_PID=""
+EXTERNAL_BENCH=0
+[[ -z "$EXTERNAL_BUNDLE" || -z "${BAS_NATIVE_EXTERNAL_CONFIG:-}" ]] || {
+  printf 'Choose legacy EXTERNAL_CONFIG or the dual-channel EXTERNAL_BUNDLE, not both.\n' >&2; exit 2;
+}
 # Gazebo server, bridges, tracker and viewer share this host. Pin upstream
 # Transport to loopback instead of auto-advertising a VPN/external interface.
 export GZ_IP=127.0.0.1
@@ -69,6 +76,10 @@ WIFI_AGGREGATION="${BAS_NATIVE_WIFI_AGGREGATION:-$WIFI_AGGREGATION_DEFAULT}"
   printf 'BAS_NATIVE_WIFI_AGGREGATION must be 0 or 1.\n' >&2; exit 2;
 }
 PROPAGATION_PROFILE="${BAS_NATIVE_PROPAGATION_PROFILE:-sionna}"
+SIONNA_LOG_LEVEL="${BAS_NATIVE_SIONNA_LOG_LEVEL:-info}"
+[[ "$SIONNA_LOG_LEVEL" == info || "$SIONNA_LOG_LEVEL" == debug ]] || {
+  printf 'BAS_NATIVE_SIONNA_LOG_LEVEL must be info or debug.\n' >&2; exit 2;
+}
 case "$PROPAGATION_PROFILE" in
   sionna|hybrid|friis|geometry_logdistance) ;;
   *) printf 'Unsupported propagation profile: %s\n' "$PROPAGATION_PROFILE" >&2; exit 2 ;;
@@ -87,7 +98,7 @@ export BAS_LOCKSTEP_TIMEOUT_S="${BAS_LOCKSTEP_TIMEOUT_S:-60}"
 [[ "$BAS_SIMULATION_MODE" == realtime || "$BAS_SIMULATION_MODE" == lockstep ]] || {
   printf 'BAS_SIMULATION_MODE must be realtime or lockstep.\n' >&2; exit 2;
 }
-if [[ "$BAS_SIMULATION_MODE" == lockstep && -n "${BAS_NATIVE_EXTERNAL_CONFIG:-}" ]]; then
+if [[ "$BAS_SIMULATION_MODE" == lockstep && ( -n "${BAS_NATIVE_EXTERNAL_CONFIG:-}" || -n "$EXTERNAL_BUNDLE" ) ]]; then
   printf 'External controllers require realtime: physical hardware cannot pause with model time.\n' >&2; exit 2
 fi
 python3 - "$BAS_LOCKSTEP_STEP_MS" "$BAS_LOCKSTEP_TIMEOUT_S" <<'PYMODE'
@@ -102,8 +113,35 @@ PYMODE
 }
 [[ "$GUI" == 0 || "$GUI" == 1 ]] || { printf 'BAS_NATIVE_FIVE_GUI must be 0 or 1.\n' >&2; exit 2; }
 [[ "$CAPTURE_IMAGES" == 0 || "$CAPTURE_IMAGES" == 1 ]] || { printf 'BAS_NATIVE_CAPTURE_IMAGES must be 0 or 1.\n' >&2; exit 2; }
+if [[ -n "$EXTERNAL_BUNDLE" ]]; then
+  [[ "$COORDINATION_POLICY" == off && "$BAS_SIMULATION_MODE" == realtime &&
+     "${BAS_NATIVE_LATENCY_MODE:-0}" == 1 && "${BAS_NATIVE_FLIGHT_DIAGNOSTIC:-0}" == 0 &&
+     "${BAS_NATIVE_OPERATOR_SECONDS:-0}" == 0 && "${BAS_NATIVE_UART_CHANNELS:-control,payload}" == control,payload ]] || {
+    printf 'Dual-channel external bundle requires explicit realtime, coordinator=off, latency=1, both UART channels and no operator/flight mode.\n' >&2; exit 2;
+  }
+  mapfile -t external_values < <(python3 - "$ROOT_DIR" "$EXTERNAL_BUNDLE" "$UAV_COUNT" <<'PYEXTERNAL'
+import sys
+from pathlib import Path
+root = Path(sys.argv[1]).resolve()
+sys.path.insert(0, str(root))
+from scripts.product.test_radio_hitl import load_bundle
+path = (root / sys.argv[2]).resolve()
+relative = path.relative_to(root)
+bundle = load_bundle(path, native_uav_count=int(sys.argv[3]))
+print(bundle['native_binding']['uav_id'])
+print(relative.as_posix())
+PYEXTERNAL
+)
+  [[ "${#external_values[@]}" == 2 && "${external_values[0]}" =~ ^[1-5]$ ]] || {
+    printf 'External bundle failed strict native binding/roster validation.\n' >&2; exit 2;
+  }
+  EXTERNAL_UAV_ID="${external_values[0]}"
+  EXTERNAL_BUNDLE="${external_values[1]}"
+  EXTERNAL_BENCH=1
+fi
 if [[ "$SCENARIO_KEY" == urban ]]; then
-  [[ ( "$PROPAGATION_PROFILE" == geometry_logdistance || "$PROPAGATION_PROFILE" == sionna ) && "$FAULT_PROFILE" == none && "$COORDINATION_POLICY" != off ]] || {
+  [[ ( "$PROPAGATION_PROFILE" == geometry_logdistance || "$PROPAGATION_PROFILE" == sionna ) && "$FAULT_PROFILE" == none &&
+     ( "$COORDINATION_POLICY" != off || "$EXTERNAL_BENCH" == 1 ) ]] || {
     printf 'Urban mission requires explicit geometry_logdistance or Sionna, coordinator policy and no injected fault.\n' >&2; exit 2;
   }
   if [[ "$PROPAGATION_PROFILE" == sionna ]]; then
@@ -183,6 +221,7 @@ run_in_container() {
     -e BAS_SOURCE_HEAD="$(git -C "$ROOT_DIR" rev-parse HEAD)" \
     -e BAS_SOURCE_DIRTY="$(git -C "$ROOT_DIR" status --porcelain | wc -l)" \
     -e BAS_NATIVE_PROPAGATION_PROFILE="${BAS_NATIVE_PROPAGATION_PROFILE:-sionna}" \
+    -e BAS_NATIVE_SIONNA_LOG_LEVEL="$SIONNA_LOG_LEVEL" \
     -e BAS_NATIVE_URBAN_CONFIG="$container_geometry" \
     -e BAS_NATIVE_URBAN_OUTPUT="$container_urban_output" \
     -e BAS_NATIVE_RADIO_CONFIG="$container_radio" \
@@ -198,6 +237,7 @@ run_in_container() {
     -e BAS_NATIVE_OPERATOR_SECONDS="${BAS_NATIVE_OPERATOR_SECONDS:-0}" \
     -e BAS_NATIVE_SOURCES="${BAS_NATIVE_SOURCES:-}" \
     -e BAS_NATIVE_EXTERNAL_CONFIG="${BAS_NATIVE_EXTERNAL_CONFIG:-}" \
+    -e BAS_NATIVE_EXTERNAL_BUNDLE="$EXTERNAL_BUNDLE" \
     -e BAS_NATIVE_FIVE_RUN_ID="${BAS_NATIVE_FIVE_RUN_ID:-}" \
     -e BAS_NATIVE_FIVE_SCENARIO="$SCENARIO_KEY" \
     -e BAS_NATIVE_FIVE_GUI="$GUI" \
@@ -290,7 +330,7 @@ if [[ "$COORDINATION_POLICY" != off ]]; then
   [[ "$BAS_SIMULATION_MODE" == realtime &&
      ( "$PROPAGATION_PROFILE" == friis || "$PROPAGATION_PROFILE" == geometry_logdistance || "$PROPAGATION_PROFILE" == sionna ) && "$WIFI_TOPOLOGY" == adhoc &&
      "$SCENARIO_MODE" == product && ( "$ACTIVE_UART_CHANNELS" == control || "$ACTIVE_UART_CHANNELS" == control,payload ) &&
-     -z "${BAS_NATIVE_EXTERNAL_CONFIG:-}" && -z "${BAS_NATIVE_SOURCES:-}" ]] || {
+     -z "${BAS_NATIVE_EXTERNAL_CONFIG:-}" && -z "$EXTERNAL_BUNDLE" && -z "${BAS_NATIVE_SOURCES:-}" ]] || {
     printf 'Coordination requires 1..5 realtime UAVs, explicit Friis/geometry_logdistance/Sionna ad-hoc, control with optional payload UART, and no other scenario mode.\n' >&2
     exit 2
   }
@@ -339,6 +379,7 @@ REALTIME_CACHE_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-realtime-scene-cache.
 PHASED_ARRAY_ADAPTER_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-spectrumwifi-phased-array-adapter.patch"
 LOCKSTEP_TAP_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-lockstep-tap-read.patch"
 SOLVER_BUDGET_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-solver-budget.patch"
+BASEBAND_PHASE_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-baseband-spectrum-phase.patch"
 if [[ "$SCENARIO_KEY" == urban ]]; then
   SCENARIO="$URBAN_OUTPUT/scenario.yaml"
 elif [[ "$SCENARIO_KEY" == customer ]]; then
@@ -410,7 +451,7 @@ MAP_ID="${SCENARIO_VALUES[5]}"
 
 for required_file in "$ROOT_DIR/scripts/product/capture_effective_config.py" \
   "$PROJECT_SOURCE" "$PATCH_FILE" "$REALTIME_CACHE_PATCH" \
-    "$PHASED_ARRAY_ADAPTER_PATCH" "$LOCKSTEP_TAP_PATCH" "$SOLVER_BUDGET_PATCH" "$RADIO_CONFIG" "$WORLD" "$CAMERA_FRAGMENT" "$SITL_DEFAULTS"; do
+    "$PHASED_ARRAY_ADAPTER_PATCH" "$LOCKSTEP_TAP_PATCH" "$SOLVER_BUDGET_PATCH" "$BASEBAND_PHASE_PATCH" "$RADIO_CONFIG" "$WORLD" "$CAMERA_FRAGMENT" "$SITL_DEFAULTS"; do
   [[ -f "$required_file" ]] || { printf 'Missing input: %s\n' "$required_file" >&2; exit 2; }
 done
 if [[ "$REQUIRES_RT" == 1 && ! -f "$SCENE" ]]; then
@@ -557,6 +598,9 @@ fi
 if ! git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply --reverse --check "$SOLVER_BUDGET_PATCH" >/dev/null 2>&1; then
   git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply "$SOLVER_BUDGET_PATCH"
 fi
+if ! git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply --reverse --check "$BASEBAND_PHASE_PATCH" >/dev/null 2>&1; then
+  git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply "$BASEBAND_PHASE_PATCH"
+fi
 [[ -x "$PYTHON_TOOLING/bin/cmake" ]] || { printf 'Pinned CMake tooling is absent.\n' >&2; exit 2; }
 
 mkdir -p "$RUN_DIR"/{logs,metrics,pcap,screenshots,plots} "$UART_DIR" "$WORK_DIR"
@@ -653,13 +697,13 @@ if [[ -n "${BAS_NATIVE_SOURCES:-}" ]]; then
     --config "$ROOT_DIR/$BAS_NATIVE_SOURCES" --output "$RUN_DIR/logs/native_sources.json"
   source_args+=(--sources="$RUN_DIR/logs/native_sources.json")
 fi
-if [[ -n "${BAS_NATIVE_EXTERNAL_CONFIG:-}" && "$SCENARIO_MODE" != latency_diagnostic ]]; then
+if [[ ( -n "${BAS_NATIVE_EXTERNAL_CONFIG:-}" || -n "$EXTERNAL_BUNDLE" ) && "$SCENARIO_MODE" != latency_diagnostic ]]; then
   printf 'External controller requires BAS_NATIVE_LATENCY_MODE=1 (safe requests only).\n' >&2
   exit 2
 fi
 if [[ "${BAS_NATIVE_FIVE_SKIP_BUILD:-0}" == 1 ]]; then
   [[ -x "$BINARY" ]] || { printf 'Requested binary reuse but binary is absent.\n' >&2; exit 2; }
-  [[ "$BINARY" -nt "$PROJECT_SOURCE" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-geometry-loss.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-live-state.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-lockstep.h" && "$BINARY" -nt "$REALTIME_CACHE_PATCH" && "$BINARY" -nt "$LOCKSTEP_TAP_PATCH" && "$BINARY" -nt "$SOLVER_BUDGET_PATCH" ]] || {
+  [[ "$BINARY" -nt "$PROJECT_SOURCE" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-geometry-loss.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-live-state.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-lockstep.h" && "$BINARY" -nt "$REALTIME_CACHE_PATCH" && "$BINARY" -nt "$LOCKSTEP_TAP_PATCH" && "$BINARY" -nt "$SOLVER_BUDGET_PATCH" && "$BINARY" -nt "$BASEBAND_PHASE_PATCH" ]] || {
     printf 'Binary predates native source/header; rerun without BAS_NATIVE_FIVE_SKIP_BUILD.\n' >&2; exit 2;
   }
   printf 'Reused focused native target after exact project/upstream source synchronization.\n' \
@@ -728,8 +772,10 @@ PY
   printf 'stack_cpuset=%s\nradio_cpuset=%s\n' "$STACK_CPUSET" "$RADIO_CPUSET"
   printf 'radio_config=%s\nradio_backend=%s\n' "$RADIO_CONFIG" "$RADIO_BACKEND"
   printf 'native_sources=%s\nexternal_endpoint_config=%s\n' "${BAS_NATIVE_SOURCES:-none}" "${BAS_NATIVE_EXTERNAL_CONFIG:-none}"
+  printf 'external_endpoint_bundle=%s\nexternal_uav_id=%s\n' "${EXTERNAL_BUNDLE:-none}" "${EXTERNAL_UAV_ID:-none}"
   printf 'profile=%s\n' "$RADIO_PROFILE"
   printf 'selected_propagation_profile=%s\nsionna_runtime_enabled=%s\n' "$PROPAGATION_PROFILE" "$REQUIRES_RT"
+  printf 'sionna_log_level=%s\n' "$SIONNA_LOG_LEVEL"
   [[ "$PROPAGATION_PROFILE" != geometry_logdistance ]] || printf 'geometry_config=%s\ngeometry_radio_model=upstream_LogDistance_selected_by_3D_Buildings\ngeometry_antenna_offset_enu_m=0,0,0\n' "$RUN_DIR/logs/urban_scenario.json"
   printf 'technology_specific_modem=%s\n' "$TECHNOLOGY_SPECIFIC_MODEM"
   printf 'uav_count=%s\nradio_node_count=%s\nshared_spectrum_channels=1\n' "$UAV_COUNT" "$((UAV_COUNT + 1))"
@@ -799,6 +845,8 @@ capture_effective_configuration() {
     --config "native_routes=$RUN_DIR/logs/native_routes.txt"
     --config "native_neighbors=$RUN_DIR/logs/static_neighbors.txt"
     --config "native_capture_storage=$RUN_DIR/logs/native_capture_storage.json"
+    --config "sionna_solver_budget_patch=$SOLVER_BUDGET_PATCH"
+    --config "sionna_baseband_phase_patch=$BASEBAND_PHASE_PATCH"
   )
   if [[ "$REQUIRES_RT" == 0 ]]; then
     config_args+=(--not-enabled sionna)
@@ -912,6 +960,10 @@ run_with_native_watchdog() {
   local client_pid=$!
   managed_pids+=("$client_pid")
   while kill -0 "$client_pid" 2>/dev/null; do
+    if [[ -n "$EXTERNAL_BUNDLE_PID" ]] && ! kill -0 "$EXTERNAL_BUNDLE_PID" 2>/dev/null; then
+      printf 'External UART/Ethernet pair stopped during the active radio-HitL bench.\n' >&2
+      return 1
+    fi
     if ! kill -0 "$NS3_PID" 2>/dev/null || { [[ -n "$LOCKSTEP_PID" ]] && ! kill -0 "$LOCKSTEP_PID" 2>/dev/null; }; then
       printf 'Native radio exited during the active scenario; stopping the run.\n' >&2
       return 1
@@ -1042,6 +1094,17 @@ for index in "${UAV_INDICES[@]}"; do
   instance=$((index - 1))
   for channel in control payload; do
     [[ ",$ACTIVE_UART_CHANNELS," == *,$channel,* ]] || continue
+    if [[ -n "$EXTERNAL_BUNDLE" && "$index" == "$EXTERNAL_UAV_ID" ]]; then
+      if [[ "$channel" == control ]]; then
+        setsid python3 -u "$ROOT_DIR/scripts/product/test_radio_hitl.py" \
+          --config "$ROOT_DIR/$EXTERNAL_BUNDLE" --run-adapters --native-uav-count "$UAV_COUNT" \
+          --radio-watchdog-file "$NS3_READY.heartbeat" --duration-s 3600 --readiness-timeout-s 10 \
+          --output "$RUN_DIR/external_endpoints" > "$RUN_DIR/logs/external_endpoints.log" 2>&1 &
+        EXTERNAL_BUNDLE_PID=$!
+        managed_pids+=("$EXTERNAL_BUNDLE_PID")
+      fi
+      continue  # Exactly these two slots are external; other UAVs retain SITL ownership.
+    fi
     if [[ "$COORDINATION_POLICY" != off && "$channel" == control ]]; then
       setsid ip netns exec "ams-uav$index" env PYTHONPATH="$ROOT_DIR:${PYTHONPATH:-}" \
         python3 -u -m network.coordination.service uav \
@@ -1059,7 +1122,13 @@ import sys,yaml
 config=yaml.safe_load(open(sys.argv[1]))
 config['radio_watchdog_file']=sys.argv[3]
 config['watchdog_s']=0.3
-config['radio_namespace']=config.pop('namespace','ams-uav1')
+namespace=config.pop('namespace', config.get('radio_namespace','ams-uav1'))
+if config.get('radio_namespace',namespace) != namespace:
+    raise ValueError('conflicting legacy namespace fields')
+config['radio_namespace']=namespace
+if (config.get('uav_id') != 1 or config.get('channel') != 'control' or namespace != 'ams-uav1'
+        or config['radio']['bind'] != ['10.71.1.10',14601] or config['radio']['peer'] != ['10.71.0.10',14600]):
+    raise ValueError('legacy external config must own UAV1/control native binding; use a prepared bundle for other slots')
 with open(sys.argv[2],'w') as f: yaml.safe_dump(config,f)
 PYCFG
       setsid python3 -u "$ROOT_DIR/network/scripts/external_endpoint.py" \
@@ -1096,6 +1165,10 @@ done
 for index in "${UAV_INDICES[@]}"; do
   for channel in control payload; do
     [[ ",$ACTIVE_UART_CHANNELS," == *,$channel,* ]] || continue
+    if [[ -n "$EXTERNAL_BUNDLE" && "$index" == "$EXTERNAL_UAV_ID" ]]; then
+      wait_for_file "$RUN_DIR/external_endpoints/ready.json" 15 "both external UART/Ethernet endpoints"
+      continue
+    fi
     if [[ "$index" == 1 && "$channel" == control && -n "${BAS_NATIVE_EXTERNAL_CONFIG:-}" ]]; then
       wait_for_file "$RUN_DIR/external_endpoint/metrics.json" 15 "external endpoint"
       continue
@@ -1250,7 +1323,7 @@ setsid ip netns exec ams-ns3 env \
   PATH="$NS3_DIR/build/src/tap-bridge:$PATH" \
   PYTHONPATH="$PYTHON_DEPS" MPLCONFIGDIR="$RUNTIME_DIR/matplotlib" \
   SIONNA_MITSUBA_VARIANT=cuda_ad_mono_polarized \
-  NS_LOG='SionnaRtChannelModel=level_debug|prefix_time' \
+  NS_LOG="SionnaRtChannelModel=level_${SIONNA_LOG_LEVEL}|prefix_time" \
   taskset -c "$RADIO_CPUSET" stdbuf -oL -eL "$BINARY" \
   --uavCount="$UAV_COUNT" --radioBackend="$RADIO_BACKEND" \
   --RngSeed="$RNG_SEED" --RngRun="$RNG_RUN" \

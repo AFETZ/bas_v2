@@ -50,6 +50,16 @@ class RuntimeTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.load(config)
 
+    def test_diagnostic_log_level_is_explicit_and_cannot_inject_nslog_components(self):
+        resolved = self.load()
+        self.assertEqual(resolved['runtime']['sionna_log_level'], 'info')
+        self.assertEqual(bas.environment(resolved, 'log-test')['BAS_NATIVE_SIONNA_LOG_LEVEL'], 'info')
+        self.config['runtime']['sionna_log_level'] = 'debug'
+        self.assertEqual(self.load()['runtime']['sionna_log_level'], 'debug')
+        self.config['runtime']['sionna_log_level'] = 'debug:OtherComponent=all'
+        with self.assertRaises(ValueError):
+            self.load()
+
     def test_invalid_json_shapes_and_field_types_are_rejected(self):
         for config in (None, [], [dict(self.config)], 'runtime', 5, True):
             with self.subTest(config=config), self.assertRaises(ValueError):

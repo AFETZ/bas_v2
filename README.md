@@ -65,6 +65,21 @@ native Wi-Fi 802.11n, мощность, общий спектральный ка
 отказ RT останавливает запуск, подмены геометрической моделью нет. Hybrid пока
 не входит в проверенный публичный конфиг. Значения solver/cache не являются
 гарантией real-time: пригодность проверяется по фактическим метрикам опыта.
+`runtime.sionna_log_level` — строка `info` (по умолчанию) или `debug`, применяется
+при новом запуске. `info` сохраняет сообщения о решениях solver и структурные
+метрики; `debug` дополнительно пишет обращения к кэшу на каждом пакете и влияет
+на производительность. Разрешённое значение входит в снимок конфигурации.
+
+Офлайн-карты RF строятся `scripts/product/compute_radio_maps.py --config <json>
+--output <new-directory>` в закреплённом GPU runtime. Проверка входа без GPU:
+`--validate-only`. `point_grid` использует PathSolver и iso/V приёмники в центрах
+до 256 ячеек; `radio_map` — штатный RadioMapSolver и неполяризованное усреднение
+по ячейке. Конфиг задаёт подготовленные `mission_scene`, `scene_xml`, `radio_config`,
+желаемый передатчик, приёмную полосу/температуру/NF, область/шаг/высоту/время и
+необязательные развёрнутые источники из `prepare_native_sources.py`.
+Результаты — `maps.npz`, `metadata.json`, `point_checks.json` и снимки входов.
+RSS, SINR и J/S описывают RF-срез: занятость MAC, очереди и доступность классов
+нагрузки из них не выводятся. Нулевые выборки RT имеют отдельную маску.
 
 Из другого терминала:
 
@@ -221,7 +236,7 @@ SH
 изменения C++ его нужно собрать действующим inline bootstrap в
 `network/ns3/run_native_radio_five_uav.sh`. Он проверяет точный ns-3.48
 `d2add90b452d600cfb4859baed8e9ea633519447`, применяет совместимый стек патчей
-из `network/ns3/patches/` (включая solver-budget) и собирает целевой scratch target.
+из `network/ns3/patches/` (включая solver-budget и baseband-spectrum-phase) и собирает целевой scratch target.
 Используются `.python-deps-py310` и `.tooling-py310` внутри `.external/ns-3-sionna-native`:
 native Sionna/Sionna RT 1.2.0, Mitsuba 3.7.1 и Dr.Jit 1.2.0. Импорт библиотек из
 другого site-packages образа не подтверждает версию native окружения.
