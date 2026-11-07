@@ -197,7 +197,7 @@ def load_json(path):
                       parse_constant=bas.reject_json_constant)
 
 
-def load_bundle(path, catalog_path=CATALOG, *, native_uav_count=None, watchdog_file=None):
+def load_bundle(path, catalog_path=CATALOG, *, native_uav_count=None, watchdog_file=None, runtime_snapshot=False):
     """Revalidate prepared inputs; never trust saved adapter addresses or argv."""
     bundle = load_json(path)
     if not isinstance(bundle, dict):
@@ -209,6 +209,11 @@ def load_bundle(path, catalog_path=CATALOG, *, native_uav_count=None, watchdog_f
     if binding is not None and count is None:
         raise ValueError('invalid native binding')
     expected = resolve(bundle.get('source_request'), load_json(catalog_path), native_uav_count=count)
+    if runtime_snapshot:
+        if not binding or not isinstance(watchdog_file, str) or not watchdog_file:
+            raise ValueError('runtime bundle validation requires native binding and its owning watchdog path')
+        for adapter in expected['adapters'].values():
+            adapter['radio_watchdog_file'] = watchdog_file
     allowed = set(expected) | {'reference_profiles_sha256', 'adapter_argv'}
     if set(bundle) - allowed or any(bundle.get(key) != value for key, value in expected.items()):
         raise ValueError('prepared bundle does not match its validated source request and native contract')

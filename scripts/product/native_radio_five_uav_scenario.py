@@ -1815,6 +1815,73 @@ def run_scenario(args: argparse.Namespace) -> int:
     return 0
 
 
+def _uart_byte_counters(run_dir, systems, channels, counter, *, after_ns=0, watchdog_file=None):
+    """Accept only identified, fresh, drained counters from the actual owner."""
+    from scripts.product.test_radio_hitl import load_bundle, load_json
+    if counter not in ('uart_input_bytes', 'uart_output_bytes'):
+        raise ValueError('unsupported UART byte counter')
+    run_dir = Path(run_dir)
+    pair = run_dir / 'external_endpoints'
+    bundle_path = pair / 'bundle.json'
+    bundle = None
+    try:
+        if bundle_path.exists():
+            bundle = load_bundle(bundle_path, native_uav_count=len(systems),
+                                 watchdog_file=watchdog_file, runtime_snapshot=True)
+        values = {}
+        for system_id in systems:
+            for channel in channels:
+                stock = run_dir / f'metrics/{channel}_uart_uav{system_id}.json'
+                external = None
+                if bundle and system_id == bundle['native_binding']['uav_id']:
+                    if stock.exists():
+                        return None  # Two claimed owners cannot qualify one UART slot.
+                    path = pair / channel / 'metrics.json'
+                    external = bundle['adapters'][channel]
+                elif stock.exists():
+                    path = stock
+                elif system_id == 1 and channel == 'control' and not bundle:
+                    path = run_dir / 'external_endpoint/metrics.json'
+                    # The explicitly supported legacy slot remains UAV1/control.
+                    legacy = yaml.safe_load((run_dir / 'logs/external_endpoint.yaml').read_text())
+                    if not isinstance(legacy, dict):
+                        return None
+                    if (type(legacy.get('uav_id')) is not int or legacy['uav_id'] != 1
+                            or legacy.get('channel') != 'control' or legacy.get('radio_namespace') != 'ams-uav1'
+                            or legacy['radio']['bind'] != ['10.71.1.10', 14601]
+                            or legacy['radio']['peer'] != ['10.71.0.10', 14600]):
+                        return None
+                    external = legacy
+                else:
+                    return None
+                sample = load_json(path)
+                if not isinstance(sample, dict):
+                    return None
+                if (type(sample.get('uav_id')) is not int or sample['uav_id'] != system_id
+                        or sample.get('channel') != channel):
+                    return None
+                stamp = sample.get('sampled_monotonic_ns')
+                if type(stamp) is not int or stamp <= 0 or stamp < after_ns or stamp > time.monotonic_ns():
+                    return None
+                queues = ('to_device_queue_bytes', 'to_radio_queue_bytes', 'reassembly_pending_records') if external else (
+                    'uart_queue_bytes', 'radio_queue_bytes', 'reassembly_pending_records')
+                if any(type(sample.get(key)) is not int or sample[key] != 0 for key in queues):
+                    return None
+                field = counter
+                if external:
+                    if sample.get('connected') is not True or sample.get('controller_kind') != external['endpoint']['kind']:
+                        return None
+                    field = 'radio_to_endpoint_bytes' if counter == 'uart_output_bytes' else 'endpoint_to_radio_bytes'
+                byte_fields = ('radio_to_endpoint_bytes', 'endpoint_to_radio_bytes') if external else (
+                    'uart_input_bytes', 'uart_output_bytes')
+                if any(type(sample.get(key)) is not int or sample[key] < 0 for key in byte_fields):
+                    return None
+                values[f'{channel}:uav{system_id}'] = sample[field]
+        return values
+    except (OSError, ValueError, KeyError, TypeError, yaml.YAMLError):
+        return None
+
+
 def run_no_bypass_probe(args: argparse.Namespace) -> int:
     probe_args = argparse.Namespace(
         run_dir=str(Path(args.run_dir).resolve() / "logs/no_bypass_probe_workspace"),
@@ -1869,23 +1936,8 @@ def _no_bypass_probe(args, harness):
                 if node['id'] in {f'uav{i}' for i in systems}}
 
     def uart_bytes(counter, after_ns=0):
-        values = {}
-        for system_id in systems:
-            for channel in channels:
-                path = run_dir / f"metrics/{channel}_uart_uav{system_id}.json"
-                field = counter
-                if system_id == 1 and channel == "control" and not path.exists():
-                    path = run_dir / "external_endpoint/metrics.json"
-                    field = 'radio_to_endpoint_bytes' if counter == 'uart_output_bytes' else 'endpoint_to_radio_bytes'
-                try:
-                    sample = json.loads(path.read_text())
-                    if after_ns and (sample.get('sampled_monotonic_ns', -1) < after_ns
-                            or sample.get('uart_queue_bytes', 0) or sample.get('reassembly_pending_records', 0)):
-                        return None
-                    values[f"{channel}:uav{system_id}"] = int(sample[field])
-                except (OSError, ValueError, KeyError):
-                    return None
-        return values
+        return _uart_byte_counters(run_dir, systems, channels, counter, after_ns=after_ns,
+                                   watchdog_file=args.radio_heartbeat)
 
     # Periodic counters must describe the completed post-isolation cycle.
     # Otherwise an old heartbeat delivered before OFF can look like a bypass.
@@ -1929,11 +1981,23 @@ def _no_bypass_probe(args, harness):
     started_ns = clock.monotonic_ns()
     wall_started = time.monotonic()
     harness.observe_for(float(args.duration_s))
+    # Do not accept a last periodic sample that predates the end of isolation.
+    sampled_after = time.monotonic_ns()
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        uart_after = uart_bytes('uart_output_bytes', sampled_after)
+        source_uart_after = uart_bytes('uart_input_bytes', sampled_after)
+        if uart_after is not None and source_uart_after is not None:
+            break
+        harness.pump(.02)
+    else:
+        raise ScenarioError('fresh drained UART counters unavailable after the PHY-off observation window')
     messages = sum(harness.message_counts.values()) - before
     result = {
         'uav_ids': list(systems),
         'channels': list(channels),
         "duration_s": float(args.duration_s),
+        'observed_duration_s': (clock.monotonic_ns() - started_ns) / 1e9,
         "duration_domain": 'simulation' if clock.mode() == 'lockstep' else 'wall',
         "wall_duration_s": time.monotonic()-wall_started,
         "isolation_method": f"WifiPhy.SetSleepMode confirmed on {len(systems) + 1} native radios; other components keep running",
@@ -1951,8 +2015,6 @@ def _no_bypass_probe(args, harness):
         "additional_data_absent": not harness.additional_received,
         "passed": messages == 0 and not harness.additional_received,
     }
-    uart_after = uart_bytes('uart_output_bytes')
-    source_uart_after = uart_bytes('uart_input_bytes')
     source_after = source_times()
     metrics_complete = all(value is not None for value in
                            (uart_before, uart_after, source_uart_before, source_uart_after))

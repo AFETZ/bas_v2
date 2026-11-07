@@ -282,7 +282,7 @@ def render(output):
         figure.text(.5, .065, f"ENU origin: {origin['origin_latitude_deg']:g} deg, "
                     f"{origin['origin_longitude_deg']:g} deg, {origin['origin_elevation_m']:g} m", ha='center', fontsize=9)
         figure.text(.5, .025, 'Gray: no data / sampled zero, not outage. White in J/S: J=0 (-inf dB).', ha='center', fontsize=9)
-        figure.tight_layout(rect=(0, .09, 1, .87))
+        figure.tight_layout(rect=(0, .18, 1, .87))
         figure.savefig(output / 'maps.png', dpi=150)
     finally:
         plt.close(figure)

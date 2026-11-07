@@ -1,5 +1,6 @@
 """Real UDP/BSF1/MAVLink diagnostics; no simulator or hardware qualification."""
 import copy
+import hashlib
 import json
 from pathlib import Path
 import socket
@@ -15,6 +16,7 @@ import yaml
 from network.scripts.serial_transport import Encoder, Reassembler
 from scripts.product import native_radio_five_uav_scenario as native
 from scripts.product import town01_full_stack_scenario as town
+from scripts.product.test_radio_hitl import CATALOG, resolve
 
 
 class NativeDiagnosticTests(unittest.TestCase):
@@ -195,6 +197,119 @@ class NativeDiagnosticTests(unittest.TestCase):
         row = self.payload_exchange('foreign_component')
         self.assertFalse(row['accepted_ack_received'])
         self.assertFalse(row['response_received'])
+
+
+class NoBypassCounterTests(unittest.TestCase):
+    """Counter eligibility only: no synthetic PHY isolation or device pass."""
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.stamp = time.monotonic_ns()
+        self.watchdog = '/tmp/owned-native/ns3.ready.heartbeat'
+        request = dict(controller='pixhawk_6c', radio_device='microhard_pmddl2450', uav_id=2,
+            channels={channel: dict(endpoint=dict(kind='udp', bind=['127.0.0.1', 20001+index],
+                peer=['127.0.0.1', 20101+index])) for index, channel in enumerate(('control', 'payload'))})
+        self.bundle = resolve(request, json.loads(CATALOG.read_text()), native_uav_count=3)
+        self.bundle['reference_profiles_sha256'] = hashlib.sha256(CATALOG.read_bytes()).hexdigest()
+        for adapter in self.bundle['adapters'].values():
+            adapter['radio_watchdog_file'] = self.watchdog
+        self.bundle_path = self.root / 'external_endpoints/bundle.json'
+        self.store(self.bundle_path, self.bundle)
+        for i in (1, 3):
+            for channel in ('control', 'payload'):
+                self.store(self.root / f'metrics/{channel}_uart_uav{i}.json', self.sample(i, channel))
+        for channel in ('control', 'payload'):
+            self.store(self.root / f'external_endpoints/{channel}/metrics.json', self.sample(2, channel, external=True))
+
+    def store(self, path, value):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(value))
+
+    def sample(self, uav, channel, external=False):
+        value = dict(uav_id=uav, channel=channel, sampled_monotonic_ns=self.stamp, reassembly_pending_records=0)
+        if external:
+            value.update(controller_kind='udp', connected=True, to_device_queue_bytes=0, to_radio_queue_bytes=0,
+                         radio_to_endpoint_bytes=25, endpoint_to_radio_bytes=100)
+        else:
+            value.update(uart_queue_bytes=0, radio_queue_bytes=0, uart_output_bytes=25, uart_input_bytes=100)
+        return value
+
+    def read(self, **kwargs):
+        values = dict(after_ns=self.stamp, watchdog_file=self.watchdog)
+        values.update(kwargs)
+        return native._uart_byte_counters(self.root, (1, 2, 3), ('control', 'payload'), 'uart_output_bytes', **values)
+
+    def test_exact_native_pair_and_other_stock_slots_have_identified_drained_counters(self):
+        values = self.read()
+        self.assertEqual(len(values), 6)
+        self.assertTrue(all(value == 25 for value in values.values()))
+        source = native._uart_byte_counters(self.root, (1, 2, 3), ('control', 'payload'), 'uart_input_bytes',
+            after_ns=self.stamp, watchdog_file=self.watchdog)
+        self.assertTrue(all(value == 100 for value in source.values()))
+
+    def test_missing_counter_or_either_queue_or_pending_cannot_default_to_zero(self):
+        path = self.root / 'external_endpoints/payload/metrics.json'
+        original = self.sample(2, 'payload', external=True)
+        for field in original:
+            changed = original.copy()
+            del changed[field]
+            self.store(path, changed)
+            with self.subTest(field=field):
+                self.assertIsNone(self.read())
+
+    def test_both_external_queues_and_reassembly_must_be_drained(self):
+        path = self.root / 'external_endpoints/control/metrics.json'
+        for field in ('to_radio_queue_bytes', 'to_device_queue_bytes', 'reassembly_pending_records'):
+            value = self.sample(2, 'control', external=True)
+            value[field] = 1
+            self.store(path, value)
+            with self.subTest(field=field):
+                self.assertIsNone(self.read())
+
+    def test_stale_future_wrong_uav_or_channel_are_ineligible(self):
+        path = self.root / 'external_endpoints/payload/metrics.json'
+        for field, changed in (('sampled_monotonic_ns', self.stamp-1), ('sampled_monotonic_ns', 10**30),
+                               ('uav_id', 1), ('uav_id', True), ('channel', 'control')):
+            value = self.sample(2, 'payload', external=True)
+            value[field] = changed
+            self.store(path, value)
+            with self.subTest(field=field, value=changed):
+                self.assertIsNone(self.read())
+
+    def test_wrong_native_bundle_watchdog_or_duplicate_stock_owner_cannot_qualify(self):
+        self.assertIsNone(self.read(watchdog_file='/tmp/another-run/heartbeat'))
+        altered = copy.deepcopy(self.bundle)
+        altered['native_binding']['uav_id'] = 1
+        self.store(self.bundle_path, altered)
+        self.assertIsNone(self.read())
+        self.store(self.bundle_path, self.bundle)
+        self.store(self.root / 'metrics/control_uart_uav2.json', self.sample(2, 'control'))
+        self.assertIsNone(self.read())
+
+    def test_stock_counter_drain_fields_are_required_as_well(self):
+        path = self.root / 'metrics/control_uart_uav1.json'
+        for field in ('uart_queue_bytes', 'radio_queue_bytes', 'reassembly_pending_records'):
+            value = self.sample(1, 'control')
+            del value[field]
+            self.store(path, value)
+            with self.subTest(field=field):
+                self.assertIsNone(self.read())
+
+    def test_legacy_external_slot_requires_its_actual_config_and_current_drain_fields(self):
+        root = self.root / 'legacy'
+        (root / 'logs').mkdir(parents=True)
+        config = dict(uav_id=1, channel='control', radio_namespace='ams-uav1', endpoint=dict(kind='udp'),
+                      radio=dict(bind=['10.71.1.10', 14601], peer=['10.71.0.10', 14600]))
+        (root / 'logs/external_endpoint.yaml').write_text(yaml.safe_dump(config))
+        path = root / 'external_endpoint/metrics.json'
+        value = self.sample(1, 'control', external=True)
+        self.store(path, value)
+        self.assertEqual(native._uart_byte_counters(root, (1,), ('control',), 'uart_output_bytes',
+            after_ns=self.stamp), {'control:uav1': 25})
+        del value['to_radio_queue_bytes']
+        self.store(path, value)
+        self.assertIsNone(native._uart_byte_counters(root, (1,), ('control',), 'uart_output_bytes', after_ns=self.stamp))
 
 
 if __name__ == '__main__':

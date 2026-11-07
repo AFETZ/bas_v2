@@ -1,0 +1,746 @@
+--- a/src/spectrum/model/sionna-rt-channel-model.cc
++++ b/src/spectrum/model/sionna-rt-channel-model.cc
+@@ -16,6 +16,8 @@
+ #include "ns3/log.h"
+ #include "ns3/mobility-model.h"
+ #include "ns3/node.h"
++#include "ns3/isotropic-antenna-model.h"
++#include <limits>
+ #include "ns3/phased-array-model.h"
+ #include "ns3/pointer.h"
+ #include "ns3/simulator.h"
+@@ -66,6 +68,8 @@
+ void
+ SionnaRtChannelModel::DoDispose()
+ {
++    m_receiverBatchMobility.clear();
++    m_receiverBatchAntennas.clear();
+     NS_LOG_FUNCTION(this);
+     m_channelMatrixMap.clear();
+     m_channelParamsMap.clear();
+@@ -172,6 +176,12 @@
+                           MakeBooleanAccessor(&SionnaRtChannelModel::SetNormalizeDelays,
+                                               &SionnaRtChannelModel::GetNormalizeDelays),
+                           MakeBooleanChecker())
++            .AddAttribute("ReceiverBatchEnabled",
++                          "Explicit iso 1x1 engineering mode: solve all registered RX for one TX",
++                          BooleanValue(false),
++                          MakeBooleanAccessor(&SionnaRtChannelModel::SetReceiverBatchEnabled,
++                                              &SionnaRtChannelModel::GetReceiverBatchEnabled),
++                          MakeBooleanChecker())
+             .AddAttribute("Scenario",
+                           "The Sionna RT scenario name used to create scenes",
+                           StringValue("munich"),
+@@ -186,6 +196,224 @@
+ {
+     NS_LOG_FUNCTION(this);
+     m_sceneConfigs.mergeShapes = cond;
++}
++
++void
++SionnaRtChannelModel::SetReceiverBatchEndpoints(
++    const std::vector<Ptr<const MobilityModel>>& mobility,
++    const std::vector<Ptr<const PhasedArrayModel>>& antennas)
++{
++    if (m_receiverBatchEnabled || !m_channelMatrixMap.empty())
++        throw std::runtime_error("Receiver batch endpoints must be configured before enabling/solving");
++    auto previousMobility = m_receiverBatchMobility;
++    auto previousAntennas = m_receiverBatchAntennas;
++    m_receiverBatchMobility = mobility;
++    m_receiverBatchAntennas = antennas;
++    try { ValidateReceiverBatchEndpoints(); }
++    catch (...)
++    {
++        m_receiverBatchMobility = std::move(previousMobility);
++        m_receiverBatchAntennas = std::move(previousAntennas);
++        throw;
++    }
++}
++
++void
++SionnaRtChannelModel::SetReceiverBatchEnabled(bool enabled)
++{
++    if (enabled != m_receiverBatchEnabled && !m_channelMatrixMap.empty())
++        throw std::runtime_error("Receiver batch mode cannot change after channel generation");
++    if (enabled) ValidateReceiverBatchEndpoints();
++    m_receiverBatchEnabled = enabled;
++}
++
++bool
++SionnaRtChannelModel::GetReceiverBatchEnabled() const
++{
++    return m_receiverBatchEnabled;
++}
++
++uint32_t
++SionnaRtChannelModel::GetReceiverBatchAllocation(uint32_t receivers) const
++{
++    if (receivers == 0 || receivers > 5 ||
++        m_maxNumPathsPerSource > std::numeric_limits<uint32_t>::max() / receivers)
++        throw std::overflow_error("Receiver batch allocation requires 1..5 RX and a positive uint32 budget product");
++    return m_maxNumPathsPerSource * receivers;
++}
++
++SionnaRtChannelModel::ReceiverBatchStats
++SionnaRtChannelModel::GetReceiverBatchStats() const
++{
++    auto stats = m_receiverBatchStats;
++    stats.enabled = m_receiverBatchEnabled;
++    stats.registeredEndpoints = m_receiverBatchMobility.size();
++    stats.configuredMaxPathsPerSource = m_maxNumPathsPerSource;
++    return stats;
++}
++
++void
++SionnaRtChannelModel::ValidateReceiverBatchEndpoints() const
++{
++    const auto count = m_receiverBatchMobility.size();
++    if (count < 2 || count > 6 || count != m_receiverBatchAntennas.size())
++        throw std::invalid_argument("Receiver batch requires exactly 2..6 registered radio endpoints");
++    if (!m_RtPathSolverConfig.syntheticArray)
++        throw std::invalid_argument("Receiver batch requires the explicit synthetic iso 1x1 reference");
++    for (size_t i = 0; i < count; ++i)
++    {
++        auto mobility = m_receiverBatchMobility[i];
++        auto antenna = DynamicCast<const UniformPlanarArray>(m_receiverBatchAntennas[i]);
++        if (!mobility || !mobility->GetObject<Node>() || !antenna ||
++            antenna->GetNumRows() != 1 || antenna->GetNumColumns() != 1 ||
++            antenna->GetNumElems() != 1 || antenna->GetNumPorts() != 1 ||
++            antenna->GetNumPols() != 1 || antenna->GetPolSlant() != 0.0 ||
++            !DynamicCast<IsotropicAntennaModel>(antenna->GetAntennaElement()) ||
++            antenna->GetAntennaElement()->GetGainDb(Angles(0.0, M_PI / 2)) != 0.0)
++            throw std::invalid_argument("Receiver batch supports attached nodes with iso 1x1 V 0dBi arrays only");
++        if (AntennaSceneFingerprint(antenna) != AntennaSceneFingerprint(m_receiverBatchAntennas[0]))
++            throw std::invalid_argument("Receiver batch arrays must have the same reference configuration");
++        for (const Vector& value : {mobility->GetPosition(), mobility->GetVelocity(), BodyOrientation(mobility)})
++            if (!std::isfinite(value.x) || !std::isfinite(value.y) || !std::isfinite(value.z))
++                throw std::invalid_argument("Receiver batch endpoint has nonfinite pose, velocity or orientation");
++        for (size_t j = 0; j < i; ++j)
++            if (mobility->GetObject<Node>()->GetId() == m_receiverBatchMobility[j]->GetObject<Node>()->GetId() ||
++                antenna->GetId() == m_receiverBatchAntennas[j]->GetId())
++                throw std::invalid_argument("Receiver batch node and antenna identifiers must be unique");
++    }
++    (void)GetReceiverBatchAllocation(count - 1);
++}
++
++void
++SionnaRtChannelModel::ValidateReceiverBatchPair(Ptr<const MobilityModel> aMob,
++                                               Ptr<const MobilityModel> bMob,
++                                               Ptr<const PhasedArrayModel> aAntenna,
++                                               Ptr<const PhasedArrayModel> bAntenna) const
++{
++    ValidateReceiverBatchEndpoints();
++    bool aFound = false, bFound = false;
++    for (size_t i = 0; i < m_receiverBatchMobility.size(); ++i)
++    {
++        aFound |= aMob == m_receiverBatchMobility[i] && aAntenna == m_receiverBatchAntennas[i];
++        bFound |= bMob == m_receiverBatchMobility[i] && bAntenna == m_receiverBatchAntennas[i];
++    }
++    if (!aFound || !bFound || aMob == bMob)
++        throw std::invalid_argument("Pair is outside the registered receiver batch; use an explicit separate pairwise model for sources");
++}
++
++py::object
++SionnaRtChannelModel::CalculateReceiverBatchPaths(const py::module_ rt, const py::object scene,
++                                                  uint32_t receiverCount)
++{
++    if (py::str(rt.attr("__version__")).cast<std::string>() != "1.2.0")
++        throw std::runtime_error("Receiver batching is verified only for the pinned Sionna RT 1.2.0 API");
++    auto& stats = m_receiverBatchStats;
++    ++stats.attemptedCalls;
++    stats.lastReceiverCount = receiverCount;
++    stats.lastAllocatedMaxPathsPerSource = GetReceiverBatchAllocation(receiverCount);
++    stats.lastCandidateCount = stats.lastCandidateBufferSize = 0;
++    auto solver = rt.attr("PathSolver")();
++    // Pinned API instrumentation only: observe the standard pre-shrink buffer,
++    // without changing any rays, candidates or coefficients.
++    py::object candidateGenerator = solver.attr("_candidate_generator");
++    solver.attr("_candidate_generator") = py::cpp_function(
++        [this, candidateGenerator](py::args args, py::kwargs kwargs) {
++            auto buffer = candidateGenerator(*args, **kwargs);
++            auto np = py::module_::import("numpy");
++            auto count = np.attr("asarray")(buffer.attr("paths_counter"));
++            m_receiverBatchStats.lastCandidateCount =
++                count.attr("reshape")(-1).attr("__getitem__")(0).cast<uint32_t>();
++            m_receiverBatchStats.lastCandidateBufferSize = buffer.attr("buffer_size").cast<uint32_t>();
++            if (m_receiverBatchStats.lastCandidateCount >= m_receiverBatchStats.lastCandidateBufferSize)
++            {
++                ++m_receiverBatchStats.candidateCapacityReachedCalls;
++                throw std::runtime_error("Receiver batch candidate capacity reached; refusing potentially clipped RT paths");
++            }
++            return buffer;
++        });
++    auto paths = solver(py::arg("scene") = scene,
++        py::arg("samples_per_src") = m_samplesPerSource,
++        py::arg("max_num_paths_per_src") = stats.lastAllocatedMaxPathsPerSource,
++        py::arg("max_depth") = m_RtPathSolverConfig.maxDepth,
++        py::arg("los") = m_RtPathSolverConfig.los,
++        py::arg("specular_reflection") = m_RtPathSolverConfig.specularReflection,
++        py::arg("diffuse_reflection") = m_RtPathSolverConfig.diffuseReflection,
++        py::arg("refraction") = m_RtPathSolverConfig.refraction,
++        py::arg("diffraction") = m_RtPathSolverConfig.diffraction,
++        py::arg("edge_diffraction") = m_RtPathSolverConfig.edgeDiffraction,
++        py::arg("synthetic_array") = m_RtPathSolverConfig.syntheticArray,
++        py::arg("seed") = m_RtPathSolverConfig.seed);
++    if (DoesNumberOfPathsExceedMaximum(GetNumberOfPathsFromCir(paths)))
++        throw std::runtime_error("Sionna batch retained-path limit exceeded; no automatic reduction");
++    if (m_isImageRendered) SceneRenderImageToFile(rt, paths, scene);
++    NS_LOG_INFO("Receiver batch paths computed: nrx=" << receiverCount
++        << " samples_per_src=" << m_samplesPerSource
++        << " allocated_max_num_paths_per_src=" << stats.lastAllocatedMaxPathsPerSource
++        << " candidate_count=" << stats.lastCandidateCount);
++    return paths;
++}
++
++void
++SionnaRtChannelModel::GenerateReceiverBatch(Ptr<const MobilityModel> txMob,
++                                           Ptr<const PhasedArrayModel> txAntenna)
++{
++    std::vector<size_t> receivers;
++    for (size_t i = 0; i < m_receiverBatchMobility.size(); ++i)
++        if (m_receiverBatchMobility[i] != txMob) receivers.push_back(i);
++    auto rt = py::module_::import("sionna.rt");
++    auto scene = CreateScene(rt, txMob, m_receiverBatchMobility[receivers[0]],
++                              txAntenna, m_receiverBatchAntennas[receivers[0]]);
++    for (size_t index = 1; index < receivers.size(); ++index)
++    {
++        const auto name = "batch_rx_" + std::to_string(index);
++        auto rx = scene.attr("get")(name);
++        if (rx.is_none())
++        {
++            rx = rt.attr("Receiver")(py::arg("name") = name,
++                                      py::arg("position") = py::make_tuple(0.0, 0.0, 0.0));
++            scene.attr("add")(rx);
++        }
++        auto mobility = m_receiverBatchMobility[receivers[index]];
++        auto antenna = DynamicCast<const UniformPlanarArray>(m_receiverBatchAntennas[receivers[index]]);
++        const auto position = mobility->GetPosition(), velocity = mobility->GetVelocity();
++        VectorValue orientation;
++        const auto angles = mobility->GetAttributeFailSafe("Orientation", orientation)
++            ? orientation.Get() : Vector(antenna->GetAlpha(), antenna->GetBeta(), 0.0);
++        rx.attr("position") = py::make_tuple(position.x, position.y, position.z);
++        rx.attr("velocity") = py::make_tuple(velocity.x, velocity.y, velocity.z);
++        rx.attr("orientation") = py::make_tuple(angles.x, angles.y, angles.z);
++    }
++    if (py::len(scene.attr("receivers")) != receivers.size() || py::len(scene.attr("transmitters")) != 1)
++        throw std::runtime_error("Receiver batch scene contains unexpected endpoints");
++    auto paths = CalculateReceiverBatchPaths(rt, scene, receivers.size());
++    // Extract/validate all receiver tensors before publishing fresh matrices.
++    // Any exception propagates to the existing fail-closed simulator boundary.
++    std::vector<Ptr<ChannelMatrix>> matrices;
++    std::vector<Ptr<SionnaRtChannelParams>> parameters;
++    for (size_t index = 0; index < receivers.size(); ++index)
++    {
++        auto rxMob = m_receiverBatchMobility[receivers[index]];
++        auto rxAntenna = m_receiverBatchAntennas[receivers[index]];
++        auto matrix = CreateNewMatrixChannel(CalculateCirFromPaths(paths, index), txMob,
++                                               rxMob, txAntenna, rxAntenna);
++        matrix->m_antennaPair = {txAntenna->GetId(), rxAntenna->GetId()};
++        matrices.push_back(matrix);
++        parameters.push_back(CalculateChannelParamsFromPaths(paths, txMob, rxMob, index));
++    }
++    for (size_t index = 0; index < receivers.size(); ++index)
++    {
++        auto rxMob = m_receiverBatchMobility[receivers[index]];
++        auto rxAntenna = m_receiverBatchAntennas[receivers[index]];
++        const auto txId = txMob->GetObject<Node>()->GetId(), rxId = rxMob->GetObject<Node>()->GetId();
++        m_channelMatrixMap[GetKey(txAntenna->GetId(), rxAntenna->GetId())] = matrices[index];
++        m_channelParamsMap[GetKey(txId, rxId)] = parameters[index];
++        m_pairPositionSnapshots[GetKey(txId, rxId)] = {txId, txMob->GetPosition(), rxId,
++            rxMob->GetPosition(), txMob->GetVelocity(), rxMob->GetVelocity(),
++            BodyOrientation(txMob), BodyOrientation(rxMob)};
++        (void)txAntenna->IsChannelOutOfDate(rxAntenna); // This pair was just regenerated.
++    }
++    ++m_receiverBatchStats.completedCalls;
++    m_receiverBatchStats.generatedLinks += receivers.size();
+ }
+ 
+ void
+@@ -360,6 +588,11 @@
+ {
+     NS_LOG_FUNCTION(this);
+ 
++    if (m_receiverBatchEnabled)
++    {
++        ValidateReceiverBatchPair(aMob, bMob, aAntenna, bAntenna);
++    }
++
+     // Compute the channel matrix key. The key is reciprocal, i.e., key (a, b) = key (b, a)
+     uint64_t channelMatrixKey = GetKey(aAntenna->GetId(), bAntenna->GetId());
+ 
+@@ -389,6 +622,11 @@
+     // generate a new realization
+     if (notFound || update)
+     {
++        if (m_receiverBatchEnabled)
++        {
++            GenerateReceiverBatch(aMob, aAntenna);
++            return m_channelMatrixMap.at(channelMatrixKey);
++        }
+         // channel matrix not found or has to be updated, generate a new one
+         py::module_ rt = py::module_::import("sionna.rt");
+         NS_LOG_INFO("Building scene for antenna pair ("
+@@ -622,7 +860,8 @@
+ Ptr<SionnaRtChannelModel::SionnaRtChannelParams>
+ SionnaRtChannelModel::CalculateChannelParamsFromPaths(const py::object paths,
+                                                       Ptr<const MobilityModel> aMob,
+-                                                      Ptr<const MobilityModel> bMob) const
++                                                      Ptr<const MobilityModel> bMob,
++                                                      size_t receiverIndex) const
+ {
+     NS_LOG_FUNCTION(this);
+     NS_LOG_DEBUG("Calculating ChannelParams from paths");
+@@ -636,13 +875,13 @@
+ 
+     channelParams->m_generatedTime = Simulator::Now();
+ 
+-    channelParams->m_delay = CalculateTauFromPaths(np, paths);
+-    channelParams->m_doppler = CalculateDopplerFromPaths(np, paths);
++    channelParams->m_delay = CalculateTauFromPaths(np, paths, receiverIndex);
++    channelParams->m_doppler = CalculateDopplerFromPaths(np, paths, receiverIndex);
+     channelParams->m_angle.clear();
+-    channelParams->m_angle.push_back(CalculateAnglesFromPaths(np, paths, "AOA")); // AOA
+-    channelParams->m_angle.push_back(CalculateAnglesFromPaths(np, paths, "ZOA")); // ZOA
+-    channelParams->m_angle.push_back(CalculateAnglesFromPaths(np, paths, "AOD")); // AOD
+-    channelParams->m_angle.push_back(CalculateAnglesFromPaths(np, paths, "ZOD")); // ZOD
++    channelParams->m_angle.push_back(CalculateAnglesFromPaths(np, paths, "AOA", receiverIndex));
++    channelParams->m_angle.push_back(CalculateAnglesFromPaths(np, paths, "ZOA", receiverIndex));
++    channelParams->m_angle.push_back(CalculateAnglesFromPaths(np, paths, "AOD", receiverIndex));
++    channelParams->m_angle.push_back(CalculateAnglesFromPaths(np, paths, "ZOD", receiverIndex));
+ 
+     // Precompute angles sincos
+     channelParams->m_cachedAngleSincos.resize(channelParams->m_angle.size());
+@@ -845,7 +1084,7 @@
+ }
+ 
+ MatrixBasedChannelModel::Complex3DVector
+-SionnaRtChannelModel::CalculateCirFromPaths(const py::object paths) const
++SionnaRtChannelModel::CalculateCirFromPaths(const py::object paths, size_t receiverIndex) const
+ {
+     NS_LOG_FUNCTION(this);
+     py::module_ np = py::module_::import("numpy");
+@@ -853,9 +1092,14 @@
+     py::tuple cir = paths.attr("cir")(py::arg("normalize_delays") = m_normalizeDelays,
+                                       py::arg("out_type") = "numpy");
+ 
+-    py::object a_py = np.attr("asarray")(cir[0], py::arg("dtype") = np.attr("complex128"));
++    py::object a_py = np.attr("ascontiguousarray")(cir[0], py::arg("dtype") = np.attr("complex128"));
+     py::buffer_info a_info = py::buffer(a_py).request();
++    if (a_info.ndim != 6 || receiverIndex >= static_cast<size_t>(a_info.shape[0]) ||
++        a_info.shape[2] != 1 || a_info.shape[5] != 1)
++        throw std::out_of_range("CIR extraction requires one TX/time sample and a valid RX index");
+     auto* data = static_cast<std::complex<double>*>(a_info.ptr);
++    data += receiverIndex * a_info.shape[1] * a_info.shape[2] * a_info.shape[3] *
++            a_info.shape[4] * a_info.shape[5];
+ 
+     // Generate channel coefficients for each cluster n and each receiver
+     //  and transmitter element pair u,s.
+@@ -883,16 +1127,20 @@
+ }
+ 
+ MatrixBasedChannelModel::DoubleVector
+-SionnaRtChannelModel::CalculateTauFromPaths(const py::module_ np, py::object paths) const
++SionnaRtChannelModel::CalculateTauFromPaths(const py::module_ np, py::object paths,
++                                          size_t receiverIndex) const
+ {
+     NS_LOG_FUNCTION(this);
+     // Convert to numpy float64 array
+     py::tuple cir = paths.attr("cir")(py::arg("normalize_delays") = m_normalizeDelays,
+                                       py::arg("out_type") = "numpy");
+-    py::object tau_py = np.attr("asarray")(cir[1], py::arg("dtype") = np.attr("float64"));
++    py::object tau_py = np.attr("ascontiguousarray")(cir[1], py::arg("dtype") = np.attr("float64"));
+     // Buffer info
+     py::buffer_info tau_info = py::buffer(tau_py).request();
++    if (receiverIndex >= static_cast<size_t>(tau_info.shape[0]))
++        throw std::out_of_range("Invalid RX index for path delays");
+     auto* data = static_cast<double*>(tau_info.ptr);
++    data += receiverIndex * (tau_info.size / tau_info.shape[0]);
+     // Shape of array in case syntheticarray differs in sionna
+     if (m_RtPathSolverConfig.syntheticArray)
+     {
+@@ -905,16 +1153,20 @@
+ }
+ 
+ std::vector<double>
+-SionnaRtChannelModel::CalculateDopplerFromPaths(const py::module_ np, py::object paths) const
++SionnaRtChannelModel::CalculateDopplerFromPaths(const py::module_ np, py::object paths,
++                                              size_t receiverIndex) const
+ {
+     NS_LOG_FUNCTION(this);
+     py::tuple doppler = paths.attr("doppler");
+     // Convert doppler (DrJit tensor) to numpy complex128 array
+-    py::object d_py = np.attr("asarray")(doppler, py::arg("dtype") = np.attr("float64"));
++    py::object d_py = np.attr("ascontiguousarray")(doppler, py::arg("dtype") = np.attr("float64"));
+ 
+     // Buffer info
+     py::buffer_info d_info = py::buffer(d_py).request();
++    if (receiverIndex >= static_cast<size_t>(d_info.shape[0]))
++        throw std::out_of_range("Invalid RX index for Doppler");
+     auto* data = static_cast<double*>(d_info.ptr);
++    data += receiverIndex * (d_info.size / d_info.shape[0]);
+ 
+     // Shape of array in case syntheticarray differs in sionna
+     size_t dopplerSize =
+@@ -932,7 +1184,7 @@
+ MatrixBasedChannelModel::DoubleVector
+ SionnaRtChannelModel::CalculateAnglesFromPaths(const py::module_ np,
+                                                py::object paths,
+-                                               std::string Angle) const
++                                               std::string Angle, size_t receiverIndex) const
+ {
+     py::object angle_py;
+     if (Angle == "ZOA")
+@@ -958,11 +1210,14 @@
+     }
+ 
+     // Convert to numpy float64 array
+-    py::object angle_np = np.attr("asarray")(angle_py, py::arg("dtype") = py::dtype("float64"));
++    py::object angle_np = np.attr("ascontiguousarray")(angle_py, py::arg("dtype") = py::dtype("float64"));
+     // Buffer info
+ 
+     py::buffer_info angle_info = py::buffer(angle_np).request();
++    if (receiverIndex >= static_cast<size_t>(angle_info.shape[0]))
++        throw std::out_of_range("Invalid RX index for path angles");
+     auto* data = static_cast<double*>(angle_info.ptr);
++    data += receiverIndex * (angle_info.size / angle_info.shape[0]);
+ 
+     // Shape of array in case syntheticarray differs in sionna
+     size_t angelSize = (m_RtPathSolverConfig.syntheticArray) ? size_t(angle_info.shape[2])
+--- a/src/spectrum/model/sionna-rt-channel-model.h
++++ b/src/spectrum/model/sionna-rt-channel-model.h
+@@ -70,6 +70,27 @@
+ {
+   public:
+     /**
++     * Explicit engineering mode; default pairwise behavior is unchanged.
++     * The caller retains ownership of live-state freshness for the full roster.
++     * Solves read the existing single-threaded ns-3 mobility snapshot.
++     */
++    void SetReceiverBatchEndpoints(const std::vector<Ptr<const MobilityModel>>& mobility,
++                                   const std::vector<Ptr<const PhasedArrayModel>>& antennas);
++    void SetReceiverBatchEnabled(bool enabled);
++    bool GetReceiverBatchEnabled() const;
++    uint32_t GetReceiverBatchAllocation(uint32_t receivers) const;
++    struct ReceiverBatchStats
++    {
++        bool enabled{false};
++        uint32_t registeredEndpoints{0}, configuredMaxPathsPerSource{0};
++        uint64_t attemptedCalls{0}, completedCalls{0}, generatedLinks{0};
++        uint64_t candidateCapacityReachedCalls{0};
++        uint32_t lastReceiverCount{0}, lastAllocatedMaxPathsPerSource{0};
++        uint32_t lastCandidateCount{0}, lastCandidateBufferSize{0};
++    };
++    ReceiverBatchStats GetReceiverBatchStats() const;
++
++    /**
+      * @brief Constructor.
+      */
+     SionnaRtChannelModel();
+@@ -488,6 +509,16 @@
+     RtPathSolverConfig GetRtPathSolverConfig() const;
+ 
+   protected:
++    void ValidateReceiverBatchEndpoints() const;
++    void ValidateReceiverBatchPair(Ptr<const MobilityModel> aMob,
++                                   Ptr<const MobilityModel> bMob,
++                                   Ptr<const PhasedArrayModel> aAntenna,
++                                   Ptr<const PhasedArrayModel> bAntenna) const;
++    py::object CalculateReceiverBatchPaths(const py::module_ rt, const py::object scene,
++                                           uint32_t receiverCount);
++    void GenerateReceiverBatch(Ptr<const MobilityModel> txMob,
++                                Ptr<const PhasedArrayModel> txAntenna);
++
+     /**
+      * @brief Load a Sionna RT scene using the configured scenario name.
+      *
+@@ -574,7 +605,7 @@
+      * @param paths Python object representing computed paths
+      * @return Complex3DVector containing CIRs for Rx/Tx element pairs
+      */
+-    Complex3DVector CalculateCirFromPaths(const py::object paths) const;
++    Complex3DVector CalculateCirFromPaths(const py::object paths, size_t receiverIndex = 0) const;
+ 
+     /**
+      * @brief Extract delays (tau) per path from RS paths object.
+@@ -586,7 +617,7 @@
+      * @return Vector of delays [s], ordered to match CIR taps
+      */
+     MatrixBasedChannelModel::DoubleVector CalculateTauFromPaths(const py::module_ np,
+-                                                                py::object paths) const;
++                                                                py::object paths, size_t receiverIndex = 0) const;
+     /**
+      * @brief Extract Doppler shifts per path from the Python paths object.
+      *
+@@ -597,7 +628,8 @@
+      * @param paths Python paths object computed by Sionna RT
+      * @return Complex vector of per-path Doppler shifts (one per path)
+      */
+-    std::vector<double> CalculateDopplerFromPaths(const py::module_ np, py::object paths) const;
++    std::vector<double> CalculateDopplerFromPaths(const py::module_ np, py::object paths,
++                                                size_t receiverIndex = 0) const;
+     /**
+      * @brief Extract angular measurements (AOD/AOA/ZOA/ZOD) from the paths.
+      *
+@@ -615,7 +647,7 @@
+      */
+     MatrixBasedChannelModel::DoubleVector CalculateAnglesFromPaths(const py::module_ np,
+                                                                    py::object paths,
+-                                                                   std::string Angle) const;
++                                                                   std::string Angle, size_t receiverIndex = 0) const;
+ 
+     // void CreateOnePath(py::object& paths);
+ 
+@@ -634,7 +666,8 @@
+ 
+     Ptr<SionnaRtChannelParams> CalculateChannelParamsFromPaths(const py::object paths,
+                                                                Ptr<const MobilityModel> aMob,
+-                                                               Ptr<const MobilityModel> bMob) const;
++                                                               Ptr<const MobilityModel> bMob,
++                                                               size_t receiverIndex = 0) const;
+ 
+     /**
+      * @brief Extract the number of propagation paths from the CIR tensor.
+@@ -715,6 +748,11 @@
+     /** Whether Sionna RT should normalize path delays in CIR output. */
+     bool m_normalizeDelays;
+     double m_maxNumberOfPaths; //!< Maximum number of paths to be generated by the path solver
++    bool m_receiverBatchEnabled{false};
++    std::vector<Ptr<const MobilityModel>> m_receiverBatchMobility;
++    std::vector<Ptr<const PhasedArrayModel>> m_receiverBatchAntennas;
++    ReceiverBatchStats m_receiverBatchStats;
++
+     /** Camera position/look-at used by the scene rendering pipeline */
+     Vector m_cameraPosition; //!< Camera position for scene rendering
+     Vector m_cameraLookAt;   //!< Camera look-at point for scene rendering
+--- a/src/spectrum/model/sionna-rt-spectrum-propagation-loss-model.cc
++++ b/src/spectrum/model/sionna-rt-spectrum-propagation-loss-model.cc
+@@ -457,7 +457,8 @@
+         // check if the channel matrix has been updated
+         // or the s beam has been changed
+         // or the u beam has been changed
+-        update = m_longTermMap[longTermId]->m_channel->m_generatedTime !=
++        update = m_longTermMap[longTermId]->m_channel != channelMatrix ||
++                 m_longTermMap[longTermId]->m_channel->m_generatedTime !=
+                      channelMatrix->m_generatedTime ||
+                  m_longTermMap[longTermId]->m_sW != sW || m_longTermMap[longTermId]->m_uW != uW;
+     }
+--- a/src/spectrum/test/sionna-channel-model-test.cc
++++ b/src/spectrum/test/sionna-channel-model-test.cc
+@@ -44,7 +44,217 @@
+ #include "ns3/uniform-planar-array.h"
+ 
+ #include <pybind11/pybind11.h>
++#include <pybind11/embed.h>
+ namespace py = pybind11;
++
++namespace
++{
++using namespace ns3;
++
++class ReceiverBatchContractProbe : public SionnaRtChannelModel
++{
++  public:
++    using SionnaRtChannelModel::CalculateCirFromPaths;
++    using SionnaRtChannelModel::CalculateChannelParamsFromPaths;
++    using SionnaRtChannelModel::ValidateReceiverBatchPair;
++    Ptr<ChannelMatrix> Seed(Ptr<const MobilityModel> a, Ptr<const MobilityModel> b,
++                            Ptr<const PhasedArrayModel> aa, Ptr<const PhasedArrayModel> ba)
++    {
++        auto matrix = Create<ChannelMatrix>();
++        matrix->m_channel = Complex3DVector(1, 1, 1);
++        matrix->m_channel(0, 0, 0) = {1.0, 0.0};
++        matrix->m_generatedTime = Simulator::Now();
++        matrix->m_nodeIds = {a->GetObject<Node>()->GetId(), b->GetObject<Node>()->GetId()};
++        matrix->m_antennaPair = {aa->GetId(), ba->GetId()};
++        m_channelMatrixMap[GetKey(aa->GetId(), ba->GetId())] = matrix;
++        m_pairPositionSnapshots[GetKey(matrix->m_nodeIds.first, matrix->m_nodeIds.second)] =
++            {matrix->m_nodeIds.first, a->GetPosition(), matrix->m_nodeIds.second, b->GetPosition(),
++             a->GetVelocity(), b->GetVelocity(), Vector(), Vector()};
++        (void)aa->IsChannelOutOfDate(ba);
++        return matrix;
++    }
++};
++
++class ReceiverBatchApiTest : public TestCase
++{
++  public:
++    ReceiverBatchApiTest() : TestCase("Receiver batching is explicit, bounded, registered and fail closed") {}
++  private:
++    void DoRun() override
++    {
++        auto model = CreateObject<ReceiverBatchContractProbe>();
++        NS_TEST_ASSERT_MSG_EQ(model->GetReceiverBatchEnabled(), false, "Legacy mode must remain pairwise");
++        bool rejected = false;
++        try { model->SetReceiverBatchEnabled(true); } catch (const std::invalid_argument&) { rejected = true; }
++        NS_TEST_ASSERT_MSG_EQ(rejected, true, "Unregistered batching must fail before Python/GPU");
++        std::vector<Ptr<const MobilityModel>> mobility;
++        std::vector<Ptr<const PhasedArrayModel>> antennas;
++        for (uint32_t i = 0; i < 6; ++i)
++        {
++            auto node = CreateObject<Node>();
++            auto position = CreateObject<ConstantPositionMobilityModel>();
++            position->SetPosition(Vector(i * 10, 0, 3));
++            node->AggregateObject(position);
++            mobility.push_back(position);
++            auto antenna = CreateObject<UniformPlanarArray>();
++            antenna->SetAttribute("NumRows", UintegerValue(1));
++            antenna->SetAttribute("NumColumns", UintegerValue(1));
++            antennas.push_back(antenna);
++        }
++        model->SetAttribute("MaxNumPathsPerSource", UintegerValue(1000));
++        model->SetReceiverBatchEndpoints(mobility, antennas);
++        NS_TEST_ASSERT_MSG_EQ(model->GetReceiverBatchAllocation(5), 5000, "Allocation must preserve per-RX budget");
++        model->SetAttribute("ReceiverBatchEnabled", BooleanValue(true));
++        auto stats = model->GetReceiverBatchStats();
++        NS_TEST_ASSERT_MSG_EQ(stats.enabled, true, "Mode readback lost explicit selection");
++        NS_TEST_ASSERT_MSG_EQ(stats.registeredEndpoints, 6, "Roster was truncated");
++        NS_TEST_ASSERT_MSG_EQ(stats.configuredMaxPathsPerSource, 1000, "Base budget was silently changed");
++        model->ValidateReceiverBatchPair(mobility[2], mobility[5], antennas[2], antennas[5]);
++        rejected = false;
++        try { model->ValidateReceiverBatchPair(mobility[2], mobility[5], antennas[5], antennas[2]); }
++        catch (const std::invalid_argument&) { rejected = true; }
++        NS_TEST_ASSERT_MSG_EQ(rejected, true, "Mismatched endpoint/antenna provenance was accepted");
++        auto matrix = model->Seed(mobility[2], mobility[5], antennas[2], antennas[5]);
++        NS_TEST_ASSERT_MSG_EQ(model->GetChannel(mobility[2], mobility[5], antennas[2], antennas[5]), matrix,
++                              "Valid existing cache must be used without a solver call");
++        NS_TEST_ASSERT_MSG_EQ(model->GetChannel(mobility[5], mobility[2], antennas[5], antennas[2]), matrix,
++                              "Reciprocal cache key changed in batch mode");
++        NS_TEST_ASSERT_MSG_EQ(model->GetReceiverBatchStats().attemptedCalls, 0, "Cache hit invoked Python");
++        auto displaced = DynamicCast<const ConstantPositionMobilityModel>(mobility[2]);
++        model->SetUpdateDistanceThreshold(0.5);
++        auto mutablePosition = ConstCast<ConstantPositionMobilityModel>(displaced);
++        mutablePosition->SetPosition(Vector(21, 0, 3));
++        NS_TEST_ASSERT_MSG_EQ(model->ChannelMatrixNeedsUpdate(matrix, mobility[2], mobility[5]), true,
++                              "Batch mode relaxed the original displacement invalidator");
++        rejected = false;
++        try { model->SetReceiverBatchEnabled(false); } catch (const std::runtime_error&) { rejected = true; }
++        NS_TEST_ASSERT_MSG_EQ(rejected, true, "Hot mode change with existing matrices must fail");
++        model->Dispose();
++        NS_TEST_ASSERT_MSG_EQ(model->GetReceiverBatchStats().registeredEndpoints, 0, "Dispose retained endpoint resources");
++
++        auto invalid = CreateObject<ReceiverBatchContractProbe>();
++        auto duplicates = mobility;
++        duplicates[1] = duplicates[0];
++        rejected = false;
++        try { invalid->SetReceiverBatchEndpoints(duplicates, antennas); }
++        catch (const std::invalid_argument&) { rejected = true; }
++        NS_TEST_ASSERT_MSG_EQ(rejected, true, "Duplicate node identity accepted");
++        NS_TEST_ASSERT_MSG_EQ(invalid->GetReceiverBatchStats().registeredEndpoints, 0, "Failed registration leaked partial roster");
++        auto wide = CreateObject<UniformPlanarArray>();
++        wide->SetAttribute("NumRows", UintegerValue(2));
++        auto wrongArrays = antennas;
++        wrongArrays[1] = wide;
++        rejected = false;
++        try { invalid->SetReceiverBatchEndpoints(mobility, wrongArrays); }
++        catch (const std::invalid_argument&) { rejected = true; }
++        NS_TEST_ASSERT_MSG_EQ(rejected, true, "Unsupported multi-element array accepted");
++        invalid->SetAttribute("MaxNumPathsPerSource", UintegerValue(0xffffffffU));
++        rejected = false;
++        try { (void)invalid->GetReceiverBatchAllocation(5); }
++        catch (const std::overflow_error&) { rejected = true; }
++        NS_TEST_ASSERT_MSG_EQ(rejected, true, "uint32 allocation overflow accepted");
++        invalid->Dispose();
++        Simulator::Destroy();
++    }
++};
++
++class ReceiverBatchSliceTest : public TestCase
++{
++  public:
++    ReceiverBatchSliceTest() : TestCase("Batched CIR delays Doppler and angles select the requested receiver") {}
++  private:
++    void DoRun() override
++    {
++        py::scoped_interpreter python;
++        auto np = py::module_::import("numpy");
++        py::dict variables;
++        py::exec(R"(
++import numpy as np
++from types import SimpleNamespace
++a = np.arange(6, dtype=np.complex128).reshape(3,1,1,1,2,1)
++tau = np.arange(6, dtype=np.float64).reshape(3,1,2) * 1e-6
++paths = SimpleNamespace(cir=lambda **kw: (a, tau), doppler=np.arange(6).reshape(3,1,2),
++    phi_r=np.arange(6).reshape(3,1,2)+10, theta_r=np.arange(6).reshape(3,1,2)+20,
++    phi_t=np.arange(6).reshape(3,1,2)+30, theta_t=np.arange(6).reshape(3,1,2)+40)
++)", variables);
++        auto model = CreateObject<ReceiverBatchContractProbe>();
++        py::object paths = variables["paths"];
++        auto selected = model->CalculateCirFromPaths(paths, 2);
++        NS_TEST_ASSERT_MSG_EQ(std::real(selected(0, 0, 0)), 4.0, "CIR returned RX0 instead of RX2");
++        NS_TEST_ASSERT_MSG_EQ(std::real(selected(0, 0, 1)), 5.0, "CIR path stride is wrong");
++        auto a = CreateObject<Node>(), b = CreateObject<Node>();
++        auto am = CreateObject<ConstantPositionMobilityModel>(), bm = CreateObject<ConstantPositionMobilityModel>();
++        a->AggregateObject(am); b->AggregateObject(bm);
++        auto parameters = model->CalculateChannelParamsFromPaths(paths, am, bm, 2);
++        NS_TEST_ASSERT_MSG_EQ_TOL(parameters->m_delay[0], 4e-6, 1e-15, "Delays returned RX0 or wrong units");
++        NS_TEST_ASSERT_MSG_EQ(parameters->m_doppler[1], 5.0, "Doppler returned RX0");
++        NS_TEST_ASSERT_MSG_EQ(parameters->m_angle[0][0], 14.0, "Arrival azimuth returned RX0");
++        NS_TEST_ASSERT_MSG_EQ(parameters->m_angle[1][0], 24.0, "Arrival zenith returned RX0");
++        NS_TEST_ASSERT_MSG_EQ(parameters->m_angle[2][0], 34.0, "Departure azimuth returned RX0");
++        NS_TEST_ASSERT_MSG_EQ(parameters->m_angle[3][0], 44.0, "Departure zenith returned RX0");
++        bool rejected = false;
++        try { (void)model->CalculateCirFromPaths(paths, 3); }
++        catch (const std::out_of_range&) { rejected = true; }
++        NS_TEST_ASSERT_MSG_EQ(rejected, true, "Out-of-range receiver index was accepted");
++        model->Dispose();
++        Simulator::Destroy();
++    }
++};
++
++class ReceiverBatchLongTermProbe : public SionnaRtSpectrumPropagationLossModel
++{
++  public:
++    using SionnaRtSpectrumPropagationLossModel::GetLongTerm;
++};
++
++class ReceiverBatchSameTimeMatrixTest : public TestCase
++{
++  public:
++    ReceiverBatchSameTimeMatrixTest() : TestCase("New matrices in the same simulation event invalidate long-term coefficients") {}
++  private:
++    void DoRun() override
++    {
++        auto loss = CreateObject<ReceiverBatchLongTermProbe>();
++        auto a = CreateObject<UniformPlanarArray>(), b = CreateObject<UniformPlanarArray>();
++        for (auto antenna : {a, b})
++        {
++            antenna->SetAttribute("NumRows", UintegerValue(1));
++            antenna->SetAttribute("NumColumns", UintegerValue(1));
++            PhasedArrayModel::ComplexVector weights(1);
++            weights[0] = {1.0, 0.0};
++            antenna->SetBeamformingVector(weights);
++        }
++        auto first = Create<MatrixBasedChannelModel::ChannelMatrix>();
++        first->m_generatedTime = Simulator::Now();
++        first->m_antennaPair = {a->GetId(), b->GetId()};
++        first->m_channel = MatrixBasedChannelModel::Complex3DVector(1, 1, 1);
++        first->m_channel(0, 0, 0) = {1.0, 0.0};
++        NS_TEST_ASSERT_MSG_EQ(std::real((*loss->GetLongTerm(first, a, b))(0, 0, 0)),
++                              1.0, "Initial long-term coefficient is incorrect");
++        auto second = Create<MatrixBasedChannelModel::ChannelMatrix>();
++        second->m_generatedTime = first->m_generatedTime; // Same ns-3 event/time.
++        second->m_antennaPair = first->m_antennaPair;
++        second->m_channel = MatrixBasedChannelModel::Complex3DVector(1, 1, 1);
++        second->m_channel(0, 0, 0) = {2.0, 0.0};
++        NS_TEST_ASSERT_MSG_EQ(std::real((*loss->GetLongTerm(second, a, b))(0, 0, 0)),
++                              2.0, "Old long-term coefficients survived a same-time channel replacement");
++        loss->Dispose();
++        Simulator::Destroy();
++    }
++};
++
++class ReceiverBatchContractSuite : public TestSuite
++{
++  public:
++    ReceiverBatchContractSuite() : TestSuite("sionna-receiver-batch-contract", TestSuite::Type::UNIT)
++    {
++        AddTestCase(new ReceiverBatchApiTest(), TestCase::Duration::QUICK);
++        AddTestCase(new ReceiverBatchSameTimeMatrixTest(), TestCase::Duration::QUICK);
++        AddTestCase(new ReceiverBatchSliceTest(), TestCase::Duration::QUICK);
++    }
++};
++static ReceiverBatchContractSuite g_receiverBatchContractSuite;
++} // namespace
+ 
+ using namespace ns3;
+ 

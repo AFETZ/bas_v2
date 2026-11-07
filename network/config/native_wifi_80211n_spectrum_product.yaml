@@ -24,6 +24,7 @@ radio:
 
 sionna:
   solver_profile: realtime_minimal_solver_profile
+  receiver_batch_mode: pairwise
   max_depth: 1
   los: true
   specular_reflection: true

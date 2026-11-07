@@ -50,6 +50,18 @@ int main(int argc, char** argv)
                   << " max_num_paths_per_src=" << paths.Get() << '\n';
     }
     if (!reused || !cloned) throw std::runtime_error("source carrier routing was not exercised");
+    auto batchSources = bas::InstallSpectrumSources(reference, channel, argv[1], "not_loaded.xml",
+        solver, 90, "sionna", [](const auto&, const auto&, double, const auto&) {}, true);
+    for (const auto& [phy, model] : batchSources->sources)
+    {
+        if (model == reference) throw std::runtime_error("external source reused the registered radio cohort");
+        auto sourceChannel = DynamicCast<SionnaRtChannelModel>(model->GetChannelModel());
+        if (sourceChannel->GetReceiverBatchEnabled())
+            throw std::runtime_error("external source unexpectedly entered receiver batch");
+        UintegerValue samples;
+        model->GetChannelModelAttribute("SamplesPerSource", samples);
+        if (samples.Get() != 17000) throw std::runtime_error("standalone source lost its bounded budget");
+    }
     Simulator::Destroy();
     std::cout << "PASS native source carrier and solver budget contract\n";
 }

@@ -85,6 +85,10 @@ case "$PROPAGATION_PROFILE" in
   *) printf 'Unsupported propagation profile: %s\n' "$PROPAGATION_PROFILE" >&2; exit 2 ;;
 esac
 REQUIRES_RT=0
+if [[ "$PROPAGATION_PROFILE" == geometry_logdistance && -n "${BAS_NATIVE_SOURCES:-}" ]]; then
+  printf 'Native interference sources are not installed by geometry_logdistance; select an explicit Sionna profile.\n' >&2
+  exit 2
+fi
 [[ "$PROPAGATION_PROFILE" != sionna && "$PROPAGATION_PROFILE" != hybrid ]] || REQUIRES_RT=1
 GEOMETRY_CONFIG="${BAS_NATIVE_URBAN_CONFIG:-network/config/urban_two_building.json}"
 [[ "$GEOMETRY_CONFIG" == /* ]] || GEOMETRY_CONFIG="$ROOT_DIR/$GEOMETRY_CONFIG"
@@ -151,6 +155,32 @@ if [[ "$SCENARIO_KEY" == urban ]]; then
     }
   fi
   BAS_NATIVE_EXPERIMENT_PROFILE=urban
+fi
+if [[ -n "${BAS_NATIVE_SOURCES:-}" ]]; then
+  resolved_source_path="$(python3 - "$ROOT_DIR" "$BAS_NATIVE_SOURCES" "$SCENARIO_KEY" "$PROPAGATION_PROFILE" \
+    "${BAS_NATIVE_RT_GROUND_MATERIAL:-}" "${BAS_NATIVE_RT_BUILDING_MATERIAL:-}" <<'PYSOURCEINPUT'
+import sys
+from pathlib import Path
+root = Path(sys.argv[1]).resolve()
+sys.path.insert(0, str(root))
+name = sys.argv[2]
+relative = Path(name.replace('\\', '/'))
+if not name or ':' in name or relative.is_absolute() or '..' in relative.parts or relative.suffix.lower() not in ('.yaml', '.yml'):
+    raise ValueError('native sources require a workspace-relative YAML input without traversal')
+path = (root / relative).resolve()
+canonical = path.relative_to(root).as_posix()
+if sys.argv[3:5] == ['urban', 'sionna']:
+    from bas import _interference_input
+    _interference_input(dict(interference=dict(sources=canonical), propagation=dict(
+        model='sionna', ground_material=sys.argv[5], building_material=sys.argv[6])), root)
+else:
+    import yaml
+    from scripts.product.prepare_native_sources import UniqueSafeLoader, prepare
+    prepare(yaml.load(path.read_text(encoding='utf-8-sig'), Loader=UniqueSafeLoader))
+print(canonical)
+PYSOURCEINPUT
+)" || { printf 'Native source configuration failed pre-launch validation.\n' >&2; exit 2; }
+  BAS_NATIVE_SOURCES="$resolved_source_path"
 fi
 
 run_in_container() {
@@ -330,7 +360,8 @@ if [[ "$COORDINATION_POLICY" != off ]]; then
   [[ "$BAS_SIMULATION_MODE" == realtime &&
      ( "$PROPAGATION_PROFILE" == friis || "$PROPAGATION_PROFILE" == geometry_logdistance || "$PROPAGATION_PROFILE" == sionna ) && "$WIFI_TOPOLOGY" == adhoc &&
      "$SCENARIO_MODE" == product && ( "$ACTIVE_UART_CHANNELS" == control || "$ACTIVE_UART_CHANNELS" == control,payload ) &&
-     -z "${BAS_NATIVE_EXTERNAL_CONFIG:-}" && -z "$EXTERNAL_BUNDLE" && -z "${BAS_NATIVE_SOURCES:-}" ]] || {
+     -z "${BAS_NATIVE_EXTERNAL_CONFIG:-}" && -z "$EXTERNAL_BUNDLE" &&
+     ( -z "${BAS_NATIVE_SOURCES:-}" || "$PROPAGATION_PROFILE" == sionna ) ]] || {
     printf 'Coordination requires 1..5 realtime UAVs, explicit Friis/geometry_logdistance/Sionna ad-hoc, control with optional payload UART, and no other scenario mode.\n' >&2
     exit 2
   }
@@ -380,6 +411,7 @@ PHASED_ARRAY_ADAPTER_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-spectrumwifi-ph
 LOCKSTEP_TAP_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-lockstep-tap-read.patch"
 SOLVER_BUDGET_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-solver-budget.patch"
 BASEBAND_PHASE_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-baseband-spectrum-phase.patch"
+RECEIVER_BATCH_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-receiver-batch.patch"
 if [[ "$SCENARIO_KEY" == urban ]]; then
   SCENARIO="$URBAN_OUTPUT/scenario.yaml"
 elif [[ "$SCENARIO_KEY" == customer ]]; then
@@ -451,7 +483,7 @@ MAP_ID="${SCENARIO_VALUES[5]}"
 
 for required_file in "$ROOT_DIR/scripts/product/capture_effective_config.py" \
   "$PROJECT_SOURCE" "$PATCH_FILE" "$REALTIME_CACHE_PATCH" \
-    "$PHASED_ARRAY_ADAPTER_PATCH" "$LOCKSTEP_TAP_PATCH" "$SOLVER_BUDGET_PATCH" "$BASEBAND_PHASE_PATCH" "$RADIO_CONFIG" "$WORLD" "$CAMERA_FRAGMENT" "$SITL_DEFAULTS"; do
+    "$PHASED_ARRAY_ADAPTER_PATCH" "$LOCKSTEP_TAP_PATCH" "$SOLVER_BUDGET_PATCH" "$BASEBAND_PHASE_PATCH" "$RECEIVER_BATCH_PATCH" "$RADIO_CONFIG" "$WORLD" "$CAMERA_FRAGMENT" "$SITL_DEFAULTS"; do
   [[ -f "$required_file" ]] || { printf 'Missing input: %s\n' "$required_file" >&2; exit 2; }
 done
 if [[ "$REQUIRES_RT" == 1 && ! -f "$SCENE" ]]; then
@@ -500,12 +532,13 @@ for item in (
     str(coupling.get("runtime_lag_max_ms", 250.0)),
     str(sionna.get("samples_per_src", 1000000)),
     str(sionna.get("max_num_paths_per_src", 1000000)),
+    str(sionna.get("receiver_batch_mode", "pairwise")),
 ):
     print(item)
 PY
 )
-(( ${#RADIO_VALUES[@]} == 33 )) || {
-  printf 'Invalid native product radio config: expected 33 resolved values, got %s\n' "${#RADIO_VALUES[@]}" >&2
+(( ${#RADIO_VALUES[@]} == 34 )) || {
+  printf 'Invalid native product radio config: expected 34 resolved values, got %s\n' "${#RADIO_VALUES[@]}" >&2
   exit 2
 }
 RADIO_BACKEND="${RADIO_VALUES[0]}"
@@ -541,6 +574,10 @@ STATE_MAX_AGE_S="${RADIO_VALUES[29]}"
 RUNTIME_LAG_MAX_MS="${RADIO_VALUES[30]}"
 SIONNA_SAMPLES_PER_SOURCE="${RADIO_VALUES[31]}"
 SIONNA_MAX_NUM_PATHS_PER_SOURCE="${RADIO_VALUES[32]}"
+SIONNA_RECEIVER_BATCH_MODE="${RADIO_VALUES[33]}"
+[[ "$SIONNA_RECEIVER_BATCH_MODE" == pairwise || "$SIONNA_RECEIVER_BATCH_MODE" == receiver_batch ]] || {
+  printf 'receiver_batch_mode must be pairwise or receiver_batch.\n' >&2; exit 2;
+}
 [[ "$SIONNA_SAMPLES_PER_SOURCE" =~ ^[1-9][0-9]*$ && "$SIONNA_MAX_NUM_PATHS_PER_SOURCE" =~ ^[1-9][0-9]*$ ]] || {
   printf 'Sionna solver budgets must be positive integers.\n' >&2; exit 2;
 }
@@ -600,6 +637,9 @@ if ! git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply --reverse --check "$SO
 fi
 if ! git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply --reverse --check "$BASEBAND_PHASE_PATCH" >/dev/null 2>&1; then
   git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply "$BASEBAND_PHASE_PATCH"
+fi
+if ! git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply --reverse --check "$RECEIVER_BATCH_PATCH" >/dev/null 2>&1; then
+  git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply "$RECEIVER_BATCH_PATCH"
 fi
 [[ -x "$PYTHON_TOOLING/bin/cmake" ]] || { printf 'Pinned CMake tooling is absent.\n' >&2; exit 2; }
 
@@ -703,7 +743,7 @@ if [[ ( -n "${BAS_NATIVE_EXTERNAL_CONFIG:-}" || -n "$EXTERNAL_BUNDLE" ) && "$SCE
 fi
 if [[ "${BAS_NATIVE_FIVE_SKIP_BUILD:-0}" == 1 ]]; then
   [[ -x "$BINARY" ]] || { printf 'Requested binary reuse but binary is absent.\n' >&2; exit 2; }
-  [[ "$BINARY" -nt "$PROJECT_SOURCE" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-geometry-loss.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-live-state.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-lockstep.h" && "$BINARY" -nt "$REALTIME_CACHE_PATCH" && "$BINARY" -nt "$LOCKSTEP_TAP_PATCH" && "$BINARY" -nt "$SOLVER_BUDGET_PATCH" && "$BINARY" -nt "$BASEBAND_PHASE_PATCH" ]] || {
+  [[ "$BINARY" -nt "$PROJECT_SOURCE" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-geometry-loss.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-live-state.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-lockstep.h" && "$BINARY" -nt "$REALTIME_CACHE_PATCH" && "$BINARY" -nt "$LOCKSTEP_TAP_PATCH" && "$BINARY" -nt "$SOLVER_BUDGET_PATCH" && "$BINARY" -nt "$BASEBAND_PHASE_PATCH" && "$BINARY" -nt "$RECEIVER_BATCH_PATCH" ]] || {
     printf 'Binary predates native source/header; rerun without BAS_NATIVE_FIVE_SKIP_BUILD.\n' >&2; exit 2;
   }
   printf 'Reused focused native target after exact project/upstream source synchronization.\n' \
@@ -776,6 +816,7 @@ PY
   printf 'profile=%s\n' "$RADIO_PROFILE"
   printf 'selected_propagation_profile=%s\nsionna_runtime_enabled=%s\n' "$PROPAGATION_PROFILE" "$REQUIRES_RT"
   printf 'sionna_log_level=%s\n' "$SIONNA_LOG_LEVEL"
+  printf 'sionna_receiver_batch_mode=%s\n' "$SIONNA_RECEIVER_BATCH_MODE"
   [[ "$PROPAGATION_PROFILE" != geometry_logdistance ]] || printf 'geometry_config=%s\ngeometry_radio_model=upstream_LogDistance_selected_by_3D_Buildings\ngeometry_antenna_offset_enu_m=0,0,0\n' "$RUN_DIR/logs/urban_scenario.json"
   printf 'technology_specific_modem=%s\n' "$TECHNOLOGY_SPECIFIC_MODEM"
   printf 'uav_count=%s\nradio_node_count=%s\nshared_spectrum_channels=1\n' "$UAV_COUNT" "$((UAV_COUNT + 1))"
@@ -847,7 +888,13 @@ capture_effective_configuration() {
     --config "native_capture_storage=$RUN_DIR/logs/native_capture_storage.json"
     --config "sionna_solver_budget_patch=$SOLVER_BUDGET_PATCH"
     --config "sionna_baseband_phase_patch=$BASEBAND_PHASE_PATCH"
+    --config "sionna_receiver_batch_patch=$RECEIVER_BATCH_PATCH"
   )
+  if [[ -n "${BAS_NATIVE_SOURCES:-}" ]]; then
+    # capture_effective_config already includes logs/native_sources.json as
+    # native_sources; add the frozen YAML input once, without duplicate labels.
+    config_args+=(--config "native_sources_input=$ROOT_DIR/$BAS_NATIVE_SOURCES")
+  fi
   if [[ "$REQUIRES_RT" == 0 ]]; then
     config_args+=(--not-enabled sionna)
     if [[ "$PROPAGATION_PROFILE" == geometry_logdistance ]]; then
@@ -1362,6 +1409,7 @@ setsid ip netns exec ams-ns3 env \
   --sionnaSyntheticArray="$SIONNA_SYNTHETIC_ARRAY" \
   --sionnaSeed="$SIONNA_SEED" --sionnaMaxNumberOfPaths="$SIONNA_MAX_NUMBER_OF_PATHS" \
   --sionnaSamplesPerSource="$SIONNA_SAMPLES_PER_SOURCE" --sionnaMaxNumPathsPerSource="$SIONNA_MAX_NUM_PATHS_PER_SOURCE" \
+  --sionnaReceiverBatchMode="$SIONNA_RECEIVER_BATCH_MODE" \
   --sionnaCacheJitterFraction="$SIONNA_CACHE_JITTER_FRACTION" \
   --readinessLagMaxMs="$READINESS_LAG_MAX_MS" \
   --readinessConsecutiveSamples="$READINESS_CONSECUTIVE_SAMPLES" \
@@ -1437,13 +1485,16 @@ if ((SCENARIO_STATUS != 0)); then
   exit "$SCENARIO_STATUS"
 fi
 
-if [[ "$SCENARIO_MODE" == product && "$UAV_COUNT" == 5 && ",$ACTIVE_UART_CHANNELS," == *,control,* && ",$ACTIVE_UART_CHANNELS," == *,payload,* && -z "${BAS_NATIVE_EXTERNAL_CONFIG:-}" ]]; then
+if [[ ",$ACTIVE_UART_CHANNELS," == *,control,* && ",$ACTIVE_UART_CHANNELS," == *,payload,* &&
+      ( ( "$SCENARIO_MODE" == product && "$UAV_COUNT" == 5 && -z "${BAS_NATIVE_EXTERNAL_CONFIG:-}" ) ||
+        ( "$SCENARIO_MODE" == latency_diagnostic && -n "$EXTERNAL_BUNDLE" ) ) ]]; then
   printf 'no_bypass_radio_off\n' > "$PHASE_FILE"
   run_with_native_watchdog ip netns exec ams-gcs env BAS_LOCKSTEP_PARTICIPANT=gcs \
     python3 -u "$ROOT_DIR/scripts/product/native_radio_five_uav_scenario.py" no-bypass-probe \
     --run-dir "$RUN_DIR" --node-state "$NODE_STATE" --duration-s 10.5 \
     --radio-heartbeat "$NS3_READY.heartbeat" \
     --radio-profile="$RADIO_PROFILE" --scenario-config="$SCENARIO" \
+    --uav-count="$UAV_COUNT" --channels="$ACTIVE_UART_CHANNELS" \
     --output "$RUN_DIR/metrics/no_bypass_summary.json" \
     > "$RUN_DIR/logs/no_bypass_probe.log" 2>&1
   ip netns exec ams-gcs ss -H -tunap > "$RUN_DIR/logs/gcs_sockets_after_10s.txt" 2>&1 || true

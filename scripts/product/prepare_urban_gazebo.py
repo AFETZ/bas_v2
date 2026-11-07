@@ -45,7 +45,7 @@ def read_rt_radio_profile(path: Path, scene: dict):
                   "non_unicast_mode", "antenna", "control_basic_rates", "ssid", "channel_number",
                   "carrier_hz", "channel_width_mhz", "data_mode", "control_mode", "tx_power_w",
                   "legacy_aloha_phy_rate_bps", "shared_spectrum_channels", "neighbor_discovery_mode", "reason"},
-        "sionna": {"solver_profile", "max_depth", "los", "specular_reflection", "diffuse_reflection",
+        "sionna": {"solver_profile", "receiver_batch_mode", "max_depth", "los", "specular_reflection", "diffuse_reflection",
                    "diffraction", "edge_diffraction", "refraction", "synthetic_array", "seed",
                    "max_number_of_paths", "samples_per_src", "max_num_paths_per_src", "cache_expiry_jitter_fraction",
                    "channel_state_max_age_s", "endpoint_displacement_threshold_m", "readiness_lag_max_ms",
@@ -55,10 +55,16 @@ def read_rt_radio_profile(path: Path, scene: dict):
     if (not isinstance(value, dict) or set(value) != {"schema_version", *keys}
             or type(value["schema_version"]) is not int or value["schema_version"] != 1):
         raise ValueError("radio profile requires schema_version=1 and radio/sionna/coupling objects")
+    if isinstance(value.get("sionna"), dict):
+        value["sionna"].setdefault("receiver_batch_mode", "pairwise")
     for section, fields in keys.items():
         if not isinstance(value[section], dict) or set(value[section]) != fields:
             raise ValueError(f"missing or unknown {section} profile fields")
     radio, rt, coupling = value["radio"], value["sionna"], value["coupling"]
+    if rt["receiver_batch_mode"] not in ("pairwise", "receiver_batch"):
+        raise ValueError("receiver_batch_mode must be pairwise or receiver_batch")
+    if rt["receiver_batch_mode"] == "receiver_batch" and rt["synthetic_array"] is not True:
+        raise ValueError("receiver_batch requires the configured iso 1x1 synthetic arrays")
     if (radio["backend"] != "wifi" or radio["standard"] != "802.11n"
             or type(radio["technology_specific_modem"]) is not bool or radio["technology_specific_modem"]
             or type(radio["shared_spectrum_channels"]) is not int or radio["shared_spectrum_channels"] != 1):

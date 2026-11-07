@@ -59,8 +59,15 @@ def plan_batch(config, batch_id, seeds, rng_runs, repeats=1, duration=None, *, r
         if type(duration) not in (int, float) or not math.isfinite(duration) or duration <= 0:
             raise ValueError('duration must be finite and positive')
         config['experiment']['duration_s'] = duration
-    scene = root / config['environment']['scene']
-    scene_sha = hashlib.sha256(scene.read_bytes()).hexdigest()
+    paths = dict(scene=config['environment']['scene'])
+    if config['propagation']['model'] == 'sionna':
+        paths['radio'] = config['propagation']['radio_config']
+    sources = config.get('interference', {}).get('sources')
+    if sources is not None:
+        paths['sources'] = sources
+    input_hashes = {label: dict(path=name, sha256=hashlib.sha256((root / name).read_bytes()).hexdigest())
+                    for label, name in paths.items()}
+    scene_sha = input_hashes['scene']['sha256']
     cases = []
     for order, (seed, rng_run, repeat) in enumerate(itertools.product(seeds, rng_runs, range(1, repeats + 1)), 1):
         run_id = bas.identifier(f'{batch_id}-c{order:04d}')
@@ -68,7 +75,7 @@ def plan_batch(config, batch_id, seeds, rng_runs, repeats=1, duration=None, *, r
                           repeat=repeat, status='not_started',
                           run_record=f'runs/control/{run_id}/run.json'))
     return dict(schema_version=1, batch_id=batch_id, status='planned', config=config,
-                scene_sha256=scene_sha, cases=cases, planned_cases=count,
+                scene_sha256=scene_sha, input_sha256=input_hashes, cases=cases, planned_cases=count,
                 repeat_semantics='same declared seed/RngRun; repeats are not new independent PRNG substreams')
 
 
@@ -104,9 +111,14 @@ def execute(plan, *, root=None, run_fn=None, fail_fast=False):
                 record.update(status='cancelled', stop_reason='operator_cancelled_between_cases')
                 exit_code = 130
                 break
-            scene = root / record['config']['environment']['scene']
-            if hashlib.sha256(scene.read_bytes()).hexdigest() != record['scene_sha256']:
-                record.update(status='failed', stop_reason='scene_changed_after_batch_planning')
+            # Preserve the legacy scene guard when executing an older plan.
+            required_inputs = record.get('input_sha256', dict(scene=dict(
+                path=record['config']['environment']['scene'], sha256=record['scene_sha256'])))
+            for label, entry in required_inputs.items():
+                if hashlib.sha256((root / entry['path']).read_bytes()).hexdigest() != entry['sha256']:
+                    record.update(status='failed', stop_reason=f'{label}_changed_after_batch_planning')
+                    break
+            if record['status'] == 'failed':
                 exit_code = 2
                 break
             config = copy.deepcopy(record['config'])
@@ -129,10 +141,24 @@ def execute(plan, *, root=None, run_fn=None, fail_fast=False):
             outcome = json.loads(path.read_text()) if path.exists() else {}
             case.update({key: outcome.get(key, 'not_evaluated') for key in
                          ('runtime_status', 'mission_outcome', 'measurement_validity')})
+            for key in ('scene_sha256', 'radio_sha256', 'sources_sha256'):
+                if key in outcome:
+                    case[key] = outcome[key]
+            # Close the check→snapshot race using actual hashes from bas.run.
+            # Historical records without these fields remain explicitly unknown.
+            comparisons = [outcome[label + '_sha256'] == entry['sha256']
+                           for label, entry in required_inputs.items() if label + '_sha256' in outcome]
+            case['inputs_match_batch_plan'] = (all(comparisons)
+                if len(comparisons) == len(required_inputs) else None)
             if code == 130 or cancelled:
                 case['outcome'] = 'cancelled'
                 record.update(status='cancelled', stop_reason='current_case_stopped')
                 exit_code = 130
+                break
+            if False in comparisons:
+                case['outcome'] = 'input_snapshot_differs_from_plan'
+                record.update(status='failed', stop_reason='case_input_snapshot_differs_from_batch_planning')
+                exit_code = 2
                 break
             if case['runtime_status'] != 'completed' or case['measurement_validity'] != 'valid':
                 case['outcome'] = 'setup_or_runtime_failure'

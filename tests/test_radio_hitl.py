@@ -230,6 +230,9 @@ class RadioHitlSoftwarePairTests(unittest.TestCase):
             for channel, tos in (('control', 184), ('payload', 40)):
                 metrics = json.loads((output / channel / 'metrics.json').read_text())
                 self.assertEqual(metrics['radio_tos'], tos)
+                self.assertEqual(metrics['uav_id'], 2)
+                self.assertEqual(metrics['channel'], channel)
+                self.assertIs(type(metrics['reassembly_pending_records']), int)
                 self.assertGreater(metrics['radio_to_endpoint_bytes'], 0)
 
     def test_connection_readiness_failure_stops_both_children_and_frees_ports(self):

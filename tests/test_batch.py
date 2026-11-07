@@ -1,5 +1,6 @@
 """Controller-only batch tests; injected runs do not qualify simulations."""
 import copy
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -116,6 +117,57 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(result['status'], 'failed')
         self.assertEqual(result['stop_reason'], 'scene_changed_after_batch_planning')
         self.assertEqual(len(self.calls), 1)
+
+    def configure_rt_inputs(self):
+        (self.root / 'radio.yaml').write_bytes((bas.ROOT / 'network/config/native_wifi_80211n_spectrum_product.yaml').read_bytes())
+        (self.root / 'sources.yaml').write_text('sources: []\n')  # Hash-only controller fixture; no simulation is launched.
+        self.config['propagation'] = dict(model='sionna', radio_config='radio.yaml',
+            ground_material='medium_dry_ground', building_material='concrete', thickness_m=.2)
+        self.config['interference'] = dict(sources='sources.yaml')
+
+    def test_radio_or_source_change_stops_before_the_next_attempt(self):
+        self.configure_rt_inputs()
+        for label in ('radio', 'sources'):
+            with self.subTest(label=label):
+                run = self.runner([(0, 'completed', 'succeeded', 'valid')])
+                self.calls.clear()
+                plan = self.plan(batch_id='changed-' + label)
+                path = self.root / plan['input_sha256'][label]['path']
+                def mutate(config, run_id):
+                    code = run(config, run_id)
+                    path.write_bytes(path.read_bytes() + b'\n# changed after first case\n')
+                    return code
+                result = execute(plan, root=self.root, run_fn=mutate)
+                self.assertEqual(result['stop_reason'], label + '_changed_after_batch_planning')
+                self.assertEqual(result['attempted_cases'], 1)
+                self.assertEqual(result['cases'][1]['status'], 'not_started')
+
+    def test_actual_snapshot_hash_detects_the_precheck_to_snapshot_race(self):
+        self.configure_rt_inputs()
+        plan = self.plan()
+        run = self.runner([(0, 'completed', 'succeeded', 'valid')])
+        def snapshot_changed_source(config, run_id):
+            code = run(config, run_id)
+            path = self.root / 'runs/control' / run_id / 'run.json'
+            outcome = json.loads(path.read_text())
+            outcome.update(scene_sha256=plan['scene_sha256'], radio_sha256=plan['input_sha256']['radio']['sha256'],
+                           sources_sha256=hashlib.sha256(b'changed during runtime startup').hexdigest())
+            path.write_text(json.dumps(outcome))
+            return code
+        result = execute(plan, root=self.root, run_fn=snapshot_changed_source)
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['attempted_cases'], 1)
+        self.assertEqual(result['stop_reason'], 'case_input_snapshot_differs_from_batch_planning')
+        self.assertFalse(result['cases'][0]['inputs_match_batch_plan'])
+        self.assertEqual(result['cases'][0]['sources_sha256'], hashlib.sha256(b'changed during runtime startup').hexdigest())
+
+    def test_old_scene_hash_plan_remains_compatible_without_claiming_unknown_hashes(self):
+        plan = self.plan()
+        del plan['input_sha256']
+        result = execute(plan, root=self.root, run_fn=self.runner([(0, 'completed', 'succeeded', 'valid')] * 2))
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(result['scene_sha256'], plan['scene_sha256'])
+        self.assertIsNone(result['cases'][0]['inputs_match_batch_plan'])
 
     def test_invalid_numbers_and_large_batches_fail_before_creation(self):
         for text in ('1,,2', '1,1', '-1', 'nan', 'true'):

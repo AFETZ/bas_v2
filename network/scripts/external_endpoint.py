@@ -127,6 +127,7 @@ def run(config, output, duration=None):
                    io_errors=0, unexpected_peer=0, stale_radio_drops=0, max_queue_delay_ms=0.0,
                    radio_tx_datagrams=0, connection_epoch_drops=0,
                    radio_tos=udp.getsockopt(socket.IPPROTO_IP, socket.IP_TOS), pid=os.getpid(),
+                   uav_id=int(config['uav_id']), channel=config['channel'],
                    controller_kind=kind, hardware_validation="not_performed",
                    framing="BSF1; unchanged endpoint bytes", clock="host_monotonic")
     output.mkdir(parents=True, exist_ok=True)
@@ -142,6 +143,7 @@ def run(config, output, duration=None):
         metrics.update(sampled_monotonic_ns=time.monotonic_ns(), connected=device is not None, radio_live=radio_live,
             endpoint_silent=now-last_device_rx > watchdog, radio_silent=now-last_radio_rx > watchdog,
             to_radio_queue_bytes=to_radio.bytes, to_device_queue_bytes=to_device.bytes,
+            reassembly_pending_records=reassembler.pending_records,
             queue_drops=to_radio.dropped+to_device.dropped,
             deadline_drops=to_radio.expired+to_device.expired,
             peak_queue_bytes=max(to_radio.peak,to_device.peak), transport=counters.as_dict())

@@ -22,6 +22,7 @@ SHAPE = {
     'experiment': {'policy', 'duration_s', 'seed', 'run'},
     'runtime': {'clock', 'image', 'land_timeout_s', 'sionna_log_level'},
     'flows': {'channels', 'payload_attitude_interval_s'},
+    'interference': {'sources'},
 }
 PROPAGATION_FIELDS = {
     'geometry_logdistance': {'model'},
@@ -58,9 +59,46 @@ def reject_json_constant(value):
     raise ValueError(f'non-finite JSON value is not allowed: {value}')
 
 
+def _interference_input(config, root):
+    """Validate exact source bytes with the existing native schedule producer."""
+    name = config.get('interference', {}).get('sources')
+    if name is None:
+        return None, None
+    if config['propagation']['model'] != 'sionna':
+        raise ValueError('interference.sources requires propagation.model=sionna')
+    if not isinstance(name, str) or not name or ':' in name:
+        raise ValueError('interference.sources must be null or a workspace-relative YAML path')
+    relative = Path(name.replace('\\', '/'))
+    if relative.is_absolute() or '..' in relative.parts or relative.suffix.lower() not in ('.yaml', '.yml'):
+        raise ValueError('interference.sources must be a workspace-relative YAML path without traversal')
+    path = (root / relative).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        raise ValueError('interference.sources must stay inside the workspace') from None
+    raw = path.read_bytes()
+    import yaml
+    from scripts.product.prepare_native_sources import UniqueSafeLoader, prepare
+    from scripts.product.prepare_sionna_scene import ITU_FREQUENCIES_GHZ
+    try:
+        schedule = prepare(yaml.load(raw.decode('utf-8-sig'), Loader=UniqueSafeLoader))
+    except yaml.YAMLError as error:
+        raise ValueError(f'interference.sources contains invalid YAML: {error}') from error
+    for segment in schedule['segments']:
+        frequency_ghz = segment['center_hz'] / 1e9
+        for field in ('ground_material', 'building_material'):
+            material = config['propagation'][field]
+            if material not in ITU_FREQUENCIES_GHZ or not any(
+                    low <= frequency_ghz <= high for low, high in ITU_FREQUENCIES_GHZ[material]):
+                raise ValueError(f'interference source {segment["id"]} frequency is outside {material} ITU validity')
+    return path, raw
+
+
 def load_config(path, root=ROOT):
     config = json.loads(path.read_text(encoding='utf-8-sig'),
                         object_pairs_hook=unique_json_fields, parse_constant=reject_json_constant)
+    if isinstance(config, dict):
+        config.setdefault('interference', {'sources': None})
     if not isinstance(config, dict) or set(config) != set(SHAPE):
         raise ValueError('runtime config has missing or unknown sections')
     if isinstance(config['runtime'], dict):
@@ -159,6 +197,9 @@ def load_config(path, root=ROOT):
                 for field in ('ground_material', 'building_material', 'thickness_m')):
             raise ValueError('RT profile materials/thickness must match the shared terrain bundle')
         propagation['radio_config'] = radio_file.relative_to(root).as_posix()
+    source_path, _ = _interference_input(config, root)
+    if source_path is not None:
+        config['interference']['sources'] = source_path.relative_to(root).as_posix()
     return config
 
 
@@ -212,12 +253,21 @@ def snapshot_inputs(config, folder, env):
     scene_bytes = (ROOT / config['environment']['scene']).read_bytes()
     (folder / 'scene.json').write_bytes(scene_bytes)
     env['BAS_NATIVE_URBAN_CONFIG'] = (folder / 'scene.json').relative_to(ROOT).as_posix()
-    hashes = dict(scene_sha256=hashlib.sha256(scene_bytes).hexdigest(), radio_sha256=None)
+    hashes = dict(scene_sha256=hashlib.sha256(scene_bytes).hexdigest(), radio_sha256=None, sources_sha256=None)
     if config['propagation']['model'] == 'sionna':
         radio_bytes = (ROOT / config['propagation']['radio_config']).read_bytes()
         (folder / 'radio.yaml').write_bytes(radio_bytes)
         env['BAS_NATIVE_RADIO_CONFIG'] = (folder / 'radio.yaml').relative_to(ROOT).as_posix()
         hashes['radio_sha256'] = hashlib.sha256(radio_bytes).hexdigest()
+    # Source bytes can change after UI validation. Revalidate the exact bytes
+    # being frozen and forward only this owned snapshot, never ambient BAS_*.
+    env.pop('BAS_NATIVE_SOURCES', None)
+    source_path, source_bytes = _interference_input(config, ROOT.resolve())
+    if source_path is not None:
+        snapshot = folder / 'sources.yaml'
+        snapshot.write_bytes(source_bytes)
+        env['BAS_NATIVE_SOURCES'] = snapshot.relative_to(ROOT).as_posix()
+        hashes['sources_sha256'] = hashlib.sha256(source_bytes).hexdigest()
     return hashes
 
 

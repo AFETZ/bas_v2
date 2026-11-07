@@ -6,6 +6,7 @@
 #include "ns3/three-gpp-antenna-model.h"
 #include "ns3/pointer.h"
 #include "ns3/uinteger.h"
+#include "ns3/boolean.h"
 #include "pybind11/stl.h"
 #include <functional>
 #include <fstream>
@@ -76,7 +77,8 @@ inline Ptr<SourcePropagation> InstallSpectrumSources(
     Ptr<SionnaRtSpectrumPropagationLossModel> reference,
     Ptr<MultiModelSpectrumChannel> channel, const std::string& config,
     const std::string& scene, const SionnaRtChannelModel::RtPathSolverConfig& solver,
-    double maxPaths, const std::string& profile, EventSink emit)
+    double maxPaths, const std::string& profile, EventSink emit,
+    bool referenceUsesReceiverBatch = false)
 {
     namespace py = pybind11;
     auto router = CreateObject<SourcePropagation>();
@@ -95,7 +97,7 @@ inline Ptr<SourcePropagation> InstallSpectrumSources(
         std::filesystem::rename(config + ".state.tmp", config + ".state");
     };
     std::map<double, Ptr<SionnaRtSpectrumPropagationLossModel>> frequencies;
-    if (reference)
+    if (reference && !referenceUsesReceiverBatch)
     {
         DoubleValue referenceFrequency;
         reference->GetChannelModelAttribute("Frequency", referenceFrequency);
@@ -158,6 +160,9 @@ inline Ptr<SourcePropagation> InstallSpectrumSources(
         {
             NS_ABORT_MSG_IF(!reference, "RT sources require an explicit reference channel model");
             auto model = CreateObject<SionnaRtSpectrumPropagationLossModel>();
+            // Emitters are outside the registered CP/UAV cohort. Their exact
+            // propagation stays pairwise, including cochannel sources.
+            model->SetChannelModelAttribute("ReceiverBatchEnabled", BooleanValue(false));
             model->SetChannelModelAttribute("Frequency", DoubleValue(hz));
             // A different carrier needs its own RT channel, with the same
             // bounded solver allocation as the configured desired link.

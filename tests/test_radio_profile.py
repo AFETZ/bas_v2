@@ -69,6 +69,19 @@ class RadioProfileTests(unittest.TestCase):
         self.assertEqual(env['BAS_NATIVE_UART_CHANNELS'], 'control,payload')
         self.assertEqual(env['BAS_NATIVE_URBAN_OUTPUT'], 'runs/control/rt-test/generated')
 
+    def test_receiver_batch_is_explicit_optional_and_rejects_incompatible_arrays(self):
+        self.radio['sionna'].pop('receiver_batch_mode', None)
+        self.write_radio()
+        parsed = generator.read_rt_radio_profile(self.radio_file, self.scene)
+        self.assertEqual(parsed['sionna']['receiver_batch_mode'], 'pairwise')
+        self.radio['sionna']['receiver_batch_mode'] = 'receiver_batch'
+        self.write_radio()
+        self.assertEqual(generator.read_rt_radio_profile(self.radio_file, self.scene)['sionna']['receiver_batch_mode'], 'receiver_batch')
+        self.radio['sionna']['synthetic_array'] = False
+        self.write_radio()
+        with self.assertRaisesRegex(ValueError, 'synthetic'):
+            generator.read_rt_radio_profile(self.radio_file, self.scene)
+
     def test_snapshot_and_generator_consume_the_frozen_radio_and_geometry(self):
         config = self.load()
         env = bas.environment(config, 'rt-test')

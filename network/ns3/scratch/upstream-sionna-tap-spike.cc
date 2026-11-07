@@ -116,6 +116,8 @@ std::string g_radioProfile{"generic_native_spectrum_aloha_reference"};
 std::string g_neighborDiscoveryMode{"preconfigured_static_neighbors"};
 std::string g_radioReason{"upstream_ideal_phy_arp_reentrancy_limit"};
 std::string g_solverProfile{"realtime_minimal_solver_profile"};
+std::string g_sionnaReceiverBatchMode{"pairwise"};
+std::string g_sionnaReceiverBatchStatsJson{"null"};
 bool g_technologySpecificModem{false};
 std::vector<std::string> g_phasedArraySpectrumPropagationModels;
 uint32_t g_sionnaMaxDepth{1};
@@ -1381,6 +1383,8 @@ WriteStats(const std::string& path)
            << "  \"neighbor_discovery_mode\": \"" << g_neighborDiscoveryMode << "\",\n"
            << "  \"reason\": \"" << g_radioReason << "\",\n"
            << "  \"solver_profile\": \"" << g_solverProfile << "\",\n"
+           << "  \"sionna_receiver_batch_mode\": \"" << g_sionnaReceiverBatchMode << "\",\n"
+           << "  \"sionna_receiver_batch\": " << g_sionnaReceiverBatchStatsJson << ",\n"
            << "  \"sionna_solver\": {\"max_depth\": " << g_sionnaMaxDepth
            << ", \"los\": " << (g_sionnaLos ? "true" : "false")
            << ", \"specular_reflection\": "
@@ -1421,6 +1425,7 @@ main(int argc, char* argv[])
     std::string radioReason = "upstream_ideal_phy_arp_reentrancy_limit";
     std::string ignoredLegacyPacketOutcomeClaim;
     std::string solverProfile = "realtime_minimal_solver_profile";
+    std::string sionnaReceiverBatchMode = "pairwise";
     std::string wifiDataMode = "HtMcs0";
     std::string wifiControlMode = "ErpOfdmRate6Mbps";
     bool wifiAggregation = true;
@@ -1552,6 +1557,7 @@ main(int argc, char* argv[])
     command.AddValue("sionnaSeed", "Sionna solver random seed", sionnaSeed);
     command.AddValue("sionnaSamplesPerSource", "Actual PathSolver samples_per_src budget", sionnaSamplesPerSource);
     command.AddValue("sionnaMaxNumPathsPerSource", "Actual PathSolver max_num_paths_per_src budget", sionnaMaxNumPathsPerSource);
+    command.AddValue("sionnaReceiverBatchMode", "pairwise or explicit iso 1x1 receiver_batch", sionnaReceiverBatchMode);
     command.AddValue("sionnaMaxNumberOfPaths",
                      "Maximum Sionna paths retained per link",
                      sionnaMaxNumberOfPaths);
@@ -1605,6 +1611,12 @@ main(int argc, char* argv[])
                     "invalid explicit propagation profile");
     const bool requiresRt = g_propagationProfile == "sionna" || g_propagationProfile == "hybrid";
     const bool geometryProfile = g_propagationProfile == "geometry_logdistance";
+    NS_ABORT_MSG_IF(sionnaReceiverBatchMode != "pairwise" && sionnaReceiverBatchMode != "receiver_batch",
+                    "sionnaReceiverBatchMode must be pairwise or receiver_batch");
+    NS_ABORT_MSG_IF(sionnaReceiverBatchMode == "receiver_batch" &&
+                    (g_propagationProfile != "sionna" || radioBackend != "wifi" ||
+                     g_executionMode != "realtime" || !sionnaSyntheticArray),
+                    "receiver_batch requires the native Wi-Fi/Sionna realtime iso 1x1 reference");
     NS_ABORT_MSG_IF(geometryProfile && (geometryConfig.empty() || geometryCsv.empty() ||
                     !sourceConfig.empty() || g_faultProfile != "none"),
                     "geometry profile requires explicit geometryConfig/geometryCsv and no injected losses/sources");
@@ -1639,6 +1651,7 @@ main(int argc, char* argv[])
     g_neighborDiscoveryMode = neighborDiscoveryMode;
     g_radioReason = radioReason;
     g_solverProfile = solverProfile;
+    g_sionnaReceiverBatchMode = sionnaReceiverBatchMode;
     g_sionnaMaxDepth = sionnaMaxDepth;
     g_sionnaLos = sionnaLos;
     g_sionnaSpecularReflection = sionnaSpecularReflection;
@@ -1764,7 +1777,8 @@ main(int argc, char* argv[])
         else router = bas::InstallSpectrumSources(sionna, channel, sourceConfig, scene,
             solver, sionnaMaxNumberOfPaths, g_propagationProfile,
             [](const std::string& event, const std::string& id, double value,
-               const std::string& details) { LogEvent(event, id, "", 0, value, details); });
+               const std::string& details) { LogEvent(event, id, "", 0, value, details); },
+            sionnaReceiverBatchMode == "receiver_batch");
         router->profile=g_propagationProfile;
         channel->AddPhasedArraySpectrumPropagationLossModel(router);
         LogEvent("source_propagation_dispatch", "ns3", "", 0, router->sources.size(),
@@ -2039,6 +2053,25 @@ main(int argc, char* argv[])
     g_runtimeHeartbeat = readyFile + ".heartbeat";
     g_runtimeSampler = &metrics;
     if (g_executionMode == "realtime") positions.Poll();
+    if (sionnaReceiverBatchMode == "receiver_batch")
+    {
+        NS_ABORT_MSG_IF(!g_liveStateValid, "receiver_batch requires an initial valid pose snapshot");
+        std::vector<Ptr<const MobilityModel>> cohort;
+        std::vector<Ptr<const PhasedArrayModel>> arrays;
+        for (uint32_t index = 0; index < radioDevices.GetN(); ++index)
+        {
+            cohort.push_back(mobility.at(index));
+            auto device = DynamicCast<WifiNetDevice>(radioDevices.Get(index));
+            auto phy = DynamicCast<SpectrumWifiPhy>(device->GetPhy());
+            arrays.push_back(phy->GetAntenna()->GetObject<PhasedArrayModel>());
+        }
+        auto model = DynamicCast<SionnaRtChannelModel>(sionna->GetChannelModel());
+        model->SetReceiverBatchEndpoints(cohort, arrays);
+        model->SetAttribute("ReceiverBatchEnabled", BooleanValue(true));
+        NS_ABORT_MSG_IF(!model->GetReceiverBatchEnabled(), "receiver_batch mode was not applied");
+        LogEvent("sionna_receiver_batch_config", "ns3", "", 0, cohort.size(),
+                 "mode=receiver_batch;path_capacity=receiver_count_times_per_link_cap;samples_per_src_unchanged=true");
+    }
     Simulator::ScheduleNow(&NativeRuntimeSampler::PollLag, &metrics);
     Simulator::Schedule(Seconds(1), &NativeRuntimeSampler::PollSionnaPaths, &metrics);
     Simulator::ScheduleNow(&SampleQueues);
@@ -2117,6 +2150,23 @@ main(int argc, char* argv[])
     }
     std::filesystem::remove(g_runtimeHeartbeat);
     if (g_geometry) g_geometry->Close();
+    if (sionna && sionnaReceiverBatchMode == "receiver_batch")
+    {
+        const auto batch = DynamicCast<SionnaRtChannelModel>(sionna->GetChannelModel())->GetReceiverBatchStats();
+        std::ostringstream observed;
+        observed << "{\"enabled\":" << (batch.enabled ? "true" : "false")
+                 << ",\"registered_endpoints\":" << batch.registeredEndpoints
+                 << ",\"configured_max_paths_per_source\":" << batch.configuredMaxPathsPerSource
+                 << ",\"attempted_calls\":" << batch.attemptedCalls
+                 << ",\"completed_calls\":" << batch.completedCalls
+                 << ",\"generated_links\":" << batch.generatedLinks
+                 << ",\"candidate_capacity_reached_calls\":" << batch.candidateCapacityReachedCalls
+                 << ",\"last_receiver_count\":" << batch.lastReceiverCount
+                 << ",\"last_allocated_max_paths_per_source\":" << batch.lastAllocatedMaxPathsPerSource
+                 << ",\"last_candidate_count\":" << batch.lastCandidateCount
+                 << ",\"last_candidate_buffer_size\":" << batch.lastCandidateBufferSize << "}";
+        g_sionnaReceiverBatchStatsJson = observed.str();
+    }
     Simulator::Destroy();
     WriteStats(statsFile);
     FlushEvents();

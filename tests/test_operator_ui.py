@@ -139,6 +139,23 @@ class OperatorUITests(unittest.TestCase):
         self.assertEqual(self.request('/api/validate', payload)[0], 400)
         self.assertEqual(self.launches, [])
 
+    def test_interference_parameter_is_validated_and_saved_through_the_real_http_api(self):
+        (self.root / 'radio.yaml').write_bytes((bas.ROOT / 'network/config/native_wifi_80211n_spectrum_product.yaml').read_bytes())
+        source = dict(id='ui_source', position_m=[0, -40, 10], orientation_rad=[0, 0], pattern='iso',
+            gain_dbi=0, power_w=.01, center_hz=2412000000, bandwidth_hz=20000000,
+            start_s=10, stop_s=20, period_s=.01, duty_cycle=1, mode='continuous', spectral_shape='rectangular')
+        (self.root / 'sources.yaml').write_text(json.dumps(dict(sources=[source])))
+        payload = self.payload()
+        payload['config']['propagation'] = dict(model='sionna', radio_config='radio.yaml',
+            ground_material='medium_dry_ground', building_material='concrete', thickness_m=.2)
+        payload['config']['interference'] = dict(sources='sources.yaml')
+        code, result, _ = self.request('/api/validate', payload)
+        self.assertEqual(code, 200)
+        self.assertEqual(result['config']['interference']['sources'], 'sources.yaml')
+        self.assertEqual(self.request('/api/start', payload)[0], 202)
+        saved = bas.load_config(self.launches[0][1] / 'config.json', root=self.root)
+        self.assertEqual(saved['interference']['sources'], 'sources.yaml')
+
     def test_start_freezes_scene_and_config_and_uses_existing_controller(self):
         original = (self.root / self.config['environment']['scene']).read_bytes()
         code, result, _ = self.request('/api/start', self.payload(scene=self.scene))
