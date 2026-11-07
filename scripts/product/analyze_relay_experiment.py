@@ -20,7 +20,9 @@ CONDITIONS = ("none", "selective", "total_GCS")
 ENGINEERING_DELIVERY_V1 = dict(criterion_set="engineering-delivery-v1", deadline_ms=250.,
     latency_p95_max_ms=100., latency_p99_max_ms=150., jitter_p95_max_ms=50.,
     jitter_p99_max_ms=100., timely_per_offered_min=.999, minimum_samples_per_uav=10000,
-    minimum_distinct_rng_seeds=10)
+    minimum_distinct_rng_seeds=10, runtime_lag_p99_max_ms=20., runtime_lag_observed_max_ms=50.,
+    runtime_lag_sample_period_ms=50., runtime_lag_host_gap_max_ms=100.,
+    runtime_lag_sim_period_tolerance_ms=.001)
 
 
 def finite(value: Any) -> float | None:
@@ -29,7 +31,7 @@ def finite(value: Any) -> float | None:
     try:
         result = float(value)
         return result if math.isfinite(result) else None
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -126,6 +128,78 @@ def distribution(values: list[float]) -> dict[str, Any]:
                 min=min(values) if values else None, max=max(values) if values else None)
 
 
+def runtime_timing_evidence(meta, native, stats):
+    """Qualify the observed scheduler samples, never physical clock accuracy."""
+    limits = ENGINEERING_DELIVERY_V1
+    start = meta.get('measurement_start_host_monotonic_ns')
+    duration = meta.get('measurement_duration_wall_s')
+    end = meta.get('measurement_end_host_monotonic_ns')
+    window_valid = type(start) is int and 0 <= start < 2**63
+    duration_valid = (type(duration) in (int, float) and finite(duration) is not None and duration > 0
+                      and window_valid and duration <= (2**63 - 1 - start) / 1e9)
+    basis = 'measurement_end_host_monotonic_ns'
+    if end is None:
+        end = start + round(duration * 1e9) if window_valid and duration_valid else None
+        basis = 'measurement_start_host_monotonic_ns + rounded recorded wall duration in ns'
+    window_valid = bool(window_valid and type(end) is int and start < end < 2**63)
+    if window_valid and duration_valid and abs(end - start - round(duration * 1e9)) > 1:
+        window_valid = False
+    problems = [] if window_valid else ['exact_recorded_host_window_missing_or_invalid']
+    records, unplaced = [], 0
+    for row in native:
+        if row.get('event') != 'realtime_lag':
+            continue
+        timestamp = row.get('wall_monotonic_ns')
+        if not (type(timestamp) is int and timestamp >= 0 or
+                isinstance(timestamp, str) and timestamp.isascii() and timestamp.isdigit()):
+            unplaced += 1
+            continue
+        records.append((int(timestamp), finite(row.get('time_s')), finite(row.get('value'))))
+    if unplaced:
+        problems.append('unplaceable_lag_timestamps')
+    selected = [r for r in records if start <= r[0] < end] if window_valid else []
+    before = max((r for r in records if r[0] <= start), key=lambda r: r[0], default=None) if window_valid else None
+    after = min((r for r in records if r[0] >= end), key=lambda r: r[0], default=None) if window_valid else None
+    coverage = [r for r in records if before is not None and after is not None and before[0] <= r[0] <= after[0]]
+    valid = [r for r in selected if r[1] is not None and r[1] >= 0 and r[2] is not None and r[2] >= 0]
+    if not selected:
+        problems.append('measurement_lag_samples_missing')
+    if len(valid) != len(selected):
+        problems.append('invalid_measurement_lag_samples')
+    if before is None or after is None:
+        problems.append('measurement_boundary_coverage_censored')
+    host_gaps = [(b[0] - a[0]) / 1e6 for a, b in zip(coverage, coverage[1:])]
+    sim_gaps = [(b[1] - a[1]) * 1e3 for a, b in zip(coverage, coverage[1:])
+                if a[1] is not None and b[1] is not None]
+    if any(r[1] is None or r[1] < 0 for r in coverage):
+        problems.append('invalid_sampler_simulation_timestamps')
+    if any(gap <= 0 for gap in host_gaps):
+        problems.append('sampler_host_clock_not_strictly_increasing')
+    if any(gap > limits['runtime_lag_host_gap_max_ms'] for gap in host_gaps):
+        problems.append('sampler_host_gap_exceeded')
+    if any(not math.isclose(gap, limits['runtime_lag_sample_period_ms'], rel_tol=0,
+                           abs_tol=limits['runtime_lag_sim_period_tolerance_ms']) for gap in sim_gaps):
+        problems.append('sampler_simulation_period_gap_or_reset')
+    lag = distribution([r[2] for r in valid])
+    complete = not problems
+    checks = dict(p99=lag['p99'] <= limits['runtime_lag_p99_max_ms'] if complete else None,
+                  observed_max=lag['max'] <= limits['runtime_lag_observed_max_ms'] if complete else None)
+    return dict(status='not_evaluated' if not complete else 'passed' if all(checks.values()) else 'observed_limits_failed',
+        eligible=complete and all(checks.values()), checks=checks, coverage_status='sampled_window_covered' if complete else 'unavailable',
+        coverage_problems=problems, window=dict(start_host_monotonic_ns=start if type(start) is int else None,
+            end_host_monotonic_ns=end if type(end) is int else None,
+            interval='half_open', end_basis=basis), selected_sample_rows=len(selected), invalid_selected_rows=len(selected) - len(valid),
+        unplaceable_timestamp_rows=unplaced, first_sample_host_monotonic_ns=selected[0][0] if selected else None,
+        last_sample_host_monotonic_ns=selected[-1][0] if selected else None,
+        boundary_before_host_monotonic_ns=before[0] if before else None,
+        boundary_after_host_monotonic_ns=after[0] if after else None,
+        lag_ms=lag, observed_max_lag_ms=lag['max'], host_sample_gaps_ms=distribution(host_gaps),
+        simulation_sample_intervals_ms=distribution(sim_gaps), nominal_simulation_sample_period_ms=limits['runtime_lag_sample_period_ms'],
+        recorded_runtime_hard_abort_ms=finite(stats.get('runtime_lag_max_ms')),
+        clock_domain='Selection: recorded host monotonic ns. Value: native RealtimeNow minus Simulator::Now in ms.',
+        scope='Observed discrete scheduler lag only; no continuous maximum, inter-device synchronization accuracy or physical UART timing accuracy is established.')
+
+
 def engineering_delivery(offers, commands, uav_ids, period_s, *, observation_end_ns=None):
     """Use audited CID/UART joins, retaining every unique offered slot."""
     index = {str(row['command_id']): row for row in commands}
@@ -204,7 +278,8 @@ def engineering_delivery_series(records):
         blocks = [r.get('engineering_delivery_v1', {}) for r in members]
         rosters = {tuple(sorted(b.get('per_uav', {}))) for b in blocks if b}
         usable = bool(len(rosters) == 1 and rosters != {()} and all(
-            r.get('network_eligible') and b.get('measurement_eligible') and b.get('limits') == ENGINEERING_DELIVERY_V1
+            r.get('network_eligible') and b.get('measurement_eligible') and
+            b.get('runtime_timing', {}).get('eligible') is True and b.get('limits') == ENGINEERING_DELIVERY_V1
             for r, b in zip(members, blocks)))
         seeds = {r.get('actual_rng_seed') for r in members if r.get('actual_rng_seed') is not None}
         per_uav = {}
@@ -228,6 +303,7 @@ def engineering_delivery_series(records):
         result.append(dict(policy=policy, fault_profile=fault, limits=ENGINEERING_DELIVERY_V1,
             status='observed_limits_failed' if failed else 'passed' if sufficient else 'insufficient_evidence',
             comparable_measurements=usable, distinct_actual_rng_seeds=sorted(seeds), per_uav=per_uav,
+            runtime_timing_eligible=all(b.get('runtime_timing', {}).get('eligible') is True for b in blocks),
             percentile_policy='Every comparable run must satisfy the limits; quantiles are not averaged or pooled.'))
     return result
 
@@ -643,12 +719,13 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
     delivery = engineering_delivery(offers, commands, roster, finite(config.get('command_period_s')), observation_end_ns=end)
     delivery_checks = {uav: delivery_limit_checks(row) for uav, row in delivery.items()}
     numeric_failed = any(v is False for checks in delivery_checks.values() for v in checks.values())
+    timing = runtime_timing_evidence(meta, native, stats)
     measured = bool(roster_verified and full_window and not errors and admission_age_limit_ms == ENGINEERING_DELIVERY_V1['deadline_ms']
         and meta.get('measurement_validity') == 'valid' and not any(value for key, value in audit.items() if key != 'valid')
-        and not result['command_lineage_errors'] and not any(row['unverifiable'] for row in delivery.values()))
+        and not result['command_lineage_errors'] and not any(row['unverifiable'] for row in delivery.values()) and timing['eligible'])
     result['engineering_delivery_v1'] = dict(limits=ENGINEERING_DELIVERY_V1,
         status='observed_limits_failed' if numeric_failed else 'insufficient_evidence',
-        measurement_eligible=measured, per_uav=delivery, observed_limit_checks=delivery_checks,
+        measurement_eligible=measured, runtime_timing=timing, per_uav=delivery, observed_limit_checks=delivery_checks,
         scope='Control creation to audited UART write end, not pure RF delay, ACK RTT, physical completion or payload SLA.',
         evidence_policy='A single run cannot establish the required ten independent RNG seeds; series criteria also require 10000 latency and jitter samples per UAV.',
         jitter_definition='Absolute delay difference for adjacent recorded scheduled offers of one UAV/leader/epoch; missing, unavailable or unverifiable slots and schedule gaps break pairs.',
@@ -694,6 +771,9 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
         "[Commands, including missing delivery](metrics/relay_commands.csv); [censored recovery](metrics/relay_recovery.csv).",
         "Renewals issued before detecting total GCS loss are reported separately from new leader appointments."]
     report_lines.append(f"Engineering delivery v1: `{result['engineering_delivery_v1']['status']}`; this single run does not establish a series SLA. See per-UAV counts, p95/p99, jitter and eligibility in the numerical outcomes.")
+    report_lines.append(f"Runtime timing: `{timing['status']}`; {timing['lag_ms']['samples']} in-window samples, "
+        f"lag p99={timing['lag_ms']['p99']} ms, observed maximum={timing['observed_max_lag_ms']} ms. "
+        f"Coverage limitations: `{timing['coverage_problems']}`. Discrete scheduler samples do not establish physical clock or UART accuracy.")
     if plots:
         report_lines += ["", "![Relay outcomes](plots/relay_outcomes.png)"]
     if errors:
@@ -1021,7 +1101,8 @@ def analyze_campaign(plan_path: Path, runs_root: Path, output: Path, *, plots: b
         "", "[All runs and exclusions](metrics/relay_campaign_runs.csv); [all paired points](metrics/relay_campaign_pairs.csv); "
         "[exploratory intervals](metrics/relay_campaign_intervals.csv).", ""] + result["methods"]
     report.extend(f"Engineering delivery v1, policy `{row['policy']}`, fault `{row['fault_profile']}`: "
-                  f"`{row['status']}` ({len(row['distinct_actual_rng_seeds'])} actual seeds). "
+                  f"`{row['status']}` ({len(row['distinct_actual_rng_seeds'])} actual seeds; "
+                  f"runtime timing qualified: `{row['runtime_timing_eligible']}`). "
                   "Per-UAV evidence and fixed limits are in metrics/relay_campaign_analysis.json."
                   for row in result['engineering_delivery_v1'])
     if plots:

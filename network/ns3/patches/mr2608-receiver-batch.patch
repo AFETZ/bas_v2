@@ -32,7 +32,7 @@
              .AddAttribute("Scenario",
                            "The Sionna RT scenario name used to create scenes",
                            StringValue("munich"),
-@@ -186,6 +197,262 @@
+@@ -186,6 +197,277 @@
  {
      NS_LOG_FUNCTION(this);
      m_sceneConfigs.mergeShapes = cond;
@@ -90,6 +90,21 @@
 +    stats.registeredEndpoints = m_receiverBatchMobility.size();
 +    stats.configuredMaxPathsPerSource = m_maxNumPathsPerSource;
 +    return stats;
++}
++
++void
++SionnaRtChannelModel::RefreshReceiverBatch(Ptr<const MobilityModel> txMob,
++                                          Ptr<const PhasedArrayModel> txAntenna)
++{
++    if (!m_receiverBatchEnabled)
++        throw std::logic_error("Explicit receiver batching must be enabled before refresh");
++    ValidateReceiverBatchEndpoints();
++    bool registered = false;
++    for (size_t i = 0; i < m_receiverBatchMobility.size(); ++i)
++        registered |= txMob == m_receiverBatchMobility[i] && txAntenna == m_receiverBatchAntennas[i];
++    if (!registered)
++        throw std::invalid_argument("Refresh transmitter/antenna is outside the registered receiver batch");
++    GenerateReceiverBatch(txMob, txAntenna);
 +}
 +
 +void
@@ -295,7 +310,7 @@
  }
  
  void
-@@ -360,6 +627,31 @@
+@@ -360,6 +642,31 @@
  {
      NS_LOG_FUNCTION(this);
  
@@ -327,7 +342,7 @@
      // Compute the channel matrix key. The key is reciprocal, i.e., key (a, b) = key (b, a)
      uint64_t channelMatrixKey = GetKey(aAntenna->GetId(), bAntenna->GetId());
  
-@@ -389,6 +681,65 @@
+@@ -389,6 +696,65 @@
      // generate a new realization
      if (notFound || update)
      {
@@ -393,7 +408,7 @@
          // channel matrix not found or has to be updated, generate a new one
          py::module_ rt = py::module_::import("sionna.rt");
          NS_LOG_INFO("Building scene for antenna pair ("
-@@ -422,6 +773,7 @@
+@@ -422,6 +788,7 @@
          m_channelParamsMap[channelParamsKey] = channelParams;
      }
  
@@ -401,7 +416,7 @@
      return channelMatrix;
  }
  
-@@ -622,27 +974,28 @@
+@@ -622,27 +989,28 @@
  Ptr<SionnaRtChannelModel::SionnaRtChannelParams>
  SionnaRtChannelModel::CalculateChannelParamsFromPaths(const py::object paths,
                                                        Ptr<const MobilityModel> aMob,
@@ -450,7 +465,7 @@
  
      // Precompute angles sincos
      channelParams->m_cachedAngleSincos.resize(channelParams->m_angle.size());
-@@ -845,7 +1198,7 @@
+@@ -845,7 +1213,7 @@
  }
  
  MatrixBasedChannelModel::Complex3DVector
@@ -459,7 +474,7 @@
  {
      NS_LOG_FUNCTION(this);
      py::module_ np = py::module_::import("numpy");
-@@ -853,9 +1206,20 @@
+@@ -853,9 +1221,20 @@
      py::tuple cir = paths.attr("cir")(py::arg("normalize_delays") = m_normalizeDelays,
                                        py::arg("out_type") = "numpy");
  
@@ -482,7 +497,7 @@
  
      // Generate channel coefficients for each cluster n and each receiver
      //  and transmitter element pair u,s.
-@@ -883,56 +1247,33 @@
+@@ -883,56 +1262,33 @@
  }
  
  MatrixBasedChannelModel::DoubleVector
@@ -549,7 +564,7 @@
  {
      py::object angle_py;
      if (Angle == "ZOA")
-@@ -958,24 +1299,22 @@
+@@ -958,24 +1314,22 @@
      }
  
      // Convert to numpy float64 array
@@ -592,7 +607,7 @@
  size_t
 --- a/src/spectrum/model/sionna-rt-channel-model.h
 +++ b/src/spectrum/model/sionna-rt-channel-model.h
-@@ -70,6 +70,38 @@
+@@ -70,6 +70,44 @@
  {
    public:
      /**
@@ -604,6 +619,12 @@
 +                                   const std::vector<Ptr<const PhasedArrayModel>>& antennas);
 +    void SetReceiverBatchEnabled(bool enabled);
 +    bool GetReceiverBatchEnabled() const;
++    /** Project extension: force one fresh RT batch at the current mobility/time
++     * snapshot, including prefetch before ordinary cache expiry. This does not
++     * change GetChannel freshness thresholds or introduce another RT model.
++     */
++    void RefreshReceiverBatch(Ptr<const MobilityModel> txMob,
++                              Ptr<const PhasedArrayModel> txAntenna);
 +    uint32_t GetReceiverBatchAllocation(uint32_t receivers) const;
 +    struct ReceiverBatchStats
 +    {
@@ -631,7 +652,7 @@
       * @brief Constructor.
       */
      SionnaRtChannelModel();
-@@ -488,6 +520,22 @@
+@@ -488,6 +526,22 @@
      RtPathSolverConfig GetRtPathSolverConfig() const;
  
    protected:
@@ -654,7 +675,7 @@
      /**
       * @brief Load a Sionna RT scene using the configured scenario name.
       *
-@@ -574,7 +622,7 @@
+@@ -574,7 +628,7 @@
       * @param paths Python object representing computed paths
       * @return Complex3DVector containing CIRs for Rx/Tx element pairs
       */
@@ -663,7 +684,7 @@
  
      /**
       * @brief Extract delays (tau) per path from RS paths object.
-@@ -586,7 +634,7 @@
+@@ -586,7 +640,7 @@
       * @return Vector of delays [s], ordered to match CIR taps
       */
      MatrixBasedChannelModel::DoubleVector CalculateTauFromPaths(const py::module_ np,
@@ -672,7 +693,7 @@
      /**
       * @brief Extract Doppler shifts per path from the Python paths object.
       *
-@@ -597,7 +645,8 @@
+@@ -597,7 +651,8 @@
       * @param paths Python paths object computed by Sionna RT
       * @return Complex vector of per-path Doppler shifts (one per path)
       */
@@ -682,7 +703,7 @@
      /**
       * @brief Extract angular measurements (AOD/AOA/ZOA/ZOD) from the paths.
       *
-@@ -615,7 +664,7 @@
+@@ -615,7 +670,7 @@
       */
      MatrixBasedChannelModel::DoubleVector CalculateAnglesFromPaths(const py::module_ np,
                                                                     py::object paths,
@@ -691,7 +712,7 @@
  
      // void CreateOnePath(py::object& paths);
  
-@@ -634,7 +683,8 @@
+@@ -634,7 +689,8 @@
  
      Ptr<SionnaRtChannelParams> CalculateChannelParamsFromPaths(const py::object paths,
                                                                 Ptr<const MobilityModel> aMob,
@@ -701,7 +722,7 @@
  
      /**
       * @brief Extract the number of propagation paths from the CIR tensor.
-@@ -715,6 +765,11 @@
+@@ -715,6 +771,11 @@
      /** Whether Sionna RT should normalize path delays in CIR output. */
      bool m_normalizeDelays;
      double m_maxNumberOfPaths; //!< Maximum number of paths to be generated by the path solver
@@ -727,7 +748,7 @@
      }
 --- a/src/spectrum/test/sionna-channel-model-test.cc
 +++ b/src/spectrum/test/sionna-channel-model-test.cc
-@@ -44,6 +44,132 @@
+@@ -44,6 +44,161 @@
  #include "ns3/uniform-planar-array.h"
  
  #include <pybind11/pybind11.h>
@@ -751,6 +772,7 @@
 +        NS_TEST_ASSERT_MSG_EQ(rejected, true, "Unregistered batching must fail before Python/GPU");
 +        std::vector<Ptr<const MobilityModel>> mobility;
 +        std::vector<Ptr<const PhasedArrayModel>> antennas;
++        std::vector<Ptr<UniformPlanarArray>> mutableAntennas;
 +        for (uint32_t i = 0; i < 6; ++i)
 +        {
 +            auto node = CreateObject<Node>();
@@ -762,9 +784,14 @@
 +            antenna->SetAttribute("NumRows", UintegerValue(1));
 +            antenna->SetAttribute("NumColumns", UintegerValue(1));
 +            antennas.push_back(antenna);
++            mutableAntennas.push_back(antenna);
 +        }
 +        model->SetAttribute("MaxNumPathsPerSource", UintegerValue(1000));
 +        model->SetReceiverBatchEndpoints(mobility, antennas);
++        rejected = false;
++        try { model->RefreshReceiverBatch(mobility[0], antennas[0]); }
++        catch (const std::logic_error&) { rejected = true; }
++        NS_TEST_ASSERT_MSG_EQ(rejected, true, "Disabled refresh reached Python/GPU");
 +        NS_TEST_ASSERT_MSG_EQ(model->GetReceiverBatchAllocation(5), 5000, "Allocation must preserve per-RX budget");
 +        model->SetAttribute("ReceiverBatchEnabled", BooleanValue(true));
 +        auto stats = model->GetReceiverBatchStats();
@@ -772,12 +799,35 @@
 +        NS_TEST_ASSERT_MSG_EQ(stats.registeredEndpoints, 6, "Roster was truncated");
 +        NS_TEST_ASSERT_MSG_EQ(stats.configuredMaxPathsPerSource, 1000, "Base budget was silently changed");
 +        rejected = false;
++        try { model->RefreshReceiverBatch(mobility[2], antennas[5]); }
++        catch (const std::invalid_argument&) { rejected = true; }
++        NS_TEST_ASSERT_MSG_EQ(rejected, true, "Refresh accepted mismatched transmitter/antenna binding");
++        auto strangerNode = CreateObject<Node>();
++        auto stranger = CreateObject<ConstantPositionMobilityModel>();
++        strangerNode->AggregateObject(stranger);
++        rejected = false;
++        try { model->RefreshReceiverBatch(stranger, antennas[0]); }
++        catch (const std::invalid_argument&) { rejected = true; }
++        NS_TEST_ASSERT_MSG_EQ(rejected, true, "Refresh accepted an unregistered transmitter");
++        auto changedPeer = mutableAntennas[4];
++        changedPeer->SetAttribute("NumRows", UintegerValue(2));
++        rejected = false;
++        try { model->RefreshReceiverBatch(mobility[0], antennas[0]); }
++        catch (const std::invalid_argument&) { rejected = true; }
++        NS_TEST_ASSERT_MSG_EQ(rejected, true, "Refresh failed to revalidate the complete cohort");
++        changedPeer->SetAttribute("NumRows", UintegerValue(1));
++        NS_TEST_ASSERT_MSG_EQ(model->GetReceiverBatchStats().attemptedCalls, 0, "Rejected refresh invoked Python");
++        rejected = false;
 +        try { (void)model->GetChannel(mobility[2], mobility[5], antennas[5], antennas[2]); }
 +        catch (const std::invalid_argument&) { rejected = true; }
 +        NS_TEST_ASSERT_MSG_EQ(rejected, true, "Mismatched endpoint/antenna provenance was accepted");
 +        NS_TEST_ASSERT_MSG_EQ(model->GetReceiverBatchStats().attemptedCalls, 0, "Rejected pair invoked Python");
 +        model->Dispose();
 +        NS_TEST_ASSERT_MSG_EQ(model->GetReceiverBatchStats().registeredEndpoints, 0, "Dispose retained endpoint resources");
++        rejected = false;
++        try { model->RefreshReceiverBatch(mobility[0], antennas[0]); }
++        catch (const std::invalid_argument&) { rejected = true; }
++        NS_TEST_ASSERT_MSG_EQ(rejected, true, "Refresh accepted a disposed cohort");
 +
 +        auto invalid = CreateObject<SionnaRtChannelModel>();
 +        auto duplicates = mobility;
