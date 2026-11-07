@@ -1,0 +1,48 @@
+diff --git a/src/spectrum/model/sionna-rt-channel-model.cc b/src/spectrum/model/sionna-rt-channel-model.cc
+index 08ac1f2..3249700 100644
+--- a/src/spectrum/model/sionna-rt-channel-model.cc
++++ b/src/spectrum/model/sionna-rt-channel-model.cc
+@@ -39,6 +39,27 @@ NS_LOG_COMPONENT_DEFINE("SionnaRtChannelModel");
+ 
+ NS_OBJECT_ENSURE_REGISTERED(SionnaRtChannelModel);
+ 
++namespace
++{
++void MakeDynamicDeviceInputsOpaque(const py::object& scene)
++{
++    // Sionna 1.2 makes the packed endpoints opaque only after Scene._endpoints
++    // scatters device fields. Literal moving fields otherwise specialize those
++    // packing kernels on every pose. Keep the exact values in device storage.
++    py::list fields;
++    for (const char* collection : {"transmitters", "receivers"})
++        for (auto device : scene.attr(collection).attr("values")())
++            for (const char* attribute : {"position", "orientation", "velocity"})
++                fields.append(device.attr(attribute));
++    const auto dr = py::module_::import("drjit");
++    dr.attr("make_opaque")(*py::tuple(fields));
++    const auto evaluated = dr.attr("VarState").attr("Evaluated");
++    for (auto field : fields)
++        if (!field.attr("state").attr("__eq__")(evaluated).cast<bool>())
++            throw std::runtime_error("Dynamic Sionna device input is not evaluated device storage");
++}
++} // namespace
++
+ /// Conversion factor: degrees to radians
+ static constexpr double DEG2RAD = M_PI / 180.0;
+ 
+@@ -326,6 +347,7 @@ SionnaRtChannelModel::CalculateReceiverBatchPaths(const py::module_ rt, const py
+ {
+     if (py::str(rt.attr("__version__")).cast<std::string>() != "1.2.0")
+         throw std::runtime_error("Receiver batching is verified only for the pinned Sionna RT 1.2.0 API");
++    MakeDynamicDeviceInputsOpaque(scene);
+     auto& stats = m_receiverBatchStats;
+     ++stats.attemptedCalls;
+     stats.lastReceiverCount = receiverCount;
+@@ -1125,6 +1147,7 @@ py::object
+ SionnaRtChannelModel::CalculatePaths(const py::module_ rt, const py::object scene)
+ {
+     NS_LOG_FUNCTION(this);
++    MakeDynamicDeviceInputsOpaque(scene);
+     py::object PathSolver = rt.attr("PathSolver");
+     py::object psolver = PathSolver();
+ 

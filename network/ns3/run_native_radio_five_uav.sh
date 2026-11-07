@@ -442,6 +442,7 @@ SOLVER_BUDGET_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-solver-budget.patch"
 BASEBAND_PHASE_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-baseband-spectrum-phase.patch"
 DOPPLER_EPOCH_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-doppler-epoch.patch"
 RECEIVER_BATCH_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-receiver-batch.patch"
+DYNAMIC_RT_INPUTS_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-dynamic-rt-inputs.patch"
 TAP_QUEUE_SELECTION_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-tap-device-queue-selection.patch"
 if [[ "$SCENARIO_KEY" == urban ]]; then
   SCENARIO="$URBAN_OUTPUT/scenario.yaml"
@@ -514,7 +515,7 @@ MAP_ID="${SCENARIO_VALUES[5]}"
 
 for required_file in "$ROOT_DIR/scripts/product/capture_effective_config.py" \
   "$PROJECT_SOURCE" "$PATCH_FILE" "$REALTIME_CACHE_PATCH" \
-    "$PHASED_ARRAY_ADAPTER_PATCH" "$LOCKSTEP_TAP_PATCH" "$SOLVER_BUDGET_PATCH" "$BASEBAND_PHASE_PATCH" "$DOPPLER_EPOCH_PATCH" "$RECEIVER_BATCH_PATCH" "$TAP_QUEUE_SELECTION_PATCH" "$RADIO_CONFIG" "$WORLD" "$CAMERA_FRAGMENT" "$SITL_DEFAULTS"; do
+    "$PHASED_ARRAY_ADAPTER_PATCH" "$LOCKSTEP_TAP_PATCH" "$SOLVER_BUDGET_PATCH" "$BASEBAND_PHASE_PATCH" "$DOPPLER_EPOCH_PATCH" "$RECEIVER_BATCH_PATCH" "$DYNAMIC_RT_INPUTS_PATCH" "$TAP_QUEUE_SELECTION_PATCH" "$RADIO_CONFIG" "$WORLD" "$CAMERA_FRAGMENT" "$SITL_DEFAULTS"; do
   [[ -f "$required_file" ]] || { printf 'Missing input: %s\n' "$required_file" >&2; exit 2; }
 done
 if [[ "$REQUIRES_RT" == 1 && ! -f "$SCENE" ]]; then
@@ -647,22 +648,19 @@ reject_product_override BAS_NATIVE_UPDATE_DISTANCE_THRESHOLD_M "${BAS_NATIVE_UPD
   printf 'Official ns-3.48 exact revision is absent.\n' >&2
   exit 2
 }
-git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply --reverse --check "$PATCH_FILE" || {
-  printf 'Compatibility patch does not match exactly.\n' >&2
-  exit 2
-}
-if ! git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply --reverse --check "$REALTIME_CACHE_PATCH"; then
-  git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply "$REALTIME_CACHE_PATCH" || {
-    printf 'Realtime scene-cache patch does not apply to the compatible upstream checkout.\n' >&2
-    exit 2
-  }
-fi
-if ! git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply --reverse --check "$PHASED_ARRAY_ADAPTER_PATCH"; then
-  git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply "$PHASED_ARRAY_ADAPTER_PATCH" || {
-    printf 'SpectrumWifiPhy phased-array adapter patch does not apply.\n' >&2
-    exit 2
-  }
-fi
+# Later patches legitimately modify earlier added hunks. Verify the complete
+# pinned tree using a temporary Git index; never reapply an older hunk or change
+# an engineer's dependency checkout while starting a scenario.
+PYTHONPATH="$ROOT_DIR:${PYTHONPATH:-}" python3 - "$ROOT_DIR" "$NS3_DIR" <<'PYSDK'
+import sys
+from pathlib import Path
+from scripts.product.bootstrap_native_runtime import verify_sdk
+try:
+    verify_sdk(Path(sys.argv[1]), Path(sys.argv[2]))
+except (OSError, RuntimeError, ValueError) as error:
+    raise SystemExit(f'Native SDK does not match the pinned patched tree: {error}. '
+                     'Use bootstrap_native_runtime.py in a separate clean workspace.')
+PYSDK
 PYTHONPATH="$PYTHON_DEPS" python3 - "$PROPAGATION_PROFILE" <<'PY'
 import sys
 from importlib.metadata import version
@@ -672,24 +670,6 @@ if sys.argv[1] in ("sionna", "hybrid"):
 assert version("pybind11") == "2.11.1"
 assert version("cppyy") == "3.5.0"
 PY
-if ! git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply --reverse --check "$LOCKSTEP_TAP_PATCH" >/dev/null 2>&1; then
-  git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply "$LOCKSTEP_TAP_PATCH"
-fi
-if ! git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply --reverse --check "$TAP_QUEUE_SELECTION_PATCH" >/dev/null 2>&1; then
-  git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply "$TAP_QUEUE_SELECTION_PATCH"
-fi
-if ! git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply --reverse --check "$SOLVER_BUDGET_PATCH" >/dev/null 2>&1; then
-  git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply "$SOLVER_BUDGET_PATCH"
-fi
-if ! git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply --reverse --check "$BASEBAND_PHASE_PATCH" >/dev/null 2>&1; then
-  git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply "$BASEBAND_PHASE_PATCH"
-fi
-if ! git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply --reverse --check "$DOPPLER_EPOCH_PATCH" >/dev/null 2>&1; then
-  git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply "$DOPPLER_EPOCH_PATCH"
-fi
-if ! git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply --reverse --check "$RECEIVER_BATCH_PATCH" >/dev/null 2>&1; then
-  git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" apply "$RECEIVER_BATCH_PATCH"
-fi
 [[ -x "$PYTHON_TOOLING/bin/cmake" ]] || { printf 'Pinned CMake tooling is absent.\n' >&2; exit 2; }
 
 mkdir -p "$RUN_DIR"/{logs,metrics,pcap,screenshots,plots} "$UART_DIR" "$WORK_DIR"
@@ -797,6 +777,9 @@ if [[ "${BAS_NATIVE_FIVE_SKIP_BUILD:-0}" == 1 ]]; then
   # launcher. Check the artifact that actually implements each patched method.
   SPECTRUM_LIBRARY="$NS3_DIR/build/lib/libns3.48-spectrum-default.so"
   TAP_LIBRARY="$NS3_DIR/build/lib/libns3.48-tap-bridge-default.so"
+  [[ "$SPECTRUM_LIBRARY" -nt "$DYNAMIC_RT_INPUTS_PATCH" ]] || {
+    printf 'Spectrum library predates dynamic RT input storage fix.\n' >&2; exit 2;
+  }
   [[ "$BINARY" -nt "$PROJECT_SOURCE" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-geometry-loss.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-live-state.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-lockstep.h" && "$SPECTRUM_LIBRARY" -nt "$REALTIME_CACHE_PATCH" && "$TAP_LIBRARY" -nt "$LOCKSTEP_TAP_PATCH" && "$SPECTRUM_LIBRARY" -nt "$SOLVER_BUDGET_PATCH" && "$SPECTRUM_LIBRARY" -nt "$BASEBAND_PHASE_PATCH" && "$SPECTRUM_LIBRARY" -nt "$DOPPLER_EPOCH_PATCH" && "$SPECTRUM_LIBRARY" -nt "$RECEIVER_BATCH_PATCH" && "$TAP_LIBRARY" -nt "$TAP_QUEUE_SELECTION_PATCH" && "$SPECTRUM_LIBRARY" -nt "$PHASED_ARRAY_ADAPTER_PATCH" ]] || {
     printf 'Binary predates native source/header; rerun without BAS_NATIVE_FIVE_SKIP_BUILD.\n' >&2; exit 2;
   }
@@ -1042,6 +1025,7 @@ capture_effective_configuration() {
     --config "sionna_baseband_phase_patch=$BASEBAND_PHASE_PATCH"
     --config "sionna_doppler_epoch_patch=$DOPPLER_EPOCH_PATCH"
     --config "sionna_receiver_batch_patch=$RECEIVER_BATCH_PATCH"
+    --config "sionna_dynamic_rt_inputs_patch=$DYNAMIC_RT_INPUTS_PATCH"
     --config "tap_queue_selection_patch=$TAP_QUEUE_SELECTION_PATCH"
     --config "native_rt_pool_source=$ROOT_DIR/network/ns3/scratch/native-rt-pool.h"
     --config "native_rt_cache_source=$ROOT_DIR/network/ns3/scratch/native-rt-cache.h"
