@@ -264,23 +264,24 @@ Kafka, RabbitMQ, Redis и отдельная БД для этого профил
 ## Зависимости и разработка
 
 На ПК4 подготовлены собственные `.external`, `build`, `install`; изменяемые
-каталоги не связаны с рабочей копией статьи. Используется существующий Docker
-образ, закреплённый по ID в `runtime.json`. Новых контейнерных образов нет.
-Восстановление использует закреплённый образ и архив native-зависимостей;
-Dockerfile для полной пересборки этого образа в данной копии нет. Установка
-текущей delivery-ветки на чистую машину пока не испытана.
+каталоги не связаны с рабочей копией статьи. Используется Docker образ,
+закреплённый по ID в `runtime.json`. Базовый рецепт `.devcontainer/Dockerfile`,
+exact `.repos` и hashed pip lock перенесены из исходного проекта, ревизия
+`4434789473643fa68d5f95953a44b4e0ae3e2c25`. `bash scripts/build_container.sh`
+собирает этот рецепт, но версии apt-пакетов не заморожены: получить тот же ID
+образа пересборкой не обещаем. Установка delivery-ветки на чистую машину пока
+не испытана.
 
-Для переноса нужен выделенный Linux x86-64 хост с Docker, Bash, Git, Python
-3.10+, PyYAML, NumPy, `flock`, `tar` и `zstd`; для CUDA RT — драйвер NVIDIA и
+Для переноса нужен Linux x86-64 хост с Docker, Bash, Git, Python 3.10+, PyYAML,
+NumPy, `flock`, `tar` и `zstd`; для CUDA RT — драйвер NVIDIA и
 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 Исходники берите из текущей delivery-ветки вместе с `web/operator.html`.
-Закреплённый образ и native ns-3 с git-метаданными доступны в
+Закреплённый образ доступен в
 [публикационном выпуске](https://github.com/AFETZ/bas_v2/releases/tag/urban-article-v7-20261104).
-Это исходная среда для обновления кодом delivery-ветки, а не её готовая сборка.
-Архив журналов для установки не нужен. Скачайте `native-runtime.tar.zst.part00`,
-`native-version.tar.zst.part00`, все четыре части `runtime-image.tar.zst.part00`–`03`
-и [artifacts.json с SHA-256](https://github.com/AFETZ/bas_v2/blob/ed260ca9de57bb76df4de5baa8471a651814d499/artifacts.json).
-В новой рабочей копии задайте `ASSETS` как абсолютный путь к скачанным файлам:
+Скачайте четыре части `runtime-image.tar.zst.part00`–`03` и
+[artifacts.json с SHA-256](https://github.com/AFETZ/bas_v2/blob/ed260ca9de57bb76df4de5baa8471a651814d499/artifacts.json).
+Архивы журналов и старого native runtime для новой сборки не нужны. В чистой
+рабочей копии задайте абсолютный путь `ASSETS` к скачанным файлам:
 
 ```bash
 set -euo pipefail
@@ -289,63 +290,63 @@ python3 - "$ASSETS/artifacts.json" > "$ASSETS/SHA256SUMS" <<'PY'
 import json, sys
 from pathlib import Path
 for artifact in json.loads(Path(sys.argv[1]).read_text())['artifacts']:
-    if artifact['group'] == 'runtime':
-        for part in artifact['parts']:
+    for part in artifact['parts']:
+        if part['name'].startswith('runtime-image.tar.zst.part'):
             print(part['sha256'] + '  ' + part['name'])
 PY
 (cd "$ASSETS" && sha256sum -c SHA256SUMS)
-tar --zstd -xf "$ASSETS/native-runtime.tar.zst.part00" -C "$PWD"
-tar --zstd -xf "$ASSETS/native-version.tar.zst.part00" -C "$PWD"
 cat "$ASSETS"/runtime-image.tar.zst.part{00..03} | zstd -dc | docker image load
 IMAGE="$(python3 -c 'import json; print(json.load(open("runtime.json"))["runtime"]["image"])')"
 docker image inspect "$IMAGE" --format '{{.Id}}'
 ```
 
-При несовпадении контрольной суммы не распаковывайте архив. Не накладывайте
-старые архивы поверх уже изменённой `.external`. ROS-пакет собирается из текущих
-исходников в том же образе и по тому же пути, который использует runner:
+При несовпадении SHA-256 не загружайте образ. Сборку выполняет обычный Linux-
+пользователь в отдельной чистой рабочей копии. Новый
+`scripts/product/bootstrap_native_runtime.py` использует canonical mount
+`/workspace/multiagent_simulation`, общий lock стенда и собирает ROS-пакет,
+ns-3.48 `d2add90b452d600cfb4859baed8e9ea633519447`, десять patches и оба native targets.
+Симуляторы при этом не запускаются, GPU не требуется.
 
 ```sh
-docker run --rm -i --network none --user 0:0 \
-  -v "$PWD:/workspace/multiagent_simulation" -w /workspace/multiagent_simulation \
-  "$IMAGE" bash <<'SH'
-set -e
-source /opt/ros/humble/setup.bash
-source /workspace/ardu_ws/install/setup.bash
-colcon build --packages-select multiagent_simulation --symlink-install
-SH
+python3 scripts/product/bootstrap_native_runtime.py --check-only
 ```
 
-Контроллер `bas.py run` переиспользует готовый native бинарник. После переноса или
-изменения C++ его нужно собрать действующим inline bootstrap в
-`network/ns3/run_native_radio_five_uav.sh`. Он проверяет точный ns-3.48
-`d2add90b452d600cfb4859baed8e9ea633519447`, применяет совместимый стек патчей
-из `network/ns3/patches/` (включая solver-budget и baseband-spectrum-phase) и собирает целевой scratch target.
-Используются `.python-deps-py310` и `.tooling-py310` внутри `.external/ns-3-sionna-native`:
-native Sionna/Sionna RT 1.2.0, Mitsuba 3.7.1 и Dr.Jit 1.2.0. Импорт библиотек из
-другого site-packages образа не подтверждает версию native окружения.
+`--check-only` возвращает JSON с конкретными пробелами и exit code 1, пока сборка
+не подтверждена. Проверяются image ID, wheels и lock hashes, точный patched SDK
+tree, private environment и build receipt. Пользовательские каталоги и
+изменённые файлы сохраняются: при конфликте выберите чистую копию.
+Архивные `.external`, `build` и `install` для этой процедуры не нужны.
 
-Первая сборка следующим способом также запускает короткий интеграционный опыт,
-занимает общий lock и пишет отдельные исходные артефакты. Это не приёмка миссии:
-20-секундного окна недостаточно для штатного полного маршрута.
+На машине с интернетом один раз разрешите Python-зависимости внутри закреплённого
+образа с Python 3.10. Штатный [pip wheel](https://pip.pypa.io/en/stable/cli/pip_wheel/)
+включает транзитивные зависимости и собирает недостающие wheels. Затем создаются
+два lock-файла с SHA-256, manifest и выполняется пробная установка без сети.
+Это фиксация полученных wheels; побитовую повторяемость их исходной сборки не
+обещаем. До успешной генерации полный lock отсутствует.
 
 ```sh
-flock -n -E 75 /tmp/bas-paper-runtime.lock python3 - <<'PY'
-import subprocess
-import bas
-config = bas.load_config(bas.ROOT / 'runtime.json')
-config['experiment']['duration_s'] = 20
-env = bas.environment(config, 'native-bootstrap-01')
-env['BAS_NATIVE_FIVE_SKIP_BUILD'] = '0'
-raise SystemExit(subprocess.run(['bash', 'network/ns3/run_native_radio_five_uav.sh'], env=env).returncode)
-PY
+python3 scripts/product/bootstrap_native_runtime.py --resolve-lock \
+  --lock-bundle .external/native-runtime-wheels
+python3 scripts/product/bootstrap_native_runtime.py --bootstrap \
+  --lock-bundle .external/native-runtime-wheels
+python3 scripts/product/bootstrap_native_runtime.py --check-only \
+  --lock-bundle .external/native-runtime-wheels
 ```
 
-Для повторной попытки выберите новый ID. После сборки используйте обычный
-`python3 bas.py run --run-id <new-id>`; проверка возраста исходников запрещает
-молча использовать старый бинарник. Модульные и программные интеграционные тесты
-запускаются через `python3 -m unittest discover -s tests` в подготовленном
-runtime-окружении. Они не заменяют полётную и аппаратную приёмку.
+Передавайте весь wheel bundle вместе с исходниками и образом. Python
+устанавливается только из этих wheels с `--no-index --require-hashes`;
+отсутствующий SDK загружается из официального Git с обязательной проверкой HEAD.
+Для автономной установки также заранее подготовьте точный patched checkout SDK.
+Native окружение отдельно от базового: Sionna/Sionna RT 1.2.0, Mitsuba 3.7.1,
+Dr.Jit 1.2.0, pybind11 2.11.1, cppyy 3.5.0, CMake 3.31.6. Обычные site-packages
+образа содержат другую версию RT. Хеши входов и результатов сохраняются в
+`.external/native-bootstrap.json`, команды и вывод сборки —
+в `.external/native-bootstrap.log`. Успешная сборка ещё не подтверждает E2E.
+
+Для отдельной проверки runtime используйте `python3 bas.py run --run-id <new-id>`.
+Модульные и программные интеграционные тесты запускаются через
+`python3 -m unittest discover -s tests` в подготовленном runtime-окружении.
+Они не заменяют полётную и аппаратную приёмку.
 
 Для генерации общей треугольной геометрии нужен только дополнительный
 [trimesh 4.10.1 (MIT)](https://pypi.org/project/trimesh/4.10.1/), без extras.
@@ -377,4 +378,4 @@ PYTHONPATH="$PWD/.external/terrain-python" python3 scripts/product/prepare_terra
 архивах. При передаче включайте закреплённую среду, метаданные ns-3, wheel и
 лицензии вместе с исходниками. Архивы, зависимости и результаты исключены из Git.
 
-Проверки этой версии и наблюдаемые ограничения: [network/STATUS.md](network/STATUS.md).
+Критерии приёмки, выполненные проверки и открытые ограничения: [plans/customer-delivery.md](plans/customer-delivery.md).

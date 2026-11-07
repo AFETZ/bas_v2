@@ -1,0 +1,16 @@
+# Native SDK environment, separate from the base image's Sionna RT 1.2.2.
+# Resolve once in the pinned image; distribute the resulting hashed wheel bundle.
+sionna==1.2.0
+sionna-rt==1.2.0
+mitsuba==3.7.1
+drjit==1.2.0
+tensorflow==2.21.0
+numpy==1.26.4
+scipy==1.15.3
+matplotlib==3.10.9
+importlib-resources==7.1.0
+ipywidgets==8.1.9
+pythreejs==2.4.2
+typing-extensions==4.16.0
+pybind11==2.11.1
+cppyy==3.5.0
