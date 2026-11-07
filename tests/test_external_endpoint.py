@@ -10,8 +10,8 @@ import threading
 import time
 import unittest
 
-from network.scripts.external_endpoint import IO_BATCH, flush_queue, open_radio_socket
-from network.scripts.serial_transport import BoundedQueue, Encoder, Reassembler
+from network.scripts.external_endpoint import IO_BATCH, flush_queue, open_radio_socket, stream_read_capacity
+from network.scripts.serial_transport import HEADER, BoundedQueue, Encoder, Reassembler
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,11 +44,55 @@ class ExternalEndpointTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 open_radio_socket(dict(channel='control', radio=dict(bind=['127.0.0.1', 0], tos=value)))
 
-    def start_adapter(self, endpoint, peer, duration=2.0):
+    def test_stream_read_capacity_accounts_for_each_real_bsf1_fragment_header(self):
+        for packets in (1, 2, 64):
+            for size in (HEADER.size, HEADER.size + 1, HEADER.size + 192, 2 * (HEADER.size + 192) - 1, 8192):
+                with self.subTest(packets=packets, size=size):
+                    queue = BoundedQueue(packets, size, 1)
+                    limit = stream_read_capacity(queue, 192)
+                    frames = Encoder(channel='control', uav_id=1, direction='uart_to_gcs').encode(b'x' * limit)
+                    self.assertLessEqual(len(frames), packets)
+                    self.assertLessEqual(sum(map(len, frames)), size)
+                    for frame in frames:
+                        self.assertTrue(queue.put(frame, time.monotonic()))
+                    if limit and limit < 4096:
+                        larger = Encoder(channel='control', uav_id=1, direction='uart_to_gcs').encode(b'x' * (limit + 1))
+                        self.assertTrue(len(larger) > packets or sum(map(len, larger)) > size)
+                    if len(queue.items) == packets or size - queue.bytes <= HEADER.size:
+                        self.assertEqual(stream_read_capacity(queue, 192), 0)
+        queue = BoundedQueue(2, 2 * (HEADER.size + 192), 1)
+        queue.put(b'x' * (HEADER.size + 192), time.monotonic())
+        self.assertEqual(stream_read_capacity(queue, 192), 192)
+
+    def test_udp_over_capacity_record_is_dropped_whole_without_orphan_fragments(self):
+        with udp_socket() as radio, udp_socket() as endpoint:
+            endpoint_address = free_udp_address()
+            process, _ = self.start_adapter(dict(kind='udp', bind=endpoint_address, peer=endpoint.getsockname()),
+                radio.getsockname(), duration=2, queues=dict(packets=1, bytes=HEADER.size + 192, deadline_s=2))
+            self.wait_ready(process)
+            endpoint.sendto(b'x' * 512, endpoint_address)
+            radio.settimeout(.1)
+            with self.assertRaises(TimeoutError):
+                radio.recvfrom(65535)
+            endpoint.sendto(b'fresh-record', endpoint_address)
+            radio.settimeout(1)
+            decoder = Reassembler(channel='payload', uav_id=2, direction='uart_to_gcs', timeout_ms=20)
+            received = decoder.ingest(radio.recvfrom(65535)[0])
+            deadline = time.monotonic() + .25
+            while not received and time.monotonic() < deadline:
+                received.extend(decoder.expire())
+                time.sleep(.001)
+            self.assertEqual(received, [b'fresh-record'])
+            metrics = self.finish(process)
+            self.assertEqual(metrics['endpoint_record_drops'], 1)
+            self.assertEqual(metrics['radio_tx_datagrams'], 1)
+            self.assertEqual(metrics['queue_drops'], 3)
+
+    def start_adapter(self, endpoint, peer, duration=2.0, queues=None):
         radio_address = free_udp_address()
         config = dict(endpoint=endpoint, radio=dict(bind=radio_address, peer=peer),
                       channel='payload', uav_id=2,
-                      queues=dict(packets=4096, bytes=4 * 1024 * 1024, deadline_s=2),
+                      queues=queues or dict(packets=4096, bytes=4 * 1024 * 1024, deadline_s=2),
                       watchdog_s=3, reconnect_s=.05)
         path = self.folder / 'config.json'
         path.write_text(json.dumps(config))
@@ -199,6 +243,33 @@ class ExternalEndpointTests(unittest.TestCase):
             metrics = self.finish(process)
             self.assertGreaterEqual(metrics['connection_epoch_drops'], 1)
             self.assertGreaterEqual(metrics['reconnects'], 2)
+
+    def test_tcp_stream_survives_single_fragment_queue_without_adapter_loss(self):
+        with udp_socket() as radio, socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.bind(('127.0.0.1', 0))
+            listener.listen()
+            listener.settimeout(2)
+            process, _ = self.start_adapter(dict(kind='tcp_client', peer=listener.getsockname()),
+                radio.getsockname(), duration=2,
+                queues=dict(packets=1, bytes=HEADER.size + 192, deadline_s=2))
+            with listener.accept()[0] as source:
+                self.wait_ready(process)
+                original = bytes(range(256)) * 32
+                source.sendall(original)
+                radio.settimeout(.5)
+                decoder = Reassembler(channel='payload', uav_id=2, direction='uart_to_gcs')
+                received = bytearray()
+                while len(received) < len(original):
+                    try:
+                        data, _ = radio.recvfrom(65535)
+                    except TimeoutError:
+                        break
+                    for record in decoder.ingest(data):
+                        received.extend(record)
+                self.assertEqual(received, original)
+                metrics = self.finish(process)
+                self.assertEqual(metrics['queue_drops'], 0)
+                self.assertLessEqual(metrics['peak_queue_bytes'], HEADER.size + 192)
 
     def test_tcp_to_radio_burst_integrity_and_measured_goodput(self):
         with udp_socket() as radio, socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:

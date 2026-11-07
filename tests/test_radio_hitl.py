@@ -11,7 +11,7 @@ import time
 import unittest
 
 from scripts.product.test_radio_hitl import CATALOG, ROOT, load_bundle, main, resolve
-from network.scripts.serial_transport import Encoder, Reassembler
+from network.scripts.serial_transport import HEADER, Encoder, Reassembler
 from tests.test_external_endpoint import free_udp_address, udp_socket
 
 
@@ -53,6 +53,13 @@ class RadioHitlPreparationTests(unittest.TestCase):
         self.request['channels']['payload']['required_goodput_bps'] = 20000000
         with self.assertRaisesRegex(ValueError, '92160'):
             resolve(self.request, self.catalog)
+
+    def test_queue_must_fit_at_least_one_bsf1_payload_byte(self):
+        self.request['queues'] = dict(packets=1, bytes=HEADER.size, deadline_s=.25)
+        with self.assertRaisesRegex(ValueError, 'BSF1 header'):
+            resolve(self.request, self.catalog)
+        self.request['queues']['bytes'] += 1
+        self.assertEqual(resolve(self.request, self.catalog)['adapters']['control']['queues']['bytes'], HEADER.size + 1)
 
     def test_typo_bad_ids_and_nonfinite_values_are_rejected(self):
         for key, value in [('uav_id', True), ('uav_id', 6), ('controller', []),

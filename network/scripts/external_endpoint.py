@@ -10,13 +10,22 @@ import signal
 import socket
 import time
 try:
-    from .serial_transport import Encoder, Reassembler, TransportCounters, decode_chunk, BoundedQueue, radio_is_live
+    from .serial_transport import HEADER, Encoder, Reassembler, TransportCounters, decode_chunk, BoundedQueue, radio_is_live
 except ImportError:  # direct script entrypoint
-    from serial_transport import Encoder, Reassembler, TransportCounters, decode_chunk, BoundedQueue, radio_is_live
+    from serial_transport import HEADER, Encoder, Reassembler, TransportCounters, decode_chunk, BoundedQueue, radio_is_live
 
 
 IO_BATCH = 64
 TOS_BY_CHANNEL = {"control": 184, "payload": 40}  # Same native UART boundary as communication_vertical.
+
+
+def stream_read_capacity(queue, max_payload, maximum=4096):
+    """Read only bytes whose complete BSF1 encoding fits the existing queue."""
+    slots = queue.limit - len(queue.items)
+    available = queue.byte_limit - queue.bytes
+    full, remainder = divmod(available, HEADER.size + max_payload)
+    payload = full * max_payload + max(0, remainder - HEADER.size)
+    return max(0, min(maximum, slots * max_payload, payload))
 
 
 def open_radio_socket(config):
@@ -90,6 +99,8 @@ def flush_queue(queue, write, *, datagram=False, limit=IO_BATCH):
 
 
 def run(config, output, duration=None):
+    if config['queues']['bytes'] <= HEADER.size:
+        raise ValueError('queues.bytes must fit a BSF1 header and at least one payload byte')
     endpoint = config["endpoint"]
     kind = endpoint["kind"]
     if kind not in ("serial", "udp", "tcp_client"):
@@ -126,6 +137,7 @@ def run(config, output, duration=None):
     metrics = dict(endpoint_to_radio_bytes=0, radio_to_endpoint_bytes=0, reconnects=0,
                    io_errors=0, unexpected_peer=0, stale_radio_drops=0, max_queue_delay_ms=0.0,
                    radio_tx_datagrams=0, connection_epoch_drops=0,
+                   endpoint_record_drops=0,
                    radio_tos=udp.getsockopt(socket.IPPROTO_IP, socket.IP_TOS), pid=os.getpid(),
                    uav_id=int(config['uav_id']), channel=config['channel'],
                    controller_kind=kind, hardware_validation="not_performed",
@@ -204,24 +216,33 @@ def run(config, output, duration=None):
             try:
                 if device is not None:
                     try:
+                        capacity = stream_read_capacity(to_radio, encoder.max_payload) if radio_live else 4096
                         if kind == "serial":
-                            data = device.read(4096)
+                            data = device.read(capacity) if capacity else b''
                         elif kind == "udp":
                             data, source = device.recvfrom(65535)
                             if source != tuple(endpoint["peer"]):
                                 metrics["unexpected_peer"] += 1
                                 data = b""
                         else:
-                            data = device.recv(4096)
-                            if not data:
+                            data = device.recv(capacity) if capacity else b''
+                            if capacity and not data:
                                 raise ConnectionError("TCP peer closed")
                         if data:
                             progress = True
                             last_device_rx = now
                             metrics["endpoint_to_radio_bytes"] += len(data)
                             if radio_live:
-                                for frame in encoder.encode(data):
-                                    to_radio.put(frame, now)
+                                frames = encoder.encode(data)
+                                # UDP cannot backpressure its producer; reject a
+                                # whole record rather than enqueue orphan fragments.
+                                if (len(frames) > to_radio.limit - len(to_radio.items) or
+                                        sum(map(len, frames)) > to_radio.byte_limit - to_radio.bytes):
+                                    to_radio.dropped += len(frames)
+                                    metrics['endpoint_record_drops'] += 1
+                                else:
+                                    for frame in frames:
+                                        to_radio.put(frame, now)
                     except BlockingIOError:
                         pass
                 for _ in range(IO_BATCH):

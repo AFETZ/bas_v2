@@ -84,6 +84,9 @@ def resolve(request, catalog, *, native_uav_count=None):
     _fields(queues, {'packets', 'bytes', 'deadline_s'}, set(), 'queues')
     for field in ('packets', 'bytes'):
         _number(queues[field], 'queues.' + field, integer=True, minimum=1)
+    from network.scripts.serial_transport import HEADER
+    if queues['bytes'] <= HEADER.size:
+        raise ValueError('queues.bytes must fit a BSF1 header and at least one payload byte')
     _number(queues['deadline_s'], 'queues.deadline_s', minimum=.000001)
     watchdog = _number(request.get('watchdog_s', .3 if native_uav_count else 2), 'watchdog_s', minimum=.000001)
     if native_uav_count and watchdog > .3:
