@@ -526,7 +526,7 @@
      }
 --- a/src/spectrum/test/sionna-channel-model-test.cc
 +++ b/src/spectrum/test/sionna-channel-model-test.cc
-@@ -44,7 +44,217 @@
+@@ -44,6 +44,216 @@
  #include "ns3/uniform-planar-array.h"
  
  #include <pybind11/pybind11.h>
@@ -743,4 +743,3 @@
 +} // namespace
  
  using namespace ns3;
- 
