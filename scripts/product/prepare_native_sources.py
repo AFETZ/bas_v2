@@ -52,7 +52,13 @@ def prepare(config):
             end = min(t+dwell, stop)
             # WaveformGenerator.Stop cancels the next pulse, not an already
             # emitted wave. Whole periods guarantee no signal after stop_s.
-            if not math.isclose((end-t)/period, round((end-t)/period), abs_tol=1e-7):
+            # Compare seconds with an absolute sub-nanosecond tolerance: pinned
+            # ns-3 uses its unchanged default 1 ns Time resolution. Relative
+            # tolerance on the period count admits a partial final pulse as the
+            # count grows; a fixed count tolerance also grows with the period.
+            duration = end - t
+            whole_duration = round(duration / period) * period
+            if not math.isclose(duration, whole_duration, rel_tol=0, abs_tol=1e-10):
                 raise ValueError("segment duration must be a whole number of generator periods")
             hz = number(frequencies[index % len(frequencies)], "center_hz", bandwidth/2+1)
             segments.append(dict(id=sid, position_m=position, orientation_rad=orientation,

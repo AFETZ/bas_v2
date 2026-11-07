@@ -45,9 +45,16 @@ class PayloadChannelTests(unittest.TestCase):
             helper = self.helper()
             if window in ('inside', 'late'):
                 start = time.monotonic_ns()
-                helper.start_measurement(start, start + (1_000_000 if window == 'late' else 2_000_000_000))
+                end = start + (1_000_000 if window == 'late' else 2_000_000_000)
+                helper.start_measurement(start, end)
                 if window == 'late':
-                    time.sleep(.005)
+                    # Windows GetTickCount64 may not advance during a 5 ms sleep.
+                    # Establish the test's post-window precondition in the clock
+                    # domain actually used by production observations.
+                    deadline = time.perf_counter() + 1
+                    while time.monotonic_ns() < end and time.perf_counter() < deadline:
+                        time.sleep(.001)
+                    self.assertGreaterEqual(time.monotonic_ns(), end)
             from pymavlink import mavutil
             parser = mavutil.mavlink.MAVLink(None)
             transmitter = mavutil.mavlink.MAVLink(None)
@@ -123,8 +130,13 @@ class PayloadChannelTests(unittest.TestCase):
         self.assertTrue(all(stat['count'] == 0 for stat in window['uavs']['1']['observations'].values()))
 
     def test_wrong_roster_frame_cannot_count_as_payload_telemetry(self):
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as peer:
+        with (socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as peer,
+              socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as valid_peer):
             peer.bind(('127.0.0.1', 14702))
+            # Keep the legitimate UAV1 destination alive while injecting UAV2.
+            # An absent destination causes Windows to surface an unrelated ICMP
+            # port-unreachable as WinError10054 on the next receive/close pump.
+            valid_peer.bind(('127.0.0.1', 14701))
             helper = self.helper((1,))
             from pymavlink import mavutil
             transmitter = mavutil.mavlink.MAVLink(None)

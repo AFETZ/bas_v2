@@ -5,8 +5,10 @@
 #include "ns3/friis-spectrum-propagation-loss.h"
 #include "ns3/three-gpp-antenna-model.h"
 #include "ns3/pointer.h"
+#include "ns3/uinteger.h"
 #include "pybind11/stl.h"
 #include <functional>
+#include <fstream>
 #include <array>
 #include <filesystem>
 #include <memory>
@@ -154,15 +156,34 @@ inline Ptr<SourcePropagation> InstallSpectrumSources(
         generator->SetTxPowerSpectralDensity(psd);
         if (profile != "friis" && !frequencies.count(hz))
         {
+            NS_ABORT_MSG_IF(!reference, "RT sources require an explicit reference channel model");
             auto model = CreateObject<SionnaRtSpectrumPropagationLossModel>();
             model->SetChannelModelAttribute("Frequency", DoubleValue(hz));
+            // A different carrier needs its own RT channel, with the same
+            // bounded solver allocation as the configured desired link.
+            for (const auto* attribute : {"SamplesPerSource", "MaxNumPathsPerSource"})
+            {
+                UintegerValue budget;
+                reference->GetChannelModelAttribute(attribute, budget);
+                model->SetChannelModelAttribute(attribute, budget);
+            }
             model->SetChannelModelAttribute("Scenario", StringValue(scene));
             model->SetChannelModelAttribute("IsMergeShapeEnabled", BooleanValue(true));
             model->SetChannelModelAttribute("MaxNumberOfPaths", DoubleValue(maxPaths));
             model->SetRtPathSolverConfig(solver);
             frequencies[hz] = model;
         }
-        if (profile != "friis") router->sources[generator] = frequencies.at(hz);
+        if (profile != "friis")
+        {
+            auto selected = frequencies.at(hz);
+            router->sources[generator] = selected;
+            UintegerValue samples, paths;
+            selected->GetChannelModelAttribute("SamplesPerSource", samples);
+            selected->GetChannelModelAttribute("MaxNumPathsPerSource", paths);
+            emit("source_rt_model_config", id, hz,
+                 "samples_per_src=" + std::to_string(samples.Get()) +
+                 ";max_num_paths_per_src=" + std::to_string(paths.Get()));
+        }
         router->sourcePsds[generator] = psd;
         router->sourceTimes[generator] = {start, stop, period, duty};
         const auto details = "source=ns3::WaveformGenerator;center_hz=" + std::to_string(hz) +
