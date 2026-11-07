@@ -239,7 +239,9 @@ def load_config(path, root=ROOT):
         from scripts.product.prepare_urban_gazebo import read_rt_radio_profile
         from scripts.product.prepare_sionna_scene import ITU_FREQUENCIES_GHZ
         raw_scene = scenario.raw
-        read_rt_radio_profile(radio_file, raw_scene)
+        radio_profile = read_rt_radio_profile(radio_file, raw_scene)
+        if radio_profile['sionna']['execution_mode'] == 'worker_pool' and config.get('interference'):
+            raise ValueError('worker_pool with directed sources is not yet qualified; use in_process for source scenarios')
         thickness = propagation['thickness_m']
         if type(thickness) not in (int, float) or not 0 < thickness <= sys.float_info.max:
             raise ValueError('propagation.thickness_m must be finite and positive')
@@ -361,6 +363,21 @@ def recorded_outcome(raw, code, summary, *, source_configured=False):
         source_summary = raw / 'metrics/native_source_summary.json'
         environment_path = raw / 'environment.txt'
         environment_text = environment_path.read_text(encoding='utf-8', errors='replace') if environment_path.is_file() else ''
+        pool_required = (stats.get('sionna_rt_execution_mode') == 'worker_pool'
+                         or re.search(r'^sionna_rt_execution_mode=worker_pool\s*$', environment_text, re.M) is not None
+                         or (raw / 'logs/native_rt_worker_config.json').exists())
+        if pool_required:
+            try:
+                from scripts.product.summarize_native_radio_five_uav import load_scenario_config, native_rt_worker_contract
+                scenario = load_scenario_config(control_dir(raw.name) / 'generated/scenario.yaml')
+                proof = native_rt_worker_contract(stats, scenario)
+                result['native_rt_worker_verification'] = proof
+                frozen = json.loads((raw / 'logs/native_rt_workers/summary.json').read_text(encoding='utf-8'),
+                                    object_pairs_hook=unique_json_fields, parse_constant=reject_json_constant)
+                if proof.get('passed') is not True or frozen != stats.get('sionna_rt_workers'):
+                    raise ValueError('native RT worker evidence is incomplete or disagrees with the closed summary')
+            except (OSError, ValueError, TypeError, KeyError):
+                verification_errors.append('native_rt_worker_export_invalid')
         declared = re.search(r'^native_sources=(.+)$', environment_text, re.M)
         source_required = source_configured or source_input.exists() or (
             declared is not None and declared.group(1).strip() not in ('', 'none'))

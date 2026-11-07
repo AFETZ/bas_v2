@@ -319,6 +319,25 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result['measurement_validity'], 'invalid')
         self.assertIn('native_source_summary_missing', result['runtime_verification_errors'])
 
+    def test_declared_or_observed_rt_workers_require_the_closed_run_evidence(self):
+        raw, summary = self.qualified_source_run()
+        stats_path = raw / 'metrics/native_radio_stats.json'
+        original = json.loads(stats_path.read_text())
+        for declaration in ('native_stats', 'runner_environment', 'worker_config'):
+            with self.subTest(declaration=declaration):
+                stats_path.write_text(json.dumps(dict(original, **(
+                    {'sionna_rt_execution_mode': 'worker_pool'} if declaration == 'native_stats' else {}))))
+                (raw / 'environment.txt').write_text(
+                    'sionna_rt_execution_mode=worker_pool\n' if declaration == 'runner_environment' else '')
+                worker_config = raw / 'logs/native_rt_worker_config.json'
+                if declaration == 'worker_config':
+                    worker_config.write_text('{}')
+                result = bas.recorded_outcome(raw, 0, summary)
+                self.assertEqual(result['runtime_status'], 'failed')
+                self.assertEqual(result['measurement_validity'], 'invalid')
+                self.assertIn('native_rt_worker_export_invalid', result['runtime_verification_errors'])
+                worker_config.unlink(missing_ok=True)
+
     def test_source_export_before_capture_publication_cannot_qualify_later_capture(self):
         from scripts.product.summarize_native_radio_five_uav import summarize_native_sources
         raw, summary = self.qualified_source_run()

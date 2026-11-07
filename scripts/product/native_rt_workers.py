@@ -1,4 +1,4 @@
-"""Bounded process adapter for the native RT technical probe, not the live runner.
+"""Bounded native RT process adapter used by the live bridge and throughput probe.
 
 Only receiver threads call Connection.recv(). poll() drains completed messages
 without waiting; it also detects deadlines using the host monotonic clock.
@@ -126,7 +126,7 @@ class NativeRtWorkerPool:
         if not isinstance(command, (list, tuple)) or not command or any(type(v) is not str for v in command):
             raise ValueError('command must be a nonempty argv sequence')
         if type(workers) is not int or not 1 <= workers <= 3:
-            raise ValueError('workers must be 1..3 for this probe')
+            raise ValueError('workers must be 1..3')
         if any(type(v) not in (int, float) or not math.isfinite(v) or v <= 0
                for v in (startup_timeout_s, job_timeout_s)):
             raise ValueError('timeouts must be finite and positive')
@@ -168,7 +168,7 @@ class NativeRtWorkerPool:
         if self._started or self._closing.is_set():
             raise RuntimeError('pool cannot be restarted')
         if os.name != 'posix':
-            raise RuntimeError('native RT probe requires POSIX AF_UNIX; no transport fallback')
+            raise RuntimeError('native RT workers require POSIX AF_UNIX; no transport fallback')
         self._started = True
         self.artifacts.mkdir(parents=True, exist_ok=False)
         self.socket_dir = Path(tempfile.mkdtemp(prefix='bas-rt-'))
@@ -279,7 +279,7 @@ class NativeRtWorkerPool:
         return completed
 
     def snapshot(self):
-        return {'schema': 1, 'scope': 'development_stub' if self.allow_development_stub else 'native_rt_probe',
+        return {'schema': 1, 'scope': 'development_stub' if self.allow_development_stub else 'native_rt_worker_pool',
             'closed': self._closing.is_set(), 'socket_dir': str(self.socket_dir) if self.socket_dir else None,
             'last_request_id': self._last_request_id,
             'workers': [{'worker_id': w.identity, 'pid': w.process.pid, 'ready': w.ready,

@@ -365,6 +365,151 @@ def native_events(
     return result
 
 
+def native_rt_worker_contract(stats: dict[str, Any], scenario_config: dict[str, Any]) -> dict[str, Any]:
+    """Validate observed worker/cache participation for the configured 1..5 UAVs."""
+    from scripts.product.native_rt_workers import VERSIONS
+
+    def mapping(value):
+        return value if isinstance(value, dict) else {}
+
+    def integer(value, minimum=0):
+        return type(value) is int and value >= minimum
+
+    def number(value):
+        try:
+            return type(value) in (int, float) and math.isfinite(value)
+        except OverflowError:
+            return False
+
+    def same(observed, expected):
+        if type(expected) is bool:
+            return observed is expected
+        return (number(observed) and number(expected)
+                and math.isclose(observed, expected, rel_tol=1e-12, abs_tol=1e-12))
+
+    radio, rt = mapping(scenario_config.get("radio")), mapping(scenario_config.get("sionna"))
+    snapshot = mapping(stats.get("sionna_rt_workers"))
+    cache, pool = mapping(snapshot.get("cache")), mapping(snapshot.get("pool"))
+    positions = mapping(scenario_config.get("ground_positions"))
+    names = sorted(positions, key=lambda name: int(name[3:])
+                   if isinstance(name, str) and re.fullmatch(r"uav[1-5]", name) else 99)
+    cohort = ["cp", *names]
+    roster_valid = 1 <= len(names) <= 5 and names == [f"uav{i}" for i in range(1, len(names) + 1)]
+    count, workers = rt.get("worker_count", 3), pool.get("workers")
+
+    scene_hash = None
+    reference = mapping(scenario_config.get("map")).get("scene_xml")
+    if isinstance(reference, str) and reference:
+        candidate = Path(reference)
+        scenario_path = scenario_config.get("path")
+        parent = Path(scenario_path).parent if isinstance(scenario_path, str) else Path(".")
+        candidates = [candidate] if candidate.is_absolute() else [ROOT / candidate, parent / candidate]
+        try:
+            scene = next((path for path in candidates if path.is_file()), None)
+            if scene is not None:
+                scene_hash = hashlib.sha256(scene.read_bytes()).hexdigest()
+        except (OSError, ValueError):
+            pass  # Missing proof is a failed check, never an implicit scene match.
+
+    max_age = rt.get("channel_state_max_age_s")
+    maximum_age_ns = round(max_age * 1e9) if number(max_age) and 0 < max_age <= .5 else None
+    checks = {
+        "worker_execution_mode": rt.get("execution_mode") == "worker_pool"
+            and stats.get("sionna_rt_execution_mode") == "worker_pool"
+            and stats.get("sionna_in_process") is False,
+        "worker_profile_supported": integer(count, 1) and count <= 3
+            and rt.get("receiver_batch_mode") == "receiver_batch" and rt.get("synthetic_array") is True
+            and integer(rt.get("max_number_of_paths"), 1) and rt["max_number_of_paths"] <= 90
+            and number(rt.get("cache_expiry_jitter_fraction")) and rt["cache_expiry_jitter_fraction"] == 0
+            and maximum_age_ns is not None and number(rt.get("endpoint_displacement_threshold_m"))
+            and 0 < rt["endpoint_displacement_threshold_m"] <= .5,
+        "worker_cohort_matches_scenario": roster_valid and type(stats.get("uav_count")) is int
+            and stats["uav_count"] == len(names) and type(stats.get("radio_node_count")) is int
+            and stats["radio_node_count"] == len(cohort),
+        "worker_snapshot_complete": type(snapshot.get("schema")) is int and snapshot["schema"] == 1
+            and snapshot.get("execution_mode") == "worker_pool" and snapshot.get("started") is True
+            and snapshot.get("closed") is True and snapshot.get("cache_snapshot_stage") == "before_close"
+            and snapshot.get("failed") is False and snapshot.get("error") is None
+            and type(snapshot.get("worker_count")) is int and snapshot["worker_count"] == count
+            and type(pool.get("schema")) is int and pool["schema"] == 1
+            and pool.get("scope") == "native_rt_worker_pool" and pool.get("closed") is True,
+        "worker_results_published": all(integer(snapshot.get(key), 1) for key in
+            ("submitted_jobs", "completed_jobs", "published_results", "published_pairs"))
+            and snapshot["published_results"] <= snapshot["completed_jobs"] <= snapshot["submitted_jobs"],
+        "worker_cache_drives_native_psd": integer(cache.get("hits"), 1) and type(cache.get("misses")) is int
+            and cache["misses"] == 0 and integer(cache.get("accepted"), 1)
+            and cache["accepted"] == snapshot.get("published_pairs")
+            and stats.get("selected_propagation_profile") == "sionna"
+            and stats.get("sionna_drives_rx_psd") is True and stats.get("packet_outcome_affected") is True
+            and stats.get("native_ns3_phy") is True and stats.get("native_ns3_mac") is True
+            and same(stats.get("carrier_hz"), radio.get("carrier_hz"))
+            and same(stats.get("wifi_actual_center_frequency_hz"), radio.get("carrier_hz"))
+            and same(stats.get("wifi_channel_width_mhz"), radio.get("channel_width_mhz"))
+            and type(stats.get("shared_spectrum_channel_count")) is int and stats["shared_spectrum_channel_count"] == 1
+            and type(stats.get("scalar_base_propagation_model_count")) is int and stats["scalar_base_propagation_model_count"] == 0
+            and type(stats.get("phased_array_spectrum_propagation_model_count")) is int and stats["phased_array_spectrum_propagation_model_count"] == 1
+            and stats.get("rx_psd_propagation_model") == "ns3::SionnaRtSpectrumPropagationLossModel",
+        "worker_cache_hit_ages_within_budget": maximum_age_ns is not None
+            and all(integer(cache.get(key)) and cache[key] <= maximum_age_ns for key in
+                ("maximum_hit_native_age_ns", "maximum_hit_host_age_ns")),
+        "worker_profiles_match": False,
+        "worker_cache_pair_provenance": False,
+    }
+    solver_fields = ("max_depth", "los", "specular_reflection", "diffuse_reflection", "diffraction",
+                     "edge_diffraction", "refraction", "synthetic_array", "seed")
+    expected_radio = {"frequency_hz": radio.get("carrier_hz"), "samples_per_source": rt.get("samples_per_src"),
+        "max_paths_per_source": rt.get("max_num_paths_per_src"), "max_number_of_paths": rt.get("max_number_of_paths"),
+        "merge_shapes": True}
+    if isinstance(workers, list) and integer(count, 1) and len(workers) == count:
+        profiles_valid, identities, pids, configurations = True, set(), set(), []
+        for item in workers:
+            item = mapping(item)
+            ready = mapping(item.get("ready"))
+            config = mapping(ready.get("applied_config"))
+            applied_radio = mapping(config.get("radio"))
+            applied_solver = mapping(applied_radio.get("solver"))
+            identity, pid = item.get("worker_id"), item.get("pid")
+            valid = (integer(identity) and identity < count and identity not in identities
+                and integer(pid, 1) and pid not in pids and item.get("failed") is None
+                and integer(item.get("completed"), 1) and type(ready.get("schema")) is int
+                and ready["schema"] == 1 and ready.get("kind") == "ready"
+                and ready.get("worker_id") == identity and ready.get("pid") == pid
+                and ready.get("versions") == VERSIONS and str(ready.get("mitsuba_variant", "")).startswith("cuda")
+                and ready.get("development_stub") is not True and ready.get("render_images") is False
+                and type(config.get("schema")) is int and config["schema"] == 1 and type(config.get("normalize_delays")) is bool
+                and config.get("cohort") == [{"id": name} for name in cohort]
+                and scene_hash is not None and mapping(config.get("scene")).get("sha256") == scene_hash
+                and all(same(applied_radio.get(key), value) for key, value in expected_radio.items())
+                and all(same(applied_solver.get(key), rt.get(key)) for key in solver_fields))
+            profiles_valid &= valid
+            if integer(identity): identities.add(identity)
+            if integer(pid, 1): pids.add(pid)
+            configurations.append(config)
+        checks["worker_profiles_match"] = profiles_valid and all(item == configurations[0] for item in configurations)
+
+    pairs = cache.get("pairs")
+    native_ns, host_ns = snapshot.get("cache_snapshot_native_ns"), snapshot.get("cache_snapshot_host_monotonic_ns")
+    if isinstance(pairs, list) and roster_valid and integer(native_ns) and integer(host_ns, 1):
+        expected = {(a, b) for a in range(len(cohort)) for b in range(a + 1, len(cohort))}
+        observed, valid = set(), True
+        for pair in pairs:
+            pair = mapping(pair)
+            a, b = pair.get("first"), pair.get("second")
+            pair_key = (a, b) if integer(a) and integer(b) else None
+            valid &= (pair_key in expected and pair_key not in observed
+                and integer(pair.get("source_request_id"), 1) and integer(pair.get("sample_native_ns"))
+                and pair["sample_native_ns"] <= native_ns and integer(pair.get("sample_host_monotonic_ns"), 1)
+                and pair["sample_host_monotonic_ns"] <= host_ns and integer(pair.get("native_age_ns"))
+                and pair["native_age_ns"] == native_ns - pair["sample_native_ns"]
+                and integer(pair.get("host_age_ns")) and type(pair.get("valid")) is bool
+                and type(pair.get("due")) is bool and isinstance(pair.get("reason"), str) and bool(pair["reason"]))
+            observed.add(pair_key)
+        checks["worker_cache_pair_provenance"] = valid and observed == expected
+    return {"passed": all(checks.values()), "checks": checks,
+            "rejection_reasons": [name for name, passed in checks.items() if not passed],
+            "expected_worker_count": count, "expected_cohort": cohort, "scene_sha256": scene_hash}
+
+
 def native_product_runtime_contract(
     stats: dict[str, Any], scenario_config: dict[str, Any]
 ) -> dict[str, Any]:
@@ -494,8 +639,22 @@ def native_product_runtime_contract(
     )
     if not geometry:
         exact["sionna_solver_parameters"] = solver_valid
+    requested_mode = sionna.get("execution_mode", "in_process")
+    observed_mode = stats.get("sionna_rt_execution_mode")
+    if "sionna_rt_execution_mode" not in stats and stats.get("sionna_in_process") is True:
+        observed_mode = "in_process"  # The only supported legacy inference.
+    workers = None
+    if not geometry:
+        exact["sionna_execution_mode"] = requested_mode in ("in_process", "worker_pool") and observed_mode == requested_mode
+        if requested_mode == "worker_pool" or observed_mode == "worker_pool":
+            exact.pop("sionna_in_process")
+            exact["sionna_out_of_process"] = stats.get("sionna_in_process") is False
+            workers = native_rt_worker_contract(stats, scenario_config)
+            exact["worker_pool_runtime_contract"] = workers["passed"]
     return {"passed": all(exact.values()), "checks": exact,
-            "propagation_profile": stats.get("selected_propagation_profile", "sionna")}
+            "propagation_profile": stats.get("selected_propagation_profile", "sionna"),
+            "sionna_rt_execution_mode": observed_mode if not geometry else None,
+            "worker_pool": workers}
 
 
 def build_topology(run_dir: Path, stats: dict[str, Any]) -> dict[str, Any]:
