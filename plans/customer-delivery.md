@@ -21,11 +21,11 @@
 | 1–5 UAV | Проверено для короткого номинального сценария: N=1 два seeds (`delivery-n1-20261107-02`), N=2 `delivery-n2-20261107`, N=3..5 `delivery-n{3,4,5}-20261107-02`. Все взлетели, выполнили маршруты, сели и разоружились. Полная нагрузка и совместная приёмка остаются открытыми. |
 | Жизненный цикл | Проверено в указанных коротких циклах: свежий фактический LAND не заменяется BRAKE при expiry lease; посадка имеет отдельную наблюдаемую provenance. Пересылаемые ArduPilot MAVLink с чужим SYSID отбрасываются с сохранением очереди provenance, не останавливая миссию. Длительный исходный `delivery-five-20261107-01` оборван watchdog из-за 34,8 с отставания; причина не установлена, результат сохранён. |
 | Результаты | Проверено на реальных запусках: runtime_status, mission_outcome, measurement_validity; native stop reason, capture publication и обязательные артефакты участвуют в итоговом критерии. Незавершённые маршруты не становятся успешными по окончании окна. |
-| Serial/Ethernet | Частично: исправлены bounded batching, partial writes, backpressure, reconnect; localhost TCP→BSF1/UDP 1 MiB побайтно, 89,24 Мбит/с. Это программный тракт без радио и оборудования. |
+| Serial/Ethernet | Частично: `delivery-native-pty-n1-20261107-01` проверил два Serial PTY через действующий native PHY/MAC; `delivery-native-ethernet-n1-20261107-01` — UDP control + TCP payload через штатный socat к реальным UART SITL. В обоих 24/24 команды приняты, payload AUTOPILOT_VERSION получен. Ethernet-прогон также подтвердил no-bypass: PHY sleep 10,52 с, UART источника продолжает выдачу, до НПУ не дошло ни одного кадра обоих потоков. Артефакты: `control/delivery-native-{pty,ethernet}-20261107/`, `native-radio-realtime/<ID>/metrics/`. Физическое оборудование отсутствует. |
 | Аппаратная приёмка | Заблокирована внешней зависимостью: оборудования нет. Подготовлены проверяемые профили Pixhawk 6C/Cube Orange+, Microhard P2400 Serial и pMDDL2450 Ethernet, CLI `test_radio_hitl.py --prepare`. Популярность в РФ и эквивалентность модему заказчика не подтверждены. Два физических UART, Ethernet с реальным устройством и failsafe остаются открытыми. |
 | Два UART через общий эфир | Проверено в коротких циклах N=1..5: control и payload одновременно через native Wi-Fi Spectrum PHY/MAC; фактические HEARTBEAT/ATTITUDE/ACK считаются в измерительном окне отдельно от preflight. Приоритет под насыщением и требования классов нагрузки ещё не квалифицированы. |
 | Большая карта, Sionna/hybrid | Частично: explicit RT прошёл полный короткий N=1 цикл `delivery-ui-rt-n1-20261107-01` на `1796c4d`; native stats подтверждают Sionna drives RX PSD, один общий Spectrum-канал и ноль scalar base models. Общий OBJ рельеф 10×10 км / 200 м и здания до 15 этажей проверены Gazebo collision + Sionna 1.2.0 в `delivery-terrain-probe-20261107/runtime-result.json` на `f33b74b`. Исправлена причина DART crash: отсутствующие OBJ normals. Полёт N=1 над рельефом с RT/двумя потоками прошёл в `delivery-terrain-n1-20261107-02` (1 Вт по вводным заказчика). Первая попытка с прежним 10 мВт профилем сохранилась как mission incomplete / measurement valid. N=5 проверяется отдельно; hybrid запрещён в CLI до квалификации правил. |
-| Помехи и карты RSS/SINR/J/S | Частично: есть Spectrum-источники; нет подтверждённой полной цепочки и карт для требуемого сценария. |
+| Помехи и карты RSS/SINR/J/S | Частично: GPU `control/delivery-map-probe-20261107/verification.json` подтвердил RF-срезы до/во время помехи и при развороте диаграммы; медианная front/back разница 29,32 дБ, отдельная проверка точек отличается до 1,32 дБ (MC, допуск не согласован). Это не MAC/SLA-карты. Bas/UI замораживает YAML источников; добавлена привязка к наблюдаемому измерительному окну и actual schedule в native ns. Packet-level сценарий ещё проверяется. |
 | Интерфейс, серии, установка | Частично: loopback UI `bas.py ui` редактирует/проверяет конфигурацию, запускает штатный controller, показывает состояние/причины и экспортирует реальные артефакты; HTTP API запустил успешный RT N=1. Batch: последовательная очередь, seeds/runs/repeats, immutable attempts, отмена; реальная серия из двух seeds N=1 прошла. Чистая установка и независимый оператор ещё не проверены. |
 
 Артефакты запусков находятся на ПК4 в `/home/bas/bas_v2-core/runs/`:
@@ -38,11 +38,23 @@ RT-only probe большой сцены: холодный расчёт одно�
 Первый N=5 RT/terrain `delivery-terrain-n5-20261107-01` не достиг readiness за 180 с:
 6183 решения по 15 парам, среднее 22,0 мс, накопленное отставание 34,3 с.
 Доказательства: `control/delivery-terrain-flight-20261107/n5-{readiness-diagnosis,rt-performance}.json`.
-Выявлена повторная carrier phase на границе CIR → native spectrum PSD; исправление и
-регрессия `sionna-baseband-spectrum-phase` подготовлены. Прежние RT-полёты подтверждают
-интеграцию, корректность многолучевой PSD после исправления требует новых проверок.
-Следующий исполнимый шаг: собрать/выполнить C++ регрессию до/после исправления,
-проверить RF maps на GPU, повторить N=1 и N=5 RT с сохранёнными допусками времени.
+Повторная carrier phase на границе CIR → native spectrum PSD исправлена; CPU-регрессия
+воспроизвела дефект до изменения и прошла после (`control/delivery-baseband-phase-20261107/`).
+После исправления UI-прогон `delivery-ui-corrected-n1-20261107-01` прошёл полный цикл
+с RT/рельефом/обоими потоками; повторный pairwise N=5 не достиг readiness.
+Явный opt-in receiver_batch использует штатный PathSolver, сохраняет cache/deadline guards,
+выделяет Nrx × per-link path cap и отказывает при заполнении буфера кандидатов.
+GPU/public SDK тест `control/delivery-receiver-batch-build-20261107/gpu-public-01.json`
+подтвердил мощности/задержки/доплер/углы по каждому RX, reciprocity и displacement.
+`delivery-batch-rt-n1-20261107-01` на `8f2d01e` прошёл полный цикл, измерения valid.
+N=5 попытка `...-01` выявила readiness до холодного RT; прогрев до realtime epoch
+исправлен. Попытка `...-02` на `00215c4` всё ещё превысила hard limit: 256,9 мс на
+6,714 с, до измерений. Это незакрытый дефект производительности, не успешный N=5.
+206 программных тестов на ПК4: 205 pass, 1 платформенный skip
+(`control/delivery-receiver-batch-build-20261107/warmup-build{,-command.json}`).
+Следующий исполнимый шаг: исключить повторные GPU→CPU преобразования в одном batch,
+повторить public GPU regression и N=5 без изменения допуска 250 мс; параллельно
+проверить native включение/выключение источника после действительного anchor.
 Зависимости solver: Sionna RT 1.2.0, Mitsuba 3.7.1, DrJit 1.2.0; фактические бюджеты
 и конфигурации сохраняются. Неудачные попытки не удаляются. Публикационные результаты не изменяются.
 

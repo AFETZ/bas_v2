@@ -11,6 +11,7 @@ import math
 import re
 import statistics
 import struct
+import sys
 from bisect import bisect_right
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -21,6 +22,8 @@ import yaml
 
 UAVS = tuple(f"uav{index}" for index in range(1, 6))
 ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 RUNTIME_PHASE_ALIASES = {
     "pre_no_bypass": "no_bypass_test",
     "no_bypass_stop": "no_bypass_test",
@@ -2872,6 +2875,7 @@ def write_latency_diagnostic_report(run_dir: Path, observer_reference: Path | No
         "observer": observer,
         "observer_comparison": observer_comparison,
         "native_stats": stats,
+        "native_sources": native_sources,
         "physical_metric_availability": metric_availability,
         "control_loss_breakdown": {
             "before_native_enqueue": "unavailable: no public GCS-side pre-MAC enqueue trace",
@@ -2899,8 +2903,8 @@ def write_latency_diagnostic_report(run_dir: Path, observer_reference: Path | No
         "",
         "RSSI/SNR/SINR and BLER retain their explicit native-API availability status in `control_latency_summary.json`.",
     ]
-    if native_sources["sources"]:
-        report.extend(["", "## Native Spectrum sources", "", "See metrics/native_source_summary.json for baseline/active/recovery native powers, decoded SINR, and receive-attempt outcomes."])
+    report.extend(_native_source_report_lines(native_sources))
+    if 'active' in native_sources['windows']:
         for stem in ("07_jammer_active","08_jammer_recovery"):
             if (run_dir/"screenshots"/(stem+".raw.png")).exists():
                 report.extend(["", f"![{stem}](screenshots/{stem}.png)", "", f"[Unmodified live Gazebo frame](screenshots/{stem}.raw.png)"])
@@ -3469,21 +3473,88 @@ def export_live_metrics(
     return summary
 
 
+def _native_source_schedule(run_dir):
+    configured_path = run_dir / 'logs/native_sources.json'
+    actual_path = run_dir / 'logs/native_sources_actual.json'
+    configured = read_json(configured_path, {})
+    actual = read_json(actual_path, None)
+    result = dict(configured_sources=configured, actual_sources=actual, time_anchor=None,
+                  actual_schedule_status='not_recorded', actual_schedule_error=None)
+    if actual_path.exists():
+        try:
+            if (not isinstance(actual, dict) or type(actual.get('schema_version')) is not int
+                    or actual['schema_version'] != 1 or actual.get('clock') != 'ns3_simulation_seconds'
+                    or not isinstance(actual.get('anchor'), dict)):
+                raise ValueError('actual schedule requires schema 1, native simulation clock and an observed anchor')
+            anchor = actual['anchor']
+            if type(anchor.get('simulation_s')) not in (int, float) or not math.isfinite(anchor['simulation_s']):
+                raise ValueError('actual anchor requires finite simulation seconds')
+            if not isinstance(actual.get('segments'), list) or not actual['segments']:
+                raise ValueError('actual schedule requires committed intervals')
+            for item in actual['segments']:
+                if not isinstance(item, dict) or any(type(item.get(key)) is not int
+                        for key in ('start_ns', 'stop_ns', 'period_ns')):
+                    raise ValueError('actual intervals require integer native ticks')
+            # Reuse the native producer's one-time materialization contract;
+            # never shift or replace the configured relative schedule here.
+            from scripts.product.prepare_native_sources import materialize
+            expected = materialize(configured, anchor.get('simulation_ns'),
+                                   anchor.get('host_monotonic_ns'), anchor.get('phase'))
+            if expected is None or actual != expected:
+                raise ValueError('actual schedule does not match its input and observed native anchor')
+            result.update(actual_schedule_status='observed', time_anchor=anchor)
+        except (ValueError, TypeError, KeyError, OverflowError) as error:
+            result.update(actual_schedule_status='invalid', actual_schedule_error=str(error))
+    elif configured_path.exists() and (not isinstance(configured, dict)
+            or configured.get('clock') not in ('ns3_simulation_seconds', 'measurement_elapsed_seconds')):
+        result.update(actual_schedule_status='invalid_configured_input', actual_schedule_error='configured source clock is missing or invalid')
+    return result
+
+
+def _native_source_report_lines(summary):
+    if not (summary['sources'] or summary['configured_sources'] or summary['actual_sources']
+            or summary['actual_schedule_status'] != 'not_recorded'):
+        return []
+    lines = ['', '## Native Spectrum sources', '',
+        f"- Absolute schedule: `{summary['actual_schedule_status']}`; activation: `{summary['source_activity_status']}`.",
+        '- [Configured input, original clock](logs/native_sources.json); [source observations and window availability](metrics/native_source_summary.json).']
+    if summary['actual_sources'] is not None or summary['actual_schedule_status'] == 'invalid':
+        lines.append('- [Native committed absolute schedule](logs/native_sources_actual.json).')
+    if summary['time_anchor'] is not None:
+        anchor = summary['time_anchor']
+        lines.append(f"- Observed anchor: phase `{anchor['phase']}`, native time `{anchor['simulation_ns']}` ns; committed intervals alone do not prove source activation.")
+    if summary['actual_schedule_error']:
+        lines.append('- Schedule unavailable: ' + summary['actual_schedule_error'])
+    return lines
+
+
 def summarize_native_sources(run_dir: Path, events: list[dict[str, Any]]) -> dict[str, Any]:
     switches=[dict(e, x=None, y=None, z=None, coordinate_reason="source switch has no mobility trace; position is configured in logs/native_sources.json") for e in events if e["event"] in {"jammer_on","jammer_off"}]
-    result={"sources":switches,"configured_sources":read_json(run_dir/"logs/native_sources.json", {}),"windows":{},"measurement_scope":"native decoder/SignalArrival samples; application PDR needs distinct application offers",
+    result={"sources":switches, **_native_source_schedule(run_dir),"windows":{},"measurement_scope":"native decoder/SignalArrival samples; application PDR needs distinct application offers",
         "units":{"time":"ns-3 seconds","foreign_power":"dBm, native SpectrumWifiPhy.SignalArrival","noise_interference":"dBm, native decoded MPDU sample","sinr":"dB, derived S/(I+N) on decoded samples"}}
-    on_times = [e["time_s"] for e in switches if e["event"] == "jammer_on"]
-    off_times = [e["time_s"] for e in switches if e["event"] == "jammer_off"]
+    configured = result['configured_sources']
+    relative = isinstance(configured, dict) and configured.get('clock') == 'measurement_elapsed_seconds'
+    anchor = result['time_anchor']
+    anchor_s = anchor['simulation_s'] if relative and anchor is not None else 0
+    eligible = [e for e in switches if e['time_s'] >= anchor_s]
+    result['switch_events_before_anchor'] = len(switches) - len(eligible)
+    unavailable = (result['actual_schedule_status'].startswith('invalid') or (relative and anchor is None))
+    if unavailable:
+        eligible = []
+    on_times = [e["time_s"] for e in eligible if e["event"] == "jammer_on"]
+    off_times = [e["time_s"] for e in eligible if e["event"] == "jammer_off"]
+    result['source_activity_status'] = ('unavailable_measurement_anchor' if relative and anchor is None else
+        'unavailable_invalid_schedule' if unavailable else 'switch_on_observed' if on_times else 'not_observed')
     complete_window = bool(on_times and off_times and max(off_times) > min(on_times))
     result["window_availability"] = (
-        "observed_switch_boundaries" if complete_window else
+        "unavailable_schedule_or_measurement_anchor" if unavailable else "observed_switch_boundaries" if complete_window else
         "unavailable_incomplete_switch_boundaries" if switches else "no_switch_events"
     )
     if complete_window:
         on = min(on_times)
         off = max(off_times)
-        for name,low,high in (("baseline",max(0,on-10),on),("active",on,off),("recovery",off,off+10)):
+        result['active_window_definition'] = 'earliest observed on to latest observed off envelope; gaps, pulses and overlaps may occur'
+        for name,low,high in (("baseline",max(anchor_s,on-10),on),("active",on,off),("recovery",off,off+10)):
             selected=[e for e in events if low<=e["time_s"]<high]
             decoded=[e for e in selected if e["event"]=="wifi_monitor_rx"]
             ok=sum(e["event"]=="phy_rx_ok" for e in selected)
@@ -3734,6 +3805,7 @@ def main() -> int:
         "screenshots": screenshots,
         "operating_envelope": operating_envelope,
         "no_bypass": no_bypass,
+        "native_sources": native_sources,
         "one_uav_regression": one_uav,
         "one_uav_regression_required": bool(args.one_uav_run),
         "forbidden_custom_components_present": forbidden,
@@ -3820,6 +3892,7 @@ def main() -> int:
                 f"decoder RxOk/RxError={observation['phy_rx_ok']}/{observation['phy_rx_error']}.",
             ]
         )
+    report.extend(_native_source_report_lines(native_sources))
     (run_dir / "report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
     print(json.dumps({"run_dir": str(run_dir), "functional": functional_status, "realtime": realtime["realtime_readiness"]}, sort_keys=True))
     return 0 if functional_status == "passed" else 1

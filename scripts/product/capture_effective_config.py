@@ -173,7 +173,8 @@ def capture_snapshot(
     inputs = [("environment", run_dir / "environment.txt", "run_metadata"),
               ("command", run_dir / "command.txt", "run_metadata"),
               ("native_stats", run_dir / "metrics/native_radio_stats.json", "partial_native_export"),
-              ("native_sources", run_dir / "logs/native_sources.json", "configured_input")]
+              ("native_sources", run_dir / "logs/native_sources.json", "configured_input"),
+              ("native_sources_actual", run_dir / "logs/native_sources_actual.json", "observed_runtime_schedule")]
     inputs += [(label, path, "configured_input") for label, path in configs]
     inputs += [(label, path, "effective_parameter_export") for label, path in observed]
     labels = [item[0] for item in inputs]
@@ -240,6 +241,7 @@ def capture_snapshot(
                 "Configured-input copies record bytes used by the runner, not runtime read-back.",
                 "Only explicit effective_parameter_export inputs contain upstream parameter read-back.",
                 "Native stats can expose selected settings; they do not export all ns-3 attributes.",
+                "Observed runtime schedules record native anchors and committed intervals; source activation requires native switch observations.",
                 "Snapshot capture time is recorded; callers must capture before inputs are modified.",
                 "This snapshot does not infer flight, radio delivery or experiment success.",
             ],
