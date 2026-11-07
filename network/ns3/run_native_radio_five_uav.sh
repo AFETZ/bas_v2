@@ -432,6 +432,8 @@ PYTHON_TOOLING="$NS3_DIR/.tooling-py310"
 PROJECT_SOURCE="$ROOT_DIR/network/ns3/scratch/upstream-sionna-tap-spike.cc"
 UPSTREAM_SOURCE="$NS3_DIR/scratch/upstream-sionna-tap-spike.cc"
 BINARY="$NS3_DIR/build/scratch/ns3.48-upstream-sionna-tap-spike-default"
+RT_WORKER_BINARY="$NS3_DIR/build/scratch/ns3.48-native-rt-worker-default"
+RT_WORKER_CONFIG="$RUN_DIR/logs/native_rt_worker_config.json"
 PATCH_FILE="$ROOT_DIR/network/ns3/patches/mr2608-spike-compatibility.patch"
 REALTIME_CACHE_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-realtime-scene-cache.patch"
 PHASED_ARRAY_ADAPTER_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-spectrumwifi-phased-array-adapter.patch"
@@ -562,12 +564,14 @@ for item in (
     str(sionna.get("samples_per_src", 1000000)),
     str(sionna.get("max_num_paths_per_src", 1000000)),
     str(sionna.get("receiver_batch_mode", "pairwise")),
+    str(sionna.get("execution_mode", "in_process")),
+    str(sionna.get("worker_count", 3)),
 ):
     print(item)
 PY
 )
-(( ${#RADIO_VALUES[@]} == 34 )) || {
-  printf 'Invalid native product radio config: expected 34 resolved values, got %s\n' "${#RADIO_VALUES[@]}" >&2
+(( ${#RADIO_VALUES[@]} == 36 )) || {
+  printf 'Invalid native product radio config: expected 36 resolved values, got %s\n' "${#RADIO_VALUES[@]}" >&2
   exit 2
 }
 RADIO_BACKEND="${RADIO_VALUES[0]}"
@@ -604,6 +608,14 @@ RUNTIME_LAG_MAX_MS="${RADIO_VALUES[30]}"
 SIONNA_SAMPLES_PER_SOURCE="${RADIO_VALUES[31]}"
 SIONNA_MAX_NUM_PATHS_PER_SOURCE="${RADIO_VALUES[32]}"
 SIONNA_RECEIVER_BATCH_MODE="${RADIO_VALUES[33]}"
+SIONNA_RT_EXECUTION_MODE="${RADIO_VALUES[34]}"
+SIONNA_WORKER_COUNT="${RADIO_VALUES[35]}"
+[[ "$SIONNA_RT_EXECUTION_MODE" == in_process || "$SIONNA_RT_EXECUTION_MODE" == worker_pool ]] || {
+  printf 'execution_mode must be in_process or worker_pool.\n' >&2; exit 2;
+}
+if [[ "$SIONNA_RT_EXECUTION_MODE" == worker_pool && ( "$BAS_SIMULATION_MODE" != realtime || -n "${BAS_NATIVE_SOURCES:-}" ) ]]; then
+  printf 'worker_pool requires realtime; directed source worker integration is not yet qualified.\n' >&2; exit 2;
+fi
 [[ "$SIONNA_RECEIVER_BATCH_MODE" == pairwise || "$SIONNA_RECEIVER_BATCH_MODE" == receiver_batch ]] || {
   printf 'receiver_batch_mode must be pairwise or receiver_batch.\n' >&2; exit 2;
 }
@@ -758,6 +770,7 @@ export PATH="$PYTHON_TOOLING/bin:$PATH"
 export PYTHONPATH="$PYTHON_TOOLING:$PYTHON_DEPS:${PYTHONPATH:-}"
 cp "$PROJECT_SOURCE" "$UPSTREAM_SOURCE"
 cp "$ROOT_DIR/network/ns3/scratch/native-geometry-loss.h" "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" "$ROOT_DIR/network/ns3/scratch/native-live-state.h" "$ROOT_DIR/network/ns3/scratch/native-lockstep.h" "$NS3_DIR/scratch/"
+cp "$ROOT_DIR/network/ns3/scratch/native-rt-cache.h" "$ROOT_DIR/network/ns3/scratch/native-rt-pool.h" "$ROOT_DIR/network/ns3/scratch/native-rt-worker.cc" "$NS3_DIR/scratch/"
 source_args=()
 if [[ "$SCENARIO_KEY" == urban ]]; then
   cp "$GEOMETRY_CONFIG" "$RUN_DIR/logs/urban_scenario.json"
@@ -785,6 +798,14 @@ if [[ "${BAS_NATIVE_FIVE_SKIP_BUILD:-0}" == 1 ]]; then
   [[ "$BINARY" -nt "$PROJECT_SOURCE" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-geometry-loss.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-live-state.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-lockstep.h" && "$SPECTRUM_LIBRARY" -nt "$REALTIME_CACHE_PATCH" && "$TAP_LIBRARY" -nt "$LOCKSTEP_TAP_PATCH" && "$SPECTRUM_LIBRARY" -nt "$SOLVER_BUDGET_PATCH" && "$SPECTRUM_LIBRARY" -nt "$BASEBAND_PHASE_PATCH" && "$SPECTRUM_LIBRARY" -nt "$DOPPLER_EPOCH_PATCH" && "$SPECTRUM_LIBRARY" -nt "$RECEIVER_BATCH_PATCH" && "$TAP_LIBRARY" -nt "$TAP_QUEUE_SELECTION_PATCH" && "$SPECTRUM_LIBRARY" -nt "$PHASED_ARRAY_ADAPTER_PATCH" ]] || {
     printf 'Binary predates native source/header; rerun without BAS_NATIVE_FIVE_SKIP_BUILD.\n' >&2; exit 2;
   }
+  [[ "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-rt-cache.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-rt-pool.h" ]] || {
+    printf 'Binary predates native RT cache/pool header.\n' >&2; exit 2;
+  }
+  if [[ "$SIONNA_RT_EXECUTION_MODE" == worker_pool ]]; then
+    [[ -x "$RT_WORKER_BINARY" && "$RT_WORKER_BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-rt-worker.cc" && "$RT_WORKER_BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-live-state.h" ]] || {
+      printf 'Native RT worker is absent or older than its source/header.\n' >&2; exit 2;
+    }
+  fi
   printf 'Reused focused native target after exact project/upstream source synchronization.\n' \
     > "$RUN_DIR/logs/ns3_build.log"
 else
@@ -794,6 +815,9 @@ else
       PYTHONPATH="$PYTHON_TOOLING:$PYTHON_DEPS" ./ns3 configure --enable-examples --enable-tests --enable-python-bindings
     fi
     PYTHONPATH="$PYTHON_TOOLING:$PYTHON_DEPS" ./ns3 build upstream-sionna-tap-spike
+    if [[ "$SIONNA_RT_EXECUTION_MODE" == worker_pool ]]; then
+      PYTHONPATH="$PYTHON_TOOLING:$PYTHON_DEPS" ./ns3 build native-rt-worker
+    fi
   ) > "$RUN_DIR/logs/ns3_build.log" 2>&1
 fi
 [[ -x "$BINARY" ]] || { printf 'Focused native target did not build.\n' >&2; exit 1; }
@@ -856,6 +880,7 @@ PY
   printf 'selected_propagation_profile=%s\nsionna_runtime_enabled=%s\n' "$PROPAGATION_PROFILE" "$REQUIRES_RT"
   printf 'sionna_log_level=%s\n' "$SIONNA_LOG_LEVEL"
   printf 'sionna_receiver_batch_mode=%s\n' "$SIONNA_RECEIVER_BATCH_MODE"
+  printf 'sionna_rt_execution_mode=%s\nsionna_worker_count=%s\n' "$SIONNA_RT_EXECUTION_MODE" "$SIONNA_WORKER_COUNT"
   [[ "$PROPAGATION_PROFILE" != geometry_logdistance ]] || printf 'geometry_config=%s\ngeometry_radio_model=upstream_LogDistance_selected_by_3D_Buildings\ngeometry_antenna_offset_enu_m=0,0,0\n' "$RUN_DIR/logs/urban_scenario.json"
   printf 'technology_specific_modem=%s\n' "$TECHNOLOGY_SPECIFIC_MODEM"
   printf 'uav_count=%s\nradio_node_count=%s\nshared_spectrum_channels=1\n' "$UAV_COUNT" "$((UAV_COUNT + 1))"
@@ -902,17 +927,84 @@ CLEANUP_ACTIVE=0
 stop_pid() {
   local pid="${1:-}"
   [[ -n "$pid" ]] || return 0
-  if kill -0 "$pid" 2>/dev/null; then
-    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
-    for _ in $(seq 1 50); do
-      kill -0 "$pid" 2>/dev/null || break
-      sleep 0.1
-    done
-    if kill -0 "$pid" 2>/dev/null; then
-      kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
-    fi
+  # setsid leaders can die before their workers. Confirm the surviving session
+  # through a run-owned open stdout/stderr, not the presence of the leader PID.
+  if python3 - "$pid" "${RUN_DIR:-}" "${RUNTIME_DIR:-}" <<'PYSTOPOWNED'
+import os, signal, sys, time
+from pathlib import Path
+
+text = sys.argv[1]
+if not text.isascii() or not text.isdigit():
+    raise SystemExit(1)
+group = int(text)
+if group <= 1 or group == os.getpgrp():
+    raise SystemExit(1)
+try:
+    roots = [Path(value).resolve() for value in sys.argv[2:] if value and Path(value).is_absolute()]
+except OSError:
+    raise SystemExit(1)
+if not roots:
+    raise SystemExit(1)
+
+def members():
+    present, owned = False, False
+    for entry in Path('/proc').iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            fields = (entry / 'stat').read_text().rsplit(') ', 1)[1].split()
+            if fields[0] == 'Z' or int(fields[2]) != group or int(fields[3]) != group:
+                continue
+            present = True
+            if entry.stat().st_uid != os.geteuid():
+                return True, False
+            for descriptor in ('1', '2'):
+                target = os.readlink(entry / 'fd' / descriptor)
+                if target.endswith(' (deleted)'):
+                    target = target[:-10]
+                path = Path(target)
+                if not path.is_absolute():
+                    continue
+                path = path.resolve()
+                for root in roots:
+                    try:
+                        path.relative_to(root)
+                    except ValueError:
+                        continue
+                    owned = True
+        except (OSError, ValueError, IndexError):
+            continue  # Unreadable/disappeared processes provide no ownership proof.
+    return present, owned
+
+def send(sig):
+    try:
+        present, owned = members()
+        if not present:
+            return False
+        if not owned:
+            print(f'Refusing cleanup of PGID {group}: run ownership not established', file=sys.stderr)
+            return False
+        os.killpg(group, sig)
+        return True
+    except (OSError, ValueError, OverflowError):
+        return False  # No fallback to a potentially reused individual PID.
+
+if not send(signal.SIGTERM):
+    raise SystemExit(1)
+for _ in range(50):
+    time.sleep(.1)
+    try:
+        present, owned = members()
+    except OSError:
+        break
+    if not present or not owned:
+        break
+send(signal.SIGKILL)  # Reconfirm membership/ownership after the unchanged 5 s grace.
+PYSTOPOWNED
+  then
+    wait "$pid" 2>/dev/null || true
   fi
-  wait "$pid" 2>/dev/null || true
+  return 0  # Refused/unproven groups must not block cleanup in wait().
 }
 
 capture_effective_configuration() {
@@ -932,7 +1024,17 @@ capture_effective_configuration() {
     --config "sionna_doppler_epoch_patch=$DOPPLER_EPOCH_PATCH"
     --config "sionna_receiver_batch_patch=$RECEIVER_BATCH_PATCH"
     --config "tap_queue_selection_patch=$TAP_QUEUE_SELECTION_PATCH"
+    --config "native_rt_pool_source=$ROOT_DIR/network/ns3/scratch/native-rt-pool.h"
+    --config "native_rt_cache_source=$ROOT_DIR/network/ns3/scratch/native-rt-cache.h"
   )
+  if [[ "$SIONNA_RT_EXECUTION_MODE" == worker_pool ]]; then
+    config_args+=(--config "native_rt_worker_source=$ROOT_DIR/network/ns3/scratch/native-rt-worker.cc"
+                  --config "native_rt_pool_adapter=$ROOT_DIR/scripts/product/native_rt_workers.py")
+    if [[ "$stage" == final ]]; then
+      config_args+=(--observed-params "native_rt_worker_config=$RT_WORKER_CONFIG"
+                    --observed-params "native_rt_pool=$RUN_DIR/logs/native_rt_workers/summary.json")
+    fi
+  fi
   if [[ -n "${BAS_NATIVE_SOURCES:-}" ]]; then
     # capture_effective_config already includes logs/native_sources.json as
     # native_sources; add the frozen YAML input once, without duplicate labels.
@@ -1462,6 +1564,8 @@ setsid ip netns exec ams-ns3 env \
   --sionnaSeed="$SIONNA_SEED" --sionnaMaxNumberOfPaths="$SIONNA_MAX_NUMBER_OF_PATHS" \
   --sionnaSamplesPerSource="$SIONNA_SAMPLES_PER_SOURCE" --sionnaMaxNumPathsPerSource="$SIONNA_MAX_NUM_PATHS_PER_SOURCE" \
   --sionnaReceiverBatchMode="$SIONNA_RECEIVER_BATCH_MODE" \
+  --sionnaRtExecutionMode="$SIONNA_RT_EXECUTION_MODE" --sionnaWorkerCount="$SIONNA_WORKER_COUNT" \
+  --projectRoot="$ROOT_DIR" --sionnaWorkerBinary="$RT_WORKER_BINARY" --sionnaWorkerConfig="$RT_WORKER_CONFIG" \
   --sionnaCacheJitterFraction="$SIONNA_CACHE_JITTER_FRACTION" \
   --readinessLagMaxMs="$READINESS_LAG_MAX_MS" \
   --readinessConsecutiveSamples="$READINESS_CONSECUTIVE_SAMPLES" \
@@ -1562,6 +1666,7 @@ set +e
 wait "$NS3_PID"
 NS3_STATUS=$?
 set -e
+stop_pid "$NS3_PID"
 NS3_PID=""
 [[ "$NS3_STATUS" == 0 || "$NS3_STATUS" == 143 ]] || {
   printf 'Native process stop status=%s\n' "$NS3_STATUS" >&2

@@ -33,6 +33,7 @@
 #include "native-live-state.h"
 #include "native-lockstep.h"
 #include "native-geometry-loss.h"
+#include "native-rt-pool.h"
 #include <memory>
 
 #include <algorithm>
@@ -118,6 +119,8 @@ std::string g_radioReason{"upstream_ideal_phy_arp_reentrancy_limit"};
 std::string g_solverProfile{"realtime_minimal_solver_profile"};
 std::string g_sionnaReceiverBatchMode{"pairwise"};
 std::string g_sionnaReceiverBatchStatsJson{"null"};
+std::string g_sionnaRtExecutionMode{"in_process"};
+std::string g_sionnaRtWorkersJson{"null"};
 bool g_technologySpecificModem{false};
 std::vector<std::string> g_phasedArraySpectrumPropagationModels;
 uint32_t g_sionnaMaxDepth{1};
@@ -804,6 +807,7 @@ class LivePositionSource
 
     bool Refresh()
     {
+        py::gil_scoped_acquire gil;
         const int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
         const int64_t eventNs = g_runtimeOperational
@@ -830,6 +834,7 @@ class LivePositionSource
                     "measured_pose_age_ms;source_sim_s="+std::to_string(snapshot[i].sourceTime));
             }
             if (g_geometry) g_geometry->ObserveAll();
+            m_latest = snapshot;
             ++g_poseSnapshots;
             g_liveStateValid=true;
         }
@@ -850,11 +855,18 @@ class LivePositionSource
         }
         return true;
     }
+    std::vector<bas::MeasuredState> Snapshot() const
+    {
+        if (!g_liveStateValid || m_latest.size() != m_mobility.size())
+            throw std::runtime_error("RT producer requires a complete current measured pose cohort");
+        return m_latest;
+    }
   private:
     std::string m_path;
     std::vector<Ptr<MobilityModel>> m_mobility;
     bas::LiveStateReader m_reader;
     bas::ClockAlignment m_clockAlignment;
+    std::vector<bas::MeasuredState> m_latest;
 };
 
 class NativeRuntimeSampler
@@ -1370,7 +1382,8 @@ WriteStats(const std::string& path)
            << "  \"custom_packet_error_model\": false,\n"
            << "  \"custom_scheduler\": false,\n"
            << "  \"sionna_in_process\": "
-           << ((g_propagationProfile == "sionna" || g_propagationProfile == "hybrid") ? "true" : "false") << ",\n"
+           << (((g_propagationProfile == "sionna" || g_propagationProfile == "hybrid") &&
+                g_sionnaRtExecutionMode == "in_process") ? "true" : "false") << ",\n"
            << "  \"sionna_solver_enabled\": "
            << ((g_propagationProfile == "sionna" || g_propagationProfile == "hybrid") ? "true" : "false") << ",\n"
            << "  \"selected_propagation_profile\": \"" << g_propagationProfile << "\",\n"
@@ -1393,6 +1406,8 @@ WriteStats(const std::string& path)
            << "  \"solver_profile\": \"" << g_solverProfile << "\",\n"
            << "  \"sionna_receiver_batch_mode\": \"" << g_sionnaReceiverBatchMode << "\",\n"
            << "  \"sionna_receiver_batch\": " << g_sionnaReceiverBatchStatsJson << ",\n"
+           << "  \"sionna_rt_execution_mode\": \"" << g_sionnaRtExecutionMode << "\",\n"
+           << "  \"sionna_rt_workers\": " << g_sionnaRtWorkersJson << ",\n"
            << "  \"sionna_solver\": {\"max_depth\": " << g_sionnaMaxDepth
            << ", \"los\": " << (g_sionnaLos ? "true" : "false")
            << ", \"specular_reflection\": "
@@ -1434,6 +1449,9 @@ main(int argc, char* argv[])
     std::string ignoredLegacyPacketOutcomeClaim;
     std::string solverProfile = "realtime_minimal_solver_profile";
     std::string sionnaReceiverBatchMode = "pairwise";
+    std::string sionnaRtExecutionMode = "in_process";
+    uint32_t sionnaWorkerCount = 3;
+    std::string projectRoot, sionnaWorkerBinary, sionnaWorkerConfig;
     std::string wifiDataMode = "HtMcs0";
     std::string wifiControlMode = "ErpOfdmRate6Mbps";
     bool wifiAggregation = true;
@@ -1566,6 +1584,11 @@ main(int argc, char* argv[])
     command.AddValue("sionnaSamplesPerSource", "Actual PathSolver samples_per_src budget", sionnaSamplesPerSource);
     command.AddValue("sionnaMaxNumPathsPerSource", "Actual PathSolver max_num_paths_per_src budget", sionnaMaxNumPathsPerSource);
     command.AddValue("sionnaReceiverBatchMode", "pairwise or explicit iso 1x1 receiver_batch", sionnaReceiverBatchMode);
+    command.AddValue("sionnaRtExecutionMode", "in_process or explicit worker_pool", sionnaRtExecutionMode);
+    command.AddValue("sionnaWorkerCount", "1..3 bounded native RT producer processes", sionnaWorkerCount);
+    command.AddValue("projectRoot", "Absolute project root for the native RT worker", projectRoot);
+    command.AddValue("sionnaWorkerBinary", "Built native RT producer executable", sionnaWorkerBinary);
+    command.AddValue("sionnaWorkerConfig", "New run-owned frozen worker config JSON", sionnaWorkerConfig);
     command.AddValue("sionnaMaxNumberOfPaths",
                      "Maximum Sionna paths retained per link",
                      sionnaMaxNumberOfPaths);
@@ -1625,6 +1648,18 @@ main(int argc, char* argv[])
                     (g_propagationProfile != "sionna" || radioBackend != "wifi" ||
                      g_executionMode != "realtime" || !sionnaSyntheticArray),
                     "receiver_batch requires the native Wi-Fi/Sionna realtime iso 1x1 reference");
+    NS_ABORT_MSG_IF(sionnaRtExecutionMode != "in_process" && sionnaRtExecutionMode != "worker_pool",
+                    "sionnaRtExecutionMode must be in_process or worker_pool");
+    const bool useRtWorkers = sionnaRtExecutionMode == "worker_pool";
+    NS_ABORT_MSG_IF(sionnaWorkerCount < 1 || sionnaWorkerCount > 3 ||
+                    (!useRtWorkers && sionnaWorkerCount != 3), "invalid or unused RT worker count");
+    NS_ABORT_MSG_IF(useRtWorkers && (sionnaReceiverBatchMode != "receiver_batch" ||
+                    !sourceConfig.empty() || projectRoot.empty() || sionnaWorkerBinary.empty() ||
+                    sionnaWorkerConfig.empty() || sionnaMaxNumberOfPaths > 90 ||
+                    sionnaCacheJitterFraction != 0 || channelStateMaxAgeS > 0.5 ||
+                    updateDistanceThresholdM > 0.5),
+                    "worker_pool requires explicit receiver_batch, zero expiry jitter, <=90 paths, "
+                    "run-owned paths and a source-free scene; directed source worker integration is not yet qualified");
     NS_ABORT_MSG_IF(geometryProfile && (geometryConfig.empty() || geometryCsv.empty() ||
                     !sourceConfig.empty() || g_faultProfile != "none"),
                     "geometry profile requires explicit geometryConfig/geometryCsv and no injected losses/sources");
@@ -1660,6 +1695,7 @@ main(int argc, char* argv[])
     g_radioReason = radioReason;
     g_solverProfile = solverProfile;
     g_sionnaReceiverBatchMode = sionnaReceiverBatchMode;
+    g_sionnaRtExecutionMode = sionnaRtExecutionMode;
     g_sionnaMaxDepth = sionnaMaxDepth;
     g_sionnaLos = sionnaLos;
     g_sionnaSpecularReflection = sionnaSpecularReflection;
@@ -2056,11 +2092,13 @@ main(int argc, char* argv[])
     }
 
     LivePositionSource positions(positionFile, mobility);
-    NativeRuntimeSampler metrics(sionna ? sionna->GetChannelModel() : nullptr, cpMobility, uavMobility);
+    Ptr<SionnaRtChannelModel> originalRtModel = sionna
+        ? DynamicCast<SionnaRtChannelModel>(sionna->GetChannelModel()) : nullptr;
+    Ptr<bas::NativeRtCache> rtCache;
+    std::unique_ptr<bas::NativeRtPool> rtPool;
     for (uint32_t index = 0; index < radioDevices.GetN(); ++index)
         g_wifiRadioIndices[Mac48Address::ConvertFrom(radioDevices.Get(index)->GetAddress())] = index;
     g_runtimeHeartbeat = readyFile + ".heartbeat";
-    g_runtimeSampler = &metrics;
     if (g_executionMode == "realtime") positions.Poll();
     if (sionna && g_executionMode == "realtime" && radioBackend == "wifi")
     {
@@ -2088,12 +2126,77 @@ main(int argc, char* argv[])
         // displacement checks remain unchanged during the experiment.
         const auto started = std::chrono::steady_clock::now();
         uint64_t links = 0;
-        for (size_t tx = 0; tx < cohort.size(); ++tx)
-            for (size_t rx = tx + 1; rx < cohort.size(); ++rx)
+        if (useRtWorkers)
+        {
+            using namespace pybind11::literals;
+            auto pathlib = py::module_::import("pathlib");
+            auto json = py::module_::import("json");
+            auto configPath = pathlib.attr("Path")(sionnaWorkerConfig);
+            NS_ABORT_MSG_IF(configPath.attr("exists")().cast<bool>(), "Worker config must be new for this run");
+            BooleanValue normalizeDelays, mergeShapes;
+            model->GetAttribute("NormalizeDelays", normalizeDelays);
+            model->GetAttribute("IsMergeShapeEnabled", mergeShapes);
+            py::list nodeIds;
+            std::vector<bas::NativeRtCache::Endpoint> endpoints;
+            for (size_t i = 0; i < cohort.size(); ++i)
             {
-                model->GetChannel(cohort[tx], cohort[rx], arrays[tx], arrays[rx]);
-                ++links;
+                nodeIds.append(py::dict("id"_a=g_nodeNames.at(i)));
+                endpoints.push_back({cohort[i], arrays[i]});
             }
+            const auto sceneBytes = pathlib.attr("Path")(scene).attr("read_bytes")();
+            auto config = py::dict("schema"_a=1, "root"_a=projectRoot,
+                "scene"_a=py::dict("path"_a=scene, "sha256"_a=py::module_::import("hashlib").attr("sha256")(sceneBytes).attr("hexdigest")()),
+                "normalize_delays"_a=normalizeDelays.Get(), "cohort"_a=nodeIds,
+                "radio"_a=py::dict("frequency_hz"_a=carrierHz, "samples_per_source"_a=g_sionnaSamplesPerSource,
+                    "max_paths_per_source"_a=g_sionnaMaxNumPathsPerSource,
+                    "max_number_of_paths"_a=sionnaMaxNumberOfPaths, "merge_shapes"_a=mergeShapes.Get(),
+                    "solver"_a=py::dict("max_depth"_a=solver.maxDepth, "seed"_a=solver.seed,
+                        "los"_a=solver.los, "specular_reflection"_a=solver.specularReflection,
+                        "diffuse_reflection"_a=solver.diffuseReflection, "refraction"_a=solver.refraction,
+                        "diffraction"_a=solver.diffraction, "edge_diffraction"_a=solver.edgeDiffraction,
+                        "synthetic_array"_a=solver.syntheticArray)));
+            auto contract = py::module_::import("scripts.product.native_rt_workers");
+            config = contract.attr("validate_config")(config).cast<py::dict>();
+            configPath.attr("write_text")(json.attr("dumps")(config, "indent"_a=2, "allow_nan"_a=false), "encoding"_a="utf-8");
+            bas::NativeRtCache::Limits limits;
+            limits.maximumAge = Seconds(channelStateMaxAgeS);
+            limits.displacementM = updateDistanceThresholdM;
+            rtCache = CreateObject<bas::NativeRtCache>(carrierHz, endpoints, limits);
+            rtPool = std::make_unique<bas::NativeRtPool>(rtCache, endpoints,
+                [&positions]() { return positions.Snapshot(); },
+                [](const std::string& event, const std::string& id, double value,
+                   const std::string& details) { LogEvent(event, id, "", 0, value, details); });
+            try
+            {
+                rtPool->Start(projectRoot, sionnaWorkerBinary, sionnaWorkerConfig,
+                              (std::filesystem::path(sionnaWorkerConfig).parent_path()/"native_rt_workers").string(),
+                              sionnaWorkerCount);
+                rtPool->Warm([&positions]() {
+                    if (!positions.Refresh() || !g_liveStateValid)
+                        throw std::runtime_error("Native RT worker warmup lost the measured pose source");
+                });
+                sionna->SetChannelModel(rtCache);
+            }
+            catch (const std::exception& error)
+            {
+                g_stopReason = "rt_worker_preparation_error";
+                std::cerr << error.what() << std::endl;
+                try { rtPool->Close(); g_sionnaRtWorkersJson = rtPool->SnapshotJson(); }
+                catch (const std::exception& cleanupError) { std::cerr << cleanupError.what() << std::endl; }
+                Simulator::Destroy();
+                WriteStats(statsFile);
+                FlushEvents();
+                return 6;
+            }
+            links = cohort.size() * (cohort.size() - 1) / 2;
+        }
+        else
+            for (size_t tx = 0; tx < cohort.size(); ++tx)
+                for (size_t rx = tx + 1; rx < cohort.size(); ++rx)
+                {
+                    model->GetChannel(cohort[tx], cohort[rx], arrays[tx], arrays[rx]);
+                    ++links;
+                }
         LogEvent("sionna_radio_warmup", "ns3", "", 0,
                  std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count(),
                  "scope=actual_radio_channels;mode=" + sionnaReceiverBatchMode +
@@ -2134,6 +2237,9 @@ main(int argc, char* argv[])
         positions.Refresh(); // A cold solve may outlive the allowed pose age.
         NS_ABORT_MSG_IF(!g_liveStateValid, "source warmup ended without a current pose snapshot");
     }
+    NativeRuntimeSampler metrics(sionna ? sionna->GetChannelModel() : nullptr, cpMobility, uavMobility);
+    g_runtimeSampler = &metrics;
+    if (rtPool) Simulator::ScheduleNow(&bas::NativeRtPool::Poll, rtPool.get());
     Simulator::ScheduleNow(&NativeRuntimeSampler::PollLag, &metrics);
     Simulator::Schedule(Seconds(1), &NativeRuntimeSampler::PollSionnaPaths, &metrics);
     Simulator::ScheduleNow(&SampleQueues);
@@ -2192,6 +2298,11 @@ main(int argc, char* argv[])
                 g_lockstep->Physics(Simulator::Now().GetNanoSeconds(), g_runtimeOperational);
                 ++g_completedSteps;
             }
+        } else if (rtPool) {
+            // Receiver threads need the interpreter while the native packet
+            // path reads only the C++ CIR cache. Callbacks acquire it locally.
+            py::gil_scoped_release release;
+            Simulator::Run();
         } else Simulator::Run();
     }
     catch (const py::error_already_set& error)
@@ -2212,9 +2323,18 @@ main(int argc, char* argv[])
     }
     std::filesystem::remove(g_runtimeHeartbeat);
     if (g_geometry) g_geometry->Close();
+    if (rtPool) {
+        try { rtPool->Close(); }
+        catch (const std::exception& error) {
+            g_stopReason = "rt_worker_shutdown_error";
+            std::cerr << error.what() << std::endl;
+            result = 4;
+        }
+        g_sionnaRtWorkersJson = rtPool->SnapshotJson();
+    }
     if (sionna && sionnaReceiverBatchMode == "receiver_batch")
     {
-        const auto batch = DynamicCast<SionnaRtChannelModel>(sionna->GetChannelModel())->GetReceiverBatchStats();
+        const auto batch = originalRtModel->GetReceiverBatchStats();
         std::ostringstream observed;
         observed << "{\"enabled\":" << (batch.enabled ? "true" : "false")
                  << ",\"registered_endpoints\":" << batch.registeredEndpoints
