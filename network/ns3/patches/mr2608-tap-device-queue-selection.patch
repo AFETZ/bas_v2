@@ -1,0 +1,70 @@
+diff --git a/src/tap-bridge/model/tap-bridge.cc b/src/tap-bridge/model/tap-bridge.cc
+index c2f20b4..c227317 100644
+--- a/src/tap-bridge/model/tap-bridge.cc
++++ b/src/tap-bridge/model/tap-bridge.cc
+@@ -8,6 +8,11 @@
+ 
+ #include "tap-encode-decode.h"
+ 
++#include "ns3/ipv4-queue-disc-item.h"
++#include "ns3/ipv6-queue-disc-item.h"
++#include "ns3/net-device-queue-interface.h"
++#include "ns3/socket.h"
++
+ #include "ns3/abort.h"
+ #include "ns3/boolean.h"
+ #include "ns3/channel.h"
+@@ -812,6 +817,53 @@ TapBridge::ForwardToBridgedDevice(uint8_t* buf, ssize_t len)
+         return;
+     }
+ 
++    // TAP ingress bypasses TrafficControlLayer::Send. Use the bridged device's
++    // existing queue selector so its DS-field policy also applies to raw frames.
++    // Work on a copy: selectors must see a normal QueueDiscItem without an IP
++    // header in its packet, while the original bytes/checksum remain untouched.
++    SocketPriorityTag priority;
++    auto queues = m_bridgedDevice->GetObject<NetDeviceQueueInterface>();
++    if (queues && queues->GetNTxQueues() > 1 && queues->GetSelectQueueCallback() &&
++        !packet->PeekPacketTag(priority))
++    {
++        Ptr<QueueDiscItem> item;
++        auto copy = packet->Copy();
++        uint8_t prefix[4]{};
++        if (type == 0x0800 && copy->GetSize() >= 20)
++        {
++            copy->CopyData(prefix, sizeof(prefix));
++            const uint32_t headerSize = (prefix[0] & 0x0f) * 4;
++            const uint32_t totalSize = (uint32_t(prefix[2]) << 8) | prefix[3];
++            if ((prefix[0] >> 4) == 4 && headerSize >= 20 &&
++                headerSize <= totalSize && totalSize <= copy->GetSize())
++            {
++                Ipv4Header header;
++                copy->RemoveHeader(header);
++                item = Create<Ipv4QueueDiscItem>(copy, dst, type, header);
++            }
++        }
++        else if (type == 0x86dd && copy->GetSize() >= 40)
++        {
++            copy->CopyData(prefix, 1);
++            if ((prefix[0] >> 4) == 6)
++            {
++                Ipv6Header header;
++                copy->RemoveHeader(header);
++                item = Create<Ipv6QueueDiscItem>(copy, dst, type, header);
++            }
++        }
++        if (item)
++        {
++            const auto selected = queues->GetSelectQueueCallback()(item);
++            NS_ABORT_MSG_IF(selected >= queues->GetNTxQueues(),
++                            "TAP device selected an invalid transmission queue");
++            if (copy->PeekPacketTag(priority))
++            {
++                packet->ReplacePacketTag(priority);
++            }
++        }
++    }
++
+     NS_LOG_LOGIC("Pkt source is " << src);
+     NS_LOG_LOGIC("Pkt destination is " << dst);
+     NS_LOG_LOGIC("Pkt LengthType is " << type);
