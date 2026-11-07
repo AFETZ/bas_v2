@@ -103,6 +103,18 @@ class NativeBootstrapTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'exact dependency pin'):
             bootstrap.direct_pins(self.root)
 
+    def test_nested_vendor_metadata_is_not_the_wheel_distribution_metadata(self):
+        path = self.bundle / 'wheels/transitive_test-1.2.3-py3-none-any.whl'
+        with zipfile.ZipFile(path, 'a') as archive:
+            archive.writestr('package/_vendor/vendor-8.0.dist-info/METADATA',
+                             'Name: vendor\nVersion: 8.0\n')
+        record = bootstrap.wheel_record(path)
+        self.assertEqual((record['name'], record['version']), ('transitive-test', '1.2.3'))
+        with zipfile.ZipFile(path, 'a') as archive:
+            archive.writestr('second-1.0.dist-info/METADATA', 'Name: second\nVersion: 1.0\n')
+        with self.assertRaisesRegex(ValueError, 'exactly one METADATA'):
+            bootstrap.wheel_record(path)
+
     def test_offline_install_uses_hashes_and_resolves_closure_without_base_fallback(self):
         script = bootstrap.install_script('.external/a b;echo unwanted', '.external/a b/target', bootstrap.LOCK_NAMES[0])
         argv = shlex.split(script)

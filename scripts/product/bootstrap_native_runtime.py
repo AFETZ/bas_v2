@@ -191,7 +191,8 @@ def direct_pins(root):
 
 def wheel_record(path):
     with zipfile.ZipFile(path) as archive:
-        names = [n for n in archive.namelist() if n.endswith('.dist-info/METADATA')]
+        names = [n for n in archive.namelist()
+                 if n.count('/') == 1 and n.endswith('.dist-info/METADATA')]
         if len(names) != 1:
             raise ValueError(f'Wheel needs exactly one METADATA: {path.name}')
         metadata = BytesParser().parsebytes(archive.read(names[0]))
