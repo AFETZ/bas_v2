@@ -2078,6 +2078,23 @@ main(int argc, char* argv[])
         NS_ABORT_MSG_IF(!model->GetReceiverBatchEnabled(), "receiver_batch mode was not applied");
         LogEvent("sionna_receiver_batch_config", "ns3", "", 0, cohort.size(),
                  "mode=receiver_batch;path_capacity=receiver_count_times_per_link_cap;samples_per_src_unchanged=true");
+        // Readiness must not precede cold PathSolver/JIT work. Populate the
+        // actual production cache before the realtime epoch; cache age and
+        // displacement checks remain unchanged during the experiment.
+        const auto started = std::chrono::steady_clock::now();
+        uint64_t links = 0;
+        for (size_t tx = 0; tx < cohort.size(); ++tx)
+            for (size_t rx = tx + 1; rx < cohort.size(); ++rx)
+            {
+                model->GetChannel(cohort[tx], cohort[rx], arrays[tx], arrays[rx]);
+                ++links;
+            }
+        LogEvent("sionna_receiver_batch_warmup", "ns3", "", 0,
+                 std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count(),
+                 "scope=actual_radio_channels;receiver_links=" + std::to_string(links) +
+                 ";clock=host_monotonic_seconds;before_realtime_epoch=true");
+        positions.Refresh();
+        NS_ABORT_MSG_IF(!g_liveStateValid, "receiver batch warmup ended without a current pose snapshot");
     }
     if (sourceRouter && !sourceRouter->sources.empty())
     {
