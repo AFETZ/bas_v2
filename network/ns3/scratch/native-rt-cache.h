@@ -69,6 +69,7 @@ class NativeRtCache : public MatrixBasedChannelModel
     struct Stats
     {
         uint64_t hits{0}, misses{0}, accepted{0}, rejected{0};
+        uint64_t getChannelCalls{0}, getChannelWallNs{0}, maxGetChannelWallNs{0};
         int64_t lastHitNativeAgeNs{-1}, lastHitHostAgeNs{-1}, maximumHitNativeAgeNs{0}, maximumHitHostAgeNs{0};
         std::map<std::string, uint64_t> rejectionReasons, missReasons;
     };
@@ -198,6 +199,9 @@ class NativeRtCache : public MatrixBasedChannelModel
                                        Ptr<const PhasedArrayModel> aa,
                                        Ptr<const PhasedArrayModel> ba) override
     {
+        // Measure the actual packet callback, including refused lookups. This
+        // separates cache/guard CPU cost from producer and pose-reader latency.
+        const LookupTiming timing(m_stats);
         const auto ai = m_indices.find(PeekPointer(a)), bi = m_indices.find(PeekPointer(b));
         std::string error;
         PairStatus state{};
@@ -244,6 +248,18 @@ class NativeRtCache : public MatrixBasedChannelModel
     }
 
   private:
+    struct LookupTiming
+    {
+        Stats& stats;
+        const int64_t started{HostNowNs()};
+        explicit LookupTiming(Stats& value) : stats(value) { ++stats.getChannelCalls; }
+        ~LookupTiming()
+        {
+            const auto elapsed = static_cast<uint64_t>(HostNowNs() - started);
+            stats.getChannelWallNs += elapsed;
+            stats.maxGetChannelWallNs = std::max(stats.maxGetChannelWallNs, elapsed);
+        }
+    };
     struct Entry { Record record; };
     const double m_frequencyHz;
     std::vector<Endpoint> m_endpoints;

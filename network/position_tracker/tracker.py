@@ -123,7 +123,9 @@ def config_state(
 def write_state(output_json: Path, output_jsonl: Path | None, state: dict[str, Any]) -> None:
     output_json.parent.mkdir(parents=True, exist_ok=True)
     temp_path = output_json.with_suffix(output_json.suffix + ".tmp")
-    temp_path.write_text(json.dumps(state, indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8")
+    # This atomic file is a frequently read machine interface with bounded pose
+    # history. Whitespace adds reader CPU cost without changing its contract.
+    temp_path.write_text(json.dumps(state, separators=(",", ":"), sort_keys=True, allow_nan=False) + "\n", encoding="utf-8")
     os.replace(temp_path, output_json)
     if output_jsonl is not None:
         output_jsonl.parent.mkdir(parents=True, exist_ok=True)

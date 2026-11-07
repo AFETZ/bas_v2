@@ -222,6 +222,10 @@ void RfAndIdentity()
     Require(!cache->GetParams(cohort.mobility[0], cohort.mobility[1]), "Disposed cache returned parameters");
     Throws([&] { cache->GetChannel(cohort.mobility[0], cohort.mobility[1], cohort.antennas[0], cohort.antennas[1]); },
            "Disposed cache was admitted");
+    const auto measured = cache->GetStats();
+    Require(measured.getChannelCalls == measured.hits + measured.misses &&
+            measured.misses == 2 && measured.getChannelWallNs >= measured.maxGetChannelWallNs,
+            "Lookup timing did not cover both successful and exception paths");
     Simulator::Destroy();
 }
 

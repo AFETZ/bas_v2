@@ -1,5 +1,8 @@
 """Publication cadence on controlled clocks; no Gazebo or RF acceptance claim."""
 from types import SimpleNamespace
+import json
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -42,6 +45,23 @@ class ControlledStop:
 
 
 class GazeboPublicationTests(unittest.TestCase):
+    def test_live_file_is_compact_and_retains_exact_history_and_epochs(self):
+        state=dict(published_monotonic_ns=123456789,clock_received_monotonic_ns=123456780,
+                   nodes=[dict(id='uav1',sample_monotonic_ns=123456700,
+                               history=[dict(sample_monotonic_ns=123456690,position_m=[1,2,3])])])
+        with tempfile.TemporaryDirectory() as directory:
+            live=Path(directory)/'node.json'
+            archive=Path(directory)/'node.jsonl'
+            tracker.write_state(live,archive,state)
+            raw=live.read_text(encoding='utf-8')
+            self.assertEqual(json.loads(raw),state)
+            self.assertEqual(raw,json.dumps(state,separators=(',',':'),sort_keys=True)+'\n')
+            self.assertFalse(live.with_suffix('.json.tmp').exists())
+            saved=json.loads(archive.read_text(encoding='utf-8'))
+            self.assertEqual(saved['published_monotonic_ns'],123456789)
+            self.assertEqual(saved['nodes'][0]['sample_monotonic_ns'],123456700)
+            self.assertNotIn('history',saved['nodes'][0])
+
     def test_serialization_time_is_inside_the_requested_publication_period(self):
         for period_ns in (20_000_000, 10_000_000):
             clock = ControlledClock()

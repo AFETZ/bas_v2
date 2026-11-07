@@ -12,6 +12,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace bas {
@@ -86,6 +87,8 @@ private:
 
 class LiveStateReader {
 public:
+    // The owner keeps this reader inside the interpreter lifetime and holds
+    // the GIL during Read and destruction, as for the existing decoder calls.
     // Retain session identity: a tracker/clock reset requires a whole-run restart.
     std::vector<MeasuredState> Read(const std::string& path, const std::vector<std::string>& names,
                                    int64_t eventNs, int64_t wallNs, int64_t maxAgeNs,
@@ -95,14 +98,23 @@ public:
         const auto size=stream.tellg();
         if (size<=0 || size>1024*1024) throw std::runtime_error("missing/oversized state snapshot");
         stream.seekg(0);
-        std::string json((std::istreambuf_iterator<char>(stream)),{});
-        if (json.empty() || json.size()>1024*1024) throw std::runtime_error("missing/oversized state snapshot");
+        std::string json(static_cast<size_t>(size),'\0');
+        if (!stream.read(json.data(),static_cast<std::streamsize>(json.size())) ||
+            stream.peek()!=std::char_traits<char>::eof())
+            throw std::runtime_error("incomplete/changing state snapshot");
         // Runtime callers sample receipt AFTER reading: the atomic publisher can
         // otherwise replace the file between a caller's clock sample and open().
         // A nonzero wallNs is reserved for controlled clock fixtures.
         if (wallNs==0) wallNs=std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
-        auto root=py::module_::import("json").attr("loads")(json).cast<py::dict>();
+        if (!m_parsed || json!=m_json) {
+            auto parsed=py::module_::import("json").attr("loads")(json).cast<py::dict>();
+            m_parsed=std::move(parsed);
+            m_json=std::move(json);
+        }
+        // Reuse parsing only. Clock/session/schema validation and causal history
+        // selection below run on every call, including an unchanged publication.
+        auto root=py::reinterpret_borrow<py::dict>(m_parsed);
         const auto sourceKind=root["source"].cast<std::string>();
         if (root["schema_version"].cast<int>()!=2 || (sourceKind!="ros_odometry" && sourceKind!="gazebo_odometry")
             || root["coordinate_frame"].cast<std::string>()!="ENU" || !root["fault"].is_none())
@@ -177,6 +189,8 @@ public:
     int64_t LastPublicationNs() const { return m_lastPublicationNs; }
 private:
     std::string m_session;
+    std::string m_json;
+    py::object m_parsed;
     int64_t m_lastPublicationNs{0};
 };
 } // namespace bas

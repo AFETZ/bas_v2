@@ -525,6 +525,8 @@ class NativeRtPool
                 "prefetch_limiting_guard"_a=forecast.limitingGuard));
         }
         auto cache=py::dict("hits"_a=stats.hits,"misses"_a=stats.misses,"accepted"_a=stats.accepted,
+            "get_channel_calls"_a=stats.getChannelCalls,"get_channel_wall_ns"_a=stats.getChannelWallNs,
+            "max_get_channel_wall_ns"_a=stats.maxGetChannelWallNs,
             "rejected"_a=stats.rejected,"maximum_hit_native_age_ns"_a=stats.maximumHitNativeAgeNs,
             "maximum_hit_host_age_ns"_a=stats.maximumHitHostAgeNs,"rejection_reasons"_a=stats.rejectionReasons,
             "miss_reasons"_a=stats.missReasons,"pairs"_a=pairs);

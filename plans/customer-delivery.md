@@ -1,4 +1,4 @@
-**BAS: план доведения до поставки заказчику — 07.11.2026**
+**BAS: план доведения до поставки заказчику — 08.11.2026**
 
 Статус: план работ и предлагаемая программа приёмки, не отчёт о готовности.
 Основание: пересланные итоги созвона 16.06, уточнения модема и ответ пользователя «до 5 дронов».
@@ -8,7 +8,7 @@
 текущая реализация ведётся в `delivery/integration-20261107`, результаты привязаны к ревизиям запусков.
 07.11 доступ к ПК4 восстановлен; новые результаты ниже отмечены отдельно от измерений 05.11.
 
-**Текущее выполнение — 07.11.2026**
+**Текущее выполнение — 08.11.2026**
 
 Базовый запуск `delivery-baseline-20261107-01` на неизменённом `46e1a522`:
 пять реальных взлётов, окно 60,010 с, RTF 1,000133; `failed` при посадке.
@@ -24,9 +24,11 @@
 | Serial/Ethernet | Частично: `delivery-native-pty-n1-20261107-01` проверил два Serial PTY через действующий native PHY/MAC; `delivery-native-ethernet-n1-20261107-01` — UDP control + TCP payload через штатный socat к реальным UART SITL. В обоих 24/24 команды приняты, payload AUTOPILOT_VERSION получен. Ethernet-прогон также подтвердил no-bypass: PHY sleep 10,52 с, UART источника продолжает выдачу, до НПУ не дошло ни одного кадра обоих потоков. Артефакты: `control/delivery-native-{pty,ethernet}-20261107/`, `native-radio-realtime/<ID>/metrics/`. Физическое оборудование отсутствует. |
 | Аппаратная приёмка | Заблокирована внешней зависимостью: оборудования нет. Подготовлены проверяемые профили Pixhawk 6C/Cube Orange+, Microhard P2400 Serial и pMDDL2450 Ethernet, CLI `test_radio_hitl.py --prepare`. Популярность в РФ и эквивалентность модему заказчика не подтверждены. Два физических UART, Ethernet с реальным устройством и failsafe остаются открытыми. |
 | Два UART через общий эфир | Проверено в коротких циклах N=1..5: control и payload одновременно через native Wi-Fi Spectrum PHY/MAC. Устранена потеря ToS на UAV TAP ingress: штатный device selector теперь даёт control TID5/AC_VI, payload TID1/AC_BK. Настоящий TAP + YansWifi regression воспроизвёл defect до patch и прошёл после при backlog обоих направлений; p95 control queue residence UAV 402,78 → 1,26 мс (`control/delivery-qos-contract-20261107/verification.json`). Это очередь EDCA, не подтверждение полного UART/RF SLA и не strict priority. |
-| Большая карта, Sionna/hybrid | Частично: explicit RT прошёл полный короткий N=1 цикл `delivery-ui-rt-n1-20261107-01` на `1796c4d`; native stats подтверждают Sionna drives RX PSD, один общий Spectrum-канал и ноль scalar base models. Общий OBJ рельеф 10×10 км / 200 м и здания до 15 этажей проверены Gazebo collision + Sionna 1.2.0 в `delivery-terrain-probe-20261107/runtime-result.json` на `f33b74b`. Исправлена причина DART crash: отсутствующие OBJ normals. Полёт N=1 над рельефом с RT/двумя потоками прошёл в `delivery-terrain-n1-20261107-02` (1 Вт по вводным заказчика). Первая попытка с прежним 10 мВт профилем сохранилась как mission incomplete / measurement valid. N=5 проверяется отдельно; hybrid запрещён в CLI до квалификации правил. |
-| Помехи и карты RSS/SINR/J/S | Частично: GPU `control/delivery-map-probe-20261107/verification.json` подтвердил RF-срезы и разворот диаграммы. `delivery-source-rt-n1-20261107-03` на `ed9a4f2`: 1 Вт, tr38901, cochannel, actual measurement anchor; до помехи 459 MPDU/5 с, во время 0 и 252 PHY drops/5 с, после 930/10 с. Полёт/посадка завершены, configured runtime validity сохранена. Derived proof: `control/delivery-source-packets-20261107/derived-trace-03/`. Выявлен пропуск автоматического экспорта в relay branch; добавлены hook и обязательная проверка input/actual/summary. Новый полный прогон этих checks открыт. MAC/SLA-классы карт и аппаратная помеховая приёмка открыты. |
-| Интерфейс, серии, установка | Частично: loopback UI `bas.py ui` редактирует/проверяет конфигурацию, запускает штатный controller, показывает состояние/причины и экспортирует реальные артефакты; HTTP API запустил успешный RT N=1. Batch: последовательная очередь, seeds/runs/repeats, immutable attempts, отмена; реальная серия из двух seeds N=1 прошла. Чистая установка и независимый оператор ещё не проверены. |
+| Большая карта, Sionna/hybrid | Частично: explicit RT прошёл полный короткий N=1 цикл `delivery-ui-rt-n1-20261107-01` на `1796c4d`; native stats подтверждают Sionna drives RX PSD, один общий Spectrum-канал и ноль scalar base models. Общий OBJ рельеф 10×10 км / 200 м и здания до 15 этажей проверены Gazebo collision + Sionna 1.2.0 в `delivery-terrain-probe-20261107/runtime-result.json` на `f33b74b`. Исправлена причина DART crash: отсутствующие OBJ normals. Полёт N=1 над рельефом с RT/двумя потоками прошёл в `delivery-terrain-n1-20261107-02` (1 Вт по вводным заказчика). Первая попытка с прежним 10 мВт профилем сохранилась как mission incomplete / measurement valid. Синхронный RT N=5 остаётся неработоспособным в заданном realtime-бюджете; попытки и причины ниже. Hybrid запрещён в CLI до квалификации правил. |
+| Помехи и карты RSS/SINR/J/S | Частично: GPU `control/delivery-map-probe-20261107/verification.json` подтвердил RF-срезы и разворот диаграммы. Полный `delivery-source-rt-n1-20261107-06` на `2065c4e`: N=1, рельеф, оба потока, 1 Вт tr38901; completed / succeeded / valid, runtime verification errors отсутствуют. Экспорт после закрытия capture проверен: input/actual/summary сформированы, SHA-256 capture записан в `native-radio-realtime/<ID>/metrics/native_source_summary.json`. До cochannel-помехи 532 MPDU/5 с, во время 0 и 273 PHY drops/5 с, после 1086/10 с. Контроль `...-05` со сдвигом только частоты 2412→2447 МГц: во время источника 552 MPDU/5 с, PHY drops 0. Proof: `control/delivery-source-packets-20261107/spectral-overlap-verification.json`. Это native RF/packet-наблюдения, не application PDR или MAC/SLA-классы карт; аппаратная и совместная многопользовательская приёмка открыты. |
+| Интерфейс, серии, установка | Частично: loopback UI `bas.py ui` редактирует/проверяет конфигурацию, запускает штатный controller, показывает состояние/причины и экспортирует реальные артефакты; HTTP API запустил успешный RT N=1. Batch: последовательная очередь, seeds/runs/repeats, immutable attempts, отмена; реальная серия из двух seeds N=1 прошла. Реализован build-only bootstrap с закреплённым образом, SHA-256 wheels, журналом команд/CID и уборкой своих контейнеров; 46 локальных тестов проверены. Проба чистого bootstrap выполняется; чистая установка и независимый оператор ещё не квалифицированы. |
+| Длительные опыты | Реализовано и локально проверено на `7a250f5` (68 tests): duration до 86400 с, расчёт native/service lifetimes из длительности и существующих фаз, обязательный disk capture свыше 2400 с; readiness, radio/cache и stop guards не ослаблены. Часовая и восьмичасовая нагрузочная квалификация не подтверждены; ёмкость диска и длительная стабильность требуют целевой проверки. |
+| RT workers и когерентный кэш | Частично: в GetChannel нет RT/Python/ожидания, исходная эпоха и fail-closed guards сохраняются. На ПК4 прошли CPU cache contract (82 проверки через production Sionna spectrum), public GPU SDK contract и стационарное сравнение 1/3 workers (`bd519e6`). Proof: `control/delivery-native-rt-worker-probe-20261108/verification.json`. Полный короткий N=1 с рельефом/обоими UART завершён на `cb55438`: `delivery-rt-pool-n1-20261108-04`, completed / succeeded / valid, все 9 worker checks passed; это историческая проверка, не проверка текущего `cd5d3da`. Десятый SDK-патч собран, GPU public contract прошёл; пять N=5 pool попыток `...-01..05` failed / invalid по guards ориентации или смещения. Направленные источники в worker_pool явно отклоняются, их совместная интеграция остаётся обязательной. |
 
 Артефакты запусков находятся на ПК4 в `/home/bas/bas_v2-core/runs/`:
 `control/<ID>/run.json` и `runtime.log`, `native-radio-realtime/<ID>/metrics/`
@@ -40,6 +42,11 @@ RT-only probe большой сцены: холодный расчёт одно�
 Доказательства: `control/delivery-terrain-flight-20261107/n5-{readiness-diagnosis,rt-performance}.json`.
 Повторная carrier phase на границе CIR → native spectrum PSD исправлена; CPU-регрессия
 воспроизвела дефект до изменения и прошла после (`control/delivery-baseband-phase-20261107/`).
+Также исправлены единицы Doppler (Hz) и отсчёт от эпохи CIR вместо начала симуляции.
+Повторный red/green с нормированием CFR на фактический TX PSD завершился exit 0 на `7b8c740`:
+`control/delivery-doppler-epoch-20261107/normalized-red-green-build-and-tests-command.json`.
+Первая команда на `e0744a8` завершилась exit 1; её ошибочная проверка CFR исправлена отдельно.
+Эти CPU-проверки не заменяют повторную физическую и динамическую квалификацию полного стенда.
 После исправления UI-прогон `delivery-ui-corrected-n1-20261107-01` прошёл полный цикл
 с RT/рельефом/обоими потоками; повторный pairwise N=5 не достиг readiness.
 Явный opt-in receiver_batch использует штатный PathSolver, сохраняет cache/deadline guards,
@@ -50,15 +57,70 @@ GPU/public SDK тест `control/delivery-receiver-batch-build-20261107/gpu-publ
 N=5 попытка `...-01` выявила readiness до холодного RT; прогрев до realtime epoch
 исправлен. Попытка `...-02` на `00215c4` всё ещё превысила hard limit: 256,9 мс на
 6,714 с, до измерений. Это незакрытый дефект производительности, не успешный N=5.
-228 программных тестов на ПК4: 227 pass, 1 платформенный skip
-(`control/delivery-qos-contract-20261107/after-build-and-test{.log,-command.json}`).
+В Doppler red/green на ПК4 прошли 234 программных теста (233 pass, 1 платформенный skip),
+в последующей сборке на `7a250f5` — 259 (258 pass, 1 skip):
+`control/delivery-native-rt-worker-probe-20261108/build-01-command.json`, exit 0.
 Повторные преобразования batch устранены; public GPU regression прошёл повторно.
 Измерения выявили solver как основную hot стоимость (25–40 мс), extraction около 0,5 мс.
 Диагностика без early-expiry jitter сохранила max age/displacement 0,5 и lag 250 мс,
 но N=5 `...-05` остановился при взлёте UAV2 на 52,79 с: один сдвинувшийся RX вызывал
 отдельный batch у каждого передатчика. Исправление выбирает reciprocal anchor с большим
-числом уже устаревших связей; пороги не меняет. Следующий исполнимый шаг: причинная
-GPU-регрессия до/после и N=5 на исходном jitter=0,5, затем полный source-export прогон.
+числом уже устаревших связей; пороги не меняет. Причинная GPU-регрессия на `eb44587`
+завершена: `anchor-before-01.json` failed на лишнем solve для каждого TX,
+`anchor-after-01.json` passed; `control/delivery-receiver-batch-build-20261107/`.
+Однако синхронные N=5 остаются failed вплоть до `delivery-batch-rt-n5-20261107-07`
+на `eb44587`: watchdog после readiness, measurement not_evaluated, native stop не записан.
+Подтверждение: `control/delivery-batch-rt-n5-20261107-07/run.json`.
+На `bd519e6` GPU probe выполнил по 36 заданий для 1/3 workers: около 22/64 batch/s;
+для трёх workers hot producer p95 23,84 мс, sample-to-receive p95 40,62 мс при polling 20 мс.
+Proof: `control/delivery-native-rt-worker-probe-20261108/verification.json`.
+Это стационарные сохранённые позиции, не полёт. Live bridge собран на `e5cac22`;
+37 Linux boundary/process tests прошли, включая cleanup после abort и TCP backpressure.
+Повторный sync N=5 `delivery-batch-rt-n5-20261108-01` на `bd519e6` превысил lag 258,9 мс
+на 29,13 с; сокращение path logging не устранило основной realtime-дефект.
+В полном N=1 pool окно 20,017 с, integral RTF 1,000174; две маршрутные точки выполнены,
+посадка/разоружение подтверждены бортовым UART, отдельное радио-подтверждение посадки отсутствует.
+441 CIR опубликован после трёх холодных проб; 10 535 cache hits совпадают с PHY TX count,
+misses 0, максимальный возраст native/host 279,99/299,53 мс при guard 500 мс.
+Proof: `control/delivery-rt-pool-n1-20261108-04/run.json` и
+`native-radio-realtime/delivery-rt-pool-n1-20261108-04/{metrics/native_radio_stats.json,logs/native_rt_workers/summary.json}`.
+В этом окне 400 записей lag с полным покрытием: p99 0,148 мс, наблюдаемый max 0,327 мс;
+`control/delivery-rt-pool-flight-20261108/n1-timing.json`. Это дискретный sampler,
+не подтверждение физической синхронизации устройств, SLA или работы на всей карте.
+N=5 pool `delivery-rt-pool-n5-20261108-01` (`cb55438`) остановился по ориентации
+5,40° на 109,765 с; `...-02` (`e92186e`, polling 5 мс) — 6,23° на 110,109 с.
+`...-03` на том же коде с одним worker — `endpoint_displaced`, 0,500348 м на 65,661 с.
+`...-04` (`a97e2ca`, EDF prefetch, tracker 100 Гц, pose polling 5 мс) — ориентация
+5,34° на 100,831 с после взлёта всех пяти. `...-05` (`cd5d3da`, десятый SDK-патч) —
+5,0389° на 96,998806726 с, пара 0–5; все пять взлетели, 547 734 cache hits и 1 miss.
+Все пять failed / measurement invalid. В конце `...-05` producer занимал 23–27 мс,
+но pose→receipt — 95–102 мс; причина диагностируется, guards не ослаблялись.
+Доказательства: `control/delivery-rt-pool-n5-20261108-{01,02,03,04,05}/run.json` и
+соответствующие `logs/native_rt_workers/summary.json`, `logs/ns3_sionna.log`.
+Read-only разбор `control/delivery-rt-pool-flight-20261108/orientation-causal-01-02.json`
+показал сокращение pickup p95 с 27,3 до 8,5 мс, но около 100 мс snapshot→result.
+Порог 5°, возраст 500 мс, смещение 0,5 м и causal/skew guards не ослаблялись.
+Целевая сборка `a97e2ca` завершилась exit 0: 289 программных тестов (288 pass, 1 skip)
+и 45 CPU-проверок production prefetch/cache guards:
+`control/delivery-rt-pool-flight-20261108/{live-build-04-command,prefetch-contract-01}.json`.
+Отдельная GPU-проба движущихся входов выявила JIT-специализацию литеральных поз:
+median production около 33 → 16 мс и median memory/disk JIT misses 5 → 0 при opaque-входах.
+`control/delivery-moving-rt-probe-20261108/derived-verification.json` исправляет только
+подсчёт bool/int kernel flags; исходный `gpu-01` сохранён, это не повторный полёт.
+Соответствующий десятый патч `mr2608-dynamic-rt-inputs.patch` (SHA-256 `1f9894c9…`)
+включён в `7b30d3c`. Первые две миграции безопасно отказали до изменения SDK;
+их `dynamic-input-sdk-migration{,-02}.json` сохранены. На `cd5d3da` миграция `...-04`
+проверила все десять патчей и полное дерево runtime-кода. Для исторического архива явно
+учтены отсутствующий `.git/index`, четыре отсутствующих non-runtime файла и два
+документных symlink, развёрнутых в каталоги с проверкой точного содержимого.
+Native-сборка прошла: 335 программных тестов (334 pass, 1 skip), public SDK GPU contract
+также passed. Proof: `control/delivery-rt-pool-flight-20261108/`:
+`dynamic-input-sdk-migration-04.json`, `live-build-05-command.json`, `opaque-public-contract-01.json`.
+Это проверка реализации SDK, не успешный N=5. Следующий исполнимый шаг — установить
+состав задержки pose→receipt в `...-05`, проверить достаточность refresh budget и повторить
+полный N=5 без ослабления guards; отдельно завершить чистый bootstrap и базовый сценарий.
+Worker_pool с направленными источниками пока явно отклоняется; обязательная совместная
+приёмка остаётся открыта. Успех unit/GPU-контрактов не считается успехом полного тракта.
 Зависимости solver: Sionna RT 1.2.0, Mitsuba 3.7.1, DrJit 1.2.0; фактические бюджеты
 и конфигурации сохраняются. Неудачные попытки не удаляются. Публикационные результаты не изменяются.
 
