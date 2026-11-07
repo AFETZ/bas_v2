@@ -240,7 +240,8 @@ def load_config(path, root=ROOT):
         from scripts.product.prepare_sionna_scene import ITU_FREQUENCIES_GHZ
         raw_scene = scenario.raw
         radio_profile = read_rt_radio_profile(radio_file, raw_scene)
-        if radio_profile['sionna']['execution_mode'] == 'worker_pool' and config.get('interference'):
+        if (radio_profile['sionna']['execution_mode'] == 'worker_pool'
+                and config.get('interference', {}).get('sources') is not None):
             raise ValueError('worker_pool with directed sources is not yet qualified; use in_process for source scenarios')
         thickness = propagation['thickness_m']
         if type(thickness) not in (int, float) or not 0 < thickness <= sys.float_info.max:

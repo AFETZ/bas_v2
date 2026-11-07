@@ -135,6 +135,9 @@ class RadioProfileTests(unittest.TestCase):
                                     receiver_batch_mode='receiver_batch', cache_expiry_jitter_fraction=0)
         self.write_radio()
         source = self.radio_file.read_bytes()
+        # The public controller inserts interference.sources=None by default;
+        # that empty selection must not be mistaken for a configured emitter.
+        self.assertIsNone(self.load()['interference']['sources'])
         output = self.root / 'worker-run'
         with patch.object(generator, 'ROOT', self.root):
             generator.prepare(self.scene_file, output, 1, propagation_profile='sionna', radio_config=self.radio_file,
