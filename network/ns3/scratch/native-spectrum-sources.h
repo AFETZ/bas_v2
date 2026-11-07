@@ -7,6 +7,9 @@
 #include "ns3/pointer.h"
 #include "ns3/uinteger.h"
 #include "ns3/boolean.h"
+#include "ns3/event-id.h"
+#include "ns3/simulator.h"
+#include "pybind11/embed.h"
 #include "pybind11/stl.h"
 #include <functional>
 #include <fstream>
@@ -17,24 +20,13 @@
 #include <chrono>
 #include <vector>
 #include <stdexcept>
+#include <utility>
 
 namespace bas
 {
 using namespace ns3;
 using EventSink = std::function<void(const std::string&, const std::string&, double,
                                      const std::string&)>;
-
-inline void ObserveSourcePhase(std::function<std::string()> phaseProvider,
-                               std::function<void(std::string)> commit)
-{
-    const auto phase = phaseProvider();
-    if (phase == "experiment_normal")
-    {
-        commit(phase); // One common observed anchor; no further polling after commit.
-        return;
-    }
-    Simulator::Schedule(MilliSeconds(20), &ObserveSourcePhase, phaseProvider, commit);
-}
 
 // Select exactly one upstream propagation model per transmission. No loss formula,
 // packet-error decision, or fallback is implemented in this dispatcher.
@@ -54,7 +46,173 @@ class SourcePropagation : public PhasedArraySpectrumPropagationLossModel
     std::map<Ptr<SpectrumPhy>, Ptr<SionnaRtSpectrumPropagationLossModel>> sources;
     std::map<Ptr<SpectrumPhy>, Ptr<SpectrumValue>> sourcePsds;
     std::map<Ptr<SpectrumPhy>, std::array<double, 4>> sourceTimes;
+
+    ~SourcePropagation() override { ClearSourceSchedule(); }
+
+    void ConfigureSourceSchedule(const std::string& config, pybind11::dict resolved,
+                                 pybind11::object materialize, pybind11::object json,
+                                 EventSink emit, std::function<std::string()> phaseProvider)
+    {
+        m_config = config;
+        m_python = std::make_unique<PythonSchedule>(PythonSchedule{
+            std::move(resolved), std::move(materialize), std::move(json)});
+        m_emit = std::move(emit);
+        m_phaseProvider = std::move(phaseProvider);
+    }
+
+    void AddSourceSchedule(Ptr<WaveformGenerator> generator, const std::string& id,
+                           double power, const std::string& details)
+    {
+        m_schedule.push_back({generator, id, power, details, {}, {}});
+    }
+
+    void ArmSourceSchedule(bool relative)
+    {
+        // Only this destroy event retains the owner. Normal events carry raw
+        // pointers/indices, never Python handles or a self-owning closure.
+        Simulator::ScheduleDestroy([owner = Ptr<SourcePropagation>(this)] { owner->Dispose(); });
+        if (relative)
+            m_phaseEvent = Simulator::ScheduleNow(&SourcePropagation::ObserveSourcePhase, this);
+        else
+            m_phaseEvent = Simulator::ScheduleNow(&SourcePropagation::CommitSourceSchedule,
+                                                 this, std::string("simulation_start"));
+    }
+
+    void ClearSourceSchedule()
+    {
+        if (m_scheduleCleared) return;
+        m_scheduleCleared = true;
+        if (m_phaseEvent.PeekEventImpl()) m_phaseEvent.Cancel();
+        for (auto& source : m_schedule)
+        {
+            if (source.begin.PeekEventImpl()) source.begin.Cancel();
+            if (source.end.PeekEventImpl()) source.end.Cancel();
+            source.generator->Stop();
+        }
+        if (m_activeSources)
+        {
+            m_activeSources = 0;
+            PublishSourceState();
+        }
+        // Both explicit Dispose and Simulator::Destroy may run with the GIL
+        // released. Clear handles AND Python-backed callback storage here;
+        // their ordinary C++ destructors must have nothing left to decref.
+        NS_ABORT_MSG_IF(m_python && !Py_IsInitialized(),
+                        "source schedule must be cleared before Python finalization");
+        if (Py_IsInitialized())
+        {
+            pybind11::gil_scoped_acquire gil;
+            m_python.reset();
+            m_phaseProvider = {};
+            m_emit = {};
+        }
+        m_schedule.clear();
+    }
+
   private:
+    struct PythonSchedule
+    {
+        pybind11::dict resolved;
+        pybind11::object materialize;
+        pybind11::object json;
+    };
+    struct ScheduledSource
+    {
+        Ptr<WaveformGenerator> generator;
+        std::string id;
+        double power;
+        std::string details;
+        EventId begin;
+        EventId end;
+    };
+    std::unique_ptr<PythonSchedule> m_python;
+    std::vector<ScheduledSource> m_schedule;
+    EventSink m_emit;
+    std::function<std::string()> m_phaseProvider;
+    std::string m_config;
+    EventId m_phaseEvent;
+    unsigned m_activeSources{0};
+    bool m_scheduleCleared{false};
+
+    void ObserveSourcePhase()
+    {
+        const auto phase = m_phaseProvider();
+        if (phase == "experiment_normal")
+        {
+            CommitSourceSchedule(phase); // One observed anchor; no further polls.
+            return;
+        }
+        m_phaseEvent = Simulator::Schedule(MilliSeconds(20), &SourcePropagation::ObserveSourcePhase, this);
+    }
+
+    void SourceState(bool start)
+    {
+        if (start) ++m_activeSources;
+        else if (m_activeSources) --m_activeSources;
+        PublishSourceState();
+    }
+
+    void PublishSourceState()
+    {
+        std::ofstream output(m_config + ".state.tmp");
+        output << "{\"enabled_sources\":" << m_activeSources << ",\"sim_time_s\":"
+               << Simulator::Now().GetSeconds() << "}";
+        output.close();
+        std::filesystem::rename(m_config + ".state.tmp", m_config + ".state");
+    }
+
+    void StartSource(size_t index)
+    {
+        auto& source = m_schedule.at(index);
+        SourceState(true);
+        m_emit("jammer_on", source.id, source.power, source.details);
+        source.generator->Start();
+    }
+
+    void StopSource(size_t index)
+    {
+        auto& source = m_schedule.at(index);
+        SourceState(false);
+        source.generator->Stop();
+        m_emit("jammer_off", source.id, 0.0, source.details);
+    }
+
+    void CommitSourceSchedule(const std::string& phase)
+    {
+        namespace py = pybind11;
+        py::gil_scoped_acquire gil;
+        const auto now = Simulator::Now();
+        const auto host = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        py::dict actual = m_python->materialize(m_python->resolved, now.GetNanoSeconds(), host, phase);
+        py::list intervals = actual["segments"];
+        NS_ABORT_MSG_IF(intervals.size() != m_schedule.size(), "source materialization changed segment count");
+        auto destination = std::filesystem::path(m_config);
+        destination.replace_filename(destination.stem().string() + "_actual.json");
+        const auto temporary = destination.string() + ".tmp";
+        std::ofstream output(temporary);
+        output << m_python->json.attr("dumps")(actual, py::arg("indent") = 2,
+            py::arg("allow_nan") = false).cast<std::string>() << '\n';
+        output.close();
+        if (!output) throw std::runtime_error("cannot publish actual source schedule");
+        std::filesystem::rename(temporary, destination);
+        m_emit("source_time_anchor", "ns3", now.GetSeconds(),
+             "phase=" + phase + ";clock=ns3_simulation_seconds;actual=" + destination.string());
+        for (size_t i = 0; i < m_schedule.size(); ++i)
+        {
+            auto interval = py::reinterpret_borrow<py::dict>(intervals[i]);
+            const auto begin = NanoSeconds(interval["start_ns"].cast<int64_t>());
+            const auto end = NanoSeconds(interval["stop_ns"].cast<int64_t>());
+            NS_ABORT_MSG_IF(begin < Simulator::Now() || end <= begin, "invalid actual source interval");
+            auto& source = m_schedule[i];
+            source.generator->SetPeriod(NanoSeconds(interval["period_ns"].cast<int64_t>()));
+            sourceTimes[source.generator][0] = begin.GetSeconds();
+            sourceTimes[source.generator][1] = end.GetSeconds();
+            source.begin = Simulator::Schedule(begin - Simulator::Now(), &SourcePropagation::StartSource, this, i);
+            source.end = Simulator::Schedule(end - Simulator::Now(), &SourcePropagation::StopSource, this, i);
+        }
+    }
+
     int64_t DoAssignStreams(int64_t) override { return 0; }
     Ptr<SpectrumSignalParameters> DoCalcRxPowerSpectralDensity(
         Ptr<const SpectrumSignalParameters> params, Ptr<const MobilityModel> a,
@@ -80,6 +238,7 @@ class SourcePropagation : public PhasedArraySpectrumPropagationLossModel
     }
     void DoDispose() override
     {
+        ClearSourceSchedule();
         sources.clear();
         sourcePsds.clear();
         sourceTimes.clear();
@@ -112,17 +271,7 @@ inline Ptr<SourcePropagation> InstallSpectrumSources(
     // Preload project validation/materialization before Run/HardLimit. The
     // runner supplies ROOT in PYTHONPATH; no cold PyYAML import at measurement.
     py::object materialize = py::module_::import("scripts.product.prepare_native_sources").attr("materialize");
-    std::vector<std::function<void(Time, Time, Time)>> schedule;
-    auto active = std::make_shared<unsigned>(0);
-    auto state = [config, active](bool start) {
-        if (start) ++*active;
-        else if (*active) --*active;
-        std::ofstream output(config + ".state.tmp");
-        output << "{\"enabled_sources\":" << *active << ",\"sim_time_s\":"
-               << Simulator::Now().GetSeconds() << "}";
-        output.close();
-        std::filesystem::rename(config + ".state.tmp", config + ".state");
-    };
+    router->ConfigureSourceSchedule(config, resolved, materialize, json, emit, std::move(phaseProvider));
     std::map<double, Ptr<SionnaRtSpectrumPropagationLossModel>> frequencies;
     if (reference && !referenceUsesReceiverBatch)
     {
@@ -223,52 +372,9 @@ inline Ptr<SourcePropagation> InstallSpectrumSources(
             ";gain_dbi=" + std::to_string(gain) + ";pattern=" + pattern +
             ";azimuth_rad=" + std::to_string(angles[0]) + ";downtilt_rad=" + std::to_string(angles[1]) +
             ";duty_cycle=" + std::to_string(duty) + ";period_s=" + std::to_string(period);
-        schedule.push_back([generator, emit, id, power, details, state, router](Time begin, Time end, Time interval) {
-            NS_ABORT_MSG_IF(begin < Simulator::Now() || end <= begin, "invalid actual source interval");
-            generator->SetPeriod(interval);
-            router->sourceTimes[generator][0] = begin.GetSeconds();
-            router->sourceTimes[generator][1] = end.GetSeconds();
-            Simulator::Schedule(begin - Simulator::Now(), [generator, emit, id, power, details, state]() {
-                state(true);
-                emit("jammer_on", id, power, details);
-                generator->Start();
-            });
-            Simulator::Schedule(end - Simulator::Now(), [generator, emit, id, details, state]() {
-                state(false);
-                generator->Stop();
-                emit("jammer_off", id, 0.0, details);
-            });
-        });
+        router->AddSourceSchedule(generator, id, power, details);
     }
-    std::function<void(std::string)> commit = [resolved, materialize, json, schedule, config, emit](std::string phase) {
-        const auto now = Simulator::Now();
-        const auto host = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-        py::dict actual = materialize(resolved, now.GetNanoSeconds(), host, phase);
-        py::list intervals = actual["segments"];
-        NS_ABORT_MSG_IF(intervals.size() != schedule.size(), "source materialization changed segment count");
-        auto destination = std::filesystem::path(config);
-        destination.replace_filename(destination.stem().string() + "_actual.json");
-        const auto temporary = destination.string() + ".tmp";
-        std::ofstream output(temporary);
-        output << json.attr("dumps")(actual, py::arg("indent") = 2, py::arg("allow_nan") = false).cast<std::string>() << '\n';
-        output.close();
-        if (!output) throw std::runtime_error("cannot publish actual source schedule");
-        std::filesystem::rename(temporary, destination);
-        emit("source_time_anchor", "ns3", now.GetSeconds(),
-             "phase=" + phase + ";clock=ns3_simulation_seconds;actual=" + destination.string());
-        for (size_t i = 0; i < schedule.size(); ++i)
-        {
-            auto interval = py::reinterpret_borrow<py::dict>(intervals[i]);
-            schedule[i](NanoSeconds(interval["start_ns"].cast<int64_t>()),
-                        NanoSeconds(interval["stop_ns"].cast<int64_t>()),
-                        NanoSeconds(interval["period_ns"].cast<int64_t>()));
-        }
-    };
-    if (relative)
-        Simulator::ScheduleNow([phaseProvider, commit]() { ObserveSourcePhase(phaseProvider, commit); });
-    else
-        Simulator::ScheduleNow([commit]() { commit("simulation_start"); });
+    router->ArmSourceSchedule(relative);
     return router;
 }
 } // namespace bas
