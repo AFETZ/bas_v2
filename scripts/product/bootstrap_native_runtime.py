@@ -360,9 +360,10 @@ def verify_sdk(root, sdk):
         original_index = Path(command(git + ['rev-parse', '--git-path', 'index']))
         if not original_index.is_absolute():
             original_index = sdk / original_index
+        index_absent = not original_index.exists() and not original_index.is_symlink()
         original_env = dict(env, GIT_INDEX_FILE=str(original_index.resolve()))
-        staged = entries(command(git + ['diff', '--cached', '--name-status', '-z', '--no-renames', NS3_SHA, '--'],
-                                 env=original_env))
+        staged = [] if index_absent else entries(command(
+            git + ['diff', '--cached', '--name-status', '-z', '--no-renames', NS3_SHA, '--'], env=original_env))
         if staged:
             expected_tree = command(git + ['write-tree'], env=env)
             for status, name in staged:
@@ -376,7 +377,8 @@ def verify_sdk(root, sdk):
                                         else 'exact_patched_tree_except_listed_missing_non_runtime_files'
                                         if missing else 'exact_patched_tree'),
                     allowed_missing_non_runtime=missing,
-                    expanded_non_runtime_doc_symlinks=expanded)
+                    expanded_non_runtime_doc_symlinks=expanded,
+                    git_index_status='absent_in_source_archive' if index_absent else 'present_verified')
 
 
 def ensure_sdk(root):

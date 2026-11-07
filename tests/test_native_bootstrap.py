@@ -385,13 +385,18 @@ class NativeSdkPreservationTests(unittest.TestCase):
         return bootstrap.command(['git', '-C', self.sdk, *args])
 
     def verify_preserving_git(self):
-        index = (self.sdk / '.git/index').read_bytes()
+        index_path = self.sdk / '.git/index'
+        index = index_path.read_bytes() if index_path.exists() else None
         objects = sorted(str(p.relative_to(self.sdk)) for p in (self.sdk / '.git/objects').rglob('*'))
         try:
             with patch.object(bootstrap, 'NS3_SHA', self.head):
                 return bootstrap.verify_sdk(self.root, self.sdk)
         finally:
-            self.assertEqual(index, (self.sdk / '.git/index').read_bytes())
+            if index is None:
+                self.assertFalse(index_path.exists())
+                self.assertFalse(index_path.is_symlink())
+            else:
+                self.assertEqual(index, index_path.read_bytes())
             self.assertEqual(objects, sorted(str(p.relative_to(self.sdk)) for p in (self.sdk / '.git/objects').rglob('*')))
 
     def test_exact_patched_tree_passes_without_changing_user_index(self):
@@ -400,6 +405,7 @@ class NativeSdkPreservationTests(unittest.TestCase):
         self.assertEqual(result['verification_scope'], 'exact_patched_tree')
         self.assertEqual(result['allowed_missing_non_runtime'], [])
         self.assertEqual(result['expanded_non_runtime_doc_symlinks'], [])
+        self.assertEqual(result['git_index_status'], 'present_verified')
         self.assertEqual(self.git('diff', '--cached'), '')
 
     def test_only_explicit_absent_non_runtime_paths_pass_and_are_reported(self):
@@ -478,6 +484,35 @@ class NativeSdkPreservationTests(unittest.TestCase):
         self.git('add', 'source')
         result = self.verify_preserving_git()
         self.assertEqual(result['allowed_missing_non_runtime'], [])
+
+    def test_source_archive_without_index_passes_without_creating_an_index(self):
+        index_path = self.sdk / '.git/index'
+        backup = index_path.read_bytes()
+        self.assertTrue(backup.startswith(b'DIRC'))
+        index_path.unlink()
+        result = self.verify_preserving_git()
+        self.assertEqual(result['git_index_status'], 'absent_in_source_archive')
+        self.assertFalse(index_path.exists())
+
+    def test_missing_index_does_not_bypass_actual_source_edit(self):
+        (self.sdk / '.git/index').unlink()
+        path = self.sdk / 'source'
+        path.write_text(path.read_text().replace('outside=original', 'outside=edited'), newline='\n')
+        before = path.read_bytes()
+        with self.assertRaisesRegex(RuntimeError, 'M source'):
+            self.verify_preserving_git()
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_existing_valid_empty_index_is_not_treated_as_missing(self):
+        self.git('read-tree', '--empty')
+        self.assertTrue((self.sdk / '.git/index').read_bytes().startswith(b'DIRC'))
+        with self.assertRaises(RuntimeError):
+            self.verify_preserving_git()
+
+    def test_existing_corrupt_empty_index_is_not_treated_as_missing(self):
+        (self.sdk / '.git/index').write_bytes(b'')
+        with self.assertRaises(RuntimeError):
+            self.verify_preserving_git()
 
     def test_extra_user_edit_outside_patch_is_rejected_and_preserved(self):
         p = self.sdk / 'source'
