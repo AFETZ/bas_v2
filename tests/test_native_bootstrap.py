@@ -353,12 +353,22 @@ class NativeSdkPreservationTests(unittest.TestCase):
         self.git('config', 'user.name', 'Bootstrap fixture')
         self.git('config', 'user.email', 'fixture@example.invalid')
         self.git('config', 'core.autocrlf', 'false')
+        self.git('config', 'core.symlinks', 'false')
         (self.sdk / 'source').write_text('value=0\nuntouched\noutside=original\n', newline='\n')
         for name in bootstrap.HISTORICAL_MISSING_NON_RUNTIME:
             path = self.sdk / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('non-runtime fixture\n', newline='\n')
+        for name in bootstrap.HISTORICAL_EXPANDED_DOC_SYMLINKS:
+            path = self.sdk / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('../figures', newline='\n')
         self.git('add', '.')
+        # Git's no-symlink checkout representation works on Windows without
+        # requiring developer mode. The committed original type is still 120000.
+        for name in bootstrap.HISTORICAL_EXPANDED_DOC_SYMLINKS:
+            blob = self.git('hash-object', '-w', name)
+            self.git('update-index', '--cacheinfo', f'120000,{blob},{name}')
         self.git('commit', '--quiet', '-m', 'fixture')
         self.head = self.git('rev-parse', 'HEAD')
         for number, path in enumerate(bootstrap.patches(self.root), 1):
@@ -389,6 +399,7 @@ class NativeSdkPreservationTests(unittest.TestCase):
         self.assertEqual(result['ns3_sha'], self.head)
         self.assertEqual(result['verification_scope'], 'exact_patched_tree')
         self.assertEqual(result['allowed_missing_non_runtime'], [])
+        self.assertEqual(result['expanded_non_runtime_doc_symlinks'], [])
         self.assertEqual(self.git('diff', '--cached'), '')
 
     def test_only_explicit_absent_non_runtime_paths_pass_and_are_reported(self):
@@ -398,6 +409,38 @@ class NativeSdkPreservationTests(unittest.TestCase):
         self.assertEqual(result['allowed_missing_non_runtime'], sorted(bootstrap.HISTORICAL_MISSING_NON_RUNTIME))
         self.assertEqual(result['verification_scope'], 'exact_patched_tree_except_listed_missing_non_runtime_files')
         self.assertTrue(all(not (self.sdk / p).exists() for p in bootstrap.HISTORICAL_MISSING_NON_RUNTIME))
+
+    def test_historical_four_missing_files_and_two_expanded_doc_links_are_reported(self):
+        for name in bootstrap.HISTORICAL_MISSING_NON_RUNTIME:
+            (self.sdk / name).unlink()
+        for name in bootstrap.HISTORICAL_EXPANDED_DOC_SYMLINKS:
+            path = self.sdk / name
+            path.unlink()
+            path.mkdir()
+            (path / 'archive-content.txt').write_text('Not verified as original documentation')
+        result = self.verify_preserving_git()
+        self.assertEqual(result['allowed_missing_non_runtime'], sorted(bootstrap.HISTORICAL_MISSING_NON_RUNTIME))
+        self.assertEqual(result['expanded_non_runtime_doc_symlinks'], sorted(bootstrap.HISTORICAL_EXPANDED_DOC_SYMLINKS))
+        self.assertEqual(result['verification_scope'], 'exact_patched_tree_except_listed_non_runtime_packaging')
+        self.assertTrue(all((self.sdk / p / 'archive-content.txt').exists()
+                            for p in bootstrap.HISTORICAL_EXPANDED_DOC_SYMLINKS))
+
+    def test_doc_link_absence_without_expanded_directory_is_rejected(self):
+        name = sorted(bootstrap.HISTORICAL_EXPANDED_DOC_SYMLINKS)[0]
+        (self.sdk / name).unlink()
+        with self.assertRaisesRegex(RuntimeError, name):
+            self.verify_preserving_git()
+
+    def test_same_doc_directory_name_is_rejected_if_head_was_not_a_symlink(self):
+        name = sorted(bootstrap.HISTORICAL_EXPANDED_DOC_SYMLINKS)[0]
+        blob = self.git('hash-object', '-w', name)
+        self.git('update-index', '--cacheinfo', f'100644,{blob},{name}')
+        self.git('commit', '--quiet', '-m', 'ordinary file, not original symlink')
+        self.head = self.git('rev-parse', 'HEAD')
+        (self.sdk / name).unlink()
+        (self.sdk / name).mkdir()
+        with self.assertRaisesRegex(RuntimeError, name):
+            self.verify_preserving_git()
 
     def test_unknown_code_deletion_is_rejected_and_not_restored(self):
         (self.sdk / 'source').unlink()

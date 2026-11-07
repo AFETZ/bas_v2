@@ -49,6 +49,8 @@ RECEIPT = '.external/native-bootstrap.json'
 ACTIVE_LOG = None  # Set only within an explicit mutating CLI attempt.
 HISTORICAL_MISSING_NON_RUNTIME = frozenset((
     '.vscode/.gitignore', '.vscode/launch.json', '.vscode/tasks.json', 'AGENTS.md',
+))
+HISTORICAL_EXPANDED_DOC_SYMLINKS = frozenset((
     'doc/manual/source/figures', 'doc/tutorial/source/figures',
 ))
 
@@ -330,15 +332,28 @@ def verify_sdk(root, sdk):
                 raise RuntimeError('Malformed NUL-delimited Git name/status output')
             return list(zip(fields[::2], fields[1::2]))
 
-        def allowed_missing(status, name):
+        def allowed_layout(status, name):
             path = sdk / name
-            return (status == 'D' and name in HISTORICAL_MISSING_NON_RUNTIME
-                    and not path.exists() and not path.is_symlink())
+            if status != 'D' or path.is_symlink():
+                return None
+            if name in HISTORICAL_MISSING_NON_RUNTIME and not path.exists():
+                return 'missing'
+            if name in HISTORICAL_EXPANDED_DOC_SYMLINKS and path.is_dir():
+                # This archive expanded two documentation links. Verify the
+                # pinned original type; do not claim identity of their contents.
+                entry = command(git + ['ls-tree', '-z', NS3_SHA, '--', name], env=env).rstrip('\0')
+                metadata, separator, original_name = entry.partition('\t')
+                if separator and original_name == name and metadata.split()[0] == '120000':
+                    return 'expanded_doc_symlink'
+            return None
 
         differences = entries(command(git + ['diff', '--name-status', '-z', '--no-renames', '--'], env=env))
+        layouts = {}
         for status, name in differences:
-            if not allowed_missing(status, name):
+            layout = allowed_layout(status, name)
+            if not layout:
                 raise RuntimeError(f'Existing SDK differs from the exact patched tree: {status} {name}; left untouched')
+            layouts[name] = layout
 
         # A staged-only user change must not disappear behind the temporary
         # index. Staged exact approved patches/deletions remain acceptable.
@@ -351,14 +366,17 @@ def verify_sdk(root, sdk):
         if staged:
             expected_tree = command(git + ['write-tree'], env=env)
             for status, name in staged:
-                if not allowed_missing(status, name):
+                if not allowed_layout(status, name):
                     command(git + ['diff', '--cached', '--quiet', '--exit-code', expected_tree, '--', name],
                             env=original_env)
-        missing = sorted(name for _, name in differences)
+        missing = sorted(name for name, layout in layouts.items() if layout == 'missing')
+        expanded = sorted(name for name, layout in layouts.items() if layout == 'expanded_doc_symlink')
         return dict(ns3_sha=NS3_SHA,
-                    verification_scope=('exact_patched_tree_except_listed_missing_non_runtime_files'
+                    verification_scope=('exact_patched_tree_except_listed_non_runtime_packaging' if expanded
+                                        else 'exact_patched_tree_except_listed_missing_non_runtime_files'
                                         if missing else 'exact_patched_tree'),
-                    allowed_missing_non_runtime=missing)
+                    allowed_missing_non_runtime=missing,
+                    expanded_non_runtime_doc_symlinks=expanded)
 
 
 def ensure_sdk(root):
