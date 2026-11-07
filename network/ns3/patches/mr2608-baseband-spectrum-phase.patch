@@ -92,10 +92,10 @@
  #include "ns3/string.h"
  #include "ns3/test.h"
  #include "ns3/uinteger.h"
-@@ -234,3 +238,120 @@
- };
+@@ -45,6 +49,123 @@
+ using namespace ns3;
  
- static SionnaSolverBudgetTestSuite g_sionnaSolverBudgetTestSuite;
+ NS_LOG_COMPONENT_DEFINE("SionnaRtChannelModelTest");
 +
 +// Exercise the production CIR-to-spectrum boundary without Python or ray tracing.
 +// Paths.cir() supplies complex BASEBAND coefficients, including carrier phase.
@@ -213,3 +213,6 @@
 +};
 +
 +static SionnaBasebandSpectrumPhaseTestSuite g_sionnaBasebandSpectrumPhaseTestSuite;
+ 
+ // ---------------------------------------------------------------------------
+ // Helpers
