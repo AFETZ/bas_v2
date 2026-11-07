@@ -45,7 +45,8 @@ def read_rt_radio_profile(path: Path, scene: dict):
                   "non_unicast_mode", "antenna", "control_basic_rates", "ssid", "channel_number",
                   "carrier_hz", "channel_width_mhz", "data_mode", "control_mode", "tx_power_w",
                   "legacy_aloha_phy_rate_bps", "shared_spectrum_channels", "neighbor_discovery_mode", "reason"},
-        "sionna": {"solver_profile", "receiver_batch_mode", "max_depth", "los", "specular_reflection", "diffuse_reflection",
+        "sionna": {"solver_profile", "receiver_batch_mode", "execution_mode", "worker_count",
+                   "max_depth", "los", "specular_reflection", "diffuse_reflection",
                    "diffraction", "edge_diffraction", "refraction", "synthetic_array", "seed",
                    "max_number_of_paths", "samples_per_src", "max_num_paths_per_src", "cache_expiry_jitter_fraction",
                    "channel_state_max_age_s", "endpoint_displacement_threshold_m", "readiness_lag_max_ms",
@@ -57,10 +58,18 @@ def read_rt_radio_profile(path: Path, scene: dict):
         raise ValueError("radio profile requires schema_version=1 and radio/sionna/coupling objects")
     if isinstance(value.get("sionna"), dict):
         value["sionna"].setdefault("receiver_batch_mode", "pairwise")
+        value["sionna"].setdefault("execution_mode", "in_process")
+        value["sionna"].setdefault("worker_count", 3)
     for section, fields in keys.items():
         if not isinstance(value[section], dict) or set(value[section]) != fields:
             raise ValueError(f"missing or unknown {section} profile fields")
     radio, rt, coupling = value["radio"], value["sionna"], value["coupling"]
+    if type(rt["execution_mode"]) is not str or rt["execution_mode"] not in ("in_process", "worker_pool"):
+        raise ValueError("execution_mode must be in_process or worker_pool")
+    if type(rt["worker_count"]) is not int or not 1 <= rt["worker_count"] <= 3:
+        raise ValueError("worker_count must be an integer in 1..3")
+    if rt["execution_mode"] == "in_process" and rt["worker_count"] != 3:
+        raise ValueError("worker_count is configurable only with execution_mode=worker_pool; in_process requires default 3")
     if rt["receiver_batch_mode"] not in ("pairwise", "receiver_batch"):
         raise ValueError("receiver_batch_mode must be pairwise or receiver_batch")
     if rt["receiver_batch_mode"] == "receiver_batch" and rt["synthetic_array"] is not True:
@@ -106,6 +115,15 @@ def read_rt_radio_profile(path: Path, scene: dict):
     jitter = rt["cache_expiry_jitter_fraction"]
     if type(jitter) not in (int, float) or not 0 <= jitter <= .9:
         raise ValueError("cache_expiry_jitter_fraction must be finite in 0..0.9")
+    if rt["execution_mode"] == "worker_pool":
+        if rt["receiver_batch_mode"] != "receiver_batch":
+            raise ValueError("worker_pool requires receiver_batch_mode=receiver_batch")
+        if rt["max_number_of_paths"] > 90:
+            raise ValueError("worker_pool supports max_number_of_paths <=90 in the verified native cache")
+        if jitter != 0:
+            raise ValueError("worker_pool requires cache_expiry_jitter_fraction=0; prefetch warnings do not change expiry guards")
+        if rt["channel_state_max_age_s"] > .5 or rt["endpoint_displacement_threshold_m"] > .5:
+            raise ValueError("worker_pool cannot relax the verified cache age/displacement limits of 0.5 s/m")
     if coupling["state_max_age_s"] > .5 or coupling["runtime_lag_max_ms"] > 250:
         raise ValueError("profile cannot relax the existing pose freshness and realtime lag limits")
     for section, fields in ((radio, keys["radio"] - {"backend", "standard", "technology_specific_modem", "shared_spectrum_channels",
@@ -183,7 +201,7 @@ def prepare(config: Path, output: Path, uav_count: int | None = None, *,
             raise ValueError("Sionna requires an explicit radio config and ITU ground/building materials/thickness")
         radio_config = radio_config.resolve()
         radio_config.relative_to(ROOT.resolve())
-        read_rt_radio_profile(radio_config, data)
+        radio_profile = read_rt_radio_profile(radio_config, data)
         if scenario.terrain_manifest is not None:
             materials = scenario.terrain_manifest["materials"]
             if (ground_material != materials["ground_material"] or building_material != materials["building_material"]
@@ -288,7 +306,9 @@ def prepare(config: Path, output: Path, uav_count: int | None = None, *,
             scene = frozen_bundle / "scene.xml"
             launch["scenario"]["map"].update(kind="shared_triangle_terrain", gazebo_models=["terrain", "buildings"])
         launch["scenario"]["map"]["scene_xml"] = scene.resolve().relative_to(ROOT).as_posix()
-        launch["radio"]["config"] = radio_config.relative_to(ROOT).as_posix()
+        resolved_radio = output / "radio-resolved.yaml"
+        resolved_radio.write_text(yaml.safe_dump(radio_profile, sort_keys=False), encoding="utf-8")
+        launch["radio"]["config"] = resolved_radio.relative_to(ROOT).as_posix()
     launch["command_post"]["position_m"] = vector(data["gcs"])
     launch["robots"] = [robot for robot in launch["robots"] if str(robot["system_id"]) in ids]
     if {str(robot["system_id"]) for robot in launch["robots"]} != ids:

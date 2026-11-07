@@ -82,6 +82,82 @@ class RadioProfileTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'synthetic'):
             generator.read_rt_radio_profile(self.radio_file, self.scene)
 
+    def test_execution_mode_defaults_are_resolved_without_changing_input(self):
+        self.radio['sionna'].pop('execution_mode', None)
+        self.radio['sionna'].pop('worker_count', None)
+        self.write_radio()
+        source = self.radio_file.read_bytes()
+        parsed = generator.read_rt_radio_profile(self.radio_file, self.scene)
+        self.assertEqual(parsed['sionna']['execution_mode'], 'in_process')
+        self.assertEqual(parsed['sionna']['worker_count'], 3)
+        self.assertEqual(self.radio_file.read_bytes(), source)
+
+    def test_execution_mode_and_worker_count_reject_invalid_public_values(self):
+        for field, bad_values in [('execution_mode', ['', 'threads', True, 1, None, [], {}]),
+                                  ('worker_count', [True, False, 0, 4, -1, 1.0, '2', None])]:
+            for invalid in bad_values:
+                self.radio_file.write_text(yaml.safe_dump(self.radio | {
+                    'sionna': self.radio['sionna'] | {field: invalid}}))
+                with self.subTest(field=field, invalid=invalid), self.assertRaisesRegex(ValueError, field):
+                    generator.read_rt_radio_profile(self.radio_file, self.scene)
+        for mode in (None, 'in_process'):
+            for count in (1, 2):
+                rt = self.radio['sionna'] | {'worker_count': count}
+                if mode is not None:
+                    rt['execution_mode'] = mode
+                self.radio_file.write_text(yaml.safe_dump(self.radio | {'sionna': rt}))
+                with self.subTest(mode=mode, count=count), self.assertRaisesRegex(ValueError, 'worker_count'):
+                    generator.read_rt_radio_profile(self.radio_file, self.scene)
+
+    def test_worker_pool_requires_the_verified_batch_cache_contract(self):
+        pool = self.radio['sionna'] | dict(execution_mode='worker_pool', receiver_batch_mode='receiver_batch',
+                                          cache_expiry_jitter_fraction=0, max_number_of_paths=90)
+        for count in (None, 1, 2, 3):
+            rt = pool if count is None else pool | {'worker_count': count}
+            self.radio_file.write_text(yaml.safe_dump(self.radio | {'sionna': rt}))
+            parsed = generator.read_rt_radio_profile(self.radio_file, self.scene)
+            self.assertEqual(parsed['sionna']['execution_mode'], 'worker_pool')
+            self.assertEqual(parsed['sionna']['worker_count'], 3 if count is None else count)
+        incompatible = [('receiver_batch_mode', 'pairwise'), ('synthetic_array', False),
+                        ('max_number_of_paths', 91), ('cache_expiry_jitter_fraction', .5),
+                        ('channel_state_max_age_s', .500001), ('endpoint_displacement_threshold_m', .500001)]
+        for field, invalid in incompatible:
+            self.radio_file.write_text(yaml.safe_dump(self.radio | {'sionna': pool | {field: invalid}}))
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                generator.read_rt_radio_profile(self.radio_file, self.scene)
+        # Existing in-process policy has no new 90-path/zero-jitter restriction.
+        self.radio_file.write_text(yaml.safe_dump(self.radio | {
+            'sionna': self.radio['sionna'] | {'max_number_of_paths': 91}}))
+        self.assertEqual(generator.read_rt_radio_profile(self.radio_file, self.scene)['sionna']['max_number_of_paths'], 91)
+
+    def test_worker_pool_preparation_freezes_the_resolved_radio_selection(self):
+        self.radio['sionna'].update(execution_mode='worker_pool', worker_count=2,
+                                    receiver_batch_mode='receiver_batch', cache_expiry_jitter_fraction=0)
+        self.write_radio()
+        source = self.radio_file.read_bytes()
+        output = self.root / 'worker-run'
+        with patch.object(generator, 'ROOT', self.root):
+            generator.prepare(self.scene_file, output, 1, propagation_profile='sionna', radio_config=self.radio_file,
+                              ground_material='medium_dry_ground', building_material='concrete', thickness_m=.1)
+        scenario = yaml.safe_load((output / 'scenario.yaml').read_text())
+        resolved_path = self.root / scenario['radio']['config']
+        self.assertEqual(resolved_path, output / 'radio-resolved.yaml')
+        resolved = yaml.safe_load(resolved_path.read_text())
+        self.assertEqual(resolved['sionna']['execution_mode'], 'worker_pool')
+        self.assertEqual(resolved['sionna']['worker_count'], 2)
+        self.assertEqual(resolved['coupling'], self.radio['coupling'])
+        self.assertEqual(resolved['sionna']['channel_state_max_age_s'], self.radio['sionna']['channel_state_max_age_s'])
+        self.assertEqual(resolved['sionna']['endpoint_displacement_threshold_m'], self.radio['sionna']['endpoint_displacement_threshold_m'])
+        self.assertEqual(self.radio_file.read_bytes(), source)
+
+    def test_worker_pool_with_sources_is_explicitly_unqualified_before_source_loading(self):
+        self.radio['sionna'].update(execution_mode='worker_pool', receiver_batch_mode='receiver_batch',
+                                    cache_expiry_jitter_fraction=0)
+        self.write_radio()
+        self.config['interference'] = {'sources': 'not-opened-unqualified-sources.yaml'}
+        with self.assertRaisesRegex(ValueError, 'worker_pool with directed sources is not yet qualified'):
+            self.load()
+
     def test_snapshot_and_generator_consume_the_frozen_radio_and_geometry(self):
         config = self.load()
         env = bas.environment(config, 'rt-test')
@@ -101,7 +177,13 @@ class RadioProfileTests(unittest.TestCase):
                               ground_material=env['BAS_NATIVE_RT_GROUND_MATERIAL'],
                               building_material=env['BAS_NATIVE_RT_BUILDING_MATERIAL'], thickness_m=.1)
         scenario = yaml.safe_load((output / 'scenario.yaml').read_text())
-        self.assertEqual(scenario['radio']['config'], env['BAS_NATIVE_RADIO_CONFIG'])
+        resolved_radio_path = self.root / scenario['radio']['config']
+        self.assertEqual(resolved_radio_path, output / 'radio-resolved.yaml')
+        resolved_radio = yaml.safe_load(resolved_radio_path.read_text())
+        self.assertEqual(resolved_radio['sionna']['execution_mode'], 'in_process')
+        self.assertEqual(resolved_radio['sionna']['worker_count'], 3)
+        self.assertEqual(resolved_radio['radio']['tx_power_w'], yaml.safe_load(original_radio)['radio']['tx_power_w'])
+        self.assertEqual((self.root / env['BAS_NATIVE_RADIO_CONFIG']).read_bytes(), original_radio)
         scene = self.root / scenario['scenario']['map']['scene_xml']
         self.assertTrue(scene.is_file())
         self.assertEqual(scene, output / 'rt/scene.xml')
