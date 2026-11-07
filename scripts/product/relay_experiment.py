@@ -387,6 +387,7 @@ class RelayExperiment:
         (metrics / "relay_experiment_config.json").write_text(json.dumps(frozen, indent=2) + "\n")
         (args.run_dir / "logs/coordination_gcs.ready").write_text(json.dumps(dict(pid=os.getpid())) + "\n")
         self.payload_channel = None
+        self.payload_disabled = False
         if "payload" in getattr(args, "channels", "control").split(","):
             from network.coordination.payload import PayloadChannel
             self.payload_channel = PayloadChannel(args.run_dir, args.node_state, self.uav_ids,
@@ -419,8 +420,16 @@ class RelayExperiment:
         if stop is not None and stop.exists() and not getattr(self, "stopping", False):
             raise StopRequested()
         self.gcs.step()
-        if getattr(self, "payload_channel", None) is not None:
-            self.payload_channel.pump()
+        if getattr(self, "payload_channel", None) is not None and not getattr(self, "payload_disabled", False):
+            try:
+                self.payload_channel.pump()
+            except Exception as exc:
+                self.payload_disabled = True
+                reason = f"payload {type(exc).__name__}: {exc}"
+                self.summary.setdefault("payload_errors", []).append(reason)
+                self.emit("payload_failed", reason=reason, cleanup_continues=bool(getattr(self, "stopping", False)))
+                if not getattr(self, "stopping", False):
+                    raise RuntimeError(reason) from exc
         if not self.gcs.running:
             raise ScenarioError("GCS service interrupted")
         now = time.monotonic_ns()
@@ -825,6 +834,8 @@ class RelayExperiment:
         self.summary["measurement_end_source_sim_time_s"] = self.observation_end_source_s
         refresh_end_ns = start_ns + int(self.args.duration_s * 1e9)
         self.summary["measurement_refresh_schedule_end_host_monotonic_ns"] = refresh_end_ns
+        if getattr(self, "payload_channel", None) is not None:
+            self.payload_channel.start_measurement(start_ns, refresh_end_ns)
         current_goal, goals, next_refresh = -1, {}, start_ns
         while self.source_s - start_source < self.args.duration_s:
             self.pump()
@@ -992,6 +1003,10 @@ class RelayExperiment:
                 runtime_errors.append(f"payload close {type(exc).__name__}: {exc}")
                 error = (error + "; " if error else "") + runtime_errors[-1]
                 self.summary["error"] = error
+        if self.summary.get("payload_errors"):
+            runtime_errors.extend(self.summary["payload_errors"])
+            error = (error + "; " if error else "") + "; ".join(self.summary["payload_errors"])
+            self.summary["error"] = error
         self.summary["status"] = "failed" if error else "stopped" if stopped else "completed"
         self.summary["task_failures_are_outcomes"] = True
         completed = self.summary["completed_goals"]
@@ -1009,7 +1024,7 @@ class RelayExperiment:
                 self.summary.get("urban_routes_telemetry_completed", {}).get(str(i), False) for i in self.uav_ids)
         self.summary["criteria"]["all_uav_lifecycle"] = self.summary["criteria"]["five_uav_lifecycle"]
         if "payload_channel" in self.summary:
-            self.summary["criteria"]["payload_bidirectional_all_uavs"] = self.summary["payload_channel"]["all_uavs_bidirectional_observed"]
+            self.summary["criteria"]["payload_bidirectional_all_uavs"] = self.summary["payload_channel"].get("measurement_window", {}).get("all_bidirectional_observed", False)
         self.summary.update(outcome_fields(self.summary, window_complete=window_complete,
                                           stopped=stopped, runtime_errors=runtime_errors))
         self.phase("experiment_failed" if error else "experiment_stopped" if stopped else "experiment_done")

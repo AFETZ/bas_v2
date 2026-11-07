@@ -159,13 +159,30 @@ def recorded_outcome(raw, code, summary):
               ('runtime_status', 'mission_outcome', 'measurement_validity')}
     stats_path = raw / 'metrics/native_radio_stats.json'
     stats = json.loads(stats_path.read_text()) if stats_path.exists() else {}
+    verification_errors = []
     result['native_stop_reason'] = stats.get('stop_reason', 'not_recorded')
     if stats.get('stop_reason') not in ('duration', 'sionna_ns3_process_stopped'):
         result['runtime_status'] = 'failed'
+        verification_errors.append('native_stop_not_qualified')
+        if result['measurement_validity'] == 'valid':
+            result['measurement_validity'] = 'invalid'
         if stats.get('stop_reason') in ('position_tracker_stale', 'state_coupling_deadline', 'runtime_error', 'sionna_python_error'):
             result['measurement_validity'] = 'invalid'
     if code != 0 and not summary.get('error'):
         result['runtime_status'] = 'failed'
+        verification_errors.append('runner_exit_not_explained_by_mission')
+    storage_path = raw / 'logs/native_capture_storage.json'
+    storage = json.loads(storage_path.read_text()) if storage_path.exists() else {}
+    publication = storage.get('publication', {})
+    if publication.get('status') not in ('copied', 'direct_disk') or publication.get('errors'):
+        verification_errors.append('native_capture_publication_not_confirmed')
+    if not (raw / 'configuration/final/manifest.json').is_file():
+        verification_errors.append('final_configuration_capture_missing')
+    if verification_errors:
+        result['runtime_status'] = 'failed'
+        if result['measurement_validity'] == 'valid':
+            result['measurement_validity'] = 'invalid'
+    result['runtime_verification_errors'] = verification_errors
     return result
 
 

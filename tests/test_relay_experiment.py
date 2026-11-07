@@ -9,7 +9,7 @@ import tempfile
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from network.coordination.policy import Authority, make_command
 from scripts.product.relay_experiment import (EventTail, Goal, GoalObserver,
@@ -60,6 +60,24 @@ def measure_clock_samples(sample_pairs, *, duration_s, task_period_s):
 
 
 class RelayExperimentTests(unittest.TestCase):
+    def test_failed_payload_does_not_prevent_control_pumping_during_landing(self):
+        scenario = RelayExperiment.__new__(RelayExperiment)
+        scenario.args = SimpleNamespace(stop_file=None)
+        scenario.stopping = True
+        scenario.gcs = SimpleNamespace(step=Mock(), running=True)
+        scenario.payload_channel = SimpleNamespace(pump=Mock(side_effect=OSError('payload socket failed')))
+        scenario.summary, scenario.tails = {}, {}
+        scenario.emit = Mock()
+        scenario.last_heartbeat_ns = time.monotonic_ns()
+        scenario.reader = SimpleNamespace(read=lambda: (1., {}))
+        scenario.observation_end_source_s = None
+        scenario.pump(strict_pose=False, observe=False)
+        scenario.pump(strict_pose=False, observe=False)
+        self.assertEqual(scenario.gcs.step.call_count, 2)
+        self.assertEqual(scenario.payload_channel.pump.call_count, 1)
+        self.assertTrue(scenario.payload_disabled)
+        self.assertIn('payload socket failed', scenario.summary['payload_errors'][0])
+
     def test_completed_window_does_not_claim_completed_urban_route(self):
         summary = dict(experiment_profile="urban", criteria=dict(five_uav_lifecycle=True,
             urban_routes_telemetry_completed=False, live_integral_rtf_target=True))

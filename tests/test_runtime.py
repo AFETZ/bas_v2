@@ -142,6 +142,21 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result['runtime_status'], 'failed')
         self.assertEqual(result['measurement_validity'], 'invalid')
 
+    def test_mission_failure_cannot_hide_capture_failure(self):
+        raw = self.root / 'raw'
+        for directory in ('metrics', 'logs', 'configuration/final'):
+            (raw / directory).mkdir(parents=True)
+        (raw / 'metrics/native_radio_stats.json').write_text(json.dumps(dict(stop_reason='sionna_ns3_process_stopped')))
+        (raw / 'configuration/final/manifest.json').write_text('{}')
+        storage = raw / 'logs/native_capture_storage.json'
+        summary = dict(runtime_status='completed', mission_outcome='failed', measurement_validity='valid', error='landing not observed')
+        storage.write_text(json.dumps(dict(publication=dict(status='copied', errors=[]))))
+        self.assertEqual(bas.recorded_outcome(raw, 1, summary)['runtime_status'], 'completed')
+        storage.write_text(json.dumps(dict(publication=dict(status='copy_failed', errors=['disk full']))))
+        result = bas.recorded_outcome(raw, 1, summary)
+        self.assertEqual(result['runtime_status'], 'failed')
+        self.assertEqual(result['measurement_validity'], 'invalid')
+
     def test_events_preserve_command_and_clock_fields_across_logs(self):
         paths = [self.root / 'gcs.jsonl', self.root / 'uav.jsonl']
         rows = [dict(host_monotonic_ns=20, command_id='c', event='uart_admitted', source_sim_time_s=2.0),

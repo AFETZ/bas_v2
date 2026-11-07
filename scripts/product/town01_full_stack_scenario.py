@@ -212,9 +212,11 @@ class ScenarioError(RuntimeError):
 class FlightHarness:
     def __init__(self, run_dir: Path, node_state: Path, timeout_scale: float, *,
                  channels: tuple[str, ...] = ("control", "payload", "additional_data"),
-                 uav_ids: tuple[int, ...] = UAV_IDS) -> None:
+                 uav_ids: tuple[int, ...] = UAV_IDS,
+                 observer: Callable[[str, int, Any, int], None] | None = None) -> None:
         self.channels = tuple(channels)
         self.uav_ids = tuple(uav_ids)
+        self.message_observer = observer
         if (not self.channels or len(set(self.channels)) != len(self.channels)
                 or not set(self.channels) <= {"control", "payload", "additional_data"}):
             raise ValueError("channels must be unique supported channel names")
@@ -406,6 +408,8 @@ class FlightHarness:
                             f"AUTOPILOT uav={system_id} severity={record_value['severity']} {text}",
                             flush=True,
                         )
+                if self.message_observer is not None:
+                    self.message_observer(channel, system_id, message, now_ns)
 
     def pump(self, timeout_s: float = 0.2) -> None:
         if clock.mode() == "lockstep" and clock.snapshot()["phase"] not in ("exchange", "stopped"):

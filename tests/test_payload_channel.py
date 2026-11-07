@@ -38,11 +38,16 @@ class PayloadChannelTests(unittest.TestCase):
         self.assertIsNone(result['uavs']['1']['last_attitude_age_s'])
         self.assertEqual(helper.close(), result)
 
-    def test_real_udp_bsf1_mavlink_requests_and_observations(self):
+    def exchange(self, window):
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as peer:
             peer.bind(('127.0.0.1', 14701))
             peer.settimeout(1)
             helper = self.helper()
+            if window in ('inside', 'late'):
+                start = time.monotonic_ns()
+                helper.start_measurement(start, start + (1_000_000 if window == 'late' else 2_000_000_000))
+                if window == 'late':
+                    time.sleep(.005)
             from pymavlink import mavutil
             parser = mavutil.mavlink.MAVLink(None)
             transmitter = mavutil.mavlink.MAVLink(None)
@@ -78,6 +83,9 @@ class PayloadChannelTests(unittest.TestCase):
                 if helper.snapshot()['all_uavs_bidirectional_observed']:
                     break
                 time.sleep(.001)
+            if window == 'preflight':
+                start = time.monotonic_ns()
+                helper.start_measurement(start, start + 2_000_000_000)
             metrics = helper.close()
             self.assertTrue(metrics['all_uavs_bidirectional_observed'])
             self.assertEqual(metrics['uavs']['1']['attitudes_received'], 1)
@@ -85,6 +93,34 @@ class PayloadChannelTests(unittest.TestCase):
             self.assertGreater(metrics['transport']['payload:uav1']['uart_output_bytes'], 0)
             saved = json.loads((self.folder / 'metrics/payload_channel.json').read_text())
             self.assertEqual(saved, metrics)
+            return metrics
+
+    def test_real_udp_exchange_inside_window_is_counted(self):
+        metrics = self.exchange('inside')
+        window = metrics['measurement_window']
+        self.assertTrue(window['all_bidirectional_observed'])
+        self.assertEqual(window['service_sla'], 'not_evaluated')
+        for stat in window['uavs']['1']['observations'].values():
+            self.assertEqual(stat['count'], 1)
+            self.assertGreaterEqual(stat['first_host_monotonic_ns'], window['start_host_monotonic_ns'])
+            self.assertLess(stat['last_host_monotonic_ns'], window['end_host_monotonic_ns'])
+            self.assertIsNone(stat['max_internal_gap_s'])
+            self.assertGreaterEqual(stat['max_observed_gap_s_including_edges'], 0)
+
+    def test_preflight_exchange_cannot_qualify_measurement_window(self):
+        metrics = self.exchange('preflight')
+        self.assertTrue(metrics['all_uavs_bidirectional_observed'])
+        window = metrics['measurement_window']
+        self.assertFalse(window['all_bidirectional_observed'])
+        self.assertTrue(all(stat['count'] == 0 for stat in window['uavs']['1']['observations'].values()))
+
+    def test_late_postwindow_exchange_is_excluded(self):
+        metrics = self.exchange('late')
+        self.assertTrue(metrics['all_uavs_bidirectional_observed'])
+        window = metrics['measurement_window']
+        self.assertFalse(window['all_bidirectional_observed'])
+        self.assertEqual(window['status'], 'closed')
+        self.assertTrue(all(stat['count'] == 0 for stat in window['uavs']['1']['observations'].values()))
 
     def test_wrong_roster_frame_cannot_count_as_payload_telemetry(self):
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as peer:
