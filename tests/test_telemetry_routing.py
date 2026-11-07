@@ -10,7 +10,8 @@ from pymavlink.dialects.v20 import ardupilotmega as mavlink
 
 from network.coordination.policy import Authority
 from network.coordination.service import GCSService
-from network.scripts.serial_transport import Encoder, Reassembler
+from network.scripts.serial_transport import Encoder, Reassembler, MavlinkStreamCounter, TransportCounters
+from scripts.product.town01_full_stack_scenario import FlightHarness
 
 NOW = 10_000_000_000
 
@@ -109,6 +110,23 @@ class TelemetryRoutingTests(unittest.TestCase):
         self.assertEqual(self.gcs.telemetry_rejections[3]['foreign_sysid'], 1)
         self.assertEqual(list(self.gcs.stream_provenance[3]), [])
 
+    def test_four_corrupt_frames_foreign_ack_and_own_frame_consume_all_provenance(self):
+        corrupt = bytearray(heartbeat(3))
+        corrupt[-1] ^= 1
+        transmitter = mavlink.MAVLink(None, srcSystem=255, srcComponent=190)
+        ack = transmitter.command_ack_encode(mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, mavlink.MAV_RESULT_ACCEPTED)
+        foreign = bytes(ack.pack(transmitter, force_mavlink1=False))
+        own = heartbeat(3, custom_mode=9)
+        self.deliver(bytes(corrupt) * 4 + foreign[:5])
+        self.deliver(foreign[5:] + own, producer_ns=NOW - 25_000_000)
+        self.assertEqual(self.operator_packets(), [own])
+        self.assertEqual(self.gcs.telemetry_rejections[3]['invalid_mavlink'], 4)
+        self.assertEqual(self.gcs.telemetry_rejections[3]['foreign_sysid'], 1)
+        self.assertEqual(list(self.gcs.stream_provenance[3]), [])
+        self.assertEqual(self.gcs.telemetry_provenance[3], {})
+        self.assertNotIn('COMMAND_ACK', self.gcs.latest_messages[3])
+        self.assertEqual(self.gcs.latest_message_ns[3]['HEARTBEAT'], NOW - 25_000_000)
+
     def test_expired_record_stays_rejected_before_parsing(self):
         self.deliver(heartbeat(3), producer_ns=NOW - 251_000_000)
         self.assertEqual(self.operator_packets(), [])
@@ -128,6 +146,46 @@ class TelemetryRoutingTests(unittest.TestCase):
         with patch('network.coordination.service.time.monotonic_ns', return_value=NOW + 200_000_000):
             self.gcs.deliver(3, own, producer_ns=NOW + 150_000_000, grant=self.grant)
         self.assertEqual(self.operator_packets(), [own])
+
+
+class FlightHarnessTelemetryCountersTests(unittest.TestCase):
+    def test_crc_errors_and_routed_foreign_ack_are_distinct_and_own_frames_still_route(self):
+        # Exercise actual stream parser without binding any shared operator port.
+        harness = FlightHarness.__new__(FlightHarness)
+        key = ('payload', 1)
+        parser = mavlink.MAVLink(None)
+        parser.robust_parsing = True
+        harness.parsers = {key: parser}
+        harness.transport_counters = {key: TransportCounters()}
+        harness.transport_input_frames = {key: MavlinkStreamCounter()}
+        harness.transport_output_frames = {key: MavlinkStreamCounter()}
+        harness.transport_malformed_datagrams = 0
+        harness.transport_foreign_sysid_drops = 0
+        harness.transport_mavlink_parse_errors = 0
+        harness.message_counts = Counter()
+        harness.latest, harness.latest_at_ns, harness.acks, harness.parameters = {}, {}, {}, {}
+        observed = []
+        harness.message_observer = lambda *values: observed.append(values)
+        corrupt = bytearray(heartbeat(1))
+        corrupt[-1] ^= 1
+        foreign_tx = mavlink.MAVLink(None, srcSystem=255, srcComponent=190)
+        foreign = bytes(foreign_tx.command_ack_encode(mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+            mavlink.MAV_RESULT_ACCEPTED).pack(foreign_tx, force_mavlink1=False))
+        own_tx = mavlink.MAVLink(None, srcSystem=1, srcComponent=1)
+        own = heartbeat(1, custom_mode=9)
+        attitude = bytes(own_tx.attitude_encode(123, .1, .2, .3, 0., 0., 0.).pack(own_tx, force_mavlink1=False))
+        harness._consume_mavlink('payload', 1, [bytes(corrupt) * 4 + foreign[:5]], ('127.0.0.1', 0), NOW)
+        harness._consume_mavlink('payload', 1, [foreign[5:] + own + attitude], ('127.0.0.1', 0), NOW + 1)
+        result = harness.transport_summary()
+        self.assertEqual(result['malformed_datagrams'], 0)
+        self.assertEqual(result['foreign_sysid_drops'], 1)
+        self.assertEqual(result['mavlink_parse_errors'], 4)
+        self.assertEqual(harness.acks, {})
+        self.assertEqual(harness.latest[('payload', 1, 'HEARTBEAT')].custom_mode, 9)
+        self.assertEqual(harness.latest[('payload', 1, 'ATTITUDE')].time_boot_ms, 123)
+        self.assertEqual([message.get_type() for _, _, message, _ in observed], ['HEARTBEAT', 'ATTITUDE'])
+        self.assertEqual(harness.transport_counters[key].uart_output_bytes,
+                         4 * len(corrupt) + len(foreign) + len(own) + len(attitude))
 
 
 if __name__ == '__main__':

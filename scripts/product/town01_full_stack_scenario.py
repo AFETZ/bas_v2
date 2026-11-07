@@ -242,6 +242,8 @@ class FlightHarness:
         self.transport_input_frames: dict[tuple[str, int], MavlinkStreamCounter] = {}
         self.transport_output_frames: dict[tuple[str, int], MavlinkStreamCounter] = {}
         self.transport_malformed_datagrams = 0
+        self.transport_foreign_sysid_drops = 0
+        self.transport_mavlink_parse_errors = 0
         self.additional_received: list[tuple[Any, tuple[str, int], int]] = []
         self.additional_malformed = 0
         for channel, port, tos in (
@@ -368,10 +370,11 @@ class FlightHarness:
             self.transport_output_frames[key].feed(record)
             for message in self.parsers[key].parse_buffer(record) or []:
                 if message.get_type() == "BAD_DATA":
+                    self.transport_mavlink_parse_errors += 1
                     continue
                 observed_system_id = int(message.get_srcSystem())
                 if observed_system_id != system_id:
-                    self.transport_malformed_datagrams += 1
+                    self.transport_foreign_sysid_drops += 1
                     continue
                 message_type = str(message.get_type())
                 self.message_counts[(channel, system_id, message_type)] += 1
@@ -498,7 +501,11 @@ class FlightHarness:
         return sent
 
     def transport_summary(self) -> dict[str, Any]:
-        result: dict[str, Any] = {"malformed_datagrams": self.transport_malformed_datagrams}
+        result: dict[str, Any] = {
+            "malformed_datagrams": self.transport_malformed_datagrams,
+            "foreign_sysid_drops": self.transport_foreign_sysid_drops,
+            "mavlink_parse_errors": self.transport_mavlink_parse_errors,
+        }
         for key, counters in sorted(self.transport_counters.items()):
             channel, system_id = key
             values = counters.as_dict()
