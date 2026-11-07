@@ -110,6 +110,20 @@ sources:
     spectral_shape: rectangular
 ```
 
+`power_w` — мощность источника до дополнительного усиления и диаграммы.
+Несмотря на имя, `gain_dbi` источника задаёт дополнительное усиление питающего
+тракта в дБ, а не итоговый peak gain антенны: PSD равна
+`power_w * 10^(gain_dbi / 10) / bandwidth_hz` ([место применения](network/ns3/scratch/native-spectrum-sources.h#L182)).
+Для `tr38901` Sionna уже применяет штатную OUTDOOR-диаграмму: peak 8 dBi,
+ширина 65°/65°, Amax/SLA 30 dB. Поэтому `power_w: 1`, `gain_dbi: 0` дают
+peak EIRP ≈6,31 Вт. `gain_dbi: 8` добавит ещё 8 дБ к встроенным 8 dBi
+(16 дБ в расчёте EIRP относительно `power_w`);
+итоговый peak gain диаграммы в это поле не подставляют.
+Внешняя Spectrum-антенна источника остаётся iso 0 dBi. Это поле не настраивает
+Wi-Fi TX-антенну UAV/НПУ. SDK-конвертер `src/spectrum/model/sionna-rt-channel-model.cc`
+(`GetAntennaElementPattern` / `MakePlannarArray`) передаёт тип `iso`/`tr38901`, но не настройки INDOOR/custom;
+публичный профиль их не поддерживает.
+
 Позиции заданы в общей ENU-сцене, ориентация — азимут/наклон в радианах.
 `time_reference` — `simulation_start` (по умолчанию, секунды ns-3) или
 `measurement_start` (секунды от первого наблюдения фазы `experiment_normal`

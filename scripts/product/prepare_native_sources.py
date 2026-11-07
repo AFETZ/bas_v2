@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""Validate configured emitters and expand sweep events; no propagation model."""
+"""Validate configured emitters and expand sweep events; no propagation model.
+
+Source gain_dbi is additional feed gain in dB, not total antenna peak gain.
+native-spectrum-sources.h applies power_w * 10**(gain_dbi/10) / bandwidth_hz
+to the source PSD; its outer Spectrum antenna stays isotropic 0 dBi. Sionna's
+tr38901 OUTDOOR pattern separately includes an 8 dBi peak, 65/65 degree beams
+and 30 dB Amax/SLA. Thus power_w=1, gain_dbi=0 yields peak EIRP about 6.31 W;
+gain_dbi=8 adds another 8 dB, rather than specifying that existing peak.
+The SDK GetAntennaElementPattern/MakePlannarArray adapter selects iso/tr38901;
+INDOOR/custom settings are not exported. This is not a Wi-Fi TX antenna field.
+"""
 from __future__ import annotations
 import argparse
 import json
