@@ -31,7 +31,7 @@
              .AddAttribute("Scenario",
                            "The Sionna RT scenario name used to create scenes",
                            StringValue("munich"),
-@@ -186,6 +196,224 @@
+@@ -186,6 +196,227 @@
  {
      NS_LOG_FUNCTION(this);
      m_sceneConfigs.mergeShapes = cond;
@@ -107,9 +107,12 @@
 +            antenna->GetNumRows() != 1 || antenna->GetNumColumns() != 1 ||
 +            antenna->GetNumElems() != 1 || antenna->GetNumPorts() != 1 ||
 +            antenna->GetNumPols() != 1 || antenna->GetPolSlant() != 0.0 ||
-+            !DynamicCast<IsotropicAntennaModel>(antenna->GetAntennaElement()) ||
-+            antenna->GetAntennaElement()->GetGainDb(Angles(0.0, M_PI / 2)) != 0.0)
++            !DynamicCast<const IsotropicAntennaModel>(antenna->GetAntennaElement()))
 +            throw std::invalid_argument("Receiver batch supports attached nodes with iso 1x1 V 0dBi arrays only");
++        DoubleValue elementGain;
++        antenna->GetAntennaElement()->GetAttribute("Gain", elementGain);
++        if (elementGain.Get() != 0.0)
++            throw std::invalid_argument("Receiver batch requires the 0dBi isotropic reference element");
 +        if (AntennaSceneFingerprint(antenna) != AntennaSceneFingerprint(m_receiverBatchAntennas[0]))
 +            throw std::invalid_argument("Receiver batch arrays must have the same reference configuration");
 +        for (const Vector& value : {mobility->GetPosition(), mobility->GetVelocity(), BodyOrientation(mobility)})
@@ -256,7 +259,7 @@
  }
  
  void
-@@ -360,6 +588,11 @@
+@@ -360,6 +591,11 @@
  {
      NS_LOG_FUNCTION(this);
  
@@ -268,7 +271,7 @@
      // Compute the channel matrix key. The key is reciprocal, i.e., key (a, b) = key (b, a)
      uint64_t channelMatrixKey = GetKey(aAntenna->GetId(), bAntenna->GetId());
  
-@@ -389,6 +622,11 @@
+@@ -389,6 +625,11 @@
      // generate a new realization
      if (notFound || update)
      {
@@ -280,7 +283,7 @@
          // channel matrix not found or has to be updated, generate a new one
          py::module_ rt = py::module_::import("sionna.rt");
          NS_LOG_INFO("Building scene for antenna pair ("
-@@ -622,7 +860,8 @@
+@@ -622,7 +863,8 @@
  Ptr<SionnaRtChannelModel::SionnaRtChannelParams>
  SionnaRtChannelModel::CalculateChannelParamsFromPaths(const py::object paths,
                                                        Ptr<const MobilityModel> aMob,
@@ -290,7 +293,7 @@
  {
      NS_LOG_FUNCTION(this);
      NS_LOG_DEBUG("Calculating ChannelParams from paths");
-@@ -636,13 +875,13 @@
+@@ -636,13 +878,13 @@
  
      channelParams->m_generatedTime = Simulator::Now();
  
@@ -310,7 +313,7 @@
  
      // Precompute angles sincos
      channelParams->m_cachedAngleSincos.resize(channelParams->m_angle.size());
-@@ -845,7 +1084,7 @@
+@@ -845,7 +1087,7 @@
  }
  
  MatrixBasedChannelModel::Complex3DVector
@@ -319,7 +322,7 @@
  {
      NS_LOG_FUNCTION(this);
      py::module_ np = py::module_::import("numpy");
-@@ -853,9 +1092,14 @@
+@@ -853,9 +1095,14 @@
      py::tuple cir = paths.attr("cir")(py::arg("normalize_delays") = m_normalizeDelays,
                                        py::arg("out_type") = "numpy");
  
@@ -335,7 +338,7 @@
  
      // Generate channel coefficients for each cluster n and each receiver
      //  and transmitter element pair u,s.
-@@ -883,16 +1127,20 @@
+@@ -883,16 +1130,20 @@
  }
  
  MatrixBasedChannelModel::DoubleVector
@@ -358,7 +361,7 @@
      // Shape of array in case syntheticarray differs in sionna
      if (m_RtPathSolverConfig.syntheticArray)
      {
-@@ -905,16 +1153,20 @@
+@@ -905,16 +1156,20 @@
  }
  
  std::vector<double>
@@ -381,7 +384,7 @@
  
      // Shape of array in case syntheticarray differs in sionna
      size_t dopplerSize =
-@@ -932,7 +1184,7 @@
+@@ -932,7 +1187,7 @@
  MatrixBasedChannelModel::DoubleVector
  SionnaRtChannelModel::CalculateAnglesFromPaths(const py::module_ np,
                                                 py::object paths,
@@ -390,7 +393,7 @@
  {
      py::object angle_py;
      if (Angle == "ZOA")
-@@ -958,11 +1210,14 @@
+@@ -958,11 +1213,14 @@
      }
  
      // Convert to numpy float64 array
