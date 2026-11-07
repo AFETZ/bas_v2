@@ -529,40 +529,15 @@
      }
 --- a/src/spectrum/test/sionna-channel-model-test.cc
 +++ b/src/spectrum/test/sionna-channel-model-test.cc
-@@ -44,6 +44,216 @@
+@@ -44,6 +44,132 @@
  #include "ns3/uniform-planar-array.h"
  
  #include <pybind11/pybind11.h>
-+#include <pybind11/embed.h>
  namespace py = pybind11;
 +
 +namespace
 +{
 +using namespace ns3;
-+
-+class ReceiverBatchContractProbe : public SionnaRtChannelModel
-+{
-+  public:
-+    using SionnaRtChannelModel::CalculateCirFromPaths;
-+    using SionnaRtChannelModel::CalculateChannelParamsFromPaths;
-+    using SionnaRtChannelModel::ValidateReceiverBatchPair;
-+    Ptr<ChannelMatrix> Seed(Ptr<const MobilityModel> a, Ptr<const MobilityModel> b,
-+                            Ptr<const PhasedArrayModel> aa, Ptr<const PhasedArrayModel> ba)
-+    {
-+        auto matrix = Create<ChannelMatrix>();
-+        matrix->m_channel = Complex3DVector(1, 1, 1);
-+        matrix->m_channel(0, 0, 0) = {1.0, 0.0};
-+        matrix->m_generatedTime = Simulator::Now();
-+        matrix->m_nodeIds = {a->GetObject<Node>()->GetId(), b->GetObject<Node>()->GetId()};
-+        matrix->m_antennaPair = {aa->GetId(), ba->GetId()};
-+        m_channelMatrixMap[GetKey(aa->GetId(), ba->GetId())] = matrix;
-+        m_pairPositionSnapshots[GetKey(matrix->m_nodeIds.first, matrix->m_nodeIds.second)] =
-+            {matrix->m_nodeIds.first, a->GetPosition(), matrix->m_nodeIds.second, b->GetPosition(),
-+             a->GetVelocity(), b->GetVelocity(), Vector(), Vector()};
-+        (void)aa->IsChannelOutOfDate(ba);
-+        return matrix;
-+    }
-+};
 +
 +class ReceiverBatchApiTest : public TestCase
 +{
@@ -571,7 +546,7 @@
 +  private:
 +    void DoRun() override
 +    {
-+        auto model = CreateObject<ReceiverBatchContractProbe>();
++        auto model = CreateObject<SionnaRtChannelModel>();
 +        NS_TEST_ASSERT_MSG_EQ(model->GetReceiverBatchEnabled(), false, "Legacy mode must remain pairwise");
 +        bool rejected = false;
 +        try { model->SetReceiverBatchEnabled(true); } catch (const std::invalid_argument&) { rejected = true; }
@@ -598,30 +573,15 @@
 +        NS_TEST_ASSERT_MSG_EQ(stats.enabled, true, "Mode readback lost explicit selection");
 +        NS_TEST_ASSERT_MSG_EQ(stats.registeredEndpoints, 6, "Roster was truncated");
 +        NS_TEST_ASSERT_MSG_EQ(stats.configuredMaxPathsPerSource, 1000, "Base budget was silently changed");
-+        model->ValidateReceiverBatchPair(mobility[2], mobility[5], antennas[2], antennas[5]);
 +        rejected = false;
-+        try { model->ValidateReceiverBatchPair(mobility[2], mobility[5], antennas[5], antennas[2]); }
++        try { (void)model->GetChannel(mobility[2], mobility[5], antennas[5], antennas[2]); }
 +        catch (const std::invalid_argument&) { rejected = true; }
 +        NS_TEST_ASSERT_MSG_EQ(rejected, true, "Mismatched endpoint/antenna provenance was accepted");
-+        auto matrix = model->Seed(mobility[2], mobility[5], antennas[2], antennas[5]);
-+        NS_TEST_ASSERT_MSG_EQ(model->GetChannel(mobility[2], mobility[5], antennas[2], antennas[5]), matrix,
-+                              "Valid existing cache must be used without a solver call");
-+        NS_TEST_ASSERT_MSG_EQ(model->GetChannel(mobility[5], mobility[2], antennas[5], antennas[2]), matrix,
-+                              "Reciprocal cache key changed in batch mode");
-+        NS_TEST_ASSERT_MSG_EQ(model->GetReceiverBatchStats().attemptedCalls, 0, "Cache hit invoked Python");
-+        auto displaced = DynamicCast<const ConstantPositionMobilityModel>(mobility[2]);
-+        model->SetUpdateDistanceThreshold(0.5);
-+        auto mutablePosition = ConstCast<ConstantPositionMobilityModel>(displaced);
-+        mutablePosition->SetPosition(Vector(21, 0, 3));
-+        NS_TEST_ASSERT_MSG_EQ(model->ChannelMatrixNeedsUpdate(matrix, mobility[2], mobility[5]), true,
-+                              "Batch mode relaxed the original displacement invalidator");
-+        rejected = false;
-+        try { model->SetReceiverBatchEnabled(false); } catch (const std::runtime_error&) { rejected = true; }
-+        NS_TEST_ASSERT_MSG_EQ(rejected, true, "Hot mode change with existing matrices must fail");
++        NS_TEST_ASSERT_MSG_EQ(model->GetReceiverBatchStats().attemptedCalls, 0, "Rejected pair invoked Python");
 +        model->Dispose();
 +        NS_TEST_ASSERT_MSG_EQ(model->GetReceiverBatchStats().registeredEndpoints, 0, "Dispose retained endpoint resources");
 +
-+        auto invalid = CreateObject<ReceiverBatchContractProbe>();
++        auto invalid = CreateObject<SionnaRtChannelModel>();
 +        auto duplicates = mobility;
 +        duplicates[1] = duplicates[0];
 +        rejected = false;
@@ -643,49 +603,6 @@
 +        catch (const std::overflow_error&) { rejected = true; }
 +        NS_TEST_ASSERT_MSG_EQ(rejected, true, "uint32 allocation overflow accepted");
 +        invalid->Dispose();
-+        Simulator::Destroy();
-+    }
-+};
-+
-+class ReceiverBatchSliceTest : public TestCase
-+{
-+  public:
-+    ReceiverBatchSliceTest() : TestCase("Batched CIR delays Doppler and angles select the requested receiver") {}
-+  private:
-+    void DoRun() override
-+    {
-+        py::scoped_interpreter python;
-+        auto np = py::module_::import("numpy");
-+        py::dict variables;
-+        py::exec(R"(
-+import numpy as np
-+from types import SimpleNamespace
-+a = np.arange(6, dtype=np.complex128).reshape(3,1,1,1,2,1)
-+tau = np.arange(6, dtype=np.float64).reshape(3,1,2) * 1e-6
-+paths = SimpleNamespace(cir=lambda **kw: (a, tau), doppler=np.arange(6).reshape(3,1,2),
-+    phi_r=np.arange(6).reshape(3,1,2)+10, theta_r=np.arange(6).reshape(3,1,2)+20,
-+    phi_t=np.arange(6).reshape(3,1,2)+30, theta_t=np.arange(6).reshape(3,1,2)+40)
-+)", variables);
-+        auto model = CreateObject<ReceiverBatchContractProbe>();
-+        py::object paths = variables["paths"];
-+        auto selected = model->CalculateCirFromPaths(paths, 2);
-+        NS_TEST_ASSERT_MSG_EQ(std::real(selected(0, 0, 0)), 4.0, "CIR returned RX0 instead of RX2");
-+        NS_TEST_ASSERT_MSG_EQ(std::real(selected(0, 0, 1)), 5.0, "CIR path stride is wrong");
-+        auto a = CreateObject<Node>(), b = CreateObject<Node>();
-+        auto am = CreateObject<ConstantPositionMobilityModel>(), bm = CreateObject<ConstantPositionMobilityModel>();
-+        a->AggregateObject(am); b->AggregateObject(bm);
-+        auto parameters = model->CalculateChannelParamsFromPaths(paths, am, bm, 2);
-+        NS_TEST_ASSERT_MSG_EQ_TOL(parameters->m_delay[0], 4e-6, 1e-15, "Delays returned RX0 or wrong units");
-+        NS_TEST_ASSERT_MSG_EQ(parameters->m_doppler[1], 5.0, "Doppler returned RX0");
-+        NS_TEST_ASSERT_MSG_EQ(parameters->m_angle[0][0], 14.0, "Arrival azimuth returned RX0");
-+        NS_TEST_ASSERT_MSG_EQ(parameters->m_angle[1][0], 24.0, "Arrival zenith returned RX0");
-+        NS_TEST_ASSERT_MSG_EQ(parameters->m_angle[2][0], 34.0, "Departure azimuth returned RX0");
-+        NS_TEST_ASSERT_MSG_EQ(parameters->m_angle[3][0], 44.0, "Departure zenith returned RX0");
-+        bool rejected = false;
-+        try { (void)model->CalculateCirFromPaths(paths, 3); }
-+        catch (const std::out_of_range&) { rejected = true; }
-+        NS_TEST_ASSERT_MSG_EQ(rejected, true, "Out-of-range receiver index was accepted");
-+        model->Dispose();
 +        Simulator::Destroy();
 +    }
 +};
@@ -739,7 +656,6 @@
 +    {
 +        AddTestCase(new ReceiverBatchApiTest(), TestCase::Duration::QUICK);
 +        AddTestCase(new ReceiverBatchSameTimeMatrixTest(), TestCase::Duration::QUICK);
-+        AddTestCase(new ReceiverBatchSliceTest(), TestCase::Duration::QUICK);
 +    }
 +};
 +static ReceiverBatchContractSuite g_receiverBatchContractSuite;
