@@ -1776,6 +1776,7 @@ main(int argc, char* argv[])
     }
     Ptr<SionnaRtSpectrumPropagationLossModel> sionna;
     Ptr<bas::SourcePropagation> sourceRouter;
+    const bool mergeSionnaShapes = true;
     SionnaRtChannelModel::RtPathSolverConfig solver;
     if (requiresRt)
     {
@@ -1789,7 +1790,7 @@ main(int argc, char* argv[])
         g_sionnaSamplesPerSource = observedSamples.Get();
         g_sionnaMaxNumPathsPerSource = observedPaths.Get();
         sionna->SetChannelModelAttribute("Scenario", StringValue(scene));
-        sionna->SetChannelModelAttribute("IsMergeShapeEnabled", BooleanValue(true));
+        sionna->SetChannelModelAttribute("IsMergeShapeEnabled", BooleanValue(mergeSionnaShapes));
         sionna->SetChannelModelAttribute("MaxNumberOfPaths",
                                          DoubleValue(static_cast<double>(sionnaMaxNumberOfPaths)));
         solver.maxDepth = sionnaMaxDepth;
@@ -2133,9 +2134,8 @@ main(int argc, char* argv[])
             auto json = py::module_::import("json");
             auto configPath = pathlib.attr("Path")(sionnaWorkerConfig);
             NS_ABORT_MSG_IF(configPath.attr("exists")().cast<bool>(), "Worker config must be new for this run");
-            BooleanValue normalizeDelays, mergeShapes;
+            BooleanValue normalizeDelays;
             model->GetAttribute("NormalizeDelays", normalizeDelays);
-            model->GetAttribute("IsMergeShapeEnabled", mergeShapes);
             py::list nodeIds;
             std::vector<bas::NativeRtCache::Endpoint> endpoints;
             for (size_t i = 0; i < cohort.size(); ++i)
@@ -2149,7 +2149,7 @@ main(int argc, char* argv[])
                 "normalize_delays"_a=normalizeDelays.Get(), "cohort"_a=nodeIds,
                 "radio"_a=py::dict("frequency_hz"_a=carrierHz, "samples_per_source"_a=g_sionnaSamplesPerSource,
                     "max_paths_per_source"_a=g_sionnaMaxNumPathsPerSource,
-                    "max_number_of_paths"_a=sionnaMaxNumberOfPaths, "merge_shapes"_a=mergeShapes.Get(),
+                    "max_number_of_paths"_a=sionnaMaxNumberOfPaths, "merge_shapes"_a=mergeSionnaShapes,
                     "solver"_a=py::dict("max_depth"_a=solver.maxDepth, "seed"_a=solver.seed,
                         "los"_a=solver.los, "specular_reflection"_a=solver.specularReflection,
                         "diffuse_reflection"_a=solver.diffuseReflection, "refraction"_a=solver.refraction,
