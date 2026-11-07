@@ -57,14 +57,25 @@ class UrbanScenario:
     waypoint_dwell_s: float
     barriers: dict[tuple[int, int], dict[int, int]]
 
+    @property
+    def uav_ids(self):
+        return tuple(sorted(self.spawns))
+
     @classmethod
     def load(cls, path: Path):
-        raw = json.loads(path.read_text())
-        ids = set(range(1, 6))
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict) or not isinstance(raw.get("spawns"), dict) or not isinstance(raw.get("routes"), dict):
+            raise ValueError("urban scenario requires spawns and routes objects")
+        count = len(raw["spawns"])
+        if not 1 <= count <= 5 or set(raw["spawns"]) != {str(i) for i in range(1, count + 1)}:
+            raise ValueError("urban UAV IDs must be the contiguous canonical strings 1..N, N=1..5")
+        ids = set(range(1, count + 1))
+        if set(raw["routes"]) != set(raw["spawns"]):
+            raise ValueError("urban routes must exactly match the declared UAV spawns")
         spawns = {int(i): point(p) for i, p in raw["spawns"].items()}
         routes = {int(i): tuple(point(p) for p in route) for i, route in raw["routes"].items()}
         if set(spawns) != ids or set(routes) != ids or any(not route for route in routes.values()):
-            raise ValueError("urban scenario requires spawn and nonempty route for each of five UAVs")
+            raise ValueError("urban scenario requires spawn and nonempty route for every declared UAV")
         mission = raw["mission"]
         ground, age, speed, dwell = (float(mission[k]) for k in
                 ("world_ground_reference_z_m", "telemetry_max_age_s", "speed_mps", "waypoint_dwell_s"))

@@ -1461,7 +1461,7 @@ main(int argc, char* argv[])
     double sionnaCacheJitterFraction = 0.0;
 
     CommandLine command(__FILE__);
-    command.AddValue("uavCount", "Number of UAV radio nodes (supported: 1 or 5)", uavCount);
+    command.AddValue("uavCount", "Number of UAV radio nodes (supported: 1..5)", uavCount);
     command.AddValue("radioBackend", "Native MAC/PHY backend: aloha or wifi", radioBackend);
     command.AddValue("radioProfile", "Product radio profile identifier", radioProfile);
     command.AddValue("technologySpecificModem",
@@ -1567,7 +1567,7 @@ main(int argc, char* argv[])
     g_wifiControlMode = wifiControlMode;
     g_wifiSsid = wifiSsid;
 
-    NS_ABORT_MSG_IF(uavCount != 1 && uavCount != 5, "uavCount must be 1 or 5");
+    NS_ABORT_MSG_IF(uavCount < 1 || uavCount > 5, "uavCount must be in 1..5");
     NS_ABORT_MSG_IF(radioBackend != "aloha" && radioBackend != "wifi",
                     "radioBackend must be aloha or wifi");
     NS_ABORT_MSG_IF(g_wifiTopology != "bss" && g_wifiTopology != "adhoc",

@@ -9,16 +9,52 @@ from pathlib import Path
 import signal
 import socket
 import time
-import yaml
-from serial_transport import Encoder, Reassembler, TransportCounters, decode_chunk, BoundedQueue, radio_is_live
+try:
+    from .serial_transport import Encoder, Reassembler, TransportCounters, decode_chunk, BoundedQueue, radio_is_live
+except ImportError:  # direct script entrypoint
+    from serial_transport import Encoder, Reassembler, TransportCounters, decode_chunk, BoundedQueue, radio_is_live
+
+
+IO_BATCH = 64
+
+
+def flush_queue(queue, write, *, datagram=False, limit=IO_BATCH):
+    """Drain a bounded turn; keep stream suffixes and their original deadline.
+
+    Socket/serial writers return accepted bytes, not physical delivery. Datagram
+    sends are atomic: a short send is an error, never a second shortened datagram.
+    A zero serial write or EWOULDBLOCK is backpressure and retains the queue.
+    """
+    sent = operations = 0
+    maximum_delay_ms = 0.0
+    for _ in range(limit):
+        now = time.monotonic()
+        queue.expire(now)
+        if not queue.items:
+            break
+        data, queued = queue.items[0]
+        try:
+            count = write(data)
+        except BlockingIOError:
+            break
+        if datagram and count != len(data):
+            raise OSError("short UDP datagram write")
+        if not count:
+            break
+        queue.sent(count)
+        sent += count
+        operations += 1
+        maximum_delay_ms = max(maximum_delay_ms, (now - queued) * 1000)
+    return sent, operations, maximum_delay_ms
 
 
 def run(config, output, duration=None):
-    import serial
     endpoint = config["endpoint"]
     kind = endpoint["kind"]
     if kind not in ("serial", "udp", "tcp_client"):
         raise ValueError("endpoint.kind must be serial, udp or tcp_client")
+    if kind == "serial":
+        import serial
     radio = config["radio"]
     ns = config.get("namespace")
     if ns and os.stat("/proc/self/ns/net").st_ino != os.stat("/var/run/netns/"+ns).st_ino:
@@ -29,7 +65,7 @@ def run(config, output, duration=None):
     radio_namespace = config.get("radio_namespace")
     saved = os.open("/proc/self/ns/net", os.O_RDONLY) if radio_namespace else None
     target = os.open("/var/run/netns/"+radio_namespace, os.O_RDONLY) if radio_namespace else None
-    libc = ctypes.CDLL(None, use_errno=True)
+    libc = ctypes.CDLL(None, use_errno=True) if radio_namespace else None
     try:
         if target is not None and libc.setns(target, 0) != 0:
             raise OSError(ctypes.get_errno(), "cannot enter radio namespace")
@@ -64,6 +100,7 @@ def run(config, output, duration=None):
     report_at = started
     metrics = dict(endpoint_to_radio_bytes=0, radio_to_endpoint_bytes=0, reconnects=0,
                    io_errors=0, unexpected_peer=0, stale_radio_drops=0, max_queue_delay_ms=0.0,
+                   radio_tx_datagrams=0, connection_epoch_drops=0,
                    controller_kind=kind, hardware_validation="not_performed",
                    framing="BSF1; unchanged endpoint bytes", clock="host_monotonic")
     output.mkdir(parents=True, exist_ok=True)
@@ -75,6 +112,17 @@ def run(config, output, duration=None):
     log = (output/"events.jsonl").open("w", buffering=65536)
     def event(name, **values):
         log.write(json.dumps(dict(event=name, monotonic_ns=time.monotonic_ns(), **values))+"\n")
+    def publish(now, radio_live):
+        metrics.update(connected=device is not None, radio_live=radio_live,
+            endpoint_silent=now-last_device_rx > watchdog, radio_silent=now-last_radio_rx > watchdog,
+            to_radio_queue_bytes=to_radio.bytes, to_device_queue_bytes=to_device.bytes,
+            queue_drops=to_radio.dropped+to_device.dropped,
+            deadline_drops=to_radio.expired+to_device.expired,
+            peak_queue_bytes=max(to_radio.peak,to_device.peak), transport=counters.as_dict())
+        temporary = output/"metrics.tmp"
+        temporary.write_text(json.dumps(metrics, indent=2)+"\n")
+        temporary.replace(output/"metrics.json")
+        log.flush()
     def disconnect(reason):
         nonlocal device, reassembler
         if device is not None:
@@ -84,16 +132,21 @@ def run(config, output, duration=None):
         to_radio.clear()
         reassembler = decoder()
         event("disconnected", reason=reason)
+    accept_after_ns = time.monotonic_ns()
+    was_radio_live = False
+    radio_live = False
     try:
         while running and (duration is None or time.monotonic()-started < duration):
             now = time.monotonic()
+            progress = False
             if device is None and now >= retry_at:
                 retry_at = now+reconnect
                 try:
                     if kind == "serial":
                         device = serial.Serial(endpoint["device"], baudrate=endpoint["baud"],
                             bytesize=endpoint["bytesize"], parity=endpoint["parity"],
-                            stopbits=endpoint["stopbits"], timeout=0, write_timeout=0)
+                            stopbits=endpoint["stopbits"], timeout=0, write_timeout=0,
+                            **{key: endpoint[key] for key in ("xonxoff", "rtscts", "dsrdtr") if key in endpoint})
                     elif kind == "udp":
                         device = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                         device.bind(tuple(endpoint["bind"]))
@@ -102,8 +155,10 @@ def run(config, output, duration=None):
                         device = socket.create_connection(tuple(endpoint["peer"]), timeout=min(reconnect, .2))
                         device.setblocking(False)
                     metrics["reconnects"] += 1
+                    accept_after_ns = time.monotonic_ns()
+                    reassembler = decoder()
                     event("connected", kind=kind)
-                except (OSError, serial.SerialException) as exc:
+                except OSError as exc:
                     disconnect(str(exc))
             for queue in (to_radio, to_device):
                 queue.expire(now)
@@ -111,10 +166,13 @@ def run(config, output, duration=None):
             # radio state prevents queued commands from being replayed on recovery.
             state_file = config.get("radio_watchdog_file")
             radio_live = radio_is_live(state_file, watchdog)
+            if radio_live and not was_radio_live:
+                accept_after_ns = time.monotonic_ns()
             if not radio_live:
                 to_radio.clear()
                 to_device.clear()
                 reassembler = decoder()
+            was_radio_live = radio_live
             try:
                 if device is not None:
                     try:
@@ -130,6 +188,7 @@ def run(config, output, duration=None):
                             if not data:
                                 raise ConnectionError("TCP peer closed")
                         if data:
+                            progress = True
                             last_device_rx = now
                             metrics["endpoint_to_radio_bytes"] += len(data)
                             if radio_live:
@@ -137,12 +196,17 @@ def run(config, output, duration=None):
                                     to_radio.put(frame, now)
                     except BlockingIOError:
                         pass
-                try:
-                    data, source = udp.recvfrom(65535)
+                for _ in range(IO_BATCH):
+                    try:
+                        data, source = udp.recvfrom(65535)
+                    except BlockingIOError:
+                        break
+                    progress = True
                     if source == peer:
-                        last_radio_rx = now
+                        last_radio_rx = time.monotonic()
                         try:
-                            age = (time.monotonic_ns()-decode_chunk(data).sent_monotonic_ns)/1e9
+                            chunk = decode_chunk(data)
+                            age = (time.monotonic_ns()-chunk.sent_monotonic_ns)/1e9
                         except ValueError:
                             counters.malformed_chunks += 1
                             continue
@@ -151,54 +215,43 @@ def run(config, output, duration=None):
                         if not radio_live or age > policy["deadline_s"] or age < 0:
                             metrics["stale_radio_drops"] += 1
                             continue
+                        if chunk.sent_monotonic_ns < accept_after_ns:
+                            metrics["connection_epoch_drops"] += 1
+                            continue
                         records = reassembler.ingest(data)
                         if device is not None and radio_live:
                             for record, sent_ns in zip(records, reassembler.released_sent_ns):
                                 to_device.put(record, sent_ns/1e9)
                     else:
                         metrics["unexpected_peer"] += 1
-                except BlockingIOError:
-                    pass
                 records = reassembler.expire()
                 for record, sent_ns in zip(records, reassembler.released_sent_ns):
                     if device is not None and radio_live:
                         to_device.put(record, sent_ns/1e9)
                 to_device.expire(time.monotonic())
                 if to_radio.items and radio_live:
-                    try:
-                        count = udp.sendto(to_radio.items[0][0], peer)
-                        to_radio.sent(count)
-                    except BlockingIOError:
-                        pass
+                    _, operations, _ = flush_queue(to_radio, lambda data: udp.sendto(data, peer), datagram=True)
+                    metrics["radio_tx_datagrams"] += operations
+                    progress = progress or operations > 0
                 if device is not None and to_device.items and radio_live:
-                    data, queued = to_device.items[0]
-                    try:
-                        count = (device.write(data) if kind == "serial" else
-                                 device.sendto(data, tuple(endpoint["peer"])) if kind == "udp" else device.send(data))
-                        metrics["radio_to_endpoint_bytes"] += count
-                        metrics["max_queue_delay_ms"] = max(metrics["max_queue_delay_ms"], (now-queued)*1000)
-                        to_device.sent(count)
-                    except BlockingIOError:
-                        pass
-            except (OSError, serial.SerialException) as exc:
+                    write = (device.write if kind == "serial" else
+                             (lambda data: device.sendto(data, tuple(endpoint["peer"]))) if kind == "udp" else device.send)
+                    count, operations, delay = flush_queue(to_device, write, datagram=kind == "udp")
+                    metrics["radio_to_endpoint_bytes"] += count
+                    metrics["max_queue_delay_ms"] = max(metrics["max_queue_delay_ms"], delay)
+                    progress = progress or operations > 0
+            except OSError as exc:
                 metrics["io_errors"] += 1
                 disconnect(str(exc))
             if now >= report_at:
-                metrics.update(connected=device is not None, radio_live=radio_live,
-                    endpoint_silent=now-last_device_rx > watchdog, radio_silent=now-last_radio_rx > watchdog,
-                    to_radio_queue_bytes=to_radio.bytes, to_device_queue_bytes=to_device.bytes,
-                    queue_drops=to_radio.dropped+to_device.dropped,
-                    deadline_drops=to_radio.expired+to_device.expired,
-                    peak_queue_bytes=max(to_radio.peak,to_device.peak), transport=counters.as_dict())
-                temporary = output/"metrics.tmp"
-                temporary.write_text(json.dumps(metrics, indent=2)+"\n")
-                temporary.replace(output/"metrics.json")
-                log.flush()
+                publish(time.monotonic(), radio_live)
                 report_at = now+.25
-            time.sleep(.001)
+            if not progress:
+                time.sleep(.001)
     finally:
         disconnect("shutdown")
         udp.close()
+        publish(time.monotonic(), radio_live)
         log.close()
     return metrics
 
@@ -209,7 +262,13 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--duration-s", type=float)
     args = parser.parse_args()
-    run(yaml.safe_load(args.config.read_text()), args.output, args.duration_s)
+    text = args.config.read_text()
+    if args.config.suffix.lower() == ".json":
+        config = json.loads(text)
+    else:
+        import yaml
+        config = yaml.safe_load(text)
+    run(config, args.output, args.duration_s)
 
 
 if __name__ == "__main__":

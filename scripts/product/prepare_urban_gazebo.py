@@ -11,11 +11,15 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import sys
 import xml.etree.ElementTree as ET
 
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from scripts.product.urban_mission import UrbanScenario
 
 
 def vector(value):
@@ -64,11 +68,12 @@ def box(world, name, low, high, colour):
             sub(material, "diffuse", colour)
 
 
-def prepare(config: Path, output: Path):
-    data = json.loads(config.read_text())
-    ids = {str(i) for i in range(1, 6)}
-    if set(data["spawns"]) != ids or set(data["routes"]) != ids:
-        raise ValueError("urban scene requires all five spawns/routes")
+def prepare(config: Path, output: Path, uav_count: int | None = None):
+    scenario = UrbanScenario.load(config)
+    data = scenario.raw
+    ids = {str(i) for i in scenario.uav_ids}
+    if uav_count is not None and (type(uav_count) is not int or uav_count != len(ids)):
+        raise ValueError("requested UAV count must match the complete scene roster")
     buildings = data["buildings"]
     if len({b["id"] for b in buildings}) != len(buildings):
         raise ValueError("duplicate building ID")
@@ -120,19 +125,28 @@ def prepare(config: Path, output: Path):
     defaults = output / "urban_sitl.parm"
     defaults.write_text((ROOT / "network/config/town01_sitl.parm").read_text()
                         + f"\n# Pinned ArduCopter4.8 native waypoint speed, m/s\nWP_SPD {speed:.9g}\n")
-    launch["base_simulation"]["sitl_defaults"] = str(defaults.resolve().relative_to(ROOT))
+    launch["base_simulation"]["sitl_defaults"] = defaults.resolve().relative_to(ROOT).as_posix()
     launch["scenario"]["name"] = data["scenario"]
+    launch["scenario"]["description"] = f"Configured {len(ids)} UAVs sharing native radio and one idealized building geometry."
     launch["scenario"]["map"] = dict(id=data["scenario"], kind="idealized_shared_building_boxes", customer_survey_asset=False,
-                                      world_file=str((output / "world.sdf").resolve().relative_to(ROOT)), scene_xml="not_used_no_rt.xml",
+                                      world_file=(output / "world.sdf").resolve().relative_to(ROOT).as_posix(), scene_xml="not_used_no_rt.xml",
                                       camera_fragment="network/ns3/runtime_live_cameras.sdf.inc",
                                       gazebo_models=["urban_ground"] + ["urban_building_" + b["id"] for b in buildings])
     launch["command_post"]["position_m"] = vector(data["gcs"])
+    launch["robots"] = [robot for robot in launch["robots"] if str(robot["system_id"]) in ids]
+    if {str(robot["system_id"]) for robot in launch["robots"]} != ids:
+        raise ValueError("native launch template does not cover the scene roster")
     for robot in launch["robots"]:
         uid = str(robot["system_id"])
         robot["position"] = vector(data["spawns"][uid]) + [0., 0., 0.]
         robot["nominal_radio_position_m"] = vector(data["spawns"][uid])
     launch["flight"]["missions"] = {f"uav{i}": [dict(name=f"waypoint{k}", position_m=p, hold_s=data["mission"]["waypoint_dwell_s"])
                                                        for k, p in enumerate(data["routes"][i])] for i in sorted(ids)}
+    launch["flight"]["takeoff_relative_altitude_m"] = {
+        f"uav{i}": scenario.routes[i][0][2] - scenario.ground_reference_z_m for i in scenario.uav_ids}
+    names = {robot["name"] for robot in launch["robots"]}
+    for capture in launch.get("evidence", {}).get("screenshots", []):
+        capture["required_projected_uavs"] = [name for name in capture.get("required_projected_uavs", []) if name in names]
     (output / "scenario.yaml").write_text(yaml.safe_dump(launch, sort_keys=False))
     (output / "geometry-source.json").write_text(json.dumps(dict(source=str(config.resolve()), sha256=hashlib.sha256(config.read_bytes()).hexdigest(),
                                                                 config=data, note="generated scene; no measured flight or radio outcomes"), indent=2) + "\n")
@@ -143,5 +157,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--output", type=Path, default=ROOT / ".external/urban_ns3")
+    parser.add_argument("--uav-count", type=int, choices=range(1, 6), help="expected exact scene roster size")
     args = parser.parse_args()
-    prepare(args.config, args.output)
+    prepare(args.config, args.output, args.uav_count)

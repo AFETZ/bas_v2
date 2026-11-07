@@ -2,7 +2,6 @@
 """One-host BAS runtime: explicit configuration, owned lifecycle, raw event views."""
 import argparse
 import datetime
-import fcntl
 import hashlib
 import heapq
 import json
@@ -36,42 +35,74 @@ def write_json(path, value):
 
 
 def identifier(value):
-    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,79}', value):
+    if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,79}', value):
         raise ValueError('run ID must contain 1..80 letters, digits, underscores or hyphens')
     return value
 
 
+def unique_json_fields(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f'duplicate configuration field: {key}')
+        result[key] = value
+    return result
+
+
+def reject_json_constant(value):
+    raise ValueError(f'non-finite JSON value is not allowed: {value}')
+
+
 def load_config(path, root=ROOT):
-    config = json.loads(path.read_text())
-    if set(config) != set(SHAPE):
+    config = json.loads(path.read_text(encoding='utf-8-sig'),
+                        object_pairs_hook=unique_json_fields, parse_constant=reject_json_constant)
+    if not isinstance(config, dict) or set(config) != set(SHAPE):
         raise ValueError('runtime config has missing or unknown sections')
     for section, keys in SHAPE.items():
         if not isinstance(config[section], dict) or set(config[section]) != keys:
             raise ValueError(f'expected {section} fields: {sorted(keys)}')
     supported = [('environment', 'engine', 'gazebo'), ('drone', 'autopilot', 'ardupilot_sitl'),
-                 ('drone', 'count', 5), ('propagation', 'model', 'geometry_logdistance'),
+                 ('propagation', 'model', 'geometry_logdistance'),
                  ('network', 'engine', 'ns3'), ('network', 'topology', 'adhoc'),
                  ('runtime', 'clock', 'realtime')]
     for section, key, value in supported:
-        if config[section][key] != value:
+        if type(config[section][key]) is not type(value) or config[section][key] != value:
             raise ValueError(f'this profile requires {section}.{key}={value}')
+    count = config['drone']['count']
+    if type(count) is not int or not 1 <= count <= 5:
+        raise ValueError('drone.count must be an integer from 1 to 5')
     if config['experiment']['policy'] not in ('fixed', 'failover'):
         raise ValueError('policy must be fixed or failover')
     for section, key in [('experiment', 'duration_s'), ('runtime', 'land_timeout_s')]:
         value = config[section][key]
-        if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+        try:
+            valid = type(value) in (int, float) and math.isfinite(value) and value > 0
+        except OverflowError:
+            valid = False
+        if not valid:
             raise ValueError(f'{section}.{key} must be finite and positive')
     for key, minimum in [('seed', 1), ('run', 0)]:
         value = config['experiment'][key]
         if type(value) is not int or value < minimum:
             raise ValueError(f'experiment.{key} must be an integer >= {minimum}')
-    if not re.fullmatch(r'sha256:[0-9a-f]{64}', config['runtime']['image']):
+    image = config['runtime']['image']
+    if not isinstance(image, str) or not re.fullmatch(r'sha256:[0-9a-f]{64}', image):
         raise ValueError('runtime.image must be an immutable Docker image ID')
-    scene = (root / config['environment']['scene']).resolve()
-    scene.relative_to(root.resolve())
+    scene_name = config['environment']['scene']
+    if not isinstance(scene_name, str) or not scene_name:
+        raise ValueError('environment.scene must be a nonempty path string')
+    root = root.resolve()
+    scene = (root / scene_name.replace('\\', '/')).resolve()
+    try:
+        scene.relative_to(root)
+    except ValueError:
+        raise ValueError('environment.scene must stay inside the workspace') from None
     if not scene.is_file():
         raise ValueError(f'scene does not exist: {scene}')
-    config['environment']['scene'] = str(scene.relative_to(root.resolve()))
+    config['environment']['scene'] = scene.relative_to(root).as_posix()
+    from scripts.product.urban_mission import UrbanScenario
+    if tuple(sorted(UrbanScenario.load(scene).spawns)) != tuple(range(1, count + 1)):
+        raise ValueError('scene UAV roster must match drone.count exactly')
     return config
 
 
@@ -89,7 +120,7 @@ def environment(config, run_id, inherited=None):
         'NATIVE_EXPERIMENT_DURATION_S': config['experiment']['duration_s'],
         'NATIVE_RNG_SEED': config['experiment']['seed'], 'NATIVE_RNG_RUN': config['experiment']['run'],
         'NATIVE_LAND_TIMEOUT_S': config['runtime']['land_timeout_s'],
-        'NATIVE_UAV_COUNT': 5, 'NATIVE_FIVE_GUI': 0, 'NATIVE_CAPTURE_IMAGES': 0,
+        'NATIVE_UAV_COUNT': config['drone']['count'], 'NATIVE_FIVE_GUI': 0, 'NATIVE_CAPTURE_IMAGES': 0,
         'NATIVE_CAPTURE_STORAGE': 'tmpfs', 'NATIVE_EVENT_LOGGING': 'metrics_only',
         'NATIVE_FIVE_SKIP_BUILD': 1, 'NATIVE_PHYSICS_PROFILE': 'stock',
         'NATIVE_WIFI_TOPOLOGY': 'adhoc', 'NATIVE_WIFI_AGGREGATION': 0,
@@ -110,6 +141,22 @@ def raw_dir(run_id):
     return ROOT / 'runs/native-radio-realtime' / identifier(run_id)
 
 
+def recorded_outcome(raw, code, summary):
+    """Use backend evidence as well as mission status; never infer success from exit 0."""
+    result = {key: summary.get(key, 'not_evaluated') for key in
+              ('runtime_status', 'mission_outcome', 'measurement_validity')}
+    stats_path = raw / 'metrics/native_radio_stats.json'
+    stats = json.loads(stats_path.read_text()) if stats_path.exists() else {}
+    result['native_stop_reason'] = stats.get('stop_reason', 'not_recorded')
+    if stats.get('stop_reason') not in ('duration', 'sionna_ns3_process_stopped'):
+        result['runtime_status'] = 'failed'
+        if stats.get('stop_reason') in ('position_tracker_stale', 'state_coupling_deadline', 'runtime_error', 'sionna_python_error'):
+            result['measurement_validity'] = 'invalid'
+    if code != 0 and not summary.get('error'):
+        result['runtime_status'] = 'failed'
+    return result
+
+
 def request_stop(run_id):
     folder = control_dir(run_id)
     state = json.loads((folder / 'run.json').read_text())
@@ -120,6 +167,9 @@ def request_stop(run_id):
 
 
 def run(config, run_id):
+    if sys.platform != 'linux':
+        raise ValueError('simulation runtime requires Linux; inspect, status and events are available on this host')
+    import fcntl  # Host preparation and observation do not require the Linux runtime.
     folder, raw = control_dir(run_id), raw_dir(run_id)
     LOCK.parent.mkdir(parents=True, exist_ok=True)
     with LOCK.open('a') as lock:
@@ -167,6 +217,7 @@ def run(config, run_id):
             summary = json.loads(summary_path.read_text()) if summary_path.exists() else {}
             status = summary.get('status', 'failed') if code == 0 else 'failed'
             record.update(status=status, returncode=code, mission_error=summary.get('error'))
+            record.update(recorded_outcome(raw, code, summary))
         except Exception as error:
             record.update(status='failed', error=str(error))
             raise
@@ -175,8 +226,12 @@ def run(config, run_id):
             write_json(folder / 'run.json', record)
             for sig, handler in previous.items():
                 signal.signal(sig, handler)
-        print(json.dumps({'run_id': run_id, 'status': record['status'], 'returncode': code}))
-        return code if code else (0 if record['status'] == 'completed' else 130 if record['status'] == 'stopped' else 1)
+        print(json.dumps({key: record[key] for key in
+                         ('run_id', 'runtime_status', 'mission_outcome', 'measurement_validity', 'returncode')}))
+        return code if code else (130 if record['status'] == 'stopped' else
+                                 0 if record['runtime_status'] == 'completed'
+                                      and record['mission_outcome'] == 'succeeded'
+                                      and record['measurement_validity'] == 'valid' else 1)
 
 
 def events(paths, command_id=None, event=None, limit=50):

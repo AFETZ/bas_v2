@@ -41,6 +41,32 @@ class StopRequested(Exception):
     """Operator requested bounded LAND and simulator teardown."""
 
 
+def outcome_fields(summary, *, window_complete, stopped, runtime_errors=()):
+    """Independent observed outcomes; legacy status describes controller execution.
+
+    RTF uses the existing experiment profile criterion, not a customer HitL SLA.
+    A valid completed measurement window survives a later mission/landing failure.
+    """
+    criteria = summary.get("criteria", {})
+    required = (["urban_routes_telemetry_completed"] if summary.get("experiment_profile") == "urban"
+                else ["two_completed_goals_each", "two_completed_target_levels_each"])
+    required.insert(0, "all_uav_lifecycle" if "all_uav_lifecycle" in criteria else "five_uav_lifecycle")
+    if summary.get("fault_profile") == "total_GCS":
+        required.append("total_GCS_hold_all_five")
+    unmet = [name for name in required if criteria.get(name) is not True]
+    mission = ("cancelled" if stopped else "failed" if summary.get("error")
+               else "incomplete" if unmet else "succeeded")
+    started = summary.get("measurement_start_source_sim_time_s") is not None
+    validity = ("valid" if window_complete and criteria.get("live_integral_rtf_target") is True
+                else "invalid" if window_complete else "incomplete" if started else "not_evaluated")
+    reasons = ([] if validity == "valid" else ["existing_profile_rtf_target_not_met"] if window_complete
+               else ["declared_measurement_window_not_completed"] if started else ["measurement_not_started"])
+    return dict(runtime_status="failed" if runtime_errors else "completed",
+                runtime_errors=list(runtime_errors), mission_outcome=mission,
+                mission_unmet_criteria=unmet, measurement_validity=validity,
+                measurement_validity_reasons=reasons, measurement_window_completed=window_complete)
+
+
 @dataclasses.dataclass(frozen=True)
 class Pose:
     position: tuple[float, float, float]
@@ -52,8 +78,9 @@ class Pose:
 class PoseReader:
     """Observe fresh native odometry; never predict or repair missing samples."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, uav_ids=UAV_IDS):
         self.path, self.session = path, None
+        self.uav_ids = tuple(uav_ids)
         self.last_source_s = None
 
     def read(self) -> tuple[float, dict[int, Pose]]:
@@ -78,7 +105,7 @@ class PoseReader:
             poses = {}
             for row in value["nodes"]:
                 name = str(row.get("id", ""))
-                if name not in {f"uav{i}" for i in UAV_IDS}:
+                if name not in {f"uav{i}" for i in self.uav_ids}:
                     continue
                 # Use only genuine causal samples, as the native mobility reader does.
                 history = row.get("history", [row])
@@ -96,8 +123,8 @@ class PoseReader:
                         or not 0 <= source - stamp <= .5):
                     raise ScenarioError(f"invalid pose/source clock {name}")
                 poses[int(name[3:])] = Pose(point, velocity, stamp, row["sample_monotonic_ns"])
-            if set(poses) != set(UAV_IDS):
-                raise ScenarioError("missing native five-UAV poses")
+            if set(poses) != set(self.uav_ids):
+                raise ScenarioError("missing native UAV poses for configured roster")
             if max(p.source_s for p in poses.values()) - min(p.source_s for p in poses.values()) > .1:
                 raise ScenarioError("native cross-UAV source skew exceeds 100 ms")
             return source, poses
@@ -275,27 +302,35 @@ class LandingTrace:
 
 
 class RelayExperiment:
+    @property
+    def uav_ids(self):
+        return getattr(self, "_uav_ids", UAV_IDS)
+
     def __init__(self, args):
         self.args = args
+        self._uav_ids = tuple(range(1, getattr(args, "uav_count", 5) + 1))
         self.urban = UrbanScenario.load(args.urban_scenario) if getattr(args, "urban_scenario", None) else None
+        if self.urban and tuple(sorted(self.urban.spawns)) != self.uav_ids:
+            raise ScenarioError("urban scene roster differs from configured UAV count")
         self.urban_frames, self.urban_holds, self.urban_last_sample = {}, {}, {}
         self.urban_barrier_state = {}
-        self.urban_indices = {i: 0 for i in UAV_IDS}
-        self.urban_reached = {i: [] for i in UAV_IDS}
+        self.urban_indices = {i: 0 for i in self.uav_ids}
+        self.urban_reached = {i: [] for i in self.uav_ids}
         args.run_dir.mkdir(parents=True, exist_ok=True)
         args.phase_file.parent.mkdir(parents=True, exist_ok=True)
         if (args.run_dir / "metrics/relay_experiment_summary.json").exists():
             raise ScenarioError("run already has a summary; use a fresh run directory")
         service_args = build_parser().parse_args(["gcs", "--run-id", args.run_id,
+                    "--uav-count", str(len(self.uav_ids)),
                     "--policy", args.policy, "--initial-master", str(args.initial_master),
                     "--event-log", str(args.run_dir / "logs/coordination_gcs.jsonl")])
         service_args.radio_watchdog_file = args.radio_watchdog_file
         service_args.watchdog_s = args.watchdog_s
         self.emit = Events(service_args.event_log, args.run_id, 0)
         self.gcs = GCSService(service_args, self.emit)
-        self.reader = PoseReader(args.node_state)
+        self.reader = PoseReader(args.node_state, self.uav_ids)
         self.observer = GoalObserver(self.emit, args)
-        self.tails = {i: EventTail(args.run_dir / f"logs/coordination_uav{i}.jsonl") for i in UAV_IDS}
+        self.tails = {i: EventTail(args.run_dir / f"logs/coordination_uav{i}.jsonl") for i in self.uav_ids}
         self.mav = self.gcs.mavutil.mavlink
         self.tx = self.mav.MAVLink(None, srcSystem=255, srcComponent=191)
         self.modes = {name: number for number, name in self.gcs.mavutil.mode_mapping_acm.items()}
@@ -312,7 +347,8 @@ class RelayExperiment:
                 fault_profile=args.fault_profile, pilot=args.pilot,
                 experiment_profile=args.experiment_profile, phase_clock_domain="source_sim_time",
                 lease_clock_domain="host_monotonic", phase_requests=[],
-                uavs={str(i): dict(armed=False, takeoff=False, landed=False, auto_disarm=False) for i in UAV_IDS},
+                uav_count=len(self.uav_ids), uav_ids=list(self.uav_ids),
+                uavs={str(i): dict(armed=False, takeoff=False, landed=False, auto_disarm=False) for i in self.uav_ids},
                 mode_observations=[], failsafe_holds={}, command_refresh_period_s=args.command_period_s,
                 physical_goal_period_s=args.task_period_s)
         if self.urban:
@@ -374,7 +410,7 @@ class RelayExperiment:
         now = time.monotonic_ns()
         if now - self.last_heartbeat_ns >= 1_000_000_000:
             self.last_heartbeat_ns = now
-            for i in UAV_IDS:
+            for i in self.uav_ids:
                 try:
                     self.send(i, self.tx.heartbeat_encode(self.mav.MAV_TYPE_GCS,
                               self.mav.MAV_AUTOPILOT_INVALID, 0, 0, self.mav.MAV_STATE_ACTIVE))
@@ -458,15 +494,15 @@ class RelayExperiment:
     def prepare(self):
         self.phase("experiment_preflight")
         def gps_ready():
-            return len(self.poses) == 5 and all(0 <= time.monotonic_ns() - p.sample_ns <= 500_000_000 for p in self.poses.values()) and all(self.fresh(i, "HEARTBEAT") is not None
+            return len(self.poses) == len(self.uav_ids) and all(0 <= time.monotonic_ns() - p.sample_ns <= 500_000_000 for p in self.poses.values()) and all(self.fresh(i, "HEARTBEAT") is not None
                 and self.fresh(i, "GPS_RAW_INT") is not None and self.fresh(i, "GPS_RAW_INT").fix_type >= 3
                 and self.fresh(i, "GLOBAL_POSITION_INT") is not None
                 and 1 <= abs(self.fresh(i, "GLOBAL_POSITION_INT").lat / 1e7) <= 90
                 and 1 <= abs(self.fresh(i, "GLOBAL_POSITION_INT").lon / 1e7) <= 180
                 and (not self.urban or self.fresh(i, "LOCAL_POSITION_NED", self.urban.telemetry_max_age_s) is not None)
-                for i in UAV_IDS)
+                for i in self.uav_ids)
         def streams():
-            for i in UAV_IDS:
+            for i in self.uav_ids:
                 message_ids = [self.mav.MAVLINK_MSG_ID_GLOBAL_POSITION_INT, self.mav.MAVLINK_MSG_ID_GPS_RAW_INT]
                 if self.urban:
                     message_ids.append(self.mav.MAVLINK_MSG_ID_LOCAL_POSITION_NED)
@@ -477,7 +513,7 @@ class RelayExperiment:
                         pass
         self.wait(gps_ready, self.args.ready_timeout_s, "five real heartbeats and GPS fixes", streams, 2., strict_pose=False)
         self.initial = dict(self.poses)
-        for i in UAV_IDS:
+        for i in self.uav_ids:
             gpi = self.fresh(i, "GLOBAL_POSITION_INT")
             self.anchors[i] = dict(lat_int=int(gpi.lat), lon_int=int(gpi.lon),
                 world_z_offset_m=self.poses[i].position[2] - gpi.relative_alt / 1000.,
@@ -499,7 +535,7 @@ class RelayExperiment:
         self.summary["anchors"] = self.anchors
         if self.args.parameter_snapshots:
             self.capture_parameters("before")
-        for i in UAV_IDS:
+        for i in self.uav_ids:
             self.phase(f"experiment_takeoff_uav{i}")
             self.wait(lambda i=i: self.guided_ready(i), 30, f"uav{i} actual GUIDED")
             if self.urban:
@@ -556,6 +592,7 @@ class RelayExperiment:
         directory = self.args.run_dir / "configuration" / f"parameters-{stage}"
         command = [sys.executable, str(ROOT / "scripts/product/capture_autopilot_params.py"),
                    "--output-dir", str(directory), "--run-id", self.args.run_id,
+                   "--sysids", ",".join(map(str, self.uav_ids)),
                    "--workers", str(self.args.parameter_workers)]
         if stage == "after":
             command += ["--compare-before", str(directory.parent / "parameters-before")]
@@ -692,7 +729,7 @@ class RelayExperiment:
         Neither GoalObserver nor self.poses (Gazebo observations) is a route input.
         Once a route completes, its final target remains the refresh/hold target.
         """
-        for i in UAV_IDS:
+        for i in self.uav_ids:
             if i not in goals:
                 goals[i] = self.urban_goal(i, 0)
             pose = self.telemetry_pose(i)
@@ -788,7 +825,7 @@ class RelayExperiment:
                 self.advance_urban(goals)
             elif index != current_goal:
                 current_goal = index
-                for i in UAV_IDS:
+                for i in self.uav_ids:
                     relative = (self.args.base_altitude_m + (i - 1) * self.args.altitude_separation_m
                                 + (self.args.altitude_step_m if index % 2 == 0 else 0))
                     goal = Goal(f"goal{index}:uav{i}", i, time.monotonic_ns(), self.source_s, relative,
@@ -808,11 +845,33 @@ class RelayExperiment:
         if getattr(self, "urban", None):
             self.summary["urban_waypoints_telemetry_reached"] = self.urban_reached
             self.summary["urban_routes_telemetry_completed"] = {
-                str(i): len(self.urban_reached[i]) == len(self.urban.routes[i]) for i in UAV_IDS}
+                str(i): len(self.urban_reached[i]) == len(self.urban.routes[i]) for i in self.uav_ids}
             self.emit("urban_measurement_window_closed",
                 source_sim_time_s=self.source_s,
                 measurement_end_source_sim_time_s=self.observation_end_source_s,
                 waypoints_telemetry_reached=self.urban_reached)
+
+    def landing_heartbeat(self, i):
+        """Actual observation only; local UART never becomes an input to control.
+
+        After lease expiry the radio telemetry path may be unavailable while the
+        autopilot is landing. Both sources retain their real receipt timestamps.
+        """
+        observed = []
+        now = time.monotonic_ns()
+        hb = self.fresh(i, "HEARTBEAT")
+        if hb is not None:
+            observed.append(dict(source="radio_telemetry",
+                stamp_ns=self.gcs.latest_message_ns[i]["HEARTBEAT"],
+                mode_land=hb.custom_mode == self.modes["LAND"],
+                armed=bool(hb.base_mode & self.mav.MAV_MODE_FLAG_SAFETY_ARMED)))
+        local = self.onboard_mode.get(i, {})
+        if (type(local.get("armed")) is bool and local.get("node_id") == i
+                and 0 <= now - local.get("host_monotonic_ns", 0) <= 2_000_000_000):
+            observed.append(dict(source="onboard_uart_observation",
+                stamp_ns=local["host_monotonic_ns"], mode_land=local.get("mode") == "LAND",
+                armed=local["armed"]))
+        return max(observed, key=lambda row: row["stamp_ns"]) if observed else None
 
     def land(self):
         self.stopping = True
@@ -825,12 +884,12 @@ class RelayExperiment:
         self.landing_traces = {i: LandingTrace(self.poses[i], self.initial[i].position[2],
                     ground_tolerance=self.args.land_z_tolerance_m,
                     max_descent_mps=self.args.max_landing_descent_mps)
-                for i in UAV_IDS if i in self.initial and i in self.poses and self.summary["uavs"][str(i)]["armed"]}
+                for i in self.uav_ids if i in self.initial and i in self.poses and self.summary["uavs"][str(i)]["armed"]}
         next_send, deadline = 0., time.monotonic() + self.args.land_timeout_s
         while time.monotonic() < deadline:
             self.pump(strict_pose=False, observe=False)
             if time.monotonic() >= next_send:
-                for i in UAV_IDS:
+                for i in self.uav_ids:
                     try:
                         command = self.send(i, self.tx.set_mode_encode(i, self.mav.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
                                                                      self.modes["LAND"]))
@@ -838,53 +897,66 @@ class RelayExperiment:
                     except (ProtocolError, BlockingIOError):
                         pass
                 next_send = time.monotonic() + 1
-            for i in UAV_IDS:
-                hb, pose = self.fresh(i, "HEARTBEAT"), self.poses.get(i)
+            for i in self.uav_ids:
+                hb, pose = self.landing_heartbeat(i), self.poses.get(i)
                 if hb is None or pose is None:
                     continue
                 fresh_pose = 0 <= time.monotonic_ns() - pose.sample_ns <= 500_000_000
                 trace = self.landing_traces.get(i)
                 if trace is not None and fresh_pose:
-                    trace.observe(pose, heartbeat_ns=self.gcs.latest_message_ns[i]["HEARTBEAT"],
-                                  mode_land=hb.custom_mode == self.modes["LAND"],
-                                  armed=bool(hb.base_mode & self.mav.MAV_MODE_FLAG_SAFETY_ARMED))
+                    trace.observe(pose, heartbeat_ns=hb["stamp_ns"],
+                                  mode_land=hb["mode_land"], armed=hb["armed"])
                     for event in trace.events:
                         self.emit(event, uav_id=i, actual_position_m=pose.position,
                                   source_sim_time_s=pose.source_s, admitted_command_id=trace.command_id,
-                                  reason=trace.terminal_reason)
+                                  reason=trace.terminal_reason, observation_source=hb["source"])
                     trace.events.clear()
                     if trace.completed:
-                        self.summary["uavs"][str(i)].update(landed=True, auto_disarm=True)
+                        self.summary["uavs"][str(i)].update(landed=True, auto_disarm=True,
+                            landing_confirmation_source=hb["source"])
+                        radio_hb = self.fresh(i, "HEARTBEAT")
+                        self.summary["uavs"][str(i)]["landing_radio_confirmation"] = (
+                            radio_hb is not None and not bool(radio_hb.base_mode & self.mav.MAV_MODE_FLAG_SAFETY_ARMED))
                     if trace.terminal_reason:
                         self.summary["uavs"][str(i)]["terminal_outcome"] = trace.terminal_reason
-            all_disarmed = all(self.fresh(i, "HEARTBEAT") is not None and not self.armed(i) for i in UAV_IDS)
+            observed = [self.landing_heartbeat(i) for i in self.uav_ids]
+            all_disarmed = all(hb is not None and not hb["armed"] for hb in observed)
             if all_disarmed:
                 incomplete = [i for i, trace in self.landing_traces.items() if not trace.completed]
                 if any(trace.terminal_reason for trace in self.landing_traces.values()):
                     raise ScenarioError(f"terminal disarm without controlled LAND evidence: {incomplete}")
                 if not incomplete:
                     return
-        raise ScenarioError("landing/automatic disarm not observed for all five")
+        incomplete = [i for i, trace in self.landing_traces.items() if not trace.completed]
+        self.summary["landing_unconfirmed_uavs"] = incomplete
+        raise ScenarioError(f"landing/automatic disarm not observed for UAVs {incomplete}")
 
     def run(self):
         error = None
         landed = False
         stopped = False
+        window_complete = False
+        runtime_errors = []
         try:
             self.prepare()
             self.measure()
+            window_complete = True
         except StopRequested:
             stopped = True
             self.summary["stop_requested_source_sim_time_s"] = self.source_s
             self.emit("stop_requested", source_sim_time_s=self.source_s)
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
+            if not isinstance(exc, ScenarioError):
+                runtime_errors.append(error)
             self.emit("experiment_failed", reason=error)
         try:
             self.land()
             landed = True
         except Exception as exc:
             error = (error + "; " if error else "") + f"cleanup {type(exc).__name__}: {exc}"
+            if not isinstance(exc, ScenarioError):
+                runtime_errors.append(f"cleanup {type(exc).__name__}: {exc}")
         if self.args.parameter_snapshots and landed:
             try:
                 self.capture_parameters("after")
@@ -901,15 +973,18 @@ class RelayExperiment:
         self.summary["criteria"] = dict(
             five_uav_lifecycle=all(all(row[k] for k in ("armed", "takeoff", "landed", "auto_disarm"))
                                    for row in self.summary["uavs"].values()),
-            two_completed_goals_each=all(sum(row["uav_id"] == i for row in completed) >= 2 for i in UAV_IDS),
+            two_completed_goals_each=all(sum(row["uav_id"] == i for row in completed) >= 2 for i in self.uav_ids),
             two_completed_target_levels_each=all(len({round(row["target_position_m"][2], 3)
-                                    for row in completed if row["uav_id"] == i}) >= 2 for i in UAV_IDS),
+                                    for row in completed if row["uav_id"] == i}) >= 2 for i in self.uav_ids),
             live_integral_rtf_target=.98 <= self.summary.get("measurement_integral_rtf", 0) <= 1.02,
-            total_GCS_hold_all_five=(len(self.summary["failsafe_holds"]) == 5
+            total_GCS_hold_all_five=(len(self.summary["failsafe_holds"]) == len(self.uav_ids)
                                     if self.args.fault_profile == "total_GCS" else None))
         if self.urban:
             self.summary["criteria"]["urban_routes_telemetry_completed"] = all(
-                self.summary.get("urban_routes_telemetry_completed", {}).get(str(i), False) for i in UAV_IDS)
+                self.summary.get("urban_routes_telemetry_completed", {}).get(str(i), False) for i in self.uav_ids)
+        self.summary["criteria"]["all_uav_lifecycle"] = self.summary["criteria"]["five_uav_lifecycle"]
+        self.summary.update(outcome_fields(self.summary, window_complete=window_complete,
+                                          stopped=stopped, runtime_errors=runtime_errors))
         self.phase("experiment_failed" if error else "experiment_stopped" if stopped else "experiment_done")
         output = self.args.run_dir / "metrics/relay_experiment_summary.json"
         output.write_text(json.dumps(self.summary, indent=2, allow_nan=False) + "\n")
@@ -950,6 +1025,7 @@ def main(argv=None):
     parser.add_argument("--stop-file", type=Path, help="request controlled LAND and stop; not a completed measurement")
     parser.add_argument("--policy", choices=("fixed", "failover"), required=True)
     parser.add_argument("--run-id")
+    parser.add_argument("--uav-count", type=int, choices=range(1, 6), default=5)
     parser.add_argument("--initial-master", type=int, choices=UAV_IDS, default=1)
     parser.add_argument("--radio-watchdog-file", type=Path)
     parser.add_argument("--watchdog-s", type=float, default=.3)
@@ -981,6 +1057,8 @@ def main(argv=None):
     parser.add_argument("--max-landing-descent-mps", type=float, default=3.)
     args = parser.parse_args(argv)
     args.run_id = args.run_id or args.run_dir.name
+    if args.initial_master > args.uav_count:
+        parser.error("initial-master is outside the configured UAV roster")
     if args.experiment_profile != "urban" and not 0 < args.fault_start_s < args.fault_end_s < args.duration_s:
         parser.error("require 0 < fault-start < fault-end < duration")
     try:

@@ -1,6 +1,8 @@
 import copy
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -15,13 +17,13 @@ class RuntimeTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        (self.root / 'scene.json').write_text('{}')
+        (self.root / 'scene.json').write_bytes((bas.ROOT / 'network/config/urban_low.json').read_bytes())
         self.config = json.loads((bas.ROOT / 'runtime.json').read_text())
         self.config['environment']['scene'] = 'scene.json'
 
-    def load(self, config=None):
+    def load(self, config=...):
         path = self.root / 'runtime.json'
-        path.write_text(json.dumps(self.config if config is None else config))
+        path.write_text(json.dumps(self.config if config is ... else config))
         return bas.load_config(path, self.root)
 
     def test_environment_cannot_activate_old_modes(self):
@@ -48,6 +50,73 @@ class RuntimeTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.load(config)
 
+    def test_invalid_json_shapes_and_field_types_are_rejected(self):
+        for config in (None, [], [dict(self.config)], 'runtime', 5, True):
+            with self.subTest(config=config), self.assertRaises(ValueError):
+                self.load(config)
+        for value in (None, [], 'engine', 5, True):
+            config = copy.deepcopy(self.config)
+            config['environment'] = value
+            with self.subTest(section=value), self.assertRaises(ValueError):
+                self.load(config)
+        for section, key, value in [('drone', 'count', 5.0),
+                                    ('runtime', 'image', None),
+                                    ('runtime', 'image', 42),
+                                    ('environment', 'scene', None),
+                                    ('environment', 'scene', ['scene.json']),
+                                    ('environment', 'scene', ''),
+                                    ('experiment', 'duration_s', True),
+                                    ('experiment', 'duration_s', 10 ** 1000),
+                                    ('runtime', 'land_timeout_s', float('inf'))]:
+            with self.subTest(section=section, key=key, value=value):
+                config = copy.deepcopy(self.config)
+                config[section][key] = value
+                with self.assertRaises(ValueError):
+                    self.load(config)
+
+    def test_duplicate_json_field_is_not_silently_overridden(self):
+        path = self.root / 'runtime.json'
+        text = json.dumps(self.config).replace('"duration_s": 240', '"duration_s": 1, "duration_s": 240')
+        self.assertIn('"duration_s": 1, "duration_s": 240', text)
+        path.write_text(text)
+        with self.assertRaisesRegex(ValueError, 'duplicate'):
+            bas.load_config(path, self.root)
+
+    def test_scene_path_is_normalized_for_linux_snapshot(self):
+        (self.root / 'maps').mkdir()
+        (self.root / 'maps/scene.json').write_bytes((self.root / 'scene.json').read_bytes())
+        self.config['environment']['scene'] = r'maps\scene.json'
+        self.assertEqual(self.load()['environment']['scene'], 'maps/scene.json')
+
+    def test_inspect_cli_runs_without_linux_runtime(self):
+        result = subprocess.run([sys.executable, str(bas.ROOT / 'bas.py'), 'inspect',
+                                 '--run-id', 'inspect-test'], cwd=self.root, text=True,
+                                capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertEqual(output['config']['drone']['count'], 5)
+        self.assertEqual(output['config']['environment']['scene'], 'network/config/urban_low.json')
+        self.assertEqual(output['environment']['BAS_NATIVE_UAV_COUNT'], '5')
+
+    def test_cli_invalid_config_has_actionable_error_without_traceback(self):
+        path = self.root / 'runtime.json'
+        path.write_text('null')
+        result = subprocess.run([sys.executable, str(bas.ROOT / 'bas.py'), 'inspect',
+                                 '--config', str(path)], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('BAS:', result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+
+    @unittest.skipIf(sys.platform == 'linux', 'non-Linux runtime error only')
+    def test_run_cli_explains_linux_requirement(self):
+        result = subprocess.run([sys.executable, str(bas.ROOT / 'bas.py'), 'run',
+                                 '--run-id', 'unsupported-host-test'], cwd=self.root,
+                                text=True, capture_output=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('requires Linux', result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+        self.assertFalse((self.root / 'runs').exists())
+
     def test_scene_must_stay_inside_workspace(self):
         self.config['environment']['scene'] = '../outside.json'
         with self.assertRaises(ValueError):
@@ -57,6 +126,21 @@ class RuntimeTests(unittest.TestCase):
         for value in ('../other', '.', '/tmp/x', 'name/child', ''):
             with self.assertRaises(ValueError):
                 bas.identifier(value)
+
+    def test_count_requires_an_exact_scene_roster(self):
+        self.config['drone']['count'] = 2
+        with self.assertRaisesRegex(ValueError, 'roster'):
+            self.load()
+
+    def test_missing_or_failed_native_process_is_never_success(self):
+        raw = self.root / 'raw'
+        (raw / 'metrics').mkdir(parents=True)
+        summary = dict(runtime_status='completed', mission_outcome='succeeded', measurement_validity='valid')
+        self.assertEqual(bas.recorded_outcome(raw, 0, summary)['runtime_status'], 'failed')
+        (raw / 'metrics/native_radio_stats.json').write_text(json.dumps(dict(stop_reason='state_coupling_deadline')))
+        result = bas.recorded_outcome(raw, 0, summary)
+        self.assertEqual(result['runtime_status'], 'failed')
+        self.assertEqual(result['measurement_validity'], 'invalid')
 
     def test_events_preserve_command_and_clock_fields_across_logs(self):
         paths = [self.root / 'gcs.jsonl', self.root / 'uav.jsonl']

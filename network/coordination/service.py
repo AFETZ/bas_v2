@@ -20,7 +20,6 @@ import signal
 import socket
 import sys
 import time
-import tty
 from typing import Any
 
 from .policy import (AdmissionGate, Authority, Command, Grant, MAX_DATAGRAM_BYTES,
@@ -29,6 +28,15 @@ from network.scripts.serial_transport import Encoder, Reassembler, decode_chunk,
 
 
 UAV_IDS = tuple(range(1, 6))
+AUTOPILOT_MODE_MAX_AGE_NS = 2_000_000_000  # Local UART heartbeat is normally 1 Hz.
+
+
+def configured_uav_ids(args):
+    """Contiguous native node/TAP/SYSID roster; legacy callers default to five."""
+    count = getattr(args, "uav_count", 5)
+    if type(count) is not int or not 1 <= count <= 5:
+        raise ValueError("uav_count must be an integer in 1..5")
+    return tuple(range(1, count + 1))
 
 
 def endpoint_ip(index: int) -> str:
@@ -63,6 +71,9 @@ class Events:
 class Network:
     def __init__(self, args, index: int, emit: Events):
         self.args, self.index, self.emit = args, index, emit
+        self.uav_ids = configured_uav_ids(args)
+        if index not in (0, *self.uav_ids):
+            raise ValueError("endpoint is outside the configured UAV roster")
         self.selector = selectors.DefaultSelector()
         self.udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.udp.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, 184)
@@ -93,6 +104,8 @@ class Network:
             raise RuntimeError("native radio watchdog expired or disappeared after readiness")
 
     def send(self, kind, body, destination: int):
+        if destination not in (0, *self.uav_ids):
+            raise ProtocolError("destination is outside the configured UAV roster")
         self.guard_radio()
         raw = encode(kind, self.index, body)
         try:
@@ -107,7 +120,7 @@ class Network:
         if now - self.last_probe_ns < int(self.args.heartbeat_s * 1e9):
             return
         self.last_probe_ns = now
-        for peer in (UAV_IDS if self.index == 0 else (0, *UAV_IDS)):
+        for peer in (self.uav_ids if self.index == 0 else (0, *self.uav_ids)):
             if peer == self.index:
                 continue
             values = self.probes.setdefault(peer, [])
@@ -121,6 +134,8 @@ class Network:
     def receive(self):
         raw, source = self.udp.recvfrom(MAX_DATAGRAM_BYTES + 1)
         kind, sender, body = decode(raw)
+        if sender not in (0, *self.uav_ids):
+            raise ProtocolError("sender is outside the configured UAV roster")
         if source != (endpoint_ip(sender), self.args.port):
             raise ProtocolError("source address disagrees with protocol sender")
         run = body.run_id if isinstance(body, (Grant, Command)) else body.get("run_id")
@@ -150,6 +165,7 @@ class Network:
 
 
 def configure_uart(path: str) -> int:
+    import tty  # POSIX UART setup; pure policy/observation code also runs on Windows.
     # Reuse the existing checked baud setup without changing that adapter.
     script_path = str(Path(__file__).resolve().parents[1] / "scripts")
     if script_path not in sys.path:
@@ -182,6 +198,8 @@ class UAVService(Network):
         self.hold_pending: bytes | None = None
         self.last_hold_ns = 0
         self.hold_confirmed = True
+        self.latest_autopilot_mode: dict | None = None
+        self.hold_suppressed_for_land = False
         self.uart_parser = self.mavutil.mavlink.MAVLink(None)
         self.uart_parser.robust_parsing = True
 
@@ -190,6 +208,9 @@ class UAVService(Network):
         return os.write(self.uart, data)
 
     def request_hold(self):
+        if self.preserve_autonomous_landing():
+            self.last_hold_ns = time.monotonic_ns()
+            return
         modes = {name: number for number, name in self.mavutil.mode_mapping_acm.items()}
         if "BRAKE" not in modes:
             raise RuntimeError("pinned ArduCopter dialect has no BRAKE mode mapping")
@@ -200,8 +221,25 @@ class UAVService(Network):
         self.hold_confirmed = False
         self.last_hold_ns = time.monotonic_ns()
 
+    def preserve_autonomous_landing(self):
+        """Lease expiry fences new commands; it must not abort observed native LAND."""
+        observed = self.latest_autopilot_mode
+        now = time.monotonic_ns()
+        preserve = (observed is not None and observed["mode"] == "LAND"
+                    and 0 <= now - observed["received_host_monotonic_ns"] <= AUTOPILOT_MODE_MAX_AGE_NS)
+        if preserve:
+            self.hold_pending = None
+            if not self.hold_suppressed_for_land:
+                self.emit("hold_suppressed", reason="observed_autonomous_landing", **observed)
+            self.hold_suppressed_for_land = True
+        else:
+            self.hold_suppressed_for_land = False
+        return preserve
+
     def write_hold(self):
         if self.hold_pending is None:
+            return
+        if self.preserve_autonomous_landing():
             return
         if self.admission.queue and self.admission.queue[0][2]:
             raise RuntimeError("cannot insert HOLD into a partially written command")
@@ -215,6 +253,8 @@ class UAVService(Network):
         self.hold_pending = None
 
     def command(self, sender: int, command: Command):
+        if command.destination_id not in self.uav_ids:
+            raise ProtocolError("command target is outside the configured UAV roster")
         active = self.gate.active_grant()
         if sender == 0:
             if active is None or active.leader_id != self.index or command.leader_id != self.index:
@@ -234,9 +274,14 @@ class UAVService(Network):
         now = time.monotonic_ns()
         self.emit("uart_observed", bytes=len(raw), payload_sha256=hashlib.sha256(raw).hexdigest())
         for message in self.uart_parser.parse_buffer(raw) or []:
-            if message.get_type() == "HEARTBEAT":
+            if (message.get_type() == "HEARTBEAT" and message.get_srcSystem() == self.index
+                    and message.get_srcComponent() == 1):  # MAV_COMP_ID_AUTOPILOT1
                 mode = self.mavutil.mode_string_v10(message)
-                self.emit("autopilot_mode_observed", custom_mode=int(message.custom_mode), mode=mode)
+                self.latest_autopilot_mode = dict(mode=mode, custom_mode=int(message.custom_mode),
+                    base_mode=int(message.base_mode),
+                    armed=bool(message.base_mode & self.mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED),
+                    received_host_monotonic_ns=now)
+                self.emit("autopilot_mode_observed", **self.latest_autopilot_mode)
                 if mode == "BRAKE" and not self.hold_confirmed:
                     self.hold_confirmed = True
                     self.emit("hold_mode_observed", mode=mode)
@@ -260,7 +305,7 @@ class UAVService(Network):
                           grant_sequence=body.grant_sequence)
                 # Essential for the former master whose direct GCS link is down.
                 # The original issuer, sequence and absolute validity stay unchanged.
-                for i in UAV_IDS:
+                for i in self.uav_ids:
                     if i != self.index and self.send("grant", body, i):
                         self.emit("grant_master_forward", destination_id=i,
                                   leader_id=self.index, epoch=body.epoch,
@@ -325,17 +370,17 @@ class GCSService(Network):
         self.clients, self.client_peers, self.parsers = {}, {}, {}
         self.receivers = {i: Reassembler(channel="control", uav_id=i, direction="uart_to_gcs",
                                          max_age_ms=args.telemetry_max_age_ms)
-                          for i in UAV_IDS}
-        self.telemetry_provenance = {i: {} for i in UAV_IDS}
+                          for i in self.uav_ids}
+        self.telemetry_provenance = {i: {} for i in self.uav_ids}
         self.telemetry_scope = {}
-        self.stream_provenance = {i: deque() for i in UAV_IDS}
+        self.stream_provenance = {i: deque() for i in self.uav_ids}
         self.mavutil = mavlink_api()
         self.transmitter = self.mavutil.mavlink.MAVLink(None, srcSystem=255, srcComponent=190)
         self.uart_parsers = {}
-        self.latest_messages: dict[int, dict[str, Any]] = {i: {} for i in UAV_IDS}
-        self.latest_message_ns: dict[int, dict[str, int]] = {i: {} for i in UAV_IDS}
-        self.latest_message_received_ns: dict[int, dict[str, int]] = {i: {} for i in UAV_IDS}
-        for i in UAV_IDS:
+        self.latest_messages: dict[int, dict[str, Any]] = {i: {} for i in self.uav_ids}
+        self.latest_message_ns: dict[int, dict[str, int]] = {i: {} for i in self.uav_ids}
+        self.latest_message_received_ns: dict[int, dict[str, int]] = {i: {} for i in self.uav_ids}
+        for i in self.uav_ids:
             client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             client.bind(("127.0.0.1", 14550 + i))
             client.setblocking(False)
@@ -363,7 +408,7 @@ class GCSService(Network):
             if not self.direct_available(i, now):
                 continue
             if all(type(peer.get(str(j))) is int and 0 <= now - peer[str(j)] <= deadline
-                   for j in UAV_IDS if j != i):
+                   for j in self.uav_ids if j != i):
                 candidates.append(i)
         return sorted(candidates, key=lambda i: (self.peer_rtt_ns.get(i, 1 << 63), i))
 
@@ -395,7 +440,7 @@ class GCSService(Network):
                   grant_sequence=self.grant.grant_sequence,
                   valid_from_ns=self.grant.valid_from_ns, valid_until_ns=self.grant.valid_until_ns,
                   reason="selection" if previous != leader else "renewal")
-        for i in UAV_IDS:
+        for i in self.uav_ids:
             self.send("grant", self.grant, i)
 
     def dispatch_frame(self, destination_id: int, payload: bytes, *,
@@ -408,6 +453,8 @@ class GCSService(Network):
         Both mode restoration and setpoint still take the two native radio hops.
         This method returns a sent command, never an autopilot acknowledgement.
         """
+        if destination_id not in self.uav_ids:
+            raise ProtocolError("command target is outside the configured UAV roster")
         now = time.monotonic_ns()
         grant = self.grant
         if grant is None or not grant.valid_from_ns <= now < grant.valid_until_ns:
@@ -544,10 +591,10 @@ class GCSService(Network):
         if kind == "heartbeat":
             now = time.monotonic_ns()
             peers = body.get("peer_echo_ns")
-            if (sender not in UAV_IDS or type(body.get("sent_ns")) is not int
+            if (sender not in self.uav_ids or type(body.get("sent_ns")) is not int
                     or type(body.get("echo_ns")) is not int or not 0 <= body["echo_ns"] <= now
                     or not 0 <= body["sent_ns"] <= now or not isinstance(peers, dict)
-                    or any(k not in {str(i) for i in (0, *UAV_IDS)} or type(v) is not int
+                    or any(k not in {str(i) for i in (0, *self.uav_ids)} or type(v) is not int
                            or not 0 <= v <= now for k, v in peers.items())):
                 raise ProtocolError("invalid UAV heartbeat")
             self.heartbeat[sender] = (time.monotonic_ns(), body)
@@ -560,7 +607,7 @@ class GCSService(Network):
             grant = self.issued_grants.get(body.get("grant_sequence"))
             producer = body.get("producer_ns")
             i = body.get("origin_id")
-            if (grant is None or sender != grant.leader_id or type(i) is not int or i not in UAV_IDS
+            if (grant is None or sender != grant.leader_id or type(i) is not int or i not in self.uav_ids
                     or body.get("leader_id") != sender
                     or body.get("epoch") != grant.epoch
                     or not self.telemetry_eligible(grant, producer, now)):
@@ -619,6 +666,7 @@ def build_parser():
     parser.add_argument("--watchdog-s", type=float, default=.3)
     parser.add_argument("--heartbeat-s", type=float, default=.2)
     parser.add_argument("--duration-s", type=float, default=600)
+    parser.add_argument("--uav-count", type=int, choices=range(1, 6), default=5)
     parser.add_argument("--uav-id", type=int, choices=UAV_IDS)
     parser.add_argument("--tty")
     parser.add_argument("--policy", choices=("fixed", "failover"), default="failover")
@@ -635,6 +683,9 @@ def build_parser():
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
+    ids = configured_uav_ids(args)
+    if args.initial_master not in ids or (args.role == "uav" and args.uav_id not in ids):
+        parser.error("uav-id and initial-master must belong to the configured UAV roster")
     if os.environ.get("BAS_SIMULATION_MODE", "realtime") != "realtime":
         parser.error("coordination service currently requires realtime host-monotonic mode")
     if args.role == "uav" and (args.uav_id is None or not args.tty):

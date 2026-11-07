@@ -5,6 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 IMAGE="${BAS_CONTAINER_IMAGE:-multiagent_simulation:latest}"
 CONTAINER_NAME="${BAS_NATIVE_FIVE_CONTAINER_NAME:-bas-v2-native-radio-five-uav}"
 SCENARIO_KEY="${BAS_NATIVE_FIVE_SCENARIO:-town01}"
+UAV_COUNT="${BAS_NATIVE_UAV_COUNT:-5}"
+[[ "$UAV_COUNT" =~ ^[1-5]$ ]] || { printf 'UAV count must be an integer in 1..5: %s\n' "$UAV_COUNT" >&2; exit 2; }
 # Gazebo server, bridges, tracker and viewer share this host. Pin upstream
 # Transport to loopback instead of auto-advertising a VPN/external interface.
 export GZ_IP=127.0.0.1
@@ -118,7 +120,7 @@ run_in_container() {
     python3 "$ROOT_DIR/scripts/product/prepare_town01_gazebo.py"
   fi
   if [[ "$SCENARIO_KEY" == urban ]]; then
-    python3 "$ROOT_DIR/scripts/product/prepare_urban_gazebo.py" --config "$GEOMETRY_CONFIG" --output "$ROOT_DIR/.external/urban_ns3"
+    python3 "$ROOT_DIR/scripts/product/prepare_urban_gazebo.py" --config "$GEOMETRY_CONFIG" --output "$ROOT_DIR/.external/urban_ns3" --uav-count "$UAV_COUNT"
   fi
   local container_geometry="$GEOMETRY_CONFIG"
   if [[ "$GEOMETRY_CONFIG" == "$ROOT_DIR/"* ]]; then
@@ -191,7 +193,7 @@ run_in_container() {
     -e BAS_NATIVE_FIVE_TIMEOUT_SCALE="${BAS_NATIVE_FIVE_TIMEOUT_SCALE:-5.0}" \
     -e BAS_NATIVE_LATENCY_MODE="${BAS_NATIVE_LATENCY_MODE:-0}" \
     -e BAS_NATIVE_FLIGHT_DIAGNOSTIC="${BAS_NATIVE_FLIGHT_DIAGNOSTIC:-0}" \
-    -e BAS_NATIVE_UAV_COUNT="${BAS_NATIVE_UAV_COUNT:-5}" \
+    -e BAS_NATIVE_UAV_COUNT="$UAV_COUNT" \
     -e BAS_NATIVE_UART_CHANNELS="${BAS_NATIVE_UART_CHANNELS:-control,payload}" \
     -e BAS_NATIVE_RADIO_BACKEND="${BAS_NATIVE_RADIO_BACKEND:-}" \
     -e BAS_NATIVE_WIFI_DATA_MODE="${BAS_NATIVE_WIFI_DATA_MODE:-}" \
@@ -238,14 +240,12 @@ done
 RUN_ID="${BAS_NATIVE_FIVE_RUN_ID:-native-five-$(date -u +%Y%m%dT%H%M%SZ)}"
 [[ "$RUN_ID" =~ ^[a-zA-Z0-9_.-]+$ ]] || { printf 'Unsafe run ID: %s\n' "$RUN_ID" >&2; exit 2; }
 LATENCY_MODE="${BAS_NATIVE_LATENCY_MODE:-0}"
-UAV_COUNT="${BAS_NATIVE_UAV_COUNT:-5}"
 if [[ "$COORDINATION_POLICY" == off ]]; then
   ACTIVE_UART_CHANNELS="${BAS_NATIVE_UART_CHANNELS:-control,payload}"
 else
   ACTIVE_UART_CHANNELS="${BAS_NATIVE_UART_CHANNELS:-control}"
 fi
 EVENT_LOGGING="${BAS_NATIVE_EVENT_LOGGING:-batched_trace}"
-[[ "$UAV_COUNT" == 1 || "$UAV_COUNT" == 5 ]] || { printf 'UAV count must be 1 or 5: %s\n' "$UAV_COUNT" >&2; exit 2; }
 [[ ",$ACTIVE_UART_CHANNELS," == *,control,* ]] || { printf 'Control UART must remain active.\n' >&2; exit 2; }
 [[ "$EVENT_LOGGING" == metrics_only || "$EVENT_LOGGING" == batched_trace ]] || { printf 'Invalid event logging mode.\n' >&2; exit 2; }
 SCENARIO_MODE="product"
@@ -255,11 +255,11 @@ if [[ "${BAS_NATIVE_FLIGHT_DIAGNOSTIC:-0}" == 1 ]]; then
   SCENARIO_MODE="flight_diagnostic"
 fi
 if [[ "$COORDINATION_POLICY" != off ]]; then
-  [[ "$BAS_SIMULATION_MODE" == realtime && "$UAV_COUNT" == 5 &&
+  [[ "$BAS_SIMULATION_MODE" == realtime &&
      ( "$PROPAGATION_PROFILE" == friis || "$PROPAGATION_PROFILE" == geometry_logdistance ) && "$WIFI_TOPOLOGY" == adhoc &&
      "$SCENARIO_MODE" == product && "$ACTIVE_UART_CHANNELS" == control &&
      -z "${BAS_NATIVE_EXTERNAL_CONFIG:-}" && -z "${BAS_NATIVE_SOURCES:-}" ]] || {
-    printf 'Coordination requires five realtime UAVs, explicit Friis or geometry_logdistance/ad-hoc, control UART only, and no other scenario mode.\n' >&2
+    printf 'Coordination requires 1..5 realtime UAVs, explicit Friis or geometry_logdistance/ad-hoc, control UART only, and no other scenario mode.\n' >&2
     exit 2
   }
   SCENARIO_MODE="relay_experiment"
@@ -548,7 +548,7 @@ PYCAPTURE
 if [[ "$PHYSICS_PROFILE" == bullet_rotor ]]; then
   cp "$ROOT_DIR/.external/gz-physics7-rotor/build_manifest.json" "$RUN_DIR/logs/physics_runtime.json"
 fi
-if [[ "$SCENARIO_MODE" != product && "$UAV_COUNT" == 1 ]]; then
+if [[ ( "$SCENARIO_MODE" == flight_diagnostic || "$SCENARIO_MODE" == latency_diagnostic ) && "$UAV_COUNT" == 1 ]]; then
   python3 - "$SCENARIO" "$RUN_DIR/diagnostic_scenario.yaml" <<'PYSCENARIO'
 import sys
 from pathlib import Path
@@ -994,7 +994,7 @@ for index in "${UAV_INDICES[@]}"; do
     if [[ "$COORDINATION_POLICY" != off && "$channel" == control ]]; then
       setsid ip netns exec "ams-uav$index" env PYTHONPATH="$ROOT_DIR:${PYTHONPATH:-}" \
         python3 -u -m network.coordination.service uav \
-        --run-id "$RUN_ID" --uav-id "$index" --tty "$UART_DIR/control-adapter-$instance" \
+        --run-id "$RUN_ID" --uav-count "$UAV_COUNT" --uav-id "$index" --tty "$UART_DIR/control-adapter-$instance" \
         --event-log "$RUN_DIR/logs/coordination_uav$index.jsonl" \
         --ready-file "$RUN_DIR/logs/coordination_uav$index.ready" \
         --radio-watchdog-file "$NS3_READY.heartbeat" --watchdog-s 0.3 --duration-s 3600 \
@@ -1260,7 +1260,7 @@ if [[ "${BAS_NATIVE_OPERATOR_SECONDS:-0}" != 0 ]]; then
   if [[ "$COORDINATION_POLICY" != off ]]; then
     run_with_native_watchdog ip netns exec ams-gcs env PYTHONPATH="$ROOT_DIR:${PYTHONPATH:-}" \
       python3 -u -m network.coordination.service gcs \
-      --run-id "$RUN_ID" --policy "$COORDINATION_POLICY" --initial-master "$FAULT_MASTER_ID" \
+      --run-id "$RUN_ID" --uav-count "$UAV_COUNT" --policy "$COORDINATION_POLICY" --initial-master "$FAULT_MASTER_ID" \
       --event-log "$RUN_DIR/logs/coordination_gcs.jsonl" \
       --ready-file "$RUN_DIR/logs/coordination_gcs.ready" \
       --radio-watchdog-file "$NS3_READY.heartbeat" --duration-s "$BAS_NATIVE_OPERATOR_SECONDS" \
@@ -1277,6 +1277,7 @@ set +e
 if [[ "$COORDINATION_POLICY" != off ]]; then
   experiment_args=(
     --run-dir "$RUN_DIR" --node-state "$NODE_STATE" --phase-file "$PHASE_FILE"
+    --uav-count "$UAV_COUNT"
     --stop-file "$ROOT_DIR/runs/control/$RUN_ID/stop.request"
     --policy "$COORDINATION_POLICY" --run-id "$RUN_ID" --fault-profile "$FAULT_PROFILE"
     --initial-master "$FAULT_MASTER_ID" --radio-watchdog-file "$NS3_READY.heartbeat"

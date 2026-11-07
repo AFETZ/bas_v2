@@ -14,7 +14,7 @@ from unittest.mock import patch
 from network.coordination.policy import Authority, make_command
 from scripts.product.relay_experiment import (EventTail, Goal, GoalObserver,
                                               LandingTrace, Pose, PoseReader, RegionHold, ScenarioError, main)
-from scripts.product.relay_experiment import RelayExperiment, validate_experiment_profile
+from scripts.product.relay_experiment import RelayExperiment, outcome_fields, validate_experiment_profile
 
 
 def pose(source, z=12., host=1000, velocity=(0., 0., 0.)):
@@ -60,6 +60,49 @@ def measure_clock_samples(sample_pairs, *, duration_s, task_period_s):
 
 
 class RelayExperimentTests(unittest.TestCase):
+    def test_completed_window_does_not_claim_completed_urban_route(self):
+        summary = dict(experiment_profile="urban", criteria=dict(five_uav_lifecycle=True,
+            urban_routes_telemetry_completed=False, live_integral_rtf_target=True))
+        result = outcome_fields(summary, window_complete=True, stopped=False)
+        self.assertEqual(result["runtime_status"], "completed")
+        self.assertEqual(result["mission_outcome"], "incomplete")
+        self.assertEqual(result["measurement_validity"], "valid")
+
+    def test_post_window_landing_failure_preserves_measurements(self):
+        summary = dict(error="landing not observed", experiment_profile="urban",
+            criteria=dict(five_uav_lifecycle=False, live_integral_rtf_target=True))
+        result = outcome_fields(summary, window_complete=True, stopped=False)
+        self.assertEqual(result["mission_outcome"], "failed")
+        self.assertEqual(result["measurement_validity"], "valid")
+
+    def test_incomplete_or_bad_clock_window_is_not_valid(self):
+        summary = dict(measurement_start_source_sim_time_s=5.,
+                       criteria=dict(live_integral_rtf_target=False))
+        self.assertEqual(outcome_fields(summary, window_complete=False, stopped=True)["measurement_validity"], "incomplete")
+        result = outcome_fields(summary, window_complete=True, stopped=False, runtime_errors=["backend lost"])
+        self.assertEqual(result["measurement_validity"], "invalid")
+        self.assertEqual(result["runtime_status"], "failed")
+
+    def test_landing_observation_uses_fresh_local_uart_when_radio_is_lost(self):
+        scenario = RelayExperiment.__new__(RelayExperiment)
+        scenario.fresh = lambda *args: None
+        scenario.onboard_mode = {3: dict(node_id=3, mode="LAND", armed=False, host_monotonic_ns=2_000_000_000)}
+        with patch("scripts.product.relay_experiment.time.monotonic_ns", return_value=2_100_000_000):
+            row = scenario.landing_heartbeat(3)
+        self.assertEqual(row["source"], "onboard_uart_observation")
+        self.assertFalse(row["armed"])
+        self.assertTrue(row["mode_land"])
+
+    def test_stale_wrong_node_or_legacy_mode_event_cannot_prove_disarm(self):
+        scenario = RelayExperiment.__new__(RelayExperiment)
+        scenario.fresh = lambda *args: None
+        for row in [dict(node_id=3, mode="LAND", armed=False, host_monotonic_ns=1),
+                    dict(node_id=4, mode="LAND", armed=False, host_monotonic_ns=2_000_000_000),
+                    dict(node_id=3, mode="LAND", host_monotonic_ns=2_000_000_000)]:
+            scenario.onboard_mode = {3: row}
+            with patch("scripts.product.relay_experiment.time.monotonic_ns", return_value=2_100_000_000):
+                self.assertIsNone(scenario.landing_heartbeat(3))
+
     def test_final_pump_at_or_beyond_end_cannot_offer_refresh_goal_or_completion(self):
         for final_source in (103., 103.4):
             with self.subTest(final_source=final_source):
