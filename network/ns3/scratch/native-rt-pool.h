@@ -5,6 +5,7 @@
 #include "native-rt-cache.h"
 #include "ns3/event-id.h"
 #include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <functional>
 #include <fstream>
@@ -15,6 +16,118 @@
 namespace bas
 {
 using namespace pybind11::literals;
+
+// Scheduling hints only: neither the forecast nor a worker completion can
+// change the cache's measured poses, sample epochs, or admission guards.
+class NativeRtPrefetch
+{
+  public:
+    static constexpr int64_t kPollPeriodNs = 5000000;
+    static constexpr int64_t kMinimumLeadNs = 100000000;
+    static constexpr size_t kWindow = 64;
+    static constexpr double kGrowthFactor = 2;
+    static constexpr const char* kMethod = "edf_guard_forecast_v1";
+    using Pair = std::pair<size_t, size_t>;
+    struct Forecast
+    {
+        NativeRtCache::PairStatus state;
+        int64_t remainingNs;
+        bool eligible;
+        std::string limitingGuard;
+    };
+    struct Choice
+    {
+        size_t anchor, coveredPairs;
+        Forecast urgent;
+    };
+
+    void ObserveResponse(int64_t poseToReceiptNs, bool cold)
+    {
+        if (cold) return;
+        if (poseToReceiptNs < 0) throw std::invalid_argument("Negative RT response age");
+        m_responseAges.push_back(poseToReceiptNs);
+        if (m_responseAges.size() > kWindow) m_responseAges.pop_front();
+    }
+    size_t WindowSize() const { return m_responseAges.size(); }
+    int64_t ResponseP95Ns() const
+    {
+        if (m_responseAges.empty()) return 0;
+        std::vector<int64_t> ordered(m_responseAges.begin(), m_responseAges.end());
+        std::sort(ordered.begin(), ordered.end());
+        return ordered[(95 * ordered.size() + 99) / 100 - 1]; // Nearest rank.
+    }
+    int64_t LeadNs() const
+    {
+        const auto p95 = ResponseP95Ns();
+        return std::max(kMinimumLeadNs, p95 > INT64_MAX - kPollPeriodNs
+            ? INT64_MAX : p95 + kPollPeriodNs);
+    }
+    static Forecast Predict(const NativeRtCache::PairStatus& state,
+                            const NativeRtCache::Limits& limits, int64_t leadNs)
+    {
+        Forecast result{state, 0, true, "invalid"};
+        if (!state.valid || state.nativeAgeNs < 0 || state.hostAgeNs < 0) return result;
+        double remaining = std::max<int64_t>(0, limits.maximumAge.GetNanoSeconds() -
+            std::max(state.nativeAgeNs, state.hostAgeNs));
+        result.limitingGuard = state.hostAgeNs > state.nativeAgeNs ? "host_age" : "native_age";
+        const auto constrain = [&](double delta, double limit, const char* guard) {
+            if (delta <= 0) return;
+            // Double the observed growth for acceleration. This extrapolates
+            // urgency, never a pose or a CIR. Unknown same-epoch growth is due.
+            const double time = delta >= limit || state.nativeAgeNs == 0 ? 0 :
+                state.nativeAgeNs * ((limit - delta) / (kGrowthFactor * delta));
+            if (time < remaining) { remaining = time; result.limitingGuard = guard; }
+        };
+        constrain(state.displacementM, limits.displacementM, "displacement");
+        constrain(state.velocityDeltaMps, limits.velocityDeltaMps, "velocity");
+        constrain(state.orientationDeltaRad, limits.orientationDeltaRad, "orientation");
+        result.remainingNs = static_cast<int64_t>(remaining);
+        result.eligible = state.due || result.remainingNs <= leadNs;
+        return result;
+    }
+    static std::vector<Forecast> Rank(const std::vector<NativeRtCache::PairStatus>& states,
+                                     const NativeRtCache::Limits& limits, int64_t leadNs)
+    {
+        std::vector<Forecast> ranked;
+        for (const auto& state : states) ranked.push_back(Predict(state, limits, leadNs));
+        std::sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) {
+            if (a.remainingNs != b.remainingNs) return a.remainingNs < b.remainingNs;
+            if (a.state.normalizedRisk != b.state.normalizedRisk)
+                return a.state.normalizedRisk > b.state.normalizedRisk;
+            return Pair(a.state.first, a.state.second) < Pair(b.state.first, b.state.second);
+        });
+        return ranked;
+    }
+    static std::optional<Choice> Choose(const std::vector<Forecast>& ranked, const std::set<Pair>& covered)
+    {
+        const auto uncovered = [&](const Forecast& forecast) {
+            return forecast.eligible && !covered.count(Key(forecast.state.first, forecast.state.second));
+        };
+        const auto urgent = std::find_if(ranked.begin(), ranked.end(), uncovered);
+        if (urgent == ranked.end()) return std::nullopt;
+        size_t selected = urgent->state.first;
+        const auto other = urgent->state.second;
+        // Both anchors cover the earliest pair. Prefer coverage of the next
+        // earliest uncovered deadline, before any static count or risk sum.
+        for (const auto& forecast : ranked)
+        {
+            if (!uncovered(forecast)) continue;
+            const auto contains = [&](size_t anchor) {
+                return forecast.state.first == anchor || forecast.state.second == anchor;
+            };
+            if (contains(selected) != contains(other))
+            { if (contains(other)) selected = other; break; }
+        }
+        size_t count = 0;
+        for (const auto& forecast : ranked)
+            if (uncovered(forecast) && (forecast.state.first == selected || forecast.state.second == selected)) ++count;
+        return Choice{selected, count, *urgent};
+    }
+  private:
+    std::deque<int64_t> m_responseAges;
+    static Pair Key(size_t a, size_t b) { return {std::min(a,b), std::max(a,b)}; }
+};
+
 class NativeRtPool
 {
   public:
@@ -169,9 +282,8 @@ class NativeRtPool
     }
 
   private:
-    // The first five-UAV flight missed a rotation refresh while a reply was
-    // in transit. Poll below the 20 ms pose cadence; expiry guards stay fixed.
-    static constexpr int64_t kPollPeriodNs = 5000000;
+    // Completed-result pickup is independent of the unchanged cache guards.
+    static constexpr int64_t kPollPeriodNs = NativeRtPrefetch::kPollPeriodNs;
     using Pair = std::pair<size_t, size_t>;
     struct Job
     {
@@ -180,6 +292,11 @@ class NativeRtPool
         int64_t nativeNs, hostNs;
         std::vector<MeasuredState> poses;
         bool cold;
+        int64_t leadNs{0}, remainingNs{0};
+        Pair urgentPair{0,0};
+        std::string limitingGuard{"cold_warmup"};
+        bool forecastBeforeHalf{false};
+        size_t coveredDuePairs{0};
     };
     Ptr<NativeRtCache> m_cache;
     std::vector<NativeRtCache::Endpoint> m_endpoints;
@@ -195,6 +312,8 @@ class NativeRtPool
     uint64_t m_pollCalls{0};
     int64_t m_maxPollWallNs{0};
     std::map<std::string, uint64_t> m_discardReasons;
+    NativeRtPrefetch m_prefetch;
+    uint64_t m_forecastDispatches{0};
 
     static void Require(bool condition, const std::string& message)
     { if (!condition) throw std::runtime_error("native RT pool: " + message); }
@@ -214,10 +333,19 @@ class NativeRtPool
         return m_json.attr("dumps")(value, "allow_nan"_a=false).cast<std::string>();
     }
 
-    void Submit(size_t worker, size_t anchor, bool cold)
+    void Submit(size_t worker, size_t anchor, bool cold, const NativeRtPrefetch::Choice* choice = nullptr)
     {
         Require(!m_inflight.at(worker) && m_request < static_cast<uint64_t>(INT64_MAX), "Invalid/busy submission");
         Job job{++m_request, anchor, Simulator::Now().GetNanoSeconds(), 0, m_snapshot(), cold};
+        if (choice)
+        {
+            job.leadNs = m_prefetch.LeadNs();
+            job.remainingNs = choice->urgent.remainingNs;
+            job.urgentPair = Key(choice->urgent.state.first, choice->urgent.state.second);
+            job.limitingGuard = choice->urgent.limitingGuard;
+            job.forecastBeforeHalf = !choice->urgent.state.due;
+            job.coveredDuePairs = choice->coveredPairs;
+        }
         job.hostNs = NativeRtCache::HostNowNs(); // After the entire measured snapshot was copied.
         Require(job.poses.size() == m_endpoints.size(), "Measured snapshot does not match the complete cohort");
         py::list poses;
@@ -230,14 +358,15 @@ class NativeRtPool
             "sample_native_ns"_a=job.nativeNs, "sample_host_monotonic_ns"_a=job.hostNs,
             "anchor_index"_a=anchor, "poses"_a=poses);
         Require(m_pool.attr("submit")(worker, request).cast<bool>(), "Python pool unexpectedly reported busy");
+        if (job.forecastBeforeHalf) ++m_forecastDispatches;
         m_inflight[worker] = std::move(job);
     }
 
-    // Count only uncovered due links. Different anchors can share one pair;
-    // their completion ordering is resolved by the cache's original epochs.
+    // Keep one job per worker and the existing in-flight coverage graph.
+    // Forecasts only advance refresh dispatch; the cache still admits each CIR.
     void Dispatch()
     {
-        auto states = m_cache->Priorities();
+        const auto states = NativeRtPrefetch::Rank(m_cache->Priorities(), m_cache->GetLimits(), m_prefetch.LeadNs());
         std::set<Pair> covered;
         for (const auto& job : m_inflight)
             if (job) for (size_t peer=0;peer<m_endpoints.size();++peer)
@@ -245,24 +374,10 @@ class NativeRtPool
         for (size_t worker=0;worker<m_inflight.size();++worker)
         {
             if (m_inflight[worker]) continue;
-            const auto urgent = std::find_if(states.begin(), states.end(), [&](const auto& state) {
-                return state.due && !covered.count(Key(state.first,state.second));
-            });
-            if (urgent==states.end()) break;
-            size_t selected=0, bestCount=0;
-            double bestRisk=-1;
-            for (size_t anchor : {urgent->first,urgent->second})
-            {
-                size_t count=0; double risk=0;
-                for (const auto& state:states)
-                    if (state.due && (state.first==anchor || state.second==anchor) &&
-                        !covered.count(Key(state.first,state.second)))
-                    { ++count; risk+=state.normalizedRisk; }
-                if (count>bestCount || (count==bestCount && count && risk>bestRisk))
-                { selected=anchor; bestCount=count; bestRisk=risk; }
-            }
-            if (!bestCount) break;
-            Submit(worker,selected,false);
+            const auto choice = NativeRtPrefetch::Choose(states, covered);
+            if (!choice) break;
+            const auto selected = choice->anchor;
+            Submit(worker,selected,false,&*choice);
             for(size_t peer=0;peer<m_endpoints.size();++peer)
                 if(peer!=selected) covered.insert(Key(selected,peer));
         }
@@ -356,12 +471,20 @@ class NativeRtPool
             }
             ++m_completed; if(job.cold) ++m_cold;
             if(accepted) ++m_publishedResults;
+            const auto receivedNs = NativeRtCache::HostNowNs();
+            const auto oldestPose = std::min_element(job.poses.begin(), job.poses.end(),
+                [](const auto& a, const auto& b) { return a.sampleNs < b.sampleNs; })->sampleNs;
+            m_prefetch.ObserveResponse(receivedNs - oldestPose, job.cold);
             auto log=py::dict("schema"_a=1,"worker_id"_a=worker,"request_id"_a=job.id,"anchor_index"_a=job.anchor,
                 "cold_warmup"_a=job.cold,"sample_native_ns"_a=job.nativeNs,
-                "sample_host_monotonic_ns"_a=job.hostNs,"received_host_monotonic_ns"_a=NativeRtCache::HostNowNs(),
+                "sample_host_monotonic_ns"_a=job.hostNs,"received_host_monotonic_ns"_a=receivedNs,
                 "producer_wall_ns"_a=value["producer_wall_ns"],"sample_to_completion_ns"_a=value["sample_to_completion_ns"],
                 "batch_stats"_a=value["batch_stats"],"published_pairs"_a=accepted,"discarded_pairs"_a=discarded,
                 "outcomes"_a=outcomes);
+            log["prefetch"] = py::dict("method"_a=NativeRtPrefetch::kMethod,"lead_ns"_a=job.leadNs,
+                "remaining_ns"_a=job.remainingNs,"urgent_pair"_a=job.urgentPair,
+                "limiting_guard"_a=job.limitingGuard,"before_cache_half_threshold"_a=job.forecastBeforeHalf,
+                "covered_due_pairs"_a=job.coveredDuePairs,"pose_to_receipt_ns"_a=receivedNs-oldestPose);
             std::vector<int64_t> poseEpochs;
             for (const auto& pose : job.poses) poseEpochs.push_back(pose.sampleNs);
             log["pose_sample_host_ns"] = py::cast(poseEpochs);
@@ -374,14 +497,33 @@ class NativeRtPool
     py::dict SnapshotValue()
     {
         const auto stats=m_cache->GetStats();
+        const auto leadNs=m_prefetch.LeadNs();
+        py::list inflight;
+        for(size_t worker=0;worker<m_inflight.size();++worker)
+            if(const auto& job=m_inflight[worker])
+            {
+                std::vector<int64_t> poses;
+                for(const auto& pose:job->poses) poses.push_back(pose.sampleNs);
+                inflight.append(py::dict("worker_id"_a=worker,"request_id"_a=job->id,"anchor_index"_a=job->anchor,
+                    "sample_native_ns"_a=job->nativeNs,"sample_host_monotonic_ns"_a=job->hostNs,
+                    "pose_sample_host_ns"_a=poses,"cold_warmup"_a=job->cold,
+                    "lead_ns"_a=job->leadNs,"remaining_ns"_a=job->remainingNs,
+                    "urgent_pair"_a=job->urgentPair,"limiting_guard"_a=job->limitingGuard,
+                    "before_cache_half_threshold"_a=job->forecastBeforeHalf));
+            }
         py::list pairs;
         for(const auto& state:m_cache->Priorities())
+        {
+            const auto forecast=NativeRtPrefetch::Predict(state,m_cache->GetLimits(),leadNs);
             pairs.append(py::dict("first"_a=state.first,"second"_a=state.second,"valid"_a=state.valid,
                 "due"_a=state.due,"reason"_a=state.reason,"source_request_id"_a=state.sourceRequestId,
                 "sample_native_ns"_a=state.sampleNativeNs,"sample_host_monotonic_ns"_a=state.sampleHostMonotonicNs,
                 "native_age_ns"_a=state.nativeAgeNs,"host_age_ns"_a=state.hostAgeNs,
                 "displacement_m"_a=state.displacementM,"velocity_delta_m_s"_a=state.velocityDeltaMps,
-                "orientation_delta_rad"_a=state.orientationDeltaRad,"normalized_risk"_a=state.normalizedRisk));
+                "orientation_delta_rad"_a=state.orientationDeltaRad,"normalized_risk"_a=state.normalizedRisk,
+                "prefetch_remaining_ns"_a=forecast.remainingNs,"prefetch_eligible"_a=forecast.eligible,
+                "prefetch_limiting_guard"_a=forecast.limitingGuard));
+        }
         auto cache=py::dict("hits"_a=stats.hits,"misses"_a=stats.misses,"accepted"_a=stats.accepted,
             "rejected"_a=stats.rejected,"maximum_hit_native_age_ns"_a=stats.maximumHitNativeAgeNs,
             "maximum_hit_host_age_ns"_a=stats.maximumHitHostAgeNs,"rejection_reasons"_a=stats.rejectionReasons,
@@ -392,6 +534,12 @@ class NativeRtPool
             "published_results"_a=m_publishedResults,"published_pairs"_a=m_publishedPairs,
             "discarded_pairs"_a=m_discarded,"discard_reasons"_a=m_discardReasons,
             "poll_calls"_a=m_pollCalls,"poll_period_ns"_a=kPollPeriodNs,
+            "prefetch"_a=py::dict("method"_a=NativeRtPrefetch::kMethod,
+                "growth_safety_factor"_a=NativeRtPrefetch::kGrowthFactor,
+                "minimum_lead_ns"_a=NativeRtPrefetch::kMinimumLeadNs,"lead_ns"_a=leadNs,
+                "hot_window_capacity"_a=NativeRtPrefetch::kWindow,"hot_window_size"_a=m_prefetch.WindowSize(),
+                "hot_pose_to_receipt_p95_ns"_a=m_prefetch.ResponseP95Ns(),
+                "dispatches_before_cache_half_threshold"_a=m_forecastDispatches,"inflight"_a=inflight),
             "max_poll_wall_ns"_a=m_maxPollWallNs,"cache"_a=cache,
             "cache_snapshot_native_ns"_a=Simulator::Now().GetNanoSeconds(),
             "cache_snapshot_host_monotonic_ns"_a=NativeRtCache::HostNowNs(),
