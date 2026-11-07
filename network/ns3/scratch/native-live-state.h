@@ -171,9 +171,12 @@ public:
         break;
         }
         m_session=session;
+        m_lastPublicationNs=root["published_monotonic_ns"].cast<int64_t>();
         return states;
     }
+    int64_t LastPublicationNs() const { return m_lastPublicationNs; }
 private:
     std::string m_session;
+    int64_t m_lastPublicationNs{0};
 };
 } // namespace bas

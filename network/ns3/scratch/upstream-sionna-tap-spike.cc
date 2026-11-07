@@ -86,6 +86,8 @@ std::vector<Vector> g_positions;
 double g_channelStateMaxAgeS{0.5};
 double g_updateDistanceThresholdM{0.5};
 uint64_t g_poseSnapshots{0};
+uint32_t g_posePollPeriodMs{20};
+uint64_t g_poseReaderCalls{0}, g_poseReaderWallNs{0}, g_poseReaderMaxWallNs{0};
 uint64_t g_stalePoseSamples{0};
 uint64_t g_pathObservations{0};
 uint64_t g_realtimeLagSamples{0};
@@ -802,7 +804,7 @@ class LivePositionSource
     {
         if (!Refresh()) return;
         if (g_executionMode == "realtime")
-            Simulator::Schedule(MilliSeconds(20), &LivePositionSource::Poll, this);
+            Simulator::Schedule(MilliSeconds(g_posePollPeriodMs), &LivePositionSource::Poll, this);
     }
 
     bool Refresh()
@@ -816,10 +818,15 @@ class LivePositionSource
         {
             if (!g_lockstep && g_runtimeOperational && (nowNs-eventNs)/1e6 > g_runtimeLagMaxMs)
                 throw std::runtime_error("native scheduler exceeded live coupling deadline");
+            const auto readerStarted = std::chrono::steady_clock::now();
             auto snapshot = m_reader.Read(m_path, g_nodeNames, eventNs, 0,
                                           static_cast<int64_t>(g_stateMaxAgeS*1e9),
                                           g_lockstep ? g_lockstep->SourceTime(Simulator::Now().GetSeconds()) : -1,
                                           static_cast<int64_t>(g_stepTimeoutS*1e9));
+            const uint64_t readerNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - readerStarted).count();
+            ++g_poseReaderCalls; g_poseReaderWallNs += readerNs;
+            g_poseReaderMaxWallNs = std::max(g_poseReaderMaxWallNs, readerNs);
             if (!g_lockstep && g_runtimeOperational && snapshot.size()>1)
                 m_clockAlignment.Check(snapshot[1].sourceTime, Simulator::Now().GetSeconds(), g_stateMaxAgeS);
             // Commit only after every node and the source clock have been checked.
@@ -831,7 +838,8 @@ class LivePositionSource
                     (g_lockstep->SourceTime(Simulator::Now().GetSeconds())-snapshot[i].sourceTime)*1000)
                     : (nowNs-snapshot[i].sampleNs)/1e6;
                 LogEvent("live_pose", g_nodeNames[i], "", 0, ageMs,
-                    "measured_pose_age_ms;source_sim_s="+std::to_string(snapshot[i].sourceTime));
+                    "measured_pose_age_ms;source_sim_s="+std::to_string(snapshot[i].sourceTime)+
+                    ";read_publication_host_ns="+std::to_string(m_reader.LastPublicationNs()));
             }
             if (g_geometry) g_geometry->ObserveAll();
             m_latest = snapshot;
@@ -1307,6 +1315,10 @@ WriteStats(const std::string& path)
            << "  \"channel_state_max_age_s\": " << g_channelStateMaxAgeS << ",\n"
            << "  \"endpoint_displacement_threshold_m\": " << g_updateDistanceThresholdM << ",\n"
            << "  \"pose_snapshots\": " << g_poseSnapshots << ",\n"
+           << "  \"pose_poll_period_ms\": " << g_posePollPeriodMs << ",\n"
+           << "  \"successful_pose_reader_calls\": " << g_poseReaderCalls << ",\n"
+           << "  \"successful_pose_reader_wall_ns\": " << g_poseReaderWallNs << ",\n"
+           << "  \"successful_pose_reader_max_wall_ns\": " << g_poseReaderMaxWallNs << ",\n"
            << "  \"pose_updates\": " << g_poseSnapshots << ",\n"
            << "  \"stale_pose_samples\": " << g_stalePoseSamples << ",\n"
            << "  \"path_observations\": " << g_pathObservations << ",\n"
@@ -1696,6 +1708,7 @@ main(int argc, char* argv[])
     g_solverProfile = solverProfile;
     g_sionnaReceiverBatchMode = sionnaReceiverBatchMode;
     g_sionnaRtExecutionMode = sionnaRtExecutionMode;
+    g_posePollPeriodMs = useRtWorkers ? 5 : 20;
     g_sionnaMaxDepth = sionnaMaxDepth;
     g_sionnaLos = sionnaLos;
     g_sionnaSpecularReflection = sionnaSpecularReflection;

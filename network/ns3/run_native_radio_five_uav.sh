@@ -610,6 +610,8 @@ SIONNA_MAX_NUM_PATHS_PER_SOURCE="${RADIO_VALUES[32]}"
 SIONNA_RECEIVER_BATCH_MODE="${RADIO_VALUES[33]}"
 SIONNA_RT_EXECUTION_MODE="${RADIO_VALUES[34]}"
 SIONNA_WORKER_COUNT="${RADIO_VALUES[35]}"
+POSE_PUBLICATION_RATE_HZ=50
+[[ "$SIONNA_RT_EXECUTION_MODE" != worker_pool ]] || POSE_PUBLICATION_RATE_HZ=100
 [[ "$SIONNA_RT_EXECUTION_MODE" == in_process || "$SIONNA_RT_EXECUTION_MODE" == worker_pool ]] || {
   printf 'execution_mode must be in_process or worker_pool.\n' >&2; exit 2;
 }
@@ -881,6 +883,7 @@ PY
   printf 'sionna_log_level=%s\n' "$SIONNA_LOG_LEVEL"
   printf 'sionna_receiver_batch_mode=%s\n' "$SIONNA_RECEIVER_BATCH_MODE"
   printf 'sionna_rt_execution_mode=%s\nsionna_worker_count=%s\n' "$SIONNA_RT_EXECUTION_MODE" "$SIONNA_WORKER_COUNT"
+  printf 'pose_publication_rate_hz=%s\n' "$POSE_PUBLICATION_RATE_HZ"
   [[ "$PROPAGATION_PROFILE" != geometry_logdistance ]] || printf 'geometry_config=%s\ngeometry_radio_model=upstream_LogDistance_selected_by_3D_Buildings\ngeometry_antenna_offset_enu_m=0,0,0\n' "$RUN_DIR/logs/urban_scenario.json"
   printf 'technology_specific_modem=%s\n' "$TECHNOLOGY_SPECIFIC_MODEM"
   printf 'uav_count=%s\nradio_node_count=%s\nshared_spectrum_channels=1\n' "$UAV_COUNT" "$((UAV_COUNT + 1))"
@@ -1422,7 +1425,7 @@ cd "$ROOT_DIR"
 setsid taskset -c "$STACK_CPUSET" env PYTHONPATH=/home/ubuntu/.local/lib/python3.10/site-packages \
   python3 "$ROOT_DIR/network/position_tracker/tracker.py" \
   --scenario "$SCENARIO" --output-json "$NODE_STATE" --output-jsonl "$NODE_EVENTS" \
-  --transport gazebo --rate-hz 50 --stale-after-s "$STATE_MAX_AGE_S" \
+  --transport gazebo --rate-hz "$POSE_PUBLICATION_RATE_HZ" --stale-after-s "$STATE_MAX_AGE_S" \
   > "$RUN_DIR/logs/position_tracker.log" 2>&1 &
 managed_pids+=("$!")
 setsid stdbuf -oL gz topic -e -t /world/map/stats > "$RUN_DIR/logs/gazebo_stats.log" 2>&1 &
