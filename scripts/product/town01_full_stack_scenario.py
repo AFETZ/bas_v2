@@ -210,7 +210,17 @@ class ScenarioError(RuntimeError):
 
 
 class FlightHarness:
-    def __init__(self, run_dir: Path, node_state: Path, timeout_scale: float) -> None:
+    def __init__(self, run_dir: Path, node_state: Path, timeout_scale: float, *,
+                 channels: tuple[str, ...] = ("control", "payload", "additional_data"),
+                 uav_ids: tuple[int, ...] = UAV_IDS) -> None:
+        self.channels = tuple(channels)
+        self.uav_ids = tuple(uav_ids)
+        if (not self.channels or len(set(self.channels)) != len(self.channels)
+                or not set(self.channels) <= {"control", "payload", "additional_data"}):
+            raise ValueError("channels must be unique supported channel names")
+        if (not self.uav_ids or len(set(self.uav_ids)) != len(self.uav_ids)
+                or any(type(i) is not int or i not in UAV_IDS for i in self.uav_ids)):
+            raise ValueError("uav_ids must be a unique nonempty subset of 1..5")
         os.environ.setdefault("MAVLINK20", "1")
         from pymavlink import mavutil
 
@@ -237,6 +247,8 @@ class FlightHarness:
             ("payload", 14700, PAYLOAD_TOS),
             ("additional_data", 14800, 0),
         ):
+            if channel not in self.channels:
+                continue
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, tos)
             sock.bind((GCS_IP, port))
@@ -244,7 +256,7 @@ class FlightHarness:
             self.sockets[channel] = sock
             self.selector.register(sock, selectors.EVENT_READ, channel)
             if channel != "additional_data":
-                for system_id in UAV_IDS:
+                for system_id in self.uav_ids:
                     key = (channel, system_id)
                     parser = mavutil.mavlink.MAVLink(None)
                     parser.robust_parsing = True
@@ -290,23 +302,25 @@ class FlightHarness:
             "simulation_mode": clock.mode(),
             "timestamp_domain": clock.mode(),
             "status": "running",
-            "uavs": {f"uav{index}": {"system_id": index, "phases": {}} for index in UAV_IDS},
+            "uavs": {f"uav{index}": {"system_id": index, "phases": {}} for index in self.uav_ids},
             "command_acks": [],
             "dual_uart_diagnostics": {},
-            "status_texts": {f"uav{index}": [] for index in UAV_IDS},
+            "status_texts": {f"uav{index}": [] for index in self.uav_ids},
         }
 
     def close(self) -> None:
         clock.close_participant()
         self.summary["gcs_serial_transport"] = self.transport_summary()
-        write_json(self.events_path.parent / "transport_sequences.json", {
-            f"{channel}:uav{system_id}": encoder.sequence
-            for (channel, system_id), encoder in self.transport_encoders.items()
-        })
-        self.flight_handle.close()
-        self.selector.close()
-        for sock in self.sockets.values():
-            sock.close()
+        try:
+            write_json(self.events_path.parent / "transport_sequences.json", {
+                f"{channel}:uav{system_id}": encoder.sequence
+                for (channel, system_id), encoder in self.transport_encoders.items()
+            })
+        finally:
+            self.flight_handle.close()
+            self.selector.close()
+            for sock in self.sockets.values():
+                sock.close()
 
     def event(self, name: str, *, uav: int = 0, detail: str = "") -> None:
         position = self.positions().get(f"uav{uav}") if uav else None
@@ -372,7 +386,7 @@ class FlightHarness:
                         else str(raw_name)
                     ).rstrip("\x00")
                     self.parameters[(channel, system_id, name)] = (message, now_ns)
-                elif message_type == "STATUSTEXT" and system_id in UAV_IDS:
+                elif message_type == "STATUSTEXT" and system_id in self.uav_ids:
                     raw_text = message.text
                     text = (
                         raw_text.decode("utf-8", errors="replace")
@@ -437,7 +451,7 @@ class FlightHarness:
                     self.transport_malformed_datagrams += 1
                     continue
                 system_id = int(chunk.uav_id)
-                if system_id not in UAV_IDS or source != (endpoint_ip(system_id), (14600 if channel == "control" else 14700)+system_id):
+                if system_id not in self.uav_ids or source != (endpoint_ip(system_id), (14600 if channel == "control" else 14700)+system_id):
                     self.transport_malformed_datagrams += 1
                     continue
                 records = self.transport_receivers[(channel, system_id)].ingest(data, now_ns)
@@ -497,7 +511,7 @@ class FlightHarness:
         timeout_s: float,
         label: str,
     ) -> dict[int, float]:
-        pending = set(UAV_IDS)
+        pending = set(self.uav_ids)
         sent_at: dict[int, int] = {}
         latency: dict[int, float] = {}
         next_send = 0.0
@@ -538,7 +552,7 @@ class FlightHarness:
         if pending:
             observed = {
                 system_id: int(self.acks[(channel, system_id, command)][0].result)
-                for system_id in UAV_IDS
+                for system_id in self.uav_ids
                 if (channel, system_id, command) in self.acks
             }
             raise ScenarioError(f"{label} ACK missing/rejected for {sorted(pending)}; observed={observed}")
@@ -613,12 +627,12 @@ class FlightHarness:
             lambda: all(
                 (channel, system_id, "HEARTBEAT") in self.latest
                 for channel in ("control", "payload")
-                for system_id in UAV_IDS
+                for system_id in self.uav_ids
             ),
             90,
             "control and payload UART heartbeats from all five SITLs",
         )
-        for system_id in UAV_IDS:
+        for system_id in self.uav_ids:
             self.summary["uavs"][f"uav{system_id}"]["phases"]["heartbeat"] = True
         self.event("heartbeats_ready")
 
@@ -635,7 +649,7 @@ class FlightHarness:
             "SERIAL2_PROTOCOL",
             "SERIAL2_BAUD",
         )
-        for system_id in UAV_IDS:
+        for system_id in self.uav_ids:
             uav = f"uav{system_id}"
             control_sent_ns, control_latency = self.command_one(
                 "control",
@@ -727,14 +741,14 @@ class FlightHarness:
             "sequential": diagnostics,
             "parallel_safe_request": {
                 f"uav{system_id}": {"ack_latency_ms": parallel_latency[system_id]}
-                for system_id in UAV_IDS
+                for system_id in self.uav_ids
             },
         }
         self.event("parallel_safe_request_complete")
 
     def set_mode_all(self, custom_mode: int, label: str, timeout_s: float = 30.0) -> None:
         flag = int(self.mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED)
-        pending = set(UAV_IDS)
+        pending = set(self.uav_ids)
         deadline = clock.monotonic() + timeout_s * self.timeout_scale
         next_send = 0.0
         while pending and clock.monotonic() < deadline:
@@ -770,7 +784,7 @@ class FlightHarness:
         self.wait(
             lambda: all(
                 self.latest_at_ns.get(("payload", system_id, "ATTITUDE"), 0) >= payload_start
-                for system_id in UAV_IDS
+                for system_id in self.uav_ids
             ),
             20,
             "payload ATTITUDE telemetry from all UAVs",
@@ -786,7 +800,7 @@ class FlightHarness:
 
     def arm_takeoff_move_land(self) -> None:
         initial = self.positions()
-        if set(initial) < {f"uav{index}" for index in UAV_IDS}:
+        if set(initial) < {f"uav{index}" for index in self.uav_ids}:
             raise ScenarioError("fresh tracker positions are unavailable before flight")
         self.summary["initial_positions_m"] = initial
         self.set_guided()
@@ -801,12 +815,12 @@ class FlightHarness:
             lambda: all(
                 (int(self.latest[("control", system_id, "HEARTBEAT")].base_mode)
                  & int(self.mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED))
-                for system_id in UAV_IDS
+                for system_id in self.uav_ids
             ),
             20,
             "armed heartbeat for all UAVs",
         )
-        for system_id in UAV_IDS:
+        for system_id in self.uav_ids:
             self.summary["uavs"][f"uav{system_id}"]["phases"]["arm"] = True
         self.event("armed")
 
@@ -821,25 +835,25 @@ class FlightHarness:
             lambda: all(
                 self.positions().get(f"uav{system_id}", [0, 0, -1e9])[2]
                 >= initial[f"uav{system_id}"][2] + 8.0
-                for system_id in UAV_IDS
+                for system_id in self.uav_ids
             ),
             60,
             "all UAVs above takeoff threshold",
         )
-        for system_id in UAV_IDS:
+        for system_id in self.uav_ids:
             self.summary["uavs"][f"uav{system_id}"]["phases"]["takeoff"] = True
         self.event("takeoff_complete")
 
         hold_started = clock.monotonic()
         while clock.monotonic() - hold_started < 4.0:
             self.pump(0.2)
-        for system_id in UAV_IDS:
+        for system_id in self.uav_ids:
             self.summary["uavs"][f"uav{system_id}"]["phases"]["hold"] = True
         self.event("hold_complete")
 
         move_start = self.positions()
         type_mask = 3576
-        for system_id in UAV_IDS:
+        for system_id in self.uav_ids:
             message = self.transmitters[("control", system_id)].set_position_target_local_ned_encode(
                 0,
                 system_id,
@@ -868,12 +882,12 @@ class FlightHarness:
                     - move_start[f"uav{system_id}"][1],
                 )
                 >= 3.0
-                for system_id in UAV_IDS
+                for system_id in self.uav_ids
             ),
             45,
             "five-UAV guided displacement",
         )
-        for system_id in UAV_IDS:
+        for system_id in self.uav_ids:
             self.summary["uavs"][f"uav{system_id}"]["phases"]["movement"] = True
         self.event("movement_complete")
 
@@ -892,7 +906,7 @@ class FlightHarness:
                     int(self.latest[("control", system_id, "HEARTBEAT")].base_mode)
                     & int(self.mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
                 )
-                for system_id in UAV_IDS
+                for system_id in self.uav_ids
             ),
             90,
             "all UAVs disarmed after landing",
@@ -903,9 +917,9 @@ class FlightHarness:
             f"uav{system_id}": round(
                 landing_started[f"uav{system_id}"][2] - final[f"uav{system_id}"][2], 3
             )
-            for system_id in UAV_IDS
+            for system_id in self.uav_ids
         }
-        for system_id in UAV_IDS:
+        for system_id in self.uav_ids:
             self.summary["uavs"][f"uav{system_id}"]["phases"]["land"] = True
         self.event("landing_complete")
 
@@ -980,13 +994,13 @@ class FlightHarness:
                         payload=f"{message.checksum:08x}".encode(),
                     )
                     self.send_datagram(sock, confirmation, source)
-                elif message.kind == "p2mp_ack" and message.sender_id in UAV_IDS:
+                elif message.kind == "p2mp_ack" and message.sender_id in self.uav_ids:
                     multicast_acks.add(message.sender_id)
         if len(downlink_acks) != len(p2p_payloads) or len(uplinks) != len(p2p_payloads):
             raise ScenarioError(
                 f"bidirectional P2P incomplete: down={sorted(downlink_acks)} up={sorted(uplinks)}"
             )
-        if multicast_acks != set(UAV_IDS):
+        if multicast_acks != set(self.uav_ids):
             raise ScenarioError(f"P2MP data reached only {sorted(multicast_acks)}")
         self.summary["additional_data"] = {
             "protocol": "checksummed_logical_message_v1",

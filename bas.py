@@ -21,6 +21,7 @@ SHAPE = {
     'propagation': {'model'}, 'network': {'engine', 'topology'},
     'experiment': {'policy', 'duration_s', 'seed', 'run'},
     'runtime': {'clock', 'image', 'land_timeout_s'},
+    'flows': {'channels', 'payload_attitude_interval_s'},
 }
 MILESTONES = {'service_started', 'phase_requested', 'takeoff_observed',
               'waypoint_reached_telemetry', 'barrier_released', 'experiment_failed',
@@ -71,6 +72,16 @@ def load_config(path, root=ROOT):
     count = config['drone']['count']
     if type(count) is not int or not 1 <= count <= 5:
         raise ValueError('drone.count must be an integer from 1 to 5')
+    channels = config['flows']['channels']
+    if channels not in (['control'], ['control', 'payload']):
+        raise ValueError('flows.channels must be [control] or [control, payload] in that order')
+    interval = config['flows']['payload_attitude_interval_s']
+    try:
+        valid_interval = type(interval) in (int, float) and math.isfinite(interval) and .02 <= interval <= 60
+    except OverflowError:
+        valid_interval = False
+    if not valid_interval:
+        raise ValueError('flows.payload_attitude_interval_s must be finite and between .02 and 60 seconds')
     if config['experiment']['policy'] not in ('fixed', 'failover'):
         raise ValueError('policy must be fixed or failover')
     for section, key in [('experiment', 'duration_s'), ('runtime', 'land_timeout_s')]:
@@ -124,7 +135,8 @@ def environment(config, run_id, inherited=None):
         'NATIVE_CAPTURE_STORAGE': 'tmpfs', 'NATIVE_EVENT_LOGGING': 'metrics_only',
         'NATIVE_FIVE_SKIP_BUILD': 1, 'NATIVE_PHYSICS_PROFILE': 'stock',
         'NATIVE_WIFI_TOPOLOGY': 'adhoc', 'NATIVE_WIFI_AGGREGATION': 0,
-        'NATIVE_WIFI_EXPLICIT_BAR': 0, 'NATIVE_UART_CHANNELS': 'control',
+        'NATIVE_WIFI_EXPLICIT_BAR': 0, 'NATIVE_UART_CHANNELS': ','.join(config['flows']['channels']),
+        'NATIVE_PAYLOAD_INTERVAL_S': config['flows']['payload_attitude_interval_s'],
         'NATIVE_FAULT_PROFILE': 'none', 'NATIVE_EXPERIMENT_PROFILE': 'urban',
         'NATIVE_EXPERIMENT_PILOT': 1, 'NATIVE_PARAMETER_SNAPSHOTS': 0,
         'NATIVE_COMMAND_PERIOD_S': 1, 'NATIVE_TASK_PERIOD_S': 20,
@@ -259,8 +271,12 @@ def events(paths, command_id=None, event=None, limit=50):
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == 'batch':
+        from scripts.product.run_batch import main as batch_main
+        return batch_main(sys.argv[2:])
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
+    commands.add_parser('batch', help='sequential parameter/seed runs; use batch --help')
     for name in ('inspect', 'run'):
         p = commands.add_parser(name)
         p.add_argument('--config', type=Path, default=ROOT / 'runtime.json')

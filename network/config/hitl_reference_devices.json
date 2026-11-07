@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "selection_basis": "Documented interface examples; availability and market share in Russia are not established.",
+  "hardware_validation": "not_performed",
+  "controllers": {
+    "pixhawk_6c": {
+      "name": "Holybro Pixhawk 6C",
+      "bench_ports": ["TELEM1", "TELEM2"],
+      "signal_voltage_v": 3.3,
+      "connector_supply_voltage_v": 5.0,
+      "sources": ["https://docs.holybro.com/autopilot/pixhawk-6c/pixhawk-6c-ports"],
+      "notes": "TELEM1/2 provide TX/RX/CTS/RTS. Confirm carrier revision, wiring and serial parameters; a flight controller does not echo arbitrary payload bytes."
+    },
+    "cube_orange_plus": {
+      "name": "CubePilot Cube Orange+ with a compatible carrier",
+      "bench_ports": ["TELEM1", "TELEM2"],
+      "signal_voltage_v": 3.3,
+      "connector_supply_voltage_v": 5.0,
+      "sources": ["https://docs.cubepilot.org/autopilot/the-cube/introduction/interface-specifications", "https://docs.px4.io/main/en/flight_controller/cubepilot_cube_orangeplus"],
+      "notes": "Verify the exact carrier pinout and configured firmware ports. Hardware flow control is an interface capability, not an automatically enabled setting."
+    }
+  },
+  "radios": {
+    "microhard_p2400": {
+      "name": "Microhard P2400 serial reference",
+      "adapter_kinds": ["serial"],
+      "frequency_range_hz": [2400000000, 2483500000],
+      "reference_tx_power_w": 1.0,
+      "vendor_rf_rate_ceiling_bps": 345000,
+      "bench_baud_rates": [57600, 115200],
+      "sources": ["https://www.microhardcorp.com/P2400.php", "https://www.microhardcorp.com/brochures/P2400.Brochure.Rev.1.2.0.pdf"],
+      "notes": "Conservative 1W product-page reference; brochure mentions variant-dependent 2W. Serial interface is documented up to about 230kbps. Proprietary hopping/FEC/MAC is not equivalent to native Wi-Fi."
+    },
+    "microhard_pmddl2450": {
+      "name": "Microhard pMDDL2450 Ethernet reference",
+      "adapter_kinds": ["serial", "udp", "tcp_client"],
+      "frequency_range_hz": [2402000000, 2478000000],
+      "reference_tx_power_w": 1.0,
+      "channel_bandwidths_hz": [4000000, 8000000],
+      "ethernet_link_bps": 100000000,
+      "vendor_iperf_up_to_bps": 25000000,
+      "bench_baud_rates": [57600, 115200],
+      "sources": ["https://www.microhardcorp.com/pMDDL2450.php", "https://www.microhardcorp.com/brochures/pMDDL2450.Brochure.Rev.1.3.0.pdf"],
+      "notes": "Dual 10/100 Ethernet; vendor throughput depends on 2x2 MIMO, bandwidth and received level. The serial interface is still low rate. UDP/TCP endpoints must refer to the configured data path, not the management console. Native Wi-Fi equivalence is not established."
+    }
+  }
+}

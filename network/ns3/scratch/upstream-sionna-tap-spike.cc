@@ -128,6 +128,8 @@ bool g_sionnaRefraction{false};
 bool g_sionnaSyntheticArray{true};
 uint32_t g_sionnaSeed{42};
 uint32_t g_sionnaMaxNumberOfPaths{90};
+uint32_t g_sionnaSamplesPerSource{1000000};
+uint32_t g_sionnaMaxNumPathsPerSource{1000000};
 double g_sionnaCacheJitterFraction{0.0};
 double g_txPowerW{0.0};
 double g_carrierHz{0.0};
@@ -1393,6 +1395,8 @@ WriteStats(const std::string& path)
            << (g_sionnaSyntheticArray ? "true" : "false")
            << ", \"seed\": " << g_sionnaSeed
            << ", \"max_number_of_paths\": " << g_sionnaMaxNumberOfPaths
+           << ", \"samples_per_src\": " << g_sionnaSamplesPerSource
+           << ", \"max_num_paths_per_src\": " << g_sionnaMaxNumPathsPerSource
            << ", \"cache_expiry_jitter_fraction\": " << g_sionnaCacheJitterFraction
            << "},\n"
            << "  \"packet_outcome_affected\": "
@@ -1458,6 +1462,8 @@ main(int argc, char* argv[])
     bool sionnaSyntheticArray = true;
     uint32_t sionnaSeed = 42;
     uint32_t sionnaMaxNumberOfPaths = 90;
+    uint32_t sionnaSamplesPerSource = 1000000;
+    uint32_t sionnaMaxNumPathsPerSource = 1000000;
     double sionnaCacheJitterFraction = 0.0;
 
     CommandLine command(__FILE__);
@@ -1544,6 +1550,8 @@ main(int argc, char* argv[])
                      "Enable Sionna synthetic arrays",
                      sionnaSyntheticArray);
     command.AddValue("sionnaSeed", "Sionna solver random seed", sionnaSeed);
+    command.AddValue("sionnaSamplesPerSource", "Actual PathSolver samples_per_src budget", sionnaSamplesPerSource);
+    command.AddValue("sionnaMaxNumPathsPerSource", "Actual PathSolver max_num_paths_per_src budget", sionnaMaxNumPathsPerSource);
     command.AddValue("sionnaMaxNumberOfPaths",
                      "Maximum Sionna paths retained per link",
                      sionnaMaxNumberOfPaths);
@@ -1551,6 +1559,8 @@ main(int argc, char* argv[])
                      "Deterministic per-pair cache threshold spread",
                      sionnaCacheJitterFraction);
     command.Parse(argc, argv);
+    NS_ABORT_MSG_IF(sionnaSamplesPerSource == 0 || sionnaMaxNumPathsPerSource == 0,
+                    "Sionna solver budgets must be positive");
     NS_ABORT_MSG_IF(g_executionMode != "realtime" && g_executionMode != "lockstep", "invalid execution mode");
     NS_ABORT_MSG_IF(g_couplingStepMs<1 || g_couplingStepMs>50 || !std::isfinite(g_stepTimeoutS) || g_stepTimeoutS<=0,
                     "lockstep needs 1..50 ms steps and a positive finite wall timeout");
@@ -1639,6 +1649,8 @@ main(int argc, char* argv[])
     g_sionnaSyntheticArray = sionnaSyntheticArray;
     g_sionnaSeed = sionnaSeed;
     g_sionnaMaxNumberOfPaths = sionnaMaxNumberOfPaths;
+    g_sionnaSamplesPerSource = sionnaSamplesPerSource;
+    g_sionnaMaxNumPathsPerSource = sionnaMaxNumPathsPerSource;
     g_sionnaCacheJitterFraction = sionnaCacheJitterFraction;
     g_flushEveryEvents = flushEveryEvents;
     g_flushMaxDelayMs = flushMaxDelayMs;
@@ -1711,6 +1723,13 @@ main(int argc, char* argv[])
     {
         sionna = CreateObject<SionnaRtSpectrumPropagationLossModel>();
         sionna->SetChannelModelAttribute("Frequency", DoubleValue(carrierHz));
+        sionna->SetChannelModelAttribute("SamplesPerSource", UintegerValue(sionnaSamplesPerSource));
+        sionna->SetChannelModelAttribute("MaxNumPathsPerSource", UintegerValue(sionnaMaxNumPathsPerSource));
+        UintegerValue observedSamples, observedPaths;
+        sionna->GetChannelModel()->GetAttribute("SamplesPerSource", observedSamples);
+        sionna->GetChannelModel()->GetAttribute("MaxNumPathsPerSource", observedPaths);
+        g_sionnaSamplesPerSource = observedSamples.Get();
+        g_sionnaMaxNumPathsPerSource = observedPaths.Get();
         sionna->SetChannelModelAttribute("Scenario", StringValue(scene));
         sionna->SetChannelModelAttribute("IsMergeShapeEnabled", BooleanValue(true));
         sionna->SetChannelModelAttribute("MaxNumberOfPaths",

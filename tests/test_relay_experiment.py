@@ -82,6 +82,10 @@ class RelayExperimentTests(unittest.TestCase):
         result = outcome_fields(summary, window_complete=True, stopped=False, runtime_errors=["backend lost"])
         self.assertEqual(result["measurement_validity"], "invalid")
         self.assertEqual(result["runtime_status"], "failed")
+        summary["measurement_errors"] = ["source clock reset"]
+        invalid = outcome_fields(summary, window_complete=False, stopped=False)
+        self.assertEqual(invalid["measurement_validity"], "invalid")
+        self.assertEqual(invalid["measurement_validity_reasons"], ["source clock reset"])
 
     def test_landing_observation_uses_fresh_local_uart_when_radio_is_lost(self):
         scenario = RelayExperiment.__new__(RelayExperiment)

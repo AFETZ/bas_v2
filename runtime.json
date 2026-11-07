@@ -3,6 +3,7 @@
   "drone": {"autopilot": "ardupilot_sitl", "count": 5},
   "propagation": {"model": "geometry_logdistance"},
   "network": {"engine": "ns3", "topology": "adhoc"},
+  "flows": {"channels": ["control", "payload"], "payload_attitude_interval_s": 0.2},
   "experiment": {"policy": "failover", "duration_s": 240, "seed": 1, "run": 1},
   "runtime": {
     "clock": "realtime",

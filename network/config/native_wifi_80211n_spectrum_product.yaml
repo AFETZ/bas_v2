@@ -34,6 +34,9 @@ sionna:
   synthetic_array: true
   seed: 42
   max_number_of_paths: 90
+  # Actual PathSolver budgets; these differ from the retained-path postcondition above.
+  samples_per_src: 1000000
+  max_num_paths_per_src: 1000000
   cache_expiry_jitter_fraction: 0.5
   channel_state_max_age_s: 0.5
   endpoint_displacement_threshold_m: 0.5

@@ -37,6 +37,10 @@ class ScenarioError(RuntimeError):
     pass
 
 
+class MeasurementError(ScenarioError):
+    """Observed source/clock contract violation; cannot qualify a measurement."""
+
+
 class StopRequested(Exception):
     """Operator requested bounded LAND and simulator teardown."""
 
@@ -53,6 +57,8 @@ def outcome_fields(summary, *, window_complete, stopped, runtime_errors=()):
     required.insert(0, "all_uav_lifecycle" if "all_uav_lifecycle" in criteria else "five_uav_lifecycle")
     if summary.get("fault_profile") == "total_GCS":
         required.append("total_GCS_hold_all_five")
+    if "payload_bidirectional_all_uavs" in criteria:
+        required.append("payload_bidirectional_all_uavs")
     unmet = [name for name in required if criteria.get(name) is not True]
     mission = ("cancelled" if stopped else "failed" if summary.get("error")
                else "incomplete" if unmet else "succeeded")
@@ -61,6 +67,9 @@ def outcome_fields(summary, *, window_complete, stopped, runtime_errors=()):
                 else "invalid" if window_complete else "incomplete" if started else "not_evaluated")
     reasons = ([] if validity == "valid" else ["existing_profile_rtf_target_not_met"] if window_complete
                else ["declared_measurement_window_not_completed"] if started else ["measurement_not_started"])
+    if started and summary.get("measurement_errors"):
+        validity = "invalid"
+        reasons = list(summary["measurement_errors"])
     return dict(runtime_status="failed" if runtime_errors else "completed",
                 runtime_errors=list(runtime_errors), mission_outcome=mission,
                 mission_unmet_criteria=unmet, measurement_validity=validity,
@@ -90,17 +99,17 @@ class PoseReader:
             if (value["schema_version"] != 2 or value["coordinate_frame"] != "ENU"
                     or value["source"] not in ("gazebo_odometry", "ros_odometry")
                     or value.get("fault") is not None):
-                raise ScenarioError("invalid native odometry contract")
+                raise MeasurementError("invalid native odometry contract")
             session = value["session_id"]
             if self.session is not None and self.session != session:
-                raise ScenarioError("odometry session reset")
+                raise MeasurementError("odometry session reset")
             self.session = session
             for field in ("published_monotonic_ns", "clock_received_monotonic_ns"):
                 if not 0 <= now - value[field] <= 500_000_000:
-                    raise ScenarioError(f"stale native {field}")
+                    raise MeasurementError(f"stale native {field}")
             source = float(value["source_sim_time_s"])
             if self.last_source_s is not None and source < self.last_source_s:
-                raise ScenarioError("odometry source clock moved backwards")
+                raise MeasurementError("odometry source clock moved backwards")
             self.last_source_s = source
             poses = {}
             for row in value["nodes"]:
@@ -112,24 +121,24 @@ class PoseReader:
                 causal = [sample for sample in history if sample["source_sim_time_s"] <= source
                           and sample["sample_monotonic_ns"] <= now]
                 if not causal:
-                    raise ScenarioError(f"no causal native pose {name}")
+                    raise MeasurementError(f"no causal native pose {name}")
                 row = max(causal, key=lambda sample: sample["source_sim_time_s"])
                 if row.get("stale") or not 0 <= now - row["sample_monotonic_ns"] <= 500_000_000:
-                    raise ScenarioError(f"stale native pose {name}")
+                    raise MeasurementError(f"stale native pose {name}")
                 point, velocity = tuple(row["position_m"]), tuple(row["velocity_enu_mps"])
                 stamp = float(row["source_sim_time_s"])
                 if (len(point) != 3 or len(velocity) != 3
                         or not all(math.isfinite(x) for x in (*point, *velocity, stamp, source))
                         or not 0 <= source - stamp <= .5):
-                    raise ScenarioError(f"invalid pose/source clock {name}")
+                    raise MeasurementError(f"invalid pose/source clock {name}")
                 poses[int(name[3:])] = Pose(point, velocity, stamp, row["sample_monotonic_ns"])
             if set(poses) != set(self.uav_ids):
-                raise ScenarioError("missing native UAV poses for configured roster")
+                raise MeasurementError("missing native UAV poses for configured roster")
             if max(p.source_s for p in poses.values()) - min(p.source_s for p in poses.values()) > .1:
-                raise ScenarioError("native cross-UAV source skew exceeds 100 ms")
+                raise MeasurementError("native cross-UAV source skew exceeds 100 ms")
             return source, poses
         except (OSError, ValueError, KeyError, TypeError) as exc:
-            raise ScenarioError(f"native odometry unavailable: {exc}") from exc
+            raise MeasurementError(f"native odometry unavailable: {exc}") from exc
 
 
 class RegionHold:
@@ -377,6 +386,11 @@ class RelayExperiment:
         frozen["effective_service_args"] = {k: str(v) if isinstance(v, Path) else v for k, v in vars(service_args).items()}
         (metrics / "relay_experiment_config.json").write_text(json.dumps(frozen, indent=2) + "\n")
         (args.run_dir / "logs/coordination_gcs.ready").write_text(json.dumps(dict(pid=os.getpid())) + "\n")
+        self.payload_channel = None
+        if "payload" in getattr(args, "channels", "control").split(","):
+            from network.coordination.payload import PayloadChannel
+            self.payload_channel = PayloadChannel(args.run_dir, args.node_state, self.uav_ids,
+                interval_s=args.payload_interval_s)
 
     def phase(self, name: str):
         if name == self.phase_name:
@@ -405,6 +419,8 @@ class RelayExperiment:
         if stop is not None and stop.exists() and not getattr(self, "stopping", False):
             raise StopRequested()
         self.gcs.step()
+        if getattr(self, "payload_channel", None) is not None:
+            self.payload_channel.pump()
         if not self.gcs.running:
             raise ScenarioError("GCS service interrupted")
         now = time.monotonic_ns()
@@ -741,7 +757,7 @@ class RelayExperiment:
             if previous is not None and pose.sample_ns <= previous.sample_ns:
                 continue
             if previous is not None and pose.source_s < previous.source_s:
-                raise ScenarioError(f"uav{i} LOCAL_POSITION_NED autopilot clock reset")
+                raise MeasurementError(f"uav{i} LOCAL_POSITION_NED autopilot clock reset")
             self.urban_last_sample[i] = pose
             local = self.gcs.latest_messages[i]["LOCAL_POSITION_NED"]
             received = self.gcs.latest_message_received_ns[i]["LOCAL_POSITION_NED"]
@@ -816,7 +832,7 @@ class RelayExperiment:
             if elapsed >= self.args.duration_s:
                 break  # a new source sample may cross the half-open measurement window
             if time.monotonic_ns() - start_ns > int((self.args.duration_s * 1.1 + 10) * 1e9):
-                raise ScenarioError("measurement failed to advance at live rate")
+                raise MeasurementError("measurement failed to advance at live rate")
             phase = ("experiment_normal" if getattr(self, "urban", None) or elapsed < self.args.fault_start_s else
                      "experiment_fault" if elapsed < self.args.fault_end_s else "experiment_recovery")
             self.phase(phase)
@@ -947,6 +963,8 @@ class RelayExperiment:
             self.emit("stop_requested", source_sim_time_s=self.source_s)
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
+            if isinstance(exc, MeasurementError):
+                self.summary.setdefault("measurement_errors", []).append(error)
             if not isinstance(exc, ScenarioError):
                 runtime_errors.append(error)
             self.emit("experiment_failed", reason=error)
@@ -967,6 +985,13 @@ class RelayExperiment:
                 status="skipped", reason="controlled LAND/disarm was not completed")
         self.summary["completed_goals"] = list(self.observer.completed.values())
         self.summary["error"] = error
+        if getattr(self, "payload_channel", None) is not None:
+            try:
+                self.summary["payload_channel"] = self.payload_channel.close()
+            except Exception as exc:
+                runtime_errors.append(f"payload close {type(exc).__name__}: {exc}")
+                error = (error + "; " if error else "") + runtime_errors[-1]
+                self.summary["error"] = error
         self.summary["status"] = "failed" if error else "stopped" if stopped else "completed"
         self.summary["task_failures_are_outcomes"] = True
         completed = self.summary["completed_goals"]
@@ -983,6 +1008,8 @@ class RelayExperiment:
             self.summary["criteria"]["urban_routes_telemetry_completed"] = all(
                 self.summary.get("urban_routes_telemetry_completed", {}).get(str(i), False) for i in self.uav_ids)
         self.summary["criteria"]["all_uav_lifecycle"] = self.summary["criteria"]["five_uav_lifecycle"]
+        if "payload_channel" in self.summary:
+            self.summary["criteria"]["payload_bidirectional_all_uavs"] = self.summary["payload_channel"]["all_uavs_bidirectional_observed"]
         self.summary.update(outcome_fields(self.summary, window_complete=window_complete,
                                           stopped=stopped, runtime_errors=runtime_errors))
         self.phase("experiment_failed" if error else "experiment_stopped" if stopped else "experiment_done")
@@ -1026,6 +1053,8 @@ def main(argv=None):
     parser.add_argument("--policy", choices=("fixed", "failover"), required=True)
     parser.add_argument("--run-id")
     parser.add_argument("--uav-count", type=int, choices=range(1, 6), default=5)
+    parser.add_argument("--channels", choices=("control", "control,payload"), default="control")
+    parser.add_argument("--payload-interval-s", type=float, default=.2)
     parser.add_argument("--initial-master", type=int, choices=UAV_IDS, default=1)
     parser.add_argument("--radio-watchdog-file", type=Path)
     parser.add_argument("--watchdog-s", type=float, default=.3)
@@ -1059,6 +1088,8 @@ def main(argv=None):
     args.run_id = args.run_id or args.run_dir.name
     if args.initial_master > args.uav_count:
         parser.error("initial-master is outside the configured UAV roster")
+    if not math.isfinite(args.payload_interval_s) or not .02 <= args.payload_interval_s <= 60:
+        parser.error("payload-interval-s must be .02..60 seconds")
     if args.experiment_profile != "urban" and not 0 < args.fault_start_s < args.fault_end_s < args.duration_s:
         parser.error("require 0 < fault-start < fault-end < duration")
     try:
