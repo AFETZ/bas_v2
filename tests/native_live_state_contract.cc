@@ -70,7 +70,7 @@ void Test(const std::filesystem::path& input)
     Require(reader.LastPublicationNs()==base+10*ms,"Reader changed the original publication epoch");
     Reject([&]{read(base+25*ms,base+600*ms);},"Cached publication bypassed stale-clock validation");
     Require(parses==1,"Age validation reloaded an unchanged publication");
-    auto history=fixture["nodes"][1]["history"].cast<py::list>();
+    auto history=fixture["nodes"].cast<py::list>()[1]["history"].cast<py::list>();
     history[1]["position_m"]=std::vector<double>{7,0,20};
     write();
     states=read(base+25*ms,base+40*ms);
