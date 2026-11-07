@@ -1,15 +1,16 @@
 --- a/src/spectrum/model/sionna-rt-channel-model.cc
 +++ b/src/spectrum/model/sionna-rt-channel-model.cc
-@@ -16,6 +16,8 @@
+@@ -16,6 +16,9 @@
  #include "ns3/log.h"
  #include "ns3/mobility-model.h"
  #include "ns3/node.h"
 +#include "ns3/isotropic-antenna-model.h"
 +#include <limits>
++#include <chrono>
  #include "ns3/phased-array-model.h"
  #include "ns3/pointer.h"
  #include "ns3/simulator.h"
-@@ -66,6 +68,8 @@
+@@ -66,6 +69,8 @@
  void
  SionnaRtChannelModel::DoDispose()
  {
@@ -18,7 +19,7 @@
      NS_LOG_FUNCTION(this);
      m_channelMatrixMap.clear();
      m_channelParamsMap.clear();
-@@ -172,6 +176,12 @@
+@@ -172,6 +177,12 @@
                            MakeBooleanAccessor(&SionnaRtChannelModel::SetNormalizeDelays,
                                                &SionnaRtChannelModel::GetNormalizeDelays),
                            MakeBooleanChecker())
@@ -31,7 +32,7 @@
              .AddAttribute("Scenario",
                            "The Sionna RT scenario name used to create scenes",
                            StringValue("munich"),
-@@ -186,6 +196,244 @@
+@@ -186,6 +197,262 @@
  {
      NS_LOG_FUNCTION(this);
      m_sceneConfigs.mergeShapes = cond;
@@ -185,10 +186,6 @@
 +        py::arg("edge_diffraction") = m_RtPathSolverConfig.edgeDiffraction,
 +        py::arg("synthetic_array") = m_RtPathSolverConfig.syntheticArray,
 +        py::arg("seed") = m_RtPathSolverConfig.seed);
-+    NS_LOG_INFO("Receiver batch paths computed: nrx=" << receiverCount
-+        << " samples_per_src=" << m_samplesPerSource
-+        << " allocated_max_num_paths_per_src=" << stats.lastAllocatedMaxPathsPerSource
-+        << " candidate_count=" << stats.lastCandidateCount);
 +    return paths;
 +}
 +
@@ -196,6 +193,8 @@
 +SionnaRtChannelModel::GenerateReceiverBatch(Ptr<const MobilityModel> txMob,
 +                                           Ptr<const PhasedArrayModel> txAntenna)
 +{
++    using Clock = std::chrono::steady_clock;
++    const auto batchStarted = Clock::now();
 +    std::vector<size_t> receivers;
 +    for (size_t i = 0; i < m_receiverBatchMobility.size(); ++i)
 +        if (m_receiverBatchMobility[i] != txMob) receivers.push_back(i);
@@ -224,7 +223,9 @@
 +    }
 +    if (py::len(scene.attr("receivers")) != receivers.size() || py::len(scene.attr("transmitters")) != 1)
 +        throw std::runtime_error("Receiver batch scene contains unexpected endpoints");
++    const auto scenePrepared = Clock::now();
 +    auto paths = CalculateReceiverBatchPaths(rt, scene, receivers.size());
++    const auto solverReturned = Clock::now();
 +    auto np = py::module_::import("numpy");
 +    py::tuple cir = paths.attr("cir")(py::arg("normalize_delays") = m_normalizeDelays,
 +                                      py::arg("out_type") = "numpy");
@@ -259,6 +260,7 @@
 +            ConvertScalarPathArray(delays, index), ConvertScalarPathArray(doppler, index),
 +            std::move(receiverAngles)));
 +    }
++    const auto extractionFinished = Clock::now();
 +    for (size_t index = 0; index < receivers.size(); ++index)
 +    {
 +        auto rxMob = m_receiverBatchMobility[receivers[index]];
@@ -273,34 +275,108 @@
 +    }
 +    ++m_receiverBatchStats.completedCalls;
 +    m_receiverBatchStats.generatedLinks += receivers.size();
++    const auto published = Clock::now();
++    const auto elapsedNs = [](Clock::time_point start, Clock::time_point end) -> uint64_t {
++        return std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
++    };
++    auto& stats = m_receiverBatchStats;
++    stats.lastScenePrepareWallNs = elapsedNs(batchStarted, scenePrepared);
++    stats.lastSolverWallNs = elapsedNs(scenePrepared, solverReturned);
++    stats.lastExtractionWallNs = elapsedNs(solverReturned, extractionFinished);
++    stats.lastCachePublishWallNs = elapsedNs(extractionFinished, published);
++    stats.lastBatchWallNs = elapsedNs(batchStarted, published);
++    stats.scenePrepareWallNs += stats.lastScenePrepareWallNs;
++    stats.solverWallNs += stats.lastSolverWallNs;
++    stats.extractionWallNs += stats.lastExtractionWallNs;
++    stats.cachePublishWallNs += stats.lastCachePublishWallNs;
++    stats.batchWallNs += stats.lastBatchWallNs;
++    if (stats.lastBatchWallNs > stats.maxBatchWallNs)
++        stats.maxBatchWallNs = stats.lastBatchWallNs;
  }
  
  void
-@@ -360,6 +608,11 @@
+@@ -360,6 +627,31 @@
  {
      NS_LOG_FUNCTION(this);
  
++    using Clock = std::chrono::steady_clock;
++    Clock::time_point callStarted;
 +    if (m_receiverBatchEnabled)
 +    {
++        callStarted = Clock::now();
++        ++m_receiverBatchStats.getChannelCalls;
 +        ValidateReceiverBatchPair(aMob, bMob, aAntenna, bAntenna);
++        const auto validated = Clock::now();
++        const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
++            validated - callStarted).count();
++        m_receiverBatchStats.pairValidationWallNs += elapsed;
++        if (static_cast<uint64_t>(elapsed) > m_receiverBatchStats.maxPairValidationWallNs)
++            m_receiverBatchStats.maxPairValidationWallNs = elapsed;
 +    }
++    const auto finishBatchCall = [this, callStarted](bool cacheHit) {
++        const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
++            Clock::now() - callStarted).count();
++        auto& stats = m_receiverBatchStats;
++        stats.lastGetChannelWallNs = elapsed;
++        stats.getChannelWallNs += elapsed;
++        stats.getChannelCacheHits += cacheHit;
++        if (static_cast<uint64_t>(elapsed) > stats.maxGetChannelWallNs)
++            stats.maxGetChannelWallNs = elapsed;
++    };
 +
      // Compute the channel matrix key. The key is reciprocal, i.e., key (a, b) = key (b, a)
      uint64_t channelMatrixKey = GetKey(aAntenna->GetId(), bAntenna->GetId());
  
-@@ -389,6 +642,11 @@
+@@ -389,6 +681,40 @@
      // generate a new realization
      if (notFound || update)
      {
 +        if (m_receiverBatchEnabled)
 +        {
 +            GenerateReceiverBatch(aMob, aAntenna);
-+            return m_channelMatrixMap.at(channelMatrixKey);
++            auto result = m_channelMatrixMap.at(channelMatrixKey);
++            finishBatchCall(false);
++            const auto& stats = m_receiverBatchStats;
++            // One record per completed batch survives a later fatal scheduler
++            // abort, which can bypass the caller's final JSON writer.
++            NS_LOG_INFO("Receiver batch paths computed: nrx=" << stats.lastReceiverCount
++                << " samples_per_src=" << m_samplesPerSource
++                << " allocated_max_num_paths_per_src=" << stats.lastAllocatedMaxPathsPerSource
++                << " candidate_count=" << stats.lastCandidateCount
++                << " scope=completed_batch timing=host_wall_ns"
++                << " completed_calls=" << stats.completedCalls
++                << " scene_prepare_ns=" << stats.lastScenePrepareWallNs
++                << " solver_ns=" << stats.lastSolverWallNs
++                << " extraction_ns=" << stats.lastExtractionWallNs
++                << " cache_publish_ns=" << stats.lastCachePublishWallNs
++                << " batch_ns=" << stats.lastBatchWallNs
++                << " cumulative_scene_prepare_ns=" << stats.scenePrepareWallNs
++                << " cumulative_solver_ns=" << stats.solverWallNs
++                << " cumulative_extraction_ns=" << stats.extractionWallNs
++                << " cumulative_cache_publish_ns=" << stats.cachePublishWallNs
++                << " cumulative_batch_ns=" << stats.batchWallNs
++                << " max_batch_ns=" << stats.maxBatchWallNs
++                << " get_channel_calls=" << stats.getChannelCalls
++                << " get_channel_cache_hits=" << stats.getChannelCacheHits
++                << " get_channel_ns=" << stats.lastGetChannelWallNs
++                << " cumulative_get_channel_ns=" << stats.getChannelWallNs
++                << " max_get_channel_ns=" << stats.maxGetChannelWallNs
++                << " cumulative_pair_validation_ns=" << stats.pairValidationWallNs
++                << " max_pair_validation_ns=" << stats.maxPairValidationWallNs);
++            return result;
 +        }
          // channel matrix not found or has to be updated, generate a new one
          py::module_ rt = py::module_::import("sionna.rt");
          NS_LOG_INFO("Building scene for antenna pair ("
-@@ -622,27 +880,28 @@
+@@ -422,6 +748,7 @@
+         m_channelParamsMap[channelParamsKey] = channelParams;
+     }
+ 
++    if (m_receiverBatchEnabled) finishBatchCall(true);
+     return channelMatrix;
+ }
+ 
+@@ -622,27 +949,28 @@
  Ptr<SionnaRtChannelModel::SionnaRtChannelParams>
  SionnaRtChannelModel::CalculateChannelParamsFromPaths(const py::object paths,
                                                        Ptr<const MobilityModel> aMob,
@@ -349,7 +425,7 @@
  
      // Precompute angles sincos
      channelParams->m_cachedAngleSincos.resize(channelParams->m_angle.size());
-@@ -845,7 +1104,7 @@
+@@ -845,7 +1173,7 @@
  }
  
  MatrixBasedChannelModel::Complex3DVector
@@ -358,7 +434,7 @@
  {
      NS_LOG_FUNCTION(this);
      py::module_ np = py::module_::import("numpy");
-@@ -853,9 +1112,20 @@
+@@ -853,9 +1181,20 @@
      py::tuple cir = paths.attr("cir")(py::arg("normalize_delays") = m_normalizeDelays,
                                        py::arg("out_type") = "numpy");
  
@@ -381,7 +457,7 @@
  
      // Generate channel coefficients for each cluster n and each receiver
      //  and transmitter element pair u,s.
-@@ -883,56 +1153,33 @@
+@@ -883,56 +1222,33 @@
  }
  
  MatrixBasedChannelModel::DoubleVector
@@ -448,7 +524,7 @@
  {
      py::object angle_py;
      if (Angle == "ZOA")
-@@ -958,24 +1205,22 @@
+@@ -958,24 +1274,22 @@
      }
  
      // Convert to numpy float64 array
@@ -491,7 +567,7 @@
  size_t
 --- a/src/spectrum/model/sionna-rt-channel-model.h
 +++ b/src/spectrum/model/sionna-rt-channel-model.h
-@@ -70,6 +70,27 @@
+@@ -70,6 +70,38 @@
  {
    public:
      /**
@@ -512,6 +588,17 @@
 +        uint64_t candidateCapacityReachedCalls{0};
 +        uint32_t lastReceiverCount{0}, lastAllocatedMaxPathsPerSource{0};
 +        uint32_t lastCandidateCount{0}, lastCandidateBufferSize{0};
++        // Host steady-clock nanoseconds; no additional device synchronization.
++        // Phase totals/last values describe completed batches. Pending device work
++        // can be charged to extraction rather than the PathSolver API span.
++        uint64_t getChannelCalls{0}, getChannelCacheHits{0};
++        uint64_t getChannelWallNs{0}, lastGetChannelWallNs{0}, maxGetChannelWallNs{0};
++        uint64_t pairValidationWallNs{0}, maxPairValidationWallNs{0};
++        uint64_t scenePrepareWallNs{0}, solverWallNs{0};
++        uint64_t extractionWallNs{0}, cachePublishWallNs{0}, batchWallNs{0};
++        uint64_t lastScenePrepareWallNs{0}, lastSolverWallNs{0};
++        uint64_t lastExtractionWallNs{0}, lastCachePublishWallNs{0};
++        uint64_t lastBatchWallNs{0}, maxBatchWallNs{0};
 +    };
 +    ReceiverBatchStats GetReceiverBatchStats() const;
 +
@@ -519,7 +606,7 @@
       * @brief Constructor.
       */
      SionnaRtChannelModel();
-@@ -488,6 +509,22 @@
+@@ -488,6 +520,22 @@
      RtPathSolverConfig GetRtPathSolverConfig() const;
  
    protected:
@@ -542,7 +629,7 @@
      /**
       * @brief Load a Sionna RT scene using the configured scenario name.
       *
-@@ -574,7 +611,7 @@
+@@ -574,7 +622,7 @@
       * @param paths Python object representing computed paths
       * @return Complex3DVector containing CIRs for Rx/Tx element pairs
       */
@@ -551,7 +638,7 @@
  
      /**
       * @brief Extract delays (tau) per path from RS paths object.
-@@ -586,7 +623,7 @@
+@@ -586,7 +634,7 @@
       * @return Vector of delays [s], ordered to match CIR taps
       */
      MatrixBasedChannelModel::DoubleVector CalculateTauFromPaths(const py::module_ np,
@@ -560,7 +647,7 @@
      /**
       * @brief Extract Doppler shifts per path from the Python paths object.
       *
-@@ -597,7 +634,8 @@
+@@ -597,7 +645,8 @@
       * @param paths Python paths object computed by Sionna RT
       * @return Complex vector of per-path Doppler shifts (one per path)
       */
@@ -570,7 +657,7 @@
      /**
       * @brief Extract angular measurements (AOD/AOA/ZOA/ZOD) from the paths.
       *
-@@ -615,7 +653,7 @@
+@@ -615,7 +664,7 @@
       */
      MatrixBasedChannelModel::DoubleVector CalculateAnglesFromPaths(const py::module_ np,
                                                                     py::object paths,
@@ -579,7 +666,7 @@
  
      // void CreateOnePath(py::object& paths);
  
-@@ -634,7 +672,8 @@
+@@ -634,7 +683,8 @@
  
      Ptr<SionnaRtChannelParams> CalculateChannelParamsFromPaths(const py::object paths,
                                                                 Ptr<const MobilityModel> aMob,
@@ -589,7 +676,7 @@
  
      /**
       * @brief Extract the number of propagation paths from the CIR tensor.
-@@ -715,6 +754,11 @@
+@@ -715,6 +765,11 @@
      /** Whether Sionna RT should normalize path delays in CIR output. */
      bool m_normalizeDelays;
      double m_maxNumberOfPaths; //!< Maximum number of paths to be generated by the path solver

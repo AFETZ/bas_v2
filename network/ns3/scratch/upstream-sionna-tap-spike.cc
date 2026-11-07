@@ -2224,7 +2224,19 @@ main(int argc, char* argv[])
                  << ",\"last_receiver_count\":" << batch.lastReceiverCount
                  << ",\"last_allocated_max_paths_per_source\":" << batch.lastAllocatedMaxPathsPerSource
                  << ",\"last_candidate_count\":" << batch.lastCandidateCount
-                 << ",\"last_candidate_buffer_size\":" << batch.lastCandidateBufferSize << "}";
+                 << ",\"last_candidate_buffer_size\":" << batch.lastCandidateBufferSize
+                 << ",\"get_channel_calls\":" << batch.getChannelCalls
+                 << ",\"get_channel_cache_hits\":" << batch.getChannelCacheHits
+                 << ",\"get_channel_wall_ns\":" << batch.getChannelWallNs
+                 << ",\"max_get_channel_wall_ns\":" << batch.maxGetChannelWallNs
+                 << ",\"pair_validation_wall_ns\":" << batch.pairValidationWallNs
+                 << ",\"max_pair_validation_wall_ns\":" << batch.maxPairValidationWallNs
+                 << ",\"scene_prepare_wall_ns\":" << batch.scenePrepareWallNs
+                 << ",\"solver_wall_ns\":" << batch.solverWallNs
+                 << ",\"extraction_wall_ns\":" << batch.extractionWallNs
+                 << ",\"cache_publish_wall_ns\":" << batch.cachePublishWallNs
+                 << ",\"batch_wall_ns\":" << batch.batchWallNs
+                 << ",\"max_batch_wall_ns\":" << batch.maxBatchWallNs << "}";
         g_sionnaReceiverBatchStatsJson = observed.str();
     }
     Simulator::Destroy();

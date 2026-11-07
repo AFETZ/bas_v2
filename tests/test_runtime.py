@@ -186,6 +186,77 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result['runtime_status'], 'failed')
         self.assertEqual(result['measurement_validity'], 'invalid')
 
+    def qualified_source_run(self):
+        from scripts.product.prepare_native_sources import materialize, prepare
+        from scripts.product.summarize_native_radio_five_uav import summarize_native_sources
+        raw = self.root / 'source-raw'
+        for directory in ('metrics', 'logs', 'configuration/final'):
+            (raw / directory).mkdir(parents=True)
+        (raw / 'metrics/native_radio_stats.json').write_text(json.dumps(dict(stop_reason='duration')))
+        (raw / 'configuration/final/manifest.json').write_text('{}')
+        (raw / 'logs/native_capture_storage.json').write_text(json.dumps(dict(
+            publication=dict(status='copied', errors=[]))))
+        source = dict(id='outside_window', position_m=[0, -40, 10], orientation_rad=[0, 0],
+            pattern='iso', gain_dbi=0, power_w=.01, center_hz=2412000000, bandwidth_hz=20000000,
+            start_s=1000, stop_s=1010, period_s=.01, duty_cycle=1, mode='continuous', spectral_shape='rectangular')
+        configured = prepare(dict(time_reference='measurement_start', sources=[source]))
+        (raw / 'logs/native_sources.json').write_text(json.dumps(configured))
+        actual = materialize(configured, 100_000_000_000, 1000, 'experiment_normal')
+        (raw / 'logs/native_sources_actual.json').write_text(json.dumps(actual))
+        summarize_native_sources(raw, [])
+        summary = dict(runtime_status='completed', mission_outcome='succeeded', measurement_validity='valid')
+        return raw, summary
+
+    def test_missing_source_export_cannot_be_reported_as_valid_completed_run(self):
+        raw, summary = self.qualified_source_run()
+        (raw / 'metrics/native_source_summary.json').unlink()
+        result = bas.recorded_outcome(raw, 0, summary)
+        self.assertEqual(result['runtime_status'], 'failed')
+        self.assertEqual(result['measurement_validity'], 'invalid')
+        self.assertIn('native_source_summary_missing', result['runtime_verification_errors'])
+
+    def test_anchored_out_of_window_source_needs_no_switches_or_effect(self):
+        raw, summary = self.qualified_source_run()
+        result = bas.recorded_outcome(raw, 0, summary)
+        self.assertEqual(result['runtime_status'], 'completed')
+        self.assertEqual(result['measurement_validity'], 'valid')
+        self.assertEqual(result['runtime_verification_errors'], [])
+
+    def test_missing_actual_corrupt_stale_or_invalid_source_summary_is_rejected(self):
+        raw, summary = self.qualified_source_run()
+        actual_path = raw / 'logs/native_sources_actual.json'
+        actual_bytes = actual_path.read_bytes()
+        actual_path.unlink()
+        result = bas.recorded_outcome(raw, 0, summary)
+        self.assertEqual(result['measurement_validity'], 'invalid')
+        actual_path.write_bytes(actual_bytes)
+        path = raw / 'metrics/native_source_summary.json'
+        original = json.loads(path.read_text())
+        for value in (None, [], '{broken}', dict(original, actual_schedule_status='invalid'),
+                      dict(original, configured_sources={}), dict(original, actual_sources={})):
+            with self.subTest(value=value):
+                path.write_text(value if isinstance(value, str) else json.dumps(value))
+                result = bas.recorded_outcome(raw, 0, summary)
+                self.assertEqual(result['runtime_status'], 'failed')
+                self.assertIn('native_source_export_invalid', result['runtime_verification_errors'])
+
+    def test_configured_or_runner_declared_source_input_cannot_disappear(self):
+        raw, summary = self.qualified_source_run()
+        (raw / 'logs/native_sources.json').unlink()
+        result = bas.recorded_outcome(raw, 0, summary, source_configured=True)
+        self.assertIn('native_source_input_missing', result['runtime_verification_errors'])
+        (raw / 'environment.txt').write_text('native_sources=runs/control/test/sources.yaml\n')
+        result = bas.recorded_outcome(raw, 0, summary)
+        self.assertIn('native_source_input_missing', result['runtime_verification_errors'])
+
+    def test_source_export_guard_does_not_expand_failed_or_unmeasured_runs(self):
+        raw, summary = self.qualified_source_run()
+        (raw / 'metrics/native_source_summary.json').unlink()
+        for changes in (dict(runtime_status='failed'), dict(measurement_validity='not_evaluated')):
+            with self.subTest(changes=changes):
+                result = bas.recorded_outcome(raw, 0, dict(summary, **changes), source_configured=True)
+                self.assertEqual(result['runtime_verification_errors'], [])
+
     def test_events_preserve_command_and_clock_fields_across_logs(self):
         paths = [self.root / 'gcs.jsonl', self.root / 'uav.jsonl']
         rows = [dict(host_monotonic_ns=20, command_id='c', event='uart_admitted', source_sim_time_s=2.0),

@@ -98,6 +98,26 @@ class SourceArtifactTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), 'observed')
 
+    def test_source_cli_exports_native_observations_without_five_uav_mission_report(self):
+        self.actual()
+        (self.run / 'logs/native_radio_events.csv').write_text(
+            'time_s,wall_monotonic_ns,phase,event,node,peer,bytes,x,y,z,value,details\n'
+            '110.000000,997654321,experiment_normal,jammer_on,clock_fixture,,0,0,0,0,1,\n'
+            '120.000000,998654321,experiment_normal,jammer_off,clock_fixture,,0,0,0,0,0,\n')
+        before = {p.relative_to(self.run): p.read_bytes() for p in self.run.rglob('*') if p.is_file()}
+        script = Path(__file__).resolve().parents[1] / 'scripts/product/summarize_native_radio_five_uav.py'
+        output = self.run / 'derived'
+        result = subprocess.run([sys.executable, str(script), '--run-dir', str(self.run),
+                                 '--native-sources-only', '--output-dir', str(output)],
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['actual_schedule_status'], 'observed')
+        report = json.loads((output / 'metrics/native_source_summary.json').read_text())
+        self.assertEqual(report['source_activity_status'], 'switch_on_observed')
+        self.assertEqual(report['windows']['active']['start_sim_s'], 110)
+        self.assertFalse((self.run / 'metrics/native_source_summary.json').exists())
+        self.assertTrue(all((self.run / p).read_bytes() == contents for p, contents in before.items()))
+
     def test_anchored_native_switches_use_absolute_time_and_keep_relative_input(self):
         actual = self.actual()
         start, stop = (actual['segments'][0][key] for key in ('start_s', 'stop_s'))
@@ -108,6 +128,15 @@ class SourceArtifactTests(unittest.TestCase):
         self.assertEqual(result['configured_sources'], self.configured)
         self.assertEqual(result['actual_sources'], actual)
         self.assertEqual(json.loads((self.run / 'metrics/native_source_summary.json').read_text()), result)
+
+    def test_single_uav_summary_does_not_invent_four_additional_receivers(self):
+        actual = self.actual()
+        (self.run / 'metrics/native_radio_stats.json').write_text(
+            json.dumps(dict(uav_count=1, event_logging='batched_trace')))
+        interval = actual['segments'][0]
+        result = summarize_native_sources(self.run, self.switches(interval['start_s'], interval['stop_s']))
+        self.assertEqual(result['receiver_roster'], ['cp', 'uav1'])
+        self.assertEqual(set(result['windows']['active']['foreign_power_dbm_by_receiver']), {'cp', 'uav1'})
 
     def test_pre_anchor_switches_remain_visible_but_cannot_create_measurement_windows(self):
         self.actual()

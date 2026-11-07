@@ -1533,6 +1533,10 @@ capture_pids=()
 touch "$MONITOR_STOP"
 sleep 2
 if [[ "$SCENARIO_MODE" == flight_diagnostic || "$SCENARIO_MODE" == relay_experiment ]]; then
+  if [[ -n "${BAS_NATIVE_SOURCES:-}" ]]; then
+    python3 "$ROOT_DIR/scripts/product/summarize_native_radio_five_uav.py" \
+      --run-dir "$RUN_DIR" --native-sources-only > "$RUN_DIR/logs/source_summary.log" 2>&1
+  fi
   printf 'Selected %s completed; inspect its summary and raw logs.\n' "$SCENARIO_MODE"
   exit 0
 fi

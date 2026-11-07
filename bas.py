@@ -275,7 +275,7 @@ def snapshot_inputs(config, folder, env):
     return hashes
 
 
-def recorded_outcome(raw, code, summary):
+def recorded_outcome(raw, code, summary, *, source_configured=False):
     """Use backend evidence as well as mission status; never infer success from exit 0."""
     result = {key: summary.get(key, 'not_evaluated') for key in
               ('runtime_status', 'mission_outcome', 'measurement_validity')}
@@ -300,6 +300,33 @@ def recorded_outcome(raw, code, summary):
         verification_errors.append('native_capture_publication_not_confirmed')
     if not (raw / 'configuration/final/manifest.json').is_file():
         verification_errors.append('final_configuration_capture_missing')
+    if (not verification_errors and result['runtime_status'] == 'completed'
+            and result['measurement_validity'] == 'valid'):
+        source_input = raw / 'logs/native_sources.json'
+        source_summary = raw / 'metrics/native_source_summary.json'
+        environment_path = raw / 'environment.txt'
+        environment_text = environment_path.read_text(encoding='utf-8', errors='replace') if environment_path.is_file() else ''
+        declared = re.search(r'^native_sources=(.+)$', environment_text, re.M)
+        source_required = source_configured or source_input.exists() or (
+            declared is not None and declared.group(1).strip() not in ('', 'none'))
+        if source_required:
+            if not source_input.is_file():
+                verification_errors.append('native_source_input_missing')
+            elif not source_summary.is_file():
+                verification_errors.append('native_source_summary_missing')
+            else:
+                try:
+                    # Validate existing evidence only: never create an export or
+                    # infer source activity/effect from its configured interval.
+                    from scripts.product.summarize_native_radio_five_uav import _native_source_schedule
+                    expected = _native_source_schedule(raw)
+                    observed = json.loads(source_summary.read_text(encoding='utf-8'),
+                        object_pairs_hook=unique_json_fields, parse_constant=reject_json_constant)
+                    if (expected['actual_schedule_status'] != 'observed' or not isinstance(observed, dict)
+                            or any(observed.get(key) != expected[key] for key in expected)):
+                        raise ValueError('source export does not match the validated native schedule')
+                except (OSError, ValueError, TypeError, KeyError):
+                    verification_errors.append('native_source_export_invalid')
     if verification_errors:
         result['runtime_status'] = 'failed'
         if result['measurement_validity'] == 'valid':
@@ -363,7 +390,8 @@ def run(config, run_id):
             summary = json.loads(summary_path.read_text()) if summary_path.exists() else {}
             status = summary.get('status', 'failed') if code == 0 else 'failed'
             record.update(status=status, returncode=code, mission_error=summary.get('error'))
-            record.update(recorded_outcome(raw, code, summary))
+            record.update(recorded_outcome(raw, code, summary,
+                source_configured=config.get('interference', {}).get('sources') is not None))
         except Exception as error:
             record.update(status='failed', error=str(error))
             raise

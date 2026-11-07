@@ -3580,6 +3580,15 @@ def summarize_native_sources(run_dir: Path, events: list[dict[str, Any]], *,
     result={"sources":switches, **_native_source_schedule(run_dir),"windows":{},"measurement_scope":"native decoder/SignalArrival samples; application PDR needs distinct application offers",
         "units":{"time":"ns-3 seconds","foreign_power":"dBm, native SpectrumWifiPhy.SignalArrival","noise_interference":"dBm, native decoded MPDU sample","sinr":"dB, derived S/(I+N) on decoded samples"}}
     trace = result['trace_observations'] = _native_source_trace_observations(run_dir, events)
+    stats = read_json(run_dir / 'metrics/native_radio_stats.json', {})
+    count = stats.get('uav_count') if isinstance(stats, dict) else None
+    if type(count) is int and 1 <= count <= 5:
+        receivers = ['cp', *(f'uav{i}' for i in range(1, count + 1))]
+        result['receiver_roster_source'] = 'native_radio_stats:uav_count'
+    else:
+        receivers = sorted({e.get('node') for e in events if e.get('node') in ('cp', *UAVS)})
+        result['receiver_roster_source'] = 'observed_nodes_only; configured roster unavailable'
+    result['receiver_roster'] = receivers
     configured = result['configured_sources']
     relative = isinstance(configured, dict) and configured.get('clock') == 'measurement_elapsed_seconds'
     anchor = result['time_anchor']
@@ -3613,7 +3622,7 @@ def summarize_native_sources(run_dir: Path, events: list[dict[str, Any]], *,
                 "decoded_mpdu_samples":len(decoded) if trace['packet_trace_available'] else None,
                 "noise_interference_dbm":distribution([e["noise_interference_dbm"] for e in decoded if e.get("noise_interference_dbm") is not None]),
                 "sinr_db":distribution([e["sinr_db"] for e in decoded if e.get("sinr_db") is not None]),
-                "foreign_power_dbm_by_receiver":{node:distribution([e["value"] for e in observed if e["event"]=="spectrum_signal_arrival" and e["node"]==node and "foreign_signal=1" in str(e.get("details")) and e.get("value") is not None and math.isfinite(e["value"])]) for node in ("cp",*UAVS)},
+                "foreign_power_dbm_by_receiver":{node:distribution([e["value"] for e in observed if e["event"]=="spectrum_signal_arrival" and e["node"]==node and "foreign_signal=1" in str(e.get("details")) and e.get("value") is not None and math.isfinite(e["value"])]) for node in receivers},
                 "decoder_success_attempts":ok,"decoder_failure_attempts":error,"decoder_attempt_per":error/(ok+error) if ok is not None and error is not None and ok+error else None,
                 "decoder_per_denominator":"all RxOk + RxError callbacks in window, retries retained; preamble/CCA drops excluded",
                 "other_phy_drops":sum(e["event"]=="wifi_phy_rx_drop" for e in observed) if trace['packet_trace_available'] else None,
@@ -3636,10 +3645,13 @@ def main() -> int:
     parser.add_argument("--one-uav-run", type=Path)
     parser.add_argument("--latency-diagnostic", action="store_true")
     parser.add_argument("--observer-reference-run", type=Path)
-    parser.add_argument("--live-metrics-only", action="store_true",
+    export = parser.add_mutually_exclusive_group()
+    export.add_argument("--live-metrics-only", action="store_true",
                         help="Export observed trajectories/timing without requiring a completed scenario")
+    export.add_argument("--native-sources-only", action="store_true",
+                        help="Export source clocks and native packet observations without a mission report")
     parser.add_argument("--output-dir", type=Path,
-                        help="Separate output directory for --live-metrics-only; raw input is read-only")
+                        help="Separate directory for a live/source export; raw input is read-only")
     window = parser.add_mutually_exclusive_group()
     window.add_argument("--live-start-sim-time", type=float,
                         help="Explicit Gazebo source-time slice for --live-metrics-only")
@@ -3647,6 +3659,17 @@ def main() -> int:
                         help="Start at a recorded scenario phase with an explicit clock domain")
     args = parser.parse_args()
     run_dir = args.run_dir.resolve()
+    if args.native_sources_only:
+        if (args.latency_diagnostic or args.one_uav_run or args.observer_reference_run or
+                args.live_start_sim_time is not None or args.live_start_phase is not None):
+            parser.error("source-only export cannot be combined with mission or trajectory options")
+        output = args.output_dir.resolve() if args.output_dir else run_dir
+        summary = summarize_native_sources(run_dir, native_events(run_dir / "logs/native_radio_events.csv"),
+                                           output_dir=output)
+        print(json.dumps({"raw_run_dir": str(run_dir), "output_dir": str(output),
+                          "actual_schedule_status": summary["actual_schedule_status"],
+                          "source_activity_status": summary["source_activity_status"]}, sort_keys=True))
+        return 0
     if args.live_metrics_only:
         try:
             summary = export_live_metrics(run_dir, args.output_dir,
@@ -3658,7 +3681,7 @@ def main() -> int:
                           "target_status": summary["target_status"]}, sort_keys=True))
         return 0
     if args.output_dir:
-        parser.error("--output-dir is only supported with --live-metrics-only")
+        parser.error("--output-dir requires --live-metrics-only or --native-sources-only")
     if args.live_start_sim_time is not None or args.live_start_phase is not None:
         parser.error("explicit analysis windows require --live-metrics-only")
     if args.latency_diagnostic:
