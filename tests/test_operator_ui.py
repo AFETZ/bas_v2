@@ -33,6 +33,7 @@ class OperatorUITests(unittest.TestCase):
         scene.write_bytes((bas.ROOT / scene_name).read_bytes())
         self.scene = json.loads(scene.read_text(encoding='utf-8'))
         bas.write_json(self.root / 'runtime.json', self.config)
+        self.config = bas.load_config(self.root / 'runtime.json', root=self.root)
         self.launches, self.stops = [], []
         self.child = Child()
         self.state = UIState(self.root, launcher=self.launch, stopper=self.stops.append)

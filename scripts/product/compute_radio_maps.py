@@ -236,7 +236,67 @@ def cfr_power(paths, frequency):
     return np.abs(h[:, 0, 0, 0, 0, 0]) ** 2
 
 
-def execute(config, output, *, root=ROOT, variant='cuda_ad_mono_polarized'):
+def render(output):
+    """Render an existing completed snapshot without modifying its NPZ data."""
+    import matplotlib
+    matplotlib.use('Agg')
+    from matplotlib import pyplot as plt
+    from matplotlib.colors import ListedColormap
+    output = Path(output)
+    metadata = load_json(output / 'metadata.json')
+    if metadata.get('status') != 'completed':
+        raise ValueError('plot requires a completed RF snapshot')
+    grid, origin = metadata['map'], metadata['origin']
+    x, y, z = grid['center_m']; width, height = grid['size_m']
+    extent = (x-width/2, x+width/2, y-height/2, y+height/2)
+    with np.load(output / 'maps.npz', allow_pickle=False) as stored:
+        data = {name: stored[name] for name in stored.files}
+    desired = data['desired_sampled_positive']
+    resolved = desired & data['all_computed_tx_sampled_positive']
+    metrics = [('RSS', 'dBm', 'rss_desired_w', desired, 30),
+               ('SINR', 'dB', 'sinr_linear', resolved, 0),
+               ('J/S', 'dB', 'js_linear', resolved & data['js_defined'], 0)]
+    figure, axes = plt.subplots(1, 3, figsize=(16, 5), sharex=True, sharey=True)
+    cmap = matplotlib.colormaps['viridis'].copy(); cmap.set_bad('#999999')
+    missing = {}
+    try:
+        for axis, (name, unit, key, mask, offset) in zip(axes, metrics):
+            values = data[key]
+            valid = mask & np.isfinite(values) & (values > 0)
+            db = np.ma.masked_all(values.shape)
+            db[valid] = 10 * np.log10(values[valid]) + offset
+            image = axis.imshow(db, extent=extent, origin='lower', interpolation='nearest', cmap=cmap)
+            if valid.any():
+                figure.colorbar(image, ax=axis, label=unit, shrink=.8)
+            if name == 'J/S':
+                zero = mask & np.isfinite(values) & (values == 0)
+                white = ListedColormap(['white']); white.set_bad((0, 0, 0, 0))
+                axis.imshow(np.ma.masked_where(~zero, np.ones(values.shape)), extent=extent,
+                            origin='lower', interpolation='nearest', cmap=white, vmin=0, vmax=1)
+                valid |= zero  # Known zero J is -inf dB, distinct from missing samples.
+            missing[name] = int((~valid).sum())
+            axis.set(title=f'{name} [{unit}]', xlabel='World ENU x [m]', facecolor='#999999')
+        axes[0].set_ylabel('World ENU y [m]')
+        figure.suptitle(f"{grid['direction']} | t={grid['time_s']:g} s | ENU Z={z:g} m\n"
+                       f"{metadata['map_kind']} | RF snapshot, not service availability", fontsize=11)
+        figure.text(.5, .065, f"ENU origin: {origin['origin_latitude_deg']:g} deg, "
+                    f"{origin['origin_longitude_deg']:g} deg, {origin['origin_elevation_m']:g} m", ha='center', fontsize=9)
+        figure.text(.5, .025, 'Gray: no data / sampled zero, not outage. White in J/S: J=0 (-inf dB).', ha='center', fontsize=9)
+        figure.tight_layout(rect=(0, .09, 1, .87))
+        figure.savefig(output / 'maps.png', dpi=150)
+    finally:
+        plt.close(figure)
+    metadata['plot'] = dict(file='maps.png', matplotlib_version=matplotlib.__version__, backend='Agg',
+        sha256=hashlib.sha256((output / 'maps.png').read_bytes()).hexdigest(),
+        source_npz_sha256=hashlib.sha256((output / 'maps.npz').read_bytes()).hexdigest(),
+        extent_enu_m=list(extent), origin='lower', no_data_cells=missing)
+    temporary = output / 'metadata.tmp'
+    temporary.write_text(json.dumps(metadata, indent=2, allow_nan=False) + '\n', encoding='utf-8')
+    temporary.replace(output / 'metadata.json')
+    return metadata['plot']
+
+
+def execute(config, output, *, root=ROOT, variant='cuda_ad_mono_polarized', plot=False):
     paths, mission, profile, segments = validate(config, root)
     output = output.resolve()
     output.relative_to(root.resolve())
@@ -374,11 +434,13 @@ def execute(config, output, *, root=ROOT, variant='cuda_ad_mono_polarized'):
                         tx_order=[dict(id=t['id'], desired=d, spectral_overlap_fraction=o) for t, o, d in transmitters],
                         zero_desired_cells=int((~arrays['desired_sampled_positive']).sum()))
         write('metadata.json', metadata)
-        return metadata
     except Exception as error:
         metadata.update(status='failed', error=f'{type(error).__name__}: {error}', wall_s=time.perf_counter() - started)
         write('metadata.json', metadata)
         raise
+    if plot:
+        metadata['plot'] = render(output)
+    return metadata
 
 
 def main():
@@ -386,14 +448,17 @@ def main():
     parser.add_argument('--config', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--validate-only', action='store_true')
+    parser.add_argument('--plot', action='store_true', help='also render RSS/SINR/J/S PNG using Matplotlib Agg')
     parser.add_argument('--variant', choices=('cuda_ad_mono_polarized', 'llvm_ad_mono_polarized'), default='cuda_ad_mono_polarized')
     args = parser.parse_args()
+    if args.validate_only and args.plot:
+        parser.error('--plot requires computation; omit --validate-only')
     config = load_json(args.config)
     if args.validate_only:
         validate(config)
         print('valid')
     else:
-        print(json.dumps(execute(config, args.output, variant=args.variant), allow_nan=False))
+        print(json.dumps(execute(config, args.output, variant=args.variant, plot=args.plot), allow_nan=False))
 
 
 if __name__ == '__main__':

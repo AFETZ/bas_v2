@@ -48,13 +48,15 @@ DIAGNOSTIC_OPERATIONS_PER_UAV = 10
 DEFAULT_SCENARIO_CONFIG = ROOT / "network/config/scenario_5uav_town01_native_product.yaml"
 
 
-def load_flight_plan(path: Path) -> dict[str, Any]:
+def load_flight_plan(path: Path, *, include_flight: bool = True) -> dict[str, Any]:
     """Load and validate the product mission from the selected scenario YAML."""
 
     value = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     if not isinstance(value, dict):
         raise ScenarioError(f"scenario config must contain a mapping: {path}")
-    flight = value.get("flight") or {}
+    # Endpoint traffic and explicitly non-flight diagnostics do not execute or
+    # qualify a mission. Preserve strict mission validation for the default path.
+    flight = (value.get("flight") or {}) if include_flight else {}
     if not isinstance(flight, dict):
         raise ScenarioError(f"flight config must contain a mapping: {path}")
 
@@ -187,6 +189,7 @@ def load_flight_plan(path: Path) -> dict[str, Any]:
 
     return {
         "scenario_name": str((value.get("scenario") or {}).get("name", path.stem)),
+        "flight_included": include_flight,
         "map": dict((value.get("scenario") or {}).get("map") or {}),
         "takeoff": takeoff,
         "missions": missions,
@@ -208,7 +211,7 @@ def run_additional_agent(args: argparse.Namespace) -> int:
     """Endpoint-only traffic source/sink; there is no ns-3 echo or retry logic."""
 
     index = int(args.index)
-    traffic = load_flight_plan(Path(args.scenario_config).resolve())["traffic"]
+    traffic = load_flight_plan(Path(args.scenario_config).resolve(), include_flight=False)["traffic"]
     p2p_packets = traffic["p2p_packets_per_direction_per_uav"]
     simultaneous = traffic["simultaneous_uplink"]
     simultaneous_packets = simultaneous["packets_per_uav"]
@@ -358,13 +361,32 @@ def run_additional_agent(args: argparse.Namespace) -> int:
 
 class NativeFiveUavHarness(FlightHarness):
     def __init__(self, args: argparse.Namespace) -> None:
-        super().__init__(Path(args.run_dir).resolve(), Path(args.node_state).resolve(), args.timeout_scale)
-        self.phase_file = Path(args.phase_file).resolve()
-        self.schedule_file = Path(args.schedule_file).resolve()
+        mode = getattr(args, 'mode', 'product')
+        count = getattr(args, 'uav_count', 5)
+        channels = getattr(args, 'channels', 'control,payload')
+        if mode not in ('product', 'flight_diagnostic', 'latency_diagnostic', 'no_bypass_probe'):
+            raise ScenarioError('unsupported native harness mode')
+        if type(count) is not int or not 1 <= count <= 5:
+            raise ScenarioError('native UAV count must be an integer in 1..5')
+        if channels not in ('control', 'control,payload'):
+            raise ScenarioError('native channels must be control or control,payload')
+        if mode == 'product' and (count != 5 or channels != 'control,payload'):
+            raise ScenarioError('full product flight requires all five UAVs and both UART channels')
+        if type(args.timeout_scale) not in (int, float) or not math.isfinite(args.timeout_scale) or args.timeout_scale <= 0:
+            raise ScenarioError('timeout_scale must be finite and positive')
         self.scenario_config = Path(
             getattr(args, "scenario_config", None) or DEFAULT_SCENARIO_CONFIG
         ).resolve()
-        self.flight_plan = load_flight_plan(self.scenario_config)
+        include_flight = mode not in ('latency_diagnostic', 'no_bypass_probe')
+        # Validate before binding any sockets, so invalid missions leave no owner.
+        self.flight_plan = load_flight_plan(self.scenario_config, include_flight=include_flight)
+        selected_channels = tuple(channels.split(','))
+        if mode in ('product', 'no_bypass_probe'):
+            selected_channels += ('additional_data',)
+        super().__init__(Path(args.run_dir).resolve(), Path(args.node_state).resolve(), args.timeout_scale,
+                         channels=selected_channels, uav_ids=tuple(range(1, count + 1)))
+        self.phase_file = Path(args.phase_file).resolve()
+        self.schedule_file = Path(args.schedule_file).resolve()
         self.traffic: dict[str, Any] = self.flight_plan["traffic"]
         self.simultaneous: dict[str, Any] = self.traffic["simultaneous_uplink"]
         self.diagnostic_retry_interval_s = self.traffic["diagnostic_retry_interval_s"]
@@ -393,7 +415,9 @@ class NativeFiveUavHarness(FlightHarness):
         self.summary.update(
             {
                 "profile": args.radio_profile,
-                "technology_specific_modem": args.radio_profile.startswith("native_wifi_"),
+                "technology_specific_modem": False,
+                "active_uav_ids": list(self.uav_ids),
+                "active_channels": list(self.channels),
                 "scenario_config": str(self.scenario_config),
                 "scenario_name": self.flight_plan["scenario_name"],
                 "map": self.flight_plan["map"],
@@ -418,6 +442,8 @@ class NativeFiveUavHarness(FlightHarness):
                 },
             }
         )
+        if not include_flight:
+            self.summary.update(mission_outcome='not_applicable', flight_validation='not_applicable')
 
     def phase(self, name: str) -> None:
         temporary = self.phase_file.with_name(self.phase_file.name + ".tmp")
@@ -712,12 +738,70 @@ class NativeFiveUavHarness(FlightHarness):
             ),
         }
 
+    def payload_version_diagnostics(self, systems: tuple[int, ...], *, timeout_s: float = 3.) -> dict:
+        """One safe request per UAV on the already-owned payload BSF1 socket.
+
+        Require both a final accepted ACK and an actual version response parsed
+        after this request. MAVLink ACK has no transaction ID; this is a single
+        outstanding request/receipt observation, not FC execution-time proof.
+        """
+        if 'payload' not in self.sockets or tuple(systems) != self.uav_ids:
+            raise ScenarioError('payload diagnostic requires the exact configured payload roster')
+        if type(timeout_s) not in (int, float) or not math.isfinite(timeout_s) or timeout_s <= 0:
+            raise ValueError('payload diagnostic timeout must be finite and positive')
+        mav = self.mavutil.mavlink
+        request = int(mav.MAV_CMD_REQUEST_MESSAGE)
+        version_id = int(mav.MAVLINK_MSG_ID_AUTOPILOT_VERSION)
+        report = dict(status='running', channel='payload', command=request, response='AUTOPILOT_VERSION',
+                      clock_domain='host_monotonic', hardware_validation='not_performed',
+                      correlation='single outstanding request; post-request GCS parse receipts',
+                      uavs={str(i): dict(status='not_started') for i in systems})
+        self.summary.setdefault('latency_diagnostic', {})['payload_version_check'] = report
+        for system_id in systems:
+            ack_key = ('payload', system_id, request)
+            response_key = ('payload', system_id, 'AUTOPILOT_VERSION')
+            self.acks.pop(ack_key, None)
+            self.latest.pop(response_key, None)
+            self.latest_at_ns.pop(response_key, None)
+            operation = self.command_operation(channel='payload', system_id=system_id, command=request,
+                params=[float(version_id), 0, 0, 0, 0, 0, 0], label='payload_readonly_version',
+                retry_policy='one_shot', retry_interval_s=None, maximum_attempts=1, timeout_s=timeout_s)
+            sent_ns = operation['attempts'][0]['send_monotonic_ns']
+            deadline_ns = sent_ns + int(timeout_s * self.timeout_scale * 1e9)
+            while True:
+                ack = self.acks.get(ack_key)
+                response = self.latest.get(response_key)
+                response_ns = self.latest_at_ns.get(response_key, 0)
+                accepted = bool(ack and sent_ns <= ack[1] <= deadline_ns and ack[0].get_srcComponent() == 1
+                                and int(ack[0].result) == int(mav.MAV_RESULT_ACCEPTED))
+                received = bool(response is not None and sent_ns <= response_ns <= deadline_ns and response.get_srcComponent() == 1)
+                if (accepted and received) or clock.monotonic_ns() >= deadline_ns:
+                    break
+                self.pump(.05)
+            row = dict(status='passed' if accepted and received else 'failed', operation_id=operation['operation_id'],
+                request_send_monotonic_ns=sent_ns, accepted_ack_received=accepted, response_received=received,
+                ack_result=int(ack[0].result) if ack else None, ack_received_monotonic_ns=ack[1] if ack else None,
+                response_received_monotonic_ns=response_ns if response is not None else None,
+                response_frame_hex=bytes(response.get_msgbuf()).hex() if response is not None else None,
+                ack_frame_hex=bytes(ack[0].get_msgbuf()).hex() if ack else None)
+            report['uavs'][str(system_id)] = row
+            if not accepted or not received:
+                report['status'] = 'failed'
+                raise ScenarioError(f'payload read-only AUTOPILOT_VERSION exchange failed for UAV{system_id}: '
+                                    f'accepted_ack={accepted}, response={received}')
+        report['status'] = 'passed'
+        return report
+
     def latency_diagnostics(self, uav_count: int, channels: tuple[str, ...]) -> None:
         """Stationary, non-flight decision-gate commands; no synthetic response is used."""
 
         request = int(self.mavutil.mavlink.MAV_CMD_REQUEST_MESSAGE)
         version_id = int(self.mavutil.mavlink.MAVLINK_MSG_ID_AUTOPILOT_VERSION)
         systems = tuple(range(1, uav_count + 1))
+        if systems != self.uav_ids or channels != self.channels:
+            raise ScenarioError('latency diagnostic arguments must match the bound UAV/channel roster')
+        diagnostic = self.summary.setdefault('latency_diagnostic', {})
+        diagnostic.update(uav_count=uav_count, channels=list(channels), flight_validation='not_applicable')
         self.phase("latency_stationary_warmup")
         self.wait(
             lambda: all((channel, system_id, "HEARTBEAT") in self.latest
@@ -726,6 +810,9 @@ class NativeFiveUavHarness(FlightHarness):
             "diagnostic UART heartbeats",
         )
         self.observe_for(30.0)
+        if 'payload' in channels:
+            self.phase('latency_payload_readonly_version')
+            self.payload_version_diagnostics(systems)
         self.phase("latency_one_shot_sequential")
         for system_id in systems:
             for sequence in range(DIAGNOSTIC_OPERATIONS_PER_UAV):
@@ -752,13 +839,13 @@ class NativeFiveUavHarness(FlightHarness):
                     retry_policy="characterization", retry_interval_s=retry_interval_s,
                     maximum_attempts=3, timeout_s=1.0,
                 )
-        self.summary["latency_diagnostic"] = {
+        diagnostic.update({
             "uav_count": uav_count,
             "channels": list(channels),
             "one_shot_operations_per_uav_per_mode": DIAGNOSTIC_OPERATIONS_PER_UAV,
             "retry_candidates_s": list(RETRY_CHARACTERIZATION_CANDIDATES_S),
             "mavlink_ping": self.ping_diagnostics(systems),
-        }
+        })
 
     def native_command_one(
         self,
@@ -1737,8 +1824,22 @@ def run_no_bypass_probe(args: argparse.Namespace) -> int:
         schedule_file=str(Path(args.run_dir).resolve() / "logs/additional_schedule.json"),
         radio_profile=args.radio_profile,
         scenario_config=args.scenario_config,
+        mode='no_bypass_probe',
+        uav_count=getattr(args, 'uav_count', 5),
+        channels=getattr(args, 'channels', 'control,payload'),
     )
     harness = NativeFiveUavHarness(probe_args)
+    try:
+        result = _no_bypass_probe(args, harness)
+    finally:
+        harness.close()
+    write_json(Path(args.output), result)
+    return 0 if result['passed'] else 1
+
+
+def _no_bypass_probe(args, harness):
+    systems = harness.uav_ids
+    channels = tuple(channel for channel in harness.channels if channel != 'additional_data')
     # Continue the same BSF1 streams: retained UART receivers reject sequence zero.
     run_dir = Path(args.run_dir).resolve()
     sequences = json.loads((run_dir / "logs/transport_sequences.json").read_text())
@@ -1765,12 +1866,12 @@ def run_no_bypass_probe(args: argparse.Namespace) -> int:
     def source_times():
         state = json.loads(Path(args.node_state).read_text())
         return {node['id']: node['source_sim_time_s'] for node in state['nodes']
-                if node['id'] in {f'uav{i}' for i in UAV_IDS}}
+                if node['id'] in {f'uav{i}' for i in systems}}
 
     def uart_bytes(counter, after_ns=0):
         values = {}
-        for system_id in UAV_IDS:
-            for channel in ("control", "payload"):
+        for system_id in systems:
+            for channel in channels:
                 path = run_dir / f"metrics/{channel}_uart_uav{system_id}.json"
                 field = counter
                 if system_id == 1 and channel == "control" and not path.exists():
@@ -1804,11 +1905,13 @@ def run_no_bypass_probe(args: argparse.Namespace) -> int:
     source_before = source_times()
     before = sum(harness.message_counts.values())
     request = int(harness.mavutil.mavlink.MAV_CMD_REQUEST_MESSAGE)
-    for system_id in UAV_IDS:
+    for system_id in systems:
         for channel, message_id in (
             ("control", harness.mavutil.mavlink.MAVLINK_MSG_ID_AUTOPILOT_VERSION),
             ("payload", harness.mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE),
         ):
+            if channel not in channels:
+                continue
             message = harness.transmitters[(channel, system_id)].command_long_encode(
                 system_id, 1, request, 0, float(message_id), 0, 0, 0, 0, 0, 0
             )
@@ -1828,21 +1931,23 @@ def run_no_bypass_probe(args: argparse.Namespace) -> int:
     harness.observe_for(float(args.duration_s))
     messages = sum(harness.message_counts.values()) - before
     result = {
+        'uav_ids': list(systems),
+        'channels': list(channels),
         "duration_s": float(args.duration_s),
         "duration_domain": 'simulation' if clock.mode() == 'lockstep' else 'wall',
         "wall_duration_s": time.monotonic()-wall_started,
-        "isolation_method": "WifiPhy.SetSleepMode confirmed on all six native radios; other components keep running",
+        "isolation_method": f"WifiPhy.SetSleepMode confirmed on {len(systems) + 1} native radios; other components keep running",
         "started_monotonic_ns": started_ns,
         "ended_monotonic_ns": clock.monotonic_ns(),
         "control_or_payload_messages_received": messages,
         "additional_packets_received": len(harness.additional_received),
-        "control_ack_absent_all_five": not any(
+        "control_ack_absent": not any(
             key[0] == "control" for key in harness.acks
         ),
-        "payload_response_absent_all_five": not any(
+        "payload_response_absent": not any(
             key[0] == "payload" for key in harness.acks
         ),
-        "reverse_telemetry_absent_all_five": messages == 0,
+        "reverse_telemetry_absent": messages == 0,
         "additional_data_absent": not harness.additional_received,
         "passed": messages == 0 and not harness.additional_received,
     }
@@ -1854,16 +1959,18 @@ def run_no_bypass_probe(args: argparse.Namespace) -> int:
     deltas = {key: uart_after[key]-value for key,value in uart_before.items()} if metrics_complete else {}
     source_deltas = {key: source_uart_after[key]-value for key,value in source_uart_before.items()} if metrics_complete else {}
     progress = {name: source_after[name]-stamp for name,stamp in source_before.items() if name in source_after}
-    progressing = len(progress) == len(UAV_IDS) and all(value > 0 for value in progress.values())
+    progressing = len(progress) == len(systems) and all(value > 0 for value in progress.values())
     result.update(transport_sequences_resumed=True, uart_metrics_complete=metrics_complete,
                   uart_delivered_bytes_delta=deltas,
                   source_uart_bytes_delta=source_deltas, physics_progress_s=progress,
-                  physics_progressed_all_five=progressing,
+                  physics_progressed_all_uavs=progressing,
                   passed=result['passed'] and metrics_complete and progressing
                       and all(v > 0 for v in source_deltas.values()) and all(v == 0 for v in deltas.values()))
-    harness.close()
-    write_json(Path(args.output), result)
-    return 0 if result["passed"] else 1
+    if systems == UAV_IDS and channels == ('control', 'payload'):
+        for name in ('control_ack_absent', 'payload_response_absent', 'reverse_telemetry_absent'):
+            result[name + '_all_five'] = result[name]
+        result['physics_progressed_all_five'] = progressing
+    return result
 
 
 def parser() -> argparse.ArgumentParser:
@@ -1884,7 +1991,7 @@ def parser() -> argparse.ArgumentParser:
     scenario.add_argument("--scenario-config", default=str(DEFAULT_SCENARIO_CONFIG))
     scenario.add_argument("--timeout-scale", type=float, default=1.0)
     scenario.add_argument("--mode", choices=("product", "latency_diagnostic", "flight_diagnostic"), default="product")
-    scenario.add_argument("--uav-count", type=int, choices=(1, 5), default=5)
+    scenario.add_argument("--uav-count", type=int, choices=UAV_IDS, default=5)
     scenario.add_argument("--channels", default="control,payload")
     scenario.add_argument(
         "--radio-profile", default="native_wifi_80211n_spectrum_reference_v1"
@@ -1897,6 +2004,8 @@ def parser() -> argparse.ArgumentParser:
     probe.add_argument("--radio-heartbeat", required=True)
     probe.add_argument("--duration-s", type=float, default=10.5)
     probe.add_argument("--output", required=True)
+    probe.add_argument('--uav-count', type=int, choices=UAV_IDS, default=5)
+    probe.add_argument('--channels', choices=('control', 'control,payload'), default='control,payload')
     probe.add_argument(
         "--radio-profile", default="native_wifi_80211n_spectrum_reference_v1"
     )
