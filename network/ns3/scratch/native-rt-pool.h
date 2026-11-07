@@ -122,7 +122,7 @@ class NativeRtPool
             Collect(); Dispatch();
             ++m_pollCalls;
             m_maxPollWallNs = std::max(m_maxPollWallNs, NativeRtCache::HostNowNs() - started);
-            m_next = Simulator::Schedule(MilliSeconds(20), &NativeRtPool::Poll, this);
+            m_next = Simulator::Schedule(NanoSeconds(kPollPeriodNs), &NativeRtPool::Poll, this);
         }
         catch (const std::exception& error)
         {
@@ -169,6 +169,9 @@ class NativeRtPool
     }
 
   private:
+    // The first five-UAV flight missed a rotation refresh while a reply was
+    // in transit. Poll below the 20 ms pose cadence; expiry guards stay fixed.
+    static constexpr int64_t kPollPeriodNs = 5000000;
     using Pair = std::pair<size_t, size_t>;
     struct Job
     {
@@ -388,7 +391,8 @@ class NativeRtPool
             "submitted_jobs"_a=m_request,"completed_jobs"_a=m_completed,"cold_warmup_jobs"_a=m_cold,
             "published_results"_a=m_publishedResults,"published_pairs"_a=m_publishedPairs,
             "discarded_pairs"_a=m_discarded,"discard_reasons"_a=m_discardReasons,
-            "poll_calls"_a=m_pollCalls,"max_poll_wall_ns"_a=m_maxPollWallNs,"cache"_a=cache,
+            "poll_calls"_a=m_pollCalls,"poll_period_ns"_a=kPollPeriodNs,
+            "max_poll_wall_ns"_a=m_maxPollWallNs,"cache"_a=cache,
             "cache_snapshot_native_ns"_a=Simulator::Now().GetNanoSeconds(),
             "cache_snapshot_host_monotonic_ns"_a=NativeRtCache::HostNowNs(),
             "pool"_a=(m_pool ? m_pool.attr("snapshot")() : py::none()),"log_path"_a=m_logPath);
