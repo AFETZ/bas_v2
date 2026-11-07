@@ -176,6 +176,12 @@ int main(int argc, char** argv)
         Require(batch->ChannelMatrixNeedsUpdate(second.matrix, mobility[0], mobility[2]), "Displacement invalidation was relaxed");
         compare(read(pairwise, 0, 2, "pairwise_displaced_rx"), read(batch, 0, 2, "batch_displaced_rx"));
         Require(batch->GetReceiverBatchStats().completedCalls == before + 1, "Displacement did not create a new batch");
+        // A moved receiver invalidates its links to every peer. One reciprocal
+        // batch anchored at that receiver must refresh those links together.
+        compare(read(pairwise, 1, 2, "pairwise_displaced_rx_other_peer"),
+                read(batch, 1, 2, "batch_displaced_rx_other_peer_cache"));
+        Require(batch->GetReceiverBatchStats().completedCalls == before + 1,
+                "One moved receiver triggered a separate RT solve for each transmitter");
         compare(read(pairwise, 0, 1, "pairwise_unchanged_peer"), read(batch, 0, 1, "batch_unchanged_peer"));
         const auto observed = batch->GetReceiverBatchStats();
         Require(observed.lastReceiverCount == 2 && observed.lastAllocatedMaxPathsPerSource == 2000 &&

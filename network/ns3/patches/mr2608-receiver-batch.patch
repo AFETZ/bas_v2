@@ -327,13 +327,35 @@
      // Compute the channel matrix key. The key is reciprocal, i.e., key (a, b) = key (b, a)
      uint64_t channelMatrixKey = GetKey(aAntenna->GetId(), bAntenna->GetId());
  
-@@ -389,6 +681,40 @@
+@@ -389,6 +681,65 @@
      // generate a new realization
      if (notFound || update)
      {
 +        if (m_receiverBatchEnabled)
 +        {
-+            GenerateReceiverBatch(aMob, aAntenna);
++            // A changed receiver can invalidate every incident reciprocal link.
++            // Anchor its batch there instead of regenerating it once per peer.
++            // Use only the existing pure freshness test: antenna update flags
++            // must not be consumed while scoring unrelated pairs.
++            const auto invalidPeerLinks = [this](Ptr<const MobilityModel> mobility,
++                                                 Ptr<const PhasedArrayModel> antenna) {
++                size_t invalid = 0;
++                for (size_t i = 0; i < m_receiverBatchMobility.size(); ++i)
++                {
++                    auto peer = m_receiverBatchMobility[i];
++                    if (peer == mobility) continue;
++                    const auto key = GetKey(antenna->GetId(), m_receiverBatchAntennas[i]->GetId());
++                    const auto found = m_channelMatrixMap.find(key);
++                    if (found == m_channelMatrixMap.end() ||
++                        ChannelMatrixNeedsUpdate(found->second, mobility, peer))
++                        ++invalid;
++                }
++                return invalid;
++            };
++            const auto aInvalid = invalidPeerLinks(aMob, aAntenna);
++            const auto bInvalid = invalidPeerLinks(bMob, bAntenna);
++            const bool anchorAtB = bInvalid > aInvalid; // Preserve the original aMob tie-break.
++            GenerateReceiverBatch(anchorAtB ? bMob : aMob, anchorAtB ? bAntenna : aAntenna);
 +            auto result = m_channelMatrixMap.at(channelMatrixKey);
 +            finishBatchCall(false);
 +            const auto& stats = m_receiverBatchStats;
@@ -343,6 +365,9 @@
 +                << " samples_per_src=" << m_samplesPerSource
 +                << " allocated_max_num_paths_per_src=" << stats.lastAllocatedMaxPathsPerSource
 +                << " candidate_count=" << stats.lastCandidateCount
++                << " anchor_node=" << (anchorAtB ? bMob : aMob)->GetObject<Node>()->GetId()
++                << " requested_a_stale_links=" << aInvalid
++                << " requested_b_stale_links=" << bInvalid
 +                << " scope=completed_batch timing=host_wall_ns"
 +                << " completed_calls=" << stats.completedCalls
 +                << " scene_prepare_ns=" << stats.lastScenePrepareWallNs
@@ -368,7 +393,7 @@
          // channel matrix not found or has to be updated, generate a new one
          py::module_ rt = py::module_::import("sionna.rt");
          NS_LOG_INFO("Building scene for antenna pair ("
-@@ -422,6 +748,7 @@
+@@ -422,6 +773,7 @@
          m_channelParamsMap[channelParamsKey] = channelParams;
      }
  
@@ -376,7 +401,7 @@
      return channelMatrix;
  }
  
-@@ -622,27 +949,28 @@
+@@ -622,27 +974,28 @@
  Ptr<SionnaRtChannelModel::SionnaRtChannelParams>
  SionnaRtChannelModel::CalculateChannelParamsFromPaths(const py::object paths,
                                                        Ptr<const MobilityModel> aMob,
@@ -425,7 +450,7 @@
  
      // Precompute angles sincos
      channelParams->m_cachedAngleSincos.resize(channelParams->m_angle.size());
-@@ -845,7 +1173,7 @@
+@@ -845,7 +1198,7 @@
  }
  
  MatrixBasedChannelModel::Complex3DVector
@@ -434,7 +459,7 @@
  {
      NS_LOG_FUNCTION(this);
      py::module_ np = py::module_::import("numpy");
-@@ -853,9 +1181,20 @@
+@@ -853,9 +1206,20 @@
      py::tuple cir = paths.attr("cir")(py::arg("normalize_delays") = m_normalizeDelays,
                                        py::arg("out_type") = "numpy");
  
@@ -457,7 +482,7 @@
  
      // Generate channel coefficients for each cluster n and each receiver
      //  and transmitter element pair u,s.
-@@ -883,56 +1222,33 @@
+@@ -883,56 +1247,33 @@
  }
  
  MatrixBasedChannelModel::DoubleVector
@@ -524,7 +549,7 @@
  {
      py::object angle_py;
      if (Angle == "ZOA")
-@@ -958,24 +1274,22 @@
+@@ -958,24 +1299,22 @@
      }
  
      // Convert to numpy float64 array
