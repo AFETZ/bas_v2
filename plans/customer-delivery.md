@@ -26,9 +26,9 @@
 | Два UART через общий эфир | Проверено в коротких циклах N=1..5: control и payload одновременно через native Wi-Fi Spectrum PHY/MAC. Устранена потеря ToS на UAV TAP ingress: штатный device selector теперь даёт control TID5/AC_VI, payload TID1/AC_BK. Настоящий TAP + YansWifi regression воспроизвёл defect до patch и прошёл после при backlog обоих направлений; p95 control queue residence UAV 402,78 → 1,26 мс (`control/delivery-qos-contract-20261107/verification.json`). Это очередь EDCA, не подтверждение полного UART/RF SLA и не strict priority. |
 | Большая карта, Sionna/hybrid | Частично: explicit RT прошёл полный короткий N=1 цикл `delivery-ui-rt-n1-20261107-01` на `1796c4d`; native stats подтверждают Sionna drives RX PSD, один общий Spectrum-канал и ноль scalar base models. Общий OBJ рельеф 10×10 км / 200 м и здания до 15 этажей проверены Gazebo collision + Sionna 1.2.0 в `delivery-terrain-probe-20261107/runtime-result.json` на `f33b74b`. Исправлена причина DART crash: отсутствующие OBJ normals. Полёт N=1 над рельефом с RT/двумя потоками прошёл в `delivery-terrain-n1-20261107-02` (1 Вт по вводным заказчика). Первая попытка с прежним 10 мВт профилем сохранилась как mission incomplete / measurement valid. Синхронный RT N=5 остаётся неработоспособным в заданном realtime-бюджете; попытки и причины ниже. Hybrid запрещён в CLI до квалификации правил. |
 | Помехи и карты RSS/SINR/J/S | Частично: GPU `control/delivery-map-probe-20261107/verification.json` подтвердил RF-срезы и разворот диаграммы. Полный `delivery-source-rt-n1-20261107-06` на `2065c4e`: N=1, рельеф, оба потока, 1 Вт tr38901; completed / succeeded / valid, runtime verification errors отсутствуют. Экспорт после закрытия capture проверен: input/actual/summary сформированы, SHA-256 capture записан в `native-radio-realtime/<ID>/metrics/native_source_summary.json`. До cochannel-помехи 532 MPDU/5 с, во время 0 и 273 PHY drops/5 с, после 1086/10 с. Контроль `...-05` со сдвигом только частоты 2412→2447 МГц: во время источника 552 MPDU/5 с, PHY drops 0. Proof: `control/delivery-source-packets-20261107/spectral-overlap-verification.json`. Это native RF/packet-наблюдения, не application PDR или MAC/SLA-классы карт; аппаратная и совместная многопользовательская приёмка открыты. |
-| Интерфейс, серии, установка | Частично: loopback UI `bas.py ui` редактирует/проверяет конфигурацию, запускает штатный controller, показывает состояние/причины и экспортирует реальные артефакты; HTTP API запустил успешный RT N=1. Batch: последовательная очередь, seeds/runs/repeats, immutable attempts, отмена; реальная серия из двух seeds N=1 прошла. Реализован build-only bootstrap с закреплённым образом, SHA-256 wheels, журналом команд/CID и уборкой своих контейнеров; 47 bootstrap tests прошли после исправления выбора METADATA верхнего уровня wheel. Первая реальная resolve-lock попытка отказала до публикации bundle; повтор в чистом каталоге выполняется. Чистая установка и независимый оператор ещё не квалифицированы. |
+| Интерфейс, серии, установка | Частично: loopback UI `bas.py ui` редактирует/проверяет конфигурацию, запускает controller, показывает причины и экспортирует артефакты; HTTP API запустил успешный RT N=1. Batch сохраняет последовательные immutable attempts, seeds/runs/repeats и отмену; реальная серия двух seeds N=1 прошла. Независимый чистый clone `f2557bc` прошёл SDK12 bootstrap/check-only, pinned image и 75 hash-checked wheels; доказательства `control/delivery-bootstrap-sdk12-probe-20261108/`. Проверка установки на отдельной чистой машине и независимый оператор остаются открытыми. |
 | Длительные опыты | Реализовано и локально проверено на `7a250f5` (68 tests): duration до 86400 с, расчёт native/service lifetimes из длительности и существующих фаз, обязательный disk capture свыше 2400 с; readiness, radio/cache и stop guards не ослаблены. Часовая и восьмичасовая нагрузочная квалификация не подтверждены; ёмкость диска и длительная стабильность требуют целевой проверки. |
-| RT workers и когерентный кэш | Частично: в GetChannel нет RT/Python/ожидания, исходная эпоха и fail-closed guards сохраняются. На ПК4 прошли CPU cache/spectrum contract (83 проверки на `a0ad521`), public GPU SDK contract и стационарное сравнение 1/3 workers (`bd519e6`). Proof: `control/delivery-native-rt-worker-probe-20261108/verification.json`. Полный короткий N=1 с рельефом/обоими UART завершён на `cb55438`: `delivery-rt-pool-n1-20261108-04`, completed / succeeded / valid, все 9 worker checks passed; это историческая проверка. Десятый SDK-патч собран, GPU public contract прошёл; шесть N=5 pool попыток `...-01..06` failed / invalid по guards ориентации или смещения. Направленные источники в worker_pool явно отклоняются; их совместная интеграция и полный N=5 остаются открытыми. |
+| RT workers и когерентный кэш | Частично: GetChannel выполняется без RT/Python/ожидания, сохраняет исходные epochs и fail-closed guards. Исторический N=1 `delivery-rt-pool-n1-20261108-04` на `cb55438` прошёл полный цикл. SDK12 и fullmesh/emitter CPU/GPU-контракты проверены; N=5 `delivery-rt-coherent-n5-20261108-{01,02}` failed / invalid при строгом возрасте 100 мс до полёта. Исследуется стоимость native обработки пакетных всплесков. Направленные источники проходят standalone producer, но совместный worker_pool пока отклоняется; live bundle, полный N=5 и аппаратная приёмка открыты. |
 
 Артефакты запусков находятся на ПК4 в `/home/bas/bas_v2-core/runs/`:
 `control/<ID>/run.json` и `runtime.log`, `native-radio-realtime/<ID>/metrics/`
@@ -136,8 +136,12 @@ multi-TX/RX RT solve всей когорты вместо отдельных TX-
 resolve 75 wheels (889 670 785 байт), обе offline hash-checked установки, официальный
 SDK + 10 патчей, colcon/два native targets и check-only `ready=true`, `gaps=[]`.
 Proof: `control/delivery-bootstrap-probe-20261108/probe.json`, этапы 04–06;
-этап 03 с дефектом выбора vendored METADATA сохранён. Это чистый каталог на том же
-хосте с имеющимся pinned image; отдельная чистая машина и запуск другим инженером открыты.
+этап 03 с дефектом выбора vendored METADATA сохранён. Отдельный независимый clone
+`f2557bc` прошёл SDK12 bootstrap за 220,01 с и check-only за 18,49 с (`ready=true`,
+`gaps=[]`): `control/delivery-bootstrap-sdk12-probe-20261108/probe.json` и `clone-proof.json`.
+75 wheels скопированы независимо с проверкой SHA; старые SDK10/12 receipts сохранены.
+Это чистые каталоги на том же хосте с имеющимся pinned image; отдельная чистая машина
+и запуск другим инженером открыты.
 Standalone SOURCE producer `8a63100` прошёл 38 заданий: CP + 5 UAV, iso/TR, 2412/2422 МГц,
 исходные CIR/epochs и повтор при native0. `control/delivery-source-star-probe-20261108/gpu-01/`.
 Совместный тракт ещё не проверен: переключение профилей вызвало повторные 0,42–0,66 с
@@ -162,7 +166,7 @@ guard 0,5, CIR возрастом 68,08 мс ещё соответствовал
 когорты и её CIR перед CourseChange, сохраняет исходные epochs и проверяет возраст
 удерживаемого кадра; default immediate mode остаётся прежним. Подготовлен SDK12 emitter
 batch для внешнего TX и всех шести RX. На `f2557bc` точное дерево SDK12 проверено,
-сборка и программный набор прошли: CPU whole-cohort — 101 проверка, emitter CPU — 406,
+сборка и 360 программных тестов (359 pass, 1 skip) прошли: CPU whole-cohort — 101 проверка, emitter CPU — 406,
 emitter GPU — 1442, fullmesh CPU — 219. Доказательства:
 `control/delivery-coherent-frame-20261108/{build-02-command,coherent-pose-cpu-02,emitter-cpu-02,emitter-gpu-02,fullmesh-cpu-02}.json`.
 Первая сборка отказала из-за различия `int64_t`/`llround` на Linux; исходный failed log сохранён.
@@ -170,8 +174,16 @@ emitter GPU — 1442, fullmesh CPU — 219. Доказательства:
 возраст удерживаемого кадра 100,472137 мс превысил новый предел 100 мс. Применено 60
 согласованных кадров, 6315 cache hits / 0 misses; steady solver около 25 мс.
 Следующий шаг — установить вклад causal selection, scheduler lag и периода получения
-следующего кадра, исправить причину без увеличения 100 мс; затем повторить N=5
-и объединить desired/emitter frames с affinity. SDK12-контракт не закрывает live source integration.
+следующего кадра, исправить причину без увеличения 100 мс; затем повторить N=5.
+`...-02` на `b3187cf` остановился по host cache expiry на 2,59 с: штатный CIR→RX PSD
+занял 599,98 мс / 12504 вызова, GetChannel — 18,29 мс, reader — 182,68 мс.
+Это wall timing, включая preemption. Сначала проверяется штатная O3-сборка с
+сохранёнными assertions/logs, затем необходимость собственной оптимизации.
+На `26cb01a` source producer собран и прошёл 22 Linux tests и GPU 38 jobs,
+12 batch / 72 STAR links включая CP, реальный cap 6000; hot median 21,567 мс.
+`control/delivery-source-emitter-batch-probe-20261108/{build-and-probe-01-command,derived-verification}.json`.
+Fixed RF aliases и receipt/poll timestamps проверены; совместные desired/emitter
+frames с affinity ещё интегрируются. SDK12-контракт не закрывает live source integration.
 Worker_pool с направленными источниками пока явно отклоняется; обязательная совместная
 приёмка остаётся открыта. Успех unit/GPU-контрактов не считается успехом полного тракта.
 Зависимости solver: Sionna RT 1.2.0, Mitsuba 3.7.1, DrJit 1.2.0; фактические бюджеты
