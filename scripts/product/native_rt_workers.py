@@ -8,8 +8,10 @@ processes; CUDA threads stay inside it. No process-group or unrelated PID kills.
 """
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 import copy
+import gc
 import hashlib
 import json
 import math
@@ -280,6 +282,69 @@ class _Worker:
     last_path_storage_stats: dict | None = None
 
 
+class _GcObserver:
+    """Bounded callback intervals in the pool owner's interpreter, not its children.
+
+The interval includes any intervening GC callbacks. It is diagnostic evidence,
+not a standalone measure of collector CPU time or a change to GC policy.
+"""
+    def __init__(self):
+        self.records = deque(maxlen=256)
+        self.active = None
+        self.started = self.completed = self.overwritten = self.unmatched_stops = 0
+        self.by_generation = [0, 0, 0]
+        self.maximum_wall_ns = self.maximum_thread_cpu_ns = None
+
+    def start(self):
+        if self not in gc.callbacks:
+            gc.callbacks.append(self)
+
+    def close(self):
+        if self in gc.callbacks:
+            gc.callbacks.remove(self)
+
+    def __call__(self, phase, info):
+        host_ns, cpu_ns = time.monotonic_ns(), time.thread_time_ns()
+        thread_id, native_id = threading.get_ident(), threading.get_native_id()
+        if phase == 'start':
+            self.started += 1
+            self.active = dict(generation=info['generation'], start_host_monotonic_ns=host_ns,
+                start_thread_cpu_ns=cpu_ns, thread_id=thread_id, native_thread_id=native_id,
+                allocation_counts_start=gc.get_count())
+        elif phase == 'stop':
+            self.completed += 1
+            self.by_generation[info['generation']] += 1
+            start, self.active = self.active, None
+            if start is None or start['generation'] != info['generation']:
+                self.unmatched_stops += 1
+                start = dict(generation=info['generation'], start_host_monotonic_ns=None,
+                    start_thread_cpu_ns=None, thread_id=None, native_thread_id=None,
+                    allocation_counts_start=None)
+            same_thread = (start['thread_id'], start['native_thread_id']) == (thread_id, native_id)
+            wall_ns = host_ns-start['start_host_monotonic_ns'] if start['start_host_monotonic_ns'] is not None else None
+            thread_cpu_ns = cpu_ns-start['start_thread_cpu_ns'] if same_thread else None
+            record = dict(start, end_host_monotonic_ns=host_ns, end_thread_cpu_ns=cpu_ns,
+                end_thread_id=thread_id, end_native_thread_id=native_id, allocation_counts_stop=gc.get_count(),
+                collected=info['collected'], uncollectable=info['uncollectable'], wall_ns=wall_ns,
+                thread_cpu_ns=thread_cpu_ns)
+            self.overwritten += len(self.records) == self.records.maxlen
+            self.records.append(record)
+            if wall_ns is not None:
+                self.maximum_wall_ns = max(self.maximum_wall_ns or 0, wall_ns)
+            if thread_cpu_ns is not None:
+                self.maximum_thread_cpu_ns = max(self.maximum_thread_cpu_ns or 0, thread_cpu_ns)
+
+    def snapshot(self):
+        return dict(scope='pool_owner_python_interpreter_all_threads; excludes_worker_processes',
+            clock='host_monotonic_ns_and_collecting_thread_cpu_ns', owner_pid=os.getpid(),
+            registered=self in gc.callbacks, gc_enabled=gc.isenabled(), gc_thresholds=gc.get_threshold(),
+            record_limit=self.records.maxlen, started_collections=self.started, completed_collections=self.completed,
+            completed_by_generation=list(self.by_generation), overwritten_records=self.overwritten,
+            unmatched_stop_callbacks=self.unmatched_stops, maximum_wall_ns=self.maximum_wall_ns,
+            maximum_thread_cpu_ns=self.maximum_thread_cpu_ns, active_collection=copy.deepcopy(self.active),
+            collections=copy.deepcopy(list(self.records)))
+
+
 class NativeRtWorkerPool:
     def __init__(self, command, config, artifacts, workers=1, startup_timeout_s=60., job_timeout_s=10.,
                  *, allow_development_stub=False):
@@ -306,6 +371,7 @@ class NativeRtWorkerPool:
         self._workers, self._last_request_id = {}, 0
         self.socket_dir = None
         self._started = False
+        self._gc_observer = _GcObserver()
 
     def _emit(self, identity, message, received_ns=None):
         while not self._closing.is_set():
@@ -341,6 +407,7 @@ class NativeRtWorkerPool:
         self.socket_dir = Path(tempfile.mkdtemp(prefix='bas-rt-'))
         self.socket_dir.chmod(0o700)
         try:
+            self._gc_observer.start()
             for identity in range(self.size):
                 socket_path = self.socket_dir / f'{identity}.sock'
                 listener = Listener(str(socket_path), family='AF_UNIX', authkey=None)
@@ -494,6 +561,7 @@ class NativeRtWorkerPool:
         return {'schema': 1, 'scope': 'development_stub' if self.allow_development_stub else 'native_rt_worker_pool',
             'closed': self._closing.is_set(), 'socket_dir': str(self.socket_dir) if self.socket_dir else None,
             'last_request_id': self._last_request_id,
+            'garbage_collection': self._gc_observer.snapshot(),
             'workers': [{'worker_id': w.identity, 'pid': w.process.pid, 'ready': w.ready,
                 'busy': w.pending is not None, 'request_id': w.pending['request_id'] if w.pending else None,
                 'failed': w.failed, 'completed': w.completed,
@@ -508,6 +576,7 @@ class NativeRtWorkerPool:
         if self._closing.is_set():
             return
         self._closing.set()
+        self._gc_observer.close()
         failures = []
         for worker in self._workers.values():
             if worker.process.poll() is None:

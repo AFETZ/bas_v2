@@ -12,6 +12,7 @@
 #include <optional>
 #include <set>
 #include <thread>
+#include <time.h>
 
 namespace bas
 {
@@ -302,6 +303,7 @@ class NativeRtPool
         }
         catch (const std::exception& error)
         {
+            m_maxPollWallNs = std::max(m_maxPollWallNs, NativeRtCache::HostNowNs() - started);
             MarkBundleFailed();
             m_failed = true; m_error = error.what();
             Emit("rt_pool_failed", 0, m_error);
@@ -412,6 +414,10 @@ class NativeRtPool
     uint64_t m_request{0}, m_completed{0}, m_cold{0}, m_publishedResults{0}, m_publishedPairs{0}, m_discarded{0};
     uint64_t m_pollCalls{0};
     int64_t m_maxPollWallNs{0};
+    uint64_t m_resultLogWrites{0},m_slowestLogRequest{0};
+    int64_t m_resultLogWallNs{0},m_slowestLogBeginNs{0},m_slowestLogEncodedNs{0},m_slowestLogEndNs{0};
+    int64_t m_slowestLogCpuNs{0};
+    std::string m_slowestLogStage;
     std::map<std::string, uint64_t> m_discardReasons;
     NativeRtPrefetch m_prefetch;
     uint64_t m_forecastDispatches{0};
@@ -491,6 +497,29 @@ class NativeRtPool
     {
         if (!m_json) m_json = py::module_::import("json");
         return m_json.attr("dumps")(value, "allow_nan"_a=false).cast<std::string>();
+    }
+    static std::pair<int64_t,int64_t> ConsumerTick()
+    {
+        timespec cpu{};
+        if(clock_gettime(CLOCK_THREAD_CPUTIME_ID,&cpu)!=0)
+            throw std::runtime_error("Cannot observe native RT consumer thread CPU clock");
+        return {NativeRtCache::HostNowNs(),static_cast<int64_t>(cpu.tv_sec)*1000000000LL+cpu.tv_nsec};
+    }
+    void WriteResultLog(py::handle value,uint64_t request,const char* stage)
+    {
+        const auto begin=ConsumerTick();
+        const auto encoded=Encode(value);
+        const auto encodedEnd=ConsumerTick();
+        m_log<<encoded<<'\n';m_log.flush();
+        const auto end=ConsumerTick();
+        ++m_resultLogWrites;m_resultLogWallNs+=end.first-begin.first;
+        if(end.first-begin.first>m_slowestLogEndNs-m_slowestLogBeginNs)
+        {
+            m_slowestLogRequest=request;m_slowestLogStage=stage;
+            m_slowestLogBeginNs=begin.first;m_slowestLogEncodedNs=encodedEnd.first;m_slowestLogEndNs=end.first;
+            m_slowestLogCpuNs=end.second-begin.second;
+        }
+        Require(static_cast<bool>(m_log),"Producer result log write failed");
     }
 
     void Submit(size_t worker, size_t anchor, bool cold, const NativeRtPrefetch::Choice* choice = nullptr)
@@ -645,10 +674,10 @@ class NativeRtPool
             "pose_sample_host_ns"_a=poseEpochs,
             "required_source_ids"_a=m_lastRequiredSources,"source_requests"_a=sourceRequests,
             "required_lookahead_ns"_a=frame.lookaheadNs,"required_observations"_a=requirements,"bootstrap"_a=frame.bootstrap));
-        m_log<<Encode(py::dict("schema"_a=1,"stage"_a="bundle_committed","bundle_id"_a=frame.id,
+        WriteResultLog(py::dict("schema"_a=1,"stage"_a="bundle_committed","bundle_id"_a=frame.id,
             "sample_native_ns"_a=frame.nativeNs,"sample_host_monotonic_ns"_a=frame.hostNs,
-            "required_source_ids"_a=m_lastRequiredSources,"bootstrap"_a=frame.bootstrap))<<'\n';
-        m_log.flush();Require(static_cast<bool>(m_log),"Joint bundle log write failed");
+            "required_source_ids"_a=m_lastRequiredSources,"bootstrap"_a=frame.bootstrap),
+            frame.desired->job.id,"bundle_committed");
         m_bundle.reset();
     }
 
@@ -828,6 +857,9 @@ class NativeRtPool
     {
         for(auto item:m_pool.attr("poll")().cast<py::list>())
         {
+            // Main-thread wall/CPU observations distinguish producer latency
+            // from validation, allocation, Python encoding or descheduling.
+            const auto entered=ConsumerTick();
             const auto value=py::reinterpret_borrow<py::dict>(item);
             const auto worker=value["worker_id"].cast<size_t>();
             Require(worker<m_inflight.size() && m_inflight[worker] && m_bundle,"Reply outside a pending joint bundle");
@@ -841,10 +873,13 @@ class NativeRtPool
             const auto pairs=value["pairs"].cast<py::list>();
             Require(pairs.size()==(job.source ? m_endpoints.size() : m_endpoints.size()*(m_endpoints.size()-1)/2),
                 "Incomplete desired/source bundle component");
+            const auto validated=ConsumerTick();
             Completed completed{job,{},{}};std::set<Pair> peers;
             for(auto pair:pairs)completed.records.push_back(Decode(py::reinterpret_borrow<py::dict>(pair),job,peers));
+            const auto decoded=ConsumerTick();
             const auto proof=value[job.source ? "emitter_batch_stats" : "full_mesh_stats"].cast<py::dict>();
             completed.statsJson=Encode(proof);
+            const auto encoded=ConsumerTick();
             if(job.source)
             {
                 auto& source=m_sources.at(*job.source);++source.completed;if(job.cold)++source.cold;
@@ -857,7 +892,8 @@ class NativeRtPool
                 ++m_completed;if(job.cold)++m_cold;++m_fullMeshCompleted;++m_fullMeshCallsByWorker.at(worker);
                 m_lastFullMeshStatsJson=completed.statsJson;m_bundle->desired=std::move(completed);
             }
-            const auto received=NativeRtCache::HostNowNs();
+            const auto staged=ConsumerTick();
+            const auto received=staged.first;
             const auto oldest=std::min_element(job.poses.begin(),job.poses.end(),[](const auto& a,const auto& b){return a.sampleNs<b.sampleNs;})->sampleNs;
             m_prefetch.ObserveResponse(received-oldest,job.cold);
             auto log=py::dict("schema"_a=1,"stage"_a="decoded_for_bundle","bundle_id"_a=job.bundleId,
@@ -866,6 +902,12 @@ class NativeRtPool
                 "channel_mode"_a=(job.source ? "source_star" : "full_mesh"),"published_pairs"_a=0,
                 "producer_wall_ns"_a=value["producer_wall_ns"],"sample_to_completion_ns"_a=value["sample_to_completion_ns"],
                 "received_host_monotonic_ns"_a=received,"poll_received_host_monotonic_ns"_a=value["received_host_monotonic_ns"]);
+            log["consumer_processing_ns"]=py::dict("scope"_a="main_thread_wall_and_CLOCK_THREAD_CPUTIME_ID",
+                "entered_host_monotonic_ns"_a=entered.first,
+                "validation_wall"_a=validated.first-entered.first,"validation_cpu"_a=validated.second-entered.second,
+                "decode_wall"_a=decoded.first-validated.first,"decode_cpu"_a=decoded.second-validated.second,
+                "stats_encode_wall"_a=encoded.first-decoded.first,"stats_encode_cpu"_a=encoded.second-decoded.second,
+                "stage_wall"_a=staged.first-encoded.first,"stage_cpu"_a=staged.second-encoded.second);
             if (value.contains("receiver_enqueued_host_monotonic_ns"))
                 log["receiver_enqueued_host_monotonic_ns"]=value["receiver_enqueued_host_monotonic_ns"];
             else log["receiver_enqueued_host_monotonic_ns"]=py::none();
@@ -873,7 +915,7 @@ class NativeRtPool
             if(job.source){log["source_id"]=m_sources[*job.source].binding.id;log["source_mode"]="emitter_batch";log["source_pose_scope"]="configuration_static";}
             std::vector<int64_t> epochs;for(const auto& pose:job.poses)epochs.push_back(pose.sampleNs);
             log["pose_sample_host_ns"]=epochs;
-            m_log<<Encode(log)<<'\n';m_log.flush();Require(static_cast<bool>(m_log),"Staged bundle log write failed");
+            WriteResultLog(log,job.id,"decoded_for_bundle");
             m_inflight[worker].reset();
         }
         CommitBundle();
@@ -961,8 +1003,7 @@ class NativeRtPool
             std::vector<int64_t> poseEpochs;
             for (const auto& pose : job.poses) poseEpochs.push_back(pose.sampleNs);
             log["pose_sample_host_ns"] = py::cast(poseEpochs);
-            m_log<<Encode(log)<<'\n'; m_log.flush();
-            Require(static_cast<bool>(m_log), "Producer result log write failed");
+            WriteResultLog(log,job.id,"desired_published");
             m_inflight[worker].reset();
         }
     }
@@ -1108,6 +1149,11 @@ class NativeRtPool
             "published_results"_a=m_publishedResults,"published_pairs"_a=m_publishedPairs,
             "discarded_pairs"_a=m_discarded,"discard_reasons"_a=m_discardReasons,
             "poll_calls"_a=m_pollCalls,"poll_period_ns"_a=kPollPeriodNs,
+            "result_log_timing"_a=py::dict("writes"_a=m_resultLogWrites,"total_wall_ns"_a=m_resultLogWallNs,
+                "scope"_a="synchronous_json_encode_and_stream_flush_main_thread",
+                "slowest_request_id"_a=m_slowestLogRequest,"slowest_stage"_a=m_slowestLogStage,
+                "slowest_begin_host_ns"_a=m_slowestLogBeginNs,"slowest_encoded_host_ns"_a=m_slowestLogEncodedNs,
+                "slowest_end_host_ns"_a=m_slowestLogEndNs,"slowest_thread_cpu_ns"_a=m_slowestLogCpuNs),
             "prefetch"_a=py::dict("method"_a=(!m_sources.empty() ? "coherent_pose_and_source_bundles" : m_fullMesh ? "coherent_pose_frames" : NativeRtPrefetch::kMethod),
                 "growth_safety_factor"_a=NativeRtPrefetch::kGrowthFactor,
                 "minimum_lead_ns"_a=NativeRtPrefetch::kMinimumLeadNs,"lead_ns"_a=leadNs,

@@ -4,6 +4,7 @@ No Sionna, GPU, radio model, serial hardware, or real-time acceptance is claimed
 """
 import json
 import hashlib
+import gc
 import os
 from pathlib import Path
 import subprocess
@@ -17,7 +18,7 @@ import queue
 import copy
 
 from scripts.product.native_rt_workers import (NativeRtWorkerPool, validate_config, validate_job,
-    validate_path_storage_stats, PATH_STORAGE_SOURCE_HASHES)
+    validate_path_storage_stats, PATH_STORAGE_SOURCE_HASHES, _GcObserver)
 
 
 STUB = r'''
@@ -363,6 +364,7 @@ class JobValidationTests(unittest.TestCase):
         pool._workers,pool._messages,pool.job_timeout_ns={0:worker},queue.Queue(2),10**9
         pool._closing,pool.socket_dir,pool._last_request_id=threading.Event(),None,1
         pool.allow_development_stub=True
+        pool._gc_observer=_GcObserver()
         thread=threading.Thread(target=pool._receive,args=(worker,))
         def queued():
             deadline=time.monotonic()+1
@@ -436,6 +438,99 @@ class JobValidationTests(unittest.TestCase):
         self.assertEqual(pool._last_request_id, 3)
         self.assertEqual([row['request_id'] for row in connection.sent], [2, 3])
         self.assertFalse(hasattr(pool, '_request_ids'))
+
+
+class GcObservationTests(unittest.TestCase):
+    """Actual collection callbacks/clocks; no native-worker or real-time claims."""
+    def setUp(self):
+        self.observer = _GcObserver()
+        self.addCleanup(self.observer.close)
+        self.thresholds, self.enabled = gc.get_threshold(), gc.isenabled()
+
+    def tearDown(self):
+        self.assertEqual(gc.get_threshold(), self.thresholds)
+        self.assertEqual(gc.isenabled(), self.enabled)
+
+    def test_real_collection_reports_actual_callback_bounds_counts_and_thread_cpu(self):
+        self.observer.start()
+        before_host, before_cpu = time.monotonic_ns(), time.thread_time_ns()
+        cycle = []; cycle.append(cycle); del cycle
+        collected = gc.collect(2)
+        after_host, after_cpu = time.monotonic_ns(), time.thread_time_ns()
+        state = self.observer.snapshot()
+        record = next(row for row in reversed(state['collections']) if row['generation'] == 2)
+        self.assertGreaterEqual(collected, 1)
+        self.assertGreaterEqual(record['collected'], 1)
+        self.assertGreaterEqual(record['uncollectable'], 0)
+        self.assertLessEqual(before_host, record['start_host_monotonic_ns'])
+        self.assertLessEqual(record['end_host_monotonic_ns'], after_host)
+        self.assertLessEqual(before_cpu, record['start_thread_cpu_ns'])
+        self.assertLessEqual(record['end_thread_cpu_ns'], after_cpu)
+        self.assertEqual(record['wall_ns'], record['end_host_monotonic_ns']-record['start_host_monotonic_ns'])
+        self.assertEqual(record['thread_cpu_ns'], record['end_thread_cpu_ns']-record['start_thread_cpu_ns'])
+        self.assertGreaterEqual(record['wall_ns'], 0)
+        self.assertGreaterEqual(record['thread_cpu_ns'], 0)
+        self.assertEqual((record['thread_id'], record['end_thread_id']), (threading.get_ident(),)*2)
+        self.assertEqual((record['native_thread_id'], record['end_native_thread_id']), (threading.get_native_id(),)*2)
+        self.assertEqual(len(record['allocation_counts_start']), 3)
+        self.assertEqual(len(record['allocation_counts_stop']), 3)
+        self.assertGreaterEqual(state['maximum_wall_ns'], record['wall_ns'])
+        self.assertGreaterEqual(state['maximum_thread_cpu_ns'], record['thread_cpu_ns'])
+
+    def test_actual_collections_on_another_thread_keep_that_threads_cpu_domain(self):
+        self.observer.start()
+        thread_info = {}
+        def collect():
+            thread_info.update(identity=threading.get_ident(), native_id=threading.get_native_id(),
+                               before_cpu=time.thread_time_ns())
+            gc.collect(2)
+            thread_info['after_cpu'] = time.thread_time_ns()
+        thread = threading.Thread(target=collect)
+        thread.start(); thread.join(timeout=2)
+        self.assertFalse(thread.is_alive())
+        record = next(row for row in self.observer.snapshot()['collections']
+                      if row['thread_id'] == thread_info['identity'] and row['generation'] == 2)
+        self.assertEqual(record['native_thread_id'], thread_info['native_id'])
+        self.assertLessEqual(thread_info['before_cpu'], record['start_thread_cpu_ns'])
+        self.assertLessEqual(record['end_thread_cpu_ns'], thread_info['after_cpu'])
+
+    def test_retention_is_bounded_and_overwritten_collections_are_explicit(self):
+        self.observer.start()
+        for _ in range(self.observer.records.maxlen+3):
+            gc.collect(0)
+        state = self.observer.snapshot()
+        self.assertLessEqual(len(state['collections']), state['record_limit'])
+        self.assertGreaterEqual(state['overwritten_records'], 3)
+        self.assertGreaterEqual(state['completed_by_generation'][0], state['record_limit']+3)
+        self.assertEqual(state['unmatched_stop_callbacks'], 0)
+        # Exported records are independent of later caller edits.
+        state['collections'][-1]['collected'] = -1
+        self.assertGreaterEqual(self.observer.snapshot()['collections'][-1]['collected'], 0)
+
+    def test_pool_close_removes_only_its_callback_and_stops_recording(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); config = root/'config.json'
+            config.write_text(json.dumps(dict(schema=1, cohort=[{'id':'cp'}, {'id':'uav1'}])))
+            pool = NativeRtWorkerPool([sys.executable], config, root/'artifacts', allow_development_stub=True)
+            self.addCleanup(pool.close)
+            def unrelated_callback(phase, info):
+                pass
+            before = list(gc.callbacks)
+            gc.callbacks.append(unrelated_callback)
+            self.addCleanup(lambda: gc.callbacks.remove(unrelated_callback))
+            # Portable observer/close regression. Actual start() registration is
+            # exercised separately by the POSIX subprocess integration below.
+            pool._gc_observer.start()
+            gc.collect(0)
+            state = pool.snapshot()['garbage_collection']
+            self.assertTrue(state['registered'])
+            pool.close(); pool.close()
+            self.assertEqual(gc.callbacks, before+[unrelated_callback])
+            completed = pool.snapshot()['garbage_collection']['completed_collections']
+            gc.collect(2)
+            after = pool.snapshot()['garbage_collection']
+            self.assertFalse(after['registered'])
+            self.assertEqual(after['completed_collections'], completed)
 
 
 @unittest.skipUnless(os.name == 'posix', 'AF_UNIX production path requires POSIX; run under local WSL/Linux')
@@ -527,6 +622,19 @@ class PoolProcessTests(unittest.TestCase):
             self.create('never_connect', startup_timeout_s=.15)
         self.assertFalse(self.pool.socket_dir.exists())
         self.assertTrue(all(w.process.poll() is not None and not w.thread.is_alive() for w in self.pool._workers.values()))
+        self.assertNotIn(self.pool._gc_observer, gc.callbacks)
+
+    def test_real_pool_start_registers_gc_observation_until_close(self):
+        before = list(gc.callbacks)
+        pool = self.create()
+        self.assertIn(pool._gc_observer, gc.callbacks)
+        gc.collect(2)
+        state = pool.snapshot()['garbage_collection']
+        self.assertTrue(state['registered'])
+        self.assertGreaterEqual(state['completed_by_generation'][2], 1)
+        pool.close()
+        self.assertEqual(gc.callbacks, before)
+        self.assertFalse(pool.snapshot()['garbage_collection']['registered'])
 
     def test_close_preserves_logs_and_does_not_touch_unrelated_child(self):
         unrelated = subprocess.Popen([sys.executable, '-c', 'import time;time.sleep(30)'])

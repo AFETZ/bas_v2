@@ -200,12 +200,28 @@ Private pinned-1.2 проба `shape-01` прошла: фиксированны�
 6×6 a/tau/valid/Doppler/углов на трёх позах дали побитовое совпадение. Экспорт сохраняет
 17/17/18 путей после проверки пустого хвоста; actual zero-path branch отдельно прошёл.
 Холодные времена stock/fixed не сравниваются: процессы разные, disk kernel cache общий.
-SDK13-адаптер с версиями и source-hash gates реализуется; полный запуск с ним ещё не проверен.
+SDK13-адаптер с версиями и source-hash gates реализован; полный запуск с ним ещё не проверен.
 SDK13 `mr2608-fixed-path-storage.patch` готов (SHA-256 `196866eb…`): public SDK default
 остаётся выключенным, worker явно включает и сохраняет `fixed_path_storage: true`.
 Эпохи, бюджеты, seed и исходный размер экспортированного CIR сохраняются; empty branch
-обозначается отдельно. Добавлены CPU/schema и native GPU-регрессии, включая Dispose/GIL;
-применение к ПК4 и полные прогоны ещё не проверены.
+обозначается отдельно. На ПК4 `d045f3b` exact SDK13 и portable O3 проверены,
+целевая сборка завершилась exit 0 за 88,14 с; 389 программных тестов (388 pass, 1 skip).
+CPU cache/live/source/bundle и GPU fullmesh/receiver/emitter прошли, включая
+NormalizeDelays, empty→nonempty, сохранение CIR и Dispose при отпущенном GIL.
+Артефакты: `control/delivery-fixed-path-storage-runtime-20261108/`
+(`build-02-command.json`, `after-sdk-02.json`, `*-cpu-01.json`, `*-gpu-01.json`).
+Первая build-01 сохранена: ошибка accessor.is(object) в тесте несовместима с pybind11;
+исправлена проверкой Python pointer identity.
+Два полных SDK13-прогона на `d045f3b` остались failed / invalid:
+`delivery-rt-source-bundle-n1-20261108-02` — 1055 commits, на 26,175 с после
+RT producer 21 мс возникли 253,7 мс между poll receipt и C++ consumer receipt;
+причина паузы пока не установлена, commit отклонён по возрасту позы.
+`delivery-rt-coherent-n5-20261108-05` — 5038 commits, 634880 hits / 0 misses,
+на 117,895 с held pose age 102,476 мс превысил 100 мс. Guards не ослаблены.
+`control/delivery-fixed-path-storage-runtime-20261108/attempts-01.json`
+содержит actual storage counters, последние timestamps и 14 input SHA.
+Следующий шаг — consumer wall/thread-CPU timings и scoped Python GC observation,
+затем повтор тех же конфигураций; успех отдельных модулей не закрывает E2E.
 UI `2a1a436` прошёл 15 localhost tests и реальную Chrome-проверку source-конфига:
 в основной таблице показаны фактический cache expiry и допуск 100 мс. Артефакты:
 `control/operator-ui-20261108/reason-delivery-rt-source-bundle-n1-20261108-01.{json,png}`.
