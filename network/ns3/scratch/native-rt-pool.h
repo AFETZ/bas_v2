@@ -556,8 +556,9 @@ class NativeRtPool
                 "outcomes"_a=outcomes);
             // Transport receipt, poll pickup and post-publication receipt are
             // separate observations; none replaces the sampled CIR epoch.
-            log["receiver_enqueued_host_monotonic_ns"]=value.contains("receiver_enqueued_host_monotonic_ns")
-                ? value["receiver_enqueued_host_monotonic_ns"] : py::none();
+            if (value.contains("receiver_enqueued_host_monotonic_ns"))
+                log["receiver_enqueued_host_monotonic_ns"]=value["receiver_enqueued_host_monotonic_ns"];
+            else log["receiver_enqueued_host_monotonic_ns"]=py::none();
             log["poll_received_host_monotonic_ns"]=value["received_host_monotonic_ns"];
             log["channel_mode"]=m_fullMesh ? "full_mesh" : "receiver_batch";
             if(m_fullMesh) log["full_mesh_stats"]=value["full_mesh_stats"];
