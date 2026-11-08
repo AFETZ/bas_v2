@@ -88,7 +88,7 @@ inline void ValidateMeasuredCohort(const std::vector<MeasuredState>& states, siz
                                                state.sourceTime<(*previous)[i].sourceTime))
             throw std::runtime_error("deferred measured frame would roll back an applied source epoch");
         if (i) {
-            const auto sourceNs=std::llround(state.sourceTime*1e9);
+            const int64_t sourceNs=std::llround(state.sourceTime*1e9);
             oldest=std::min(oldest,sourceNs); newest=std::max(newest,sourceNs);
         }
     }
