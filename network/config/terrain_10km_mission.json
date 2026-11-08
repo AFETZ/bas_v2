@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "scenario": "terrain_10km_five_uav_reference_v1",
+  "status": "uncalibrated_research_configuration_pilot_required",
+  "terrain_bundle": ".external/terrain-reference",
+  "frame": {
+    "coordinate_frame": "ENU",
+    "ground_surface_z_m": 0,
+    "spherical_heading_deg": 0,
+    "origin_latitude_deg": 46.607213,
+    "origin_longitude_deg": 14.278461,
+    "origin_elevation_m": 446,
+    "datum": "procedural shared triangle terrain; uncalibrated",
+    "world_enu_to_local_ned": "N=y,E=x,D=-z per iris_radio_headless gazeboXYZToNED"
+  },
+  "gcs": [-2000, -2000, 79.96654565164894],
+  "buildings": [],
+  "spawns": {
+    "1": [-1800, -1800, 83.01655176557686],
+    "2": [-1770, -1800, 82.97422942295289],
+    "3": [-1740, -1800, 82.92100009616158],
+    "4": [-1710, -1800, 82.8383511178307],
+    "5": [-1680, -1800, 82.68284340655887]
+  },
+  "routes": {
+    "1": [[-1800, -1800, 90.86155176557686], [-1797, -1797, 92.86155176557686]],
+    "2": [[-1770, -1800, 92.81922942295289], [-1767, -1797, 94.81922942295289]],
+    "3": [[-1740, -1800, 94.76600009616158], [-1737, -1797, 96.76600009616158]],
+    "4": [[-1710, -1800, 96.6833511178307], [-1707, -1797, 98.6833511178307]],
+    "5": [[-1680, -1800, 98.52784340655887], [-1677, -1797, 100.52784340655887]]
+  },
+  "mission": {
+    "telemetry_max_age_s": 0.5,
+    "speed_mps": 3,
+    "waypoint_dwell_s": 3,
+    "world_ground_reference_z_m": 0.195,
+    "ground_reference_source": "iris base_collision: poseZ=-0.08, halfheight=0.115",
+    "route_design_reason": "Short integration routes; range and urban shadow qualification are separate tests.",
+    "barriers": {},
+    "model_rest_clearance_m": 0.195
+  },
+  "radio": {
+    "parameter_set": "hypothesis_low_v1",
+    "calibration": "uncalibrated_parametric_study",
+    "mode": "geometry",
+    "frequency_hz": 2412000000,
+    "los": {"exponent": 2, "reference_distance_m": 1, "reference_loss_db": 40.09532929124565},
+    "nlos": {"exponent": 2.7, "reference_distance_m": 1, "reference_loss_db": 40.09532929124565},
+    "sensitivity_exponents": [2.7, 3.3],
+    "parameters_source": "Legacy scene metadata; runtime-terrain.json explicitly selects Sionna RT."
+  }
+}

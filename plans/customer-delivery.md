@@ -28,7 +28,7 @@
 | Помехи и карты RSS/SINR/J/S | Частично: GPU `control/delivery-map-probe-20261107/verification.json` подтвердил RF-срезы и разворот диаграммы. Полный `delivery-source-rt-n1-20261107-06` на `2065c4e`: N=1, рельеф, оба потока, 1 Вт tr38901; completed / succeeded / valid, runtime verification errors отсутствуют. Экспорт после закрытия capture проверен: input/actual/summary сформированы, SHA-256 capture записан в `native-radio-realtime/<ID>/metrics/native_source_summary.json`. До cochannel-помехи 532 MPDU/5 с, во время 0 и 273 PHY drops/5 с, после 1086/10 с. Контроль `...-05` со сдвигом только частоты 2412→2447 МГц: во время источника 552 MPDU/5 с, PHY drops 0. Proof: `control/delivery-source-packets-20261107/spectral-overlap-verification.json`. Это native RF/packet-наблюдения, не application PDR или MAC/SLA-классы карт; аппаратная и совместная многопользовательская приёмка открыты. |
 | Интерфейс, серии, установка | Частично: loopback UI `bas.py ui` редактирует/проверяет конфигурацию, запускает controller, показывает причины и экспортирует артефакты; HTTP API запустил успешный RT N=1. Batch сохраняет immutable attempts, seeds/runs/repeats и отмену; реальная серия двух seeds N=1 прошла. Независимый чистый clone `d045f3b` прошёл SDK13/O3 bootstrap/check-only, pinned image и 75 hash-checked wheels: `control/delivery-bootstrap-sdk13-o3-probe-20261108/`. Отдельная чистая машина и независимый оператор остаются открытыми. |
 | Длительные опыты | Реализовано и локально проверено на `7a250f5` (68 tests): duration до 86400 с, расчёт native/service lifetimes из длительности и существующих фаз, обязательный disk capture свыше 2400 с; readiness, radio/cache и stop guards не ослаблены. Часовая и восьмичасовая нагрузочная квалификация не подтверждены; ёмкость диска и длительная стабильность требуют целевой проверки. |
-| RT workers и когерентный кэш | Частично: SDK13 fullmesh/emitter/receiver CPU/GPU-контракты проверены; desired/source bundle, fixed RF roles, исходные epochs и guards сохранены. Latest N=1 source `…-05` на `38bb2aa` failed / invalid: RT-журнал полностью сохранён, но live-публикация поз прервалась на 130 мс. Latest N=5 `…-07` на `f426612` также failed / invalid. Нормальный полный цикл на текущей ревизии, совместная и аппаратная приёмка открыты. |
+| RT workers и когерентный кэш | Частично: новый N=5 `delivery-rt-coherent-n5-20261108-08` на чистом `42dc494` — completed / succeeded / valid. Все пять маршрутов, посадок и разоружений подтверждены; окно 20,000 source / 20,005 wall с. 7016 coherent commits, 825450 cache hits / 0 misses, максимальный host cache age 96,91 мс при пределе 100 мс. RT/pose журналы полностью сверены. N=1 source `…-07` на той же версии также completed / succeeded / valid: 5140 commits, 10149 hits / 0 misses. Совместная приёмка с помехами, полной нагрузкой и оборудованием открыта. |
 
 Артефакты запусков находятся на ПК4 в `/home/bas/bas_v2-core/runs/`:
 `control/<ID>/run.json` и `runtime.log`, `native-radio-realtime/<ID>/metrics/`
@@ -257,7 +257,28 @@ odometry callbacks. Точная disk-stage задержка tracker не изм
 исходные timestamps и 50/100 Гц cadences сохранены. Audit closed/count/bytes/SHA и
 явное объявление режима участвуют в итоговом результате; missing export не становится legacy.
 89 локальных тестов: 83 pass, 6 POSIX skip, включая заблокированный архив при продолжающейся
-atomic-публикации. Проверка этого нового среза на ПК4 и повтор E2E ещё не выполнены.
+atomic-публикации. На ПК4 `db64320` прошёл 439 tests (438 pass, 1 skip), 795 native CPU checks
+и повтор production dual-PTY: `checks-09-command.json`, `development-pty-02/`.
+N=1 source `…-06` завершил весь цикл: RT-журнал 10449/10449 записей, архив поз 10508,
+оба closed/count/bytes/SHA подтверждены; cache 10108 hits / 0 misses, max pose age 79,25 мс.
+Первичный итог отклонён только загрузчиком: подготовленный radio YAML содержал coupling,
+но `load_scenario_config` его не возвращал для проверки full-mesh commit. Реальная регрессия
+на prepare→loader воспроизвела ошибку; `42dc494` переносит mapping без изменения guards.
+64 tests на ПК4 прошли. `reanalysis-source06-after-loader-fix.json` содержит ревизии,
+SHA исходного run.json и отдельный completed / succeeded / valid результат; исходный
+failed / invalid сохранён. Новый опыт требуется для квалификации текущей версии.
+Новый N=5 `delivery-rt-coherent-n5-20261108-08` на чистом `42dc494` прошёл весь цикл,
+включая радио-подтверждение посадки всех пяти. `run.json` подтверждает все worker/epoch/
+storage/cache guards и оба closed journals: RT 7019 записей / 20057263 bytes,
+позиции 16242 / 68580692 bytes; SHA сохранены. В этом коротком опыте оба потока активны,
+event_logging=metrics_only; он не подтверждает SLA или заданные классы нагрузки.
+N=1 source `delivery-rt-source-bundle-n1-20261108-07` на том же `42dc494` также
+прошёл новый полный цикл и все source/worker/journal guards, max host cache age 74,70 мс.
+Для воспроизводимого запуска добавлены `runtime-terrain.json` и три входных конфига
+в `network/config/`: явные маршруты пяти UAV, профиль 100 мс и расписание источника.
+Они используют штатный `prepare_terrain_scene.py --output .external/terrain-reference`,
+не зависят от каталогов прежних опытов. Локальная генерация и real loader проверены;
+новый совместный GPU-прогон именно этих входов — следующий шаг.
 `0e8910a` добавил per-offer payload lineage через существующий BSF1, оба направления,
 исходные byte refs и actual OS write-end; loss/duplicate/censor сохраняются в анализе.
 Linux dual-PTY на `38bb2aa` проверил оба production adapter одновременно:

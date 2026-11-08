@@ -1,0 +1,23 @@
+{
+  "environment": {"engine": "gazebo", "scene": "network/config/terrain_10km_mission.json"},
+  "drone": {"autopilot": "ardupilot_sitl", "count": 5},
+  "propagation": {
+    "model": "sionna",
+    "radio_config": "network/config/native_wifi_fullmesh_100ms.yaml",
+    "ground_material": "medium_dry_ground",
+    "building_material": "concrete",
+    "thickness_m": 0.2
+  },
+  "network": {"engine": "ns3", "topology": "adhoc"},
+  "flows": {"channels": ["control", "payload"], "payload_attitude_interval_s": 0.2},
+  "interference": {"sources": "network/config/terrain_directional_source.yaml"},
+  "experiment": {"policy": "failover", "duration_s": 20, "seed": 1, "run": 1},
+  "runtime": {
+    "clock": "realtime",
+    "image": "sha256:89d78eff9914b1644a1b01b793612e9ee8b19916c5a7bf5f578ba6d8bfbfafe5",
+    "land_timeout_s": 120,
+    "event_logging": "batched_trace",
+    "sionna_log_level": "info",
+    "capture_storage": "tmpfs"
+  }
+}
