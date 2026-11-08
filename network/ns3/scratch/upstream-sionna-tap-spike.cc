@@ -2373,10 +2373,7 @@ main(int argc, char* argv[])
                     const auto current=router->GetSourceBindings();
                     if (index>=current.size() || current[index].phy!=phy)
                         throw std::runtime_error("Native RT source binding disappeared before pool shutdown");
-                    // Before a measurement-relative anchor, an interval may
-                    // start immediately. Keep every possible source primed.
-                    return !current[index].scheduleCommitted ||
-                        current[index].RequiredAt(Simulator::Now(),NanoSeconds(lookaheadNs));
+                    return current[index].RequiredAt(Simulator::Now(),NanoSeconds(lookaheadNs));
                 };
                 rtPool->AddSourceBinding(std::move(source));
             }

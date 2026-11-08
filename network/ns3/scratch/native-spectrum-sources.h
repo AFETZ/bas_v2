@@ -46,15 +46,29 @@ struct SourceBinding
     Ptr<PhasedArrayModel> array;
     bool scheduleCommitted{false};
     std::optional<Time> begin, end; // Native absolute ticks; never unresolved offsets.
+    // Known measurement-relative offset; null means the unanchored start is
+    // unknown. This is a lower bound after a future anchor, not a native epoch.
+    std::optional<Time> preanchorStartOffset;
 
     bool RequiredAt(Time now, Time lookahead = NanoSeconds(0)) const
     {
         if (now < NanoSeconds(0) || lookahead < NanoSeconds(0))
             throw std::invalid_argument("source requirement times must be nonnegative");
+        if (!scheduleCommitted)
+        {
+            if (preanchorStartOffset && *preanchorStartOffset < NanoSeconds(0))
+                throw std::invalid_argument("pre-anchor source offset must be nonnegative");
+            // An unobserved measurement anchor will be Simulator::Now() when
+            // first observed. A known larger offset cannot enter this horizon.
+            // Unknown/immediate starts stay conservative; cold prime is separate.
+            return !preanchorStartOffset || *preanchorStartOffset <= lookahead;
+        }
+        if (!begin || !end || *begin < NanoSeconds(0) || *end <= *begin)
+            throw std::logic_error("committed source requires a valid actual interval");
         // Keep the entire [begin,end) interval, including duty-cycle holes. This
         // is a cache requirement, not a statement that the transmitter is on.
         // Subtraction avoids overflowing now+lookahead near the native limit.
-        return scheduleCommitted && begin && end && now < *end &&
+        return now < *end &&
                (now >= *begin || *begin - now <= lookahead);
     }
 };
@@ -466,6 +480,15 @@ inline Ptr<SourcePropagation> InstallSpectrumSources(
             ";duty_cycle=" + std::to_string(duty) + ";period_s=" + std::to_string(period);
         SourceBinding binding;
         binding.id = id;
+        if (relative)
+        {
+            // Same integer-ns rounding as prepare_native_sources.materialize,
+            // without inventing an anchor or materializing an actual schedule.
+            const double ticks = std::floor(start * 1e9 + .5);
+            if (!std::isfinite(ticks) || ticks < 0 || ticks >= std::ldexp(1., 63))
+                throw std::invalid_argument("source offset exceeds native signed-64-bit nanoseconds");
+            binding.preanchorStartOffset = NanoSeconds(static_cast<int64_t>(ticks));
+        }
         binding.centerHz = hz;
         binding.bandwidthHz = bandwidth;
         binding.powerW = power;

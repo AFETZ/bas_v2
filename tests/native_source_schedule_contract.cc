@@ -54,14 +54,15 @@ py::dict ReadJson(const std::filesystem::path& path)
     const std::string text((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
     return py::module_::import("json").attr("loads")(text).cast<py::dict>();
 }
-void WriteInput(const std::filesystem::path& path, bool relative, bool multiple = false)
+void WriteInput(const std::filesystem::path& path, bool relative, bool multiple = false,
+                double firstStartS = .01)
 {
     Require(!std::filesystem::exists(path) && !std::filesystem::exists(ActualPath(path)),
             "Preserve the previous source input and actual schedule");
     auto source = py::dict("id"_a="cpu_source", "mode"_a="continuous", "spectral_shape"_a="rectangular",
         "position_m"_a=std::vector<double>{0,0,10}, "orientation_rad"_a=std::vector<double>{0,0},
         "pattern"_a="iso", "gain_dbi"_a=0., "power_w"_a=1., "bandwidth_hz"_a=20000000.,
-        "center_hz"_a=2412000000., "start_s"_a=.01, "stop_s"_a=.04,
+        "center_hz"_a=2412000000., "start_s"_a=firstStartS, "stop_s"_a=firstStartS+.03,
         "period_s"_a=.01, "duty_cycle"_a=1.);
     py::list sources;
     if (multiple)
@@ -128,10 +129,10 @@ struct Fixture
     std::filesystem::path input;
     size_t initialDestroyed{destroyed};
     Fixture(const std::filesystem::path& path, bool relative, bool reachPhase = true,
-            bool multiple = false) : input(path)
+            bool multiple = false, double firstStartS = .01) : input(path)
     {
         current = &observation;
-        WriteInput(path, relative, multiple);
+        WriteInput(path, relative, multiple, firstStartS);
         {
             WatchedLoads watch;
             SionnaRtChannelModel::RtPathSolverConfig solver;
@@ -198,8 +199,10 @@ void ObservedMeasurement(const std::filesystem::path& path)
             before[0].orientationRad == Vector() && before[0].phy && before[0].array,
             "Binding metadata does not describe the actual static source");
     Require(!before[0].scheduleCommitted && !before[0].begin && !before[0].end &&
-            !before[0].RequiredAt(NanoSeconds(0), Seconds(1)),
-            "Measurement offsets were exposed as committed native intervals before the phase anchor");
+            before[0].preanchorStartOffset == MilliSeconds(10) &&
+            !before[0].RequiredAt(NanoSeconds(0), MilliSeconds(9)) &&
+            before[0].RequiredAt(NanoSeconds(0), MilliSeconds(10)),
+            "Pre-anchor cache priming lost the configured relative offset or invented native intervals");
     fixture.Run(MilliSeconds(125));
     Require(fixture.observation.polls == 4 && !fixture.observation.pollHadGil,
             "Phase polling did not execute at 0/20/40/60ms with the GIL released");
@@ -254,7 +257,8 @@ void CancelActive(const std::filesystem::path& path)
     Fixture fixture(path, false);
     const auto uncommitted = fixture.owner->GetSourceBindings();
     Require(uncommitted.size() == 1 && !uncommitted[0].scheduleCommitted &&
-            !uncommitted[0].begin && !uncommitted[0].end,
+            !uncommitted[0].begin && !uncommitted[0].end && !uncommitted[0].preanchorStartOffset &&
+            uncommitted[0].RequiredAt(NanoSeconds(0)),
             "Default absolute schedule was reported committed before its native commit event");
     Simulator::Schedule(MilliSeconds(25), [pointer = PeekPointer(fixture.owner)] { pointer->Dispose(); });
     fixture.Run(MilliSeconds(80));
@@ -284,8 +288,10 @@ void UnreachedOrCancelled(const std::filesystem::path& path, bool cancel)
             !std::filesystem::exists(ActualPath(path)), "Unobserved phase fabricated an anchor or transmitted");
     const auto bindings = fixture.owner->GetSourceBindings();
     Require(cancel ? bindings.empty() : bindings.size() == 1 && !bindings[0].scheduleCommitted &&
-            !bindings[0].begin && !bindings[0].end && !bindings[0].RequiredAt(Seconds(1), Seconds(1)),
-            "Unobserved/cancelled phase exposes a committed source requirement");
+            !bindings[0].begin && !bindings[0].end &&
+            !bindings[0].RequiredAt(Seconds(1), MilliSeconds(9)) &&
+            bindings[0].RequiredAt(Seconds(1), MilliSeconds(10)),
+            "Unobserved/cancelled phase lost the relative priming horizon or invented an interval");
     Require(destroyed == fixture.initialDestroyed + (cancel ? 1u : 0u), "Unexpected pre-Destroy Python lifetime");
     fixture.Destroy();
 }
@@ -309,6 +315,11 @@ void PhysicalBindings(const std::filesystem::path& path)
         Require(before[i].segmentIndex == i && before[i].phy && before[i].array &&
                 !before[i].scheduleCommitted && !before[i].begin && !before[i].end,
                 "Physical segment identity or pre-anchor clock is wrong");
+        const auto offset = MilliSeconds(i == 1 || i == 3 ? 20 : 10);
+        Require(before[i].preanchorStartOffset == offset &&
+                !before[i].RequiredAt(Seconds(100), offset-NanoSeconds(1)) &&
+                before[i].RequiredAt(Seconds(100), offset),
+                "Pulsed/sweep segment priming horizon differs from its expanded input offset");
         Require(before[i].positionM == before[i].phy->GetMobility()->GetPosition() &&
                 before[i].velocityMps == before[i].phy->GetMobility()->GetVelocity(),
                 "Source descriptor differs from the actual emitter mobility");
@@ -355,6 +366,62 @@ void PhysicalBindings(const std::filesystem::path& path)
             "Required window incorrectly follows duty-cycle holes or another source interval");
     fixture.Destroy();
 }
+
+void PreanchorRequirementBounds()
+{
+    bas::SourceBinding binding;
+    Require(binding.RequiredAt(NanoSeconds(0)) && binding.RequiredAt(Seconds(1000)),
+            "Unknown source offset silently omitted a potentially immediate source");
+    binding.preanchorStartOffset = Seconds(5);
+    for (const auto now : {NanoSeconds(0), Seconds(1000)})
+        Require(!binding.RequiredAt(now, MilliSeconds(100)) &&
+                !binding.RequiredAt(now, Seconds(5)-NanoSeconds(1)) &&
+                binding.RequiredAt(now, Seconds(5)),
+                "Unobserved anchor elapsed like an absolute start time or ignored the horizon boundary");
+    binding.preanchorStartOffset = NanoSeconds(0);
+    Require(binding.RequiredAt(Seconds(1000)), "Zero-offset source was not conservatively primed");
+    binding.preanchorStartOffset = MilliSeconds(100);
+    Require(!binding.RequiredAt(Seconds(1000), NanoSeconds(99999999)) &&
+            binding.RequiredAt(Seconds(1000), NanoSeconds(100000000)) &&
+            binding.RequiredAt(Seconds(1000), NanoSeconds(100000001)),
+            "Pre-anchor lookahead changed the inclusive nanosecond boundary");
+    binding.preanchorStartOffset = NanoSeconds(-1);
+    bool rejected = false;
+    try { binding.RequiredAt(NanoSeconds(0)); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    Require(rejected, "Negative configured pre-anchor offset was accepted");
+    binding.preanchorStartOffset.reset();
+    binding.scheduleCommitted = true;
+    rejected = false;
+    try { binding.RequiredAt(NanoSeconds(0)); }
+    catch (const std::logic_error&) { rejected = true; }
+    Require(rejected, "Committed source without an actual interval silently became inactive");
+}
+
+void FirstMaterialization(const std::filesystem::path& path, double startS)
+{
+    Fixture fixture(path, true, true, false, startS);
+    const auto before = fixture.owner->GetSourceBindings();
+    const auto offset = Seconds(startS);
+    Require(before.size() == 1 && before[0].preanchorStartOffset == offset &&
+            !before[0].scheduleCommitted && !before[0].begin && !before[0].end &&
+            before[0].RequiredAt(NanoSeconds(0), MilliSeconds(100)) == (startS == 0),
+            "Production descriptor did not distinguish immediate and delayed unanchored sources");
+    fixture.Run(MilliSeconds(125));
+    auto actual = ReadJson(ActualPath(path));
+    const auto after = fixture.owner->GetSourceBindings();
+    Require(actual["anchor"]["simulation_ns"].cast<int64_t>() == 60000000 &&
+            after.size() == 1 && after[0].scheduleCommitted &&
+            after[0].begin == MilliSeconds(60)+offset && after[0].end == MilliSeconds(90)+offset,
+            "Priming rule retimestamped the observed first anchor or actual native interval");
+    Require(fixture.observation.waves == (startS == 0 ? std::vector<int64_t>{60000000,70000000,80000000}
+                                                    : std::vector<int64_t>{}),
+            "Pre-anchor requirement changed real waveform activation ticks");
+    Require(after[0].RequiredAt(*after[0].begin) && !after[0].RequiredAt(*after[0].end) &&
+            !before[0].scheduleCommitted && !before[0].begin && !before[0].end,
+            "First materialization changed half-open intervals or mutated a historical descriptor");
+    fixture.Destroy();
+}
 } // namespace
 
 int main(int argc, char** argv)
@@ -364,6 +431,9 @@ int main(int argc, char** argv)
     std::string error;
     try
     {
+        PreanchorRequirementBounds();
+        FirstMaterialization(std::string(argv[1])+".preanchor-zero.json", 0.);
+        FirstMaterialization(std::string(argv[1])+".preanchor-five.json", 5.);
         ObservedMeasurement(std::string(argv[1])+".measurement.json");
         CancelActive(std::string(argv[1])+".cancel-active.json");
         UnreachedOrCancelled(std::string(argv[1])+".unreached.json", false);
