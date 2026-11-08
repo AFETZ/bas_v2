@@ -2497,6 +2497,7 @@ main(int argc, char* argv[])
                 try { rtPool->Close(); g_sionnaRtWorkersJson = rtPool->SnapshotJson(); }
                 catch (const std::exception& cleanupError) { std::cerr << cleanupError.what() << std::endl; }
                 Simulator::Destroy();
+                if (g_logPhase) g_logPhase->Close();
                 WriteStats(statsFile);
                 g_poseSourceForStats = nullptr;
                 FlushEvents();
