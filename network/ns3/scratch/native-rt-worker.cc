@@ -65,6 +65,17 @@ void Require(bool condition, const std::string& reason)
     if (!condition) throw std::runtime_error(reason);
 }
 
+py::dict PathStorageStats(const SionnaRtChannelModel::PathStorageStats& stats)
+{
+    return py::dict("enabled"_a=stats.enabled,"capacity"_a=stats.capacity,"source_hashes_verified"_a=stats.sourceHashesVerified,
+        "sionna_version"_a=stats.sionnaVersion,"drjit_version"_a=stats.drjitVersion,
+        "paths_source_sha256"_a=stats.pathsSourceSha256,"path_solver_source_sha256"_a=stats.pathSolverSourceSha256,
+        "attempted_calls"_a=stats.attemptedCalls,"completed_calls"_a=stats.completedCalls,"export_calls"_a=stats.exportCalls,
+        "verified_trim_calls"_a=stats.verifiedTrimCalls,"official_empty_calls"_a=stats.officialEmptyCalls,
+        "original_axis"_a=stats.originalAxis,"storage_axis"_a=stats.storageAxis,"exported_axis"_a=stats.exportedAxis,
+        "verified_trim"_a=stats.verifiedTrim,"official_empty"_a=stats.officialEmpty);
+}
+
 py::dict BatchStats(const SionnaRtChannelModel::ReceiverBatchStats& stats)
 {
     return py::dict("attempted_calls"_a=stats.attemptedCalls, "completed_calls"_a=stats.completedCalls,
@@ -121,6 +132,7 @@ int main(int argc, char** argv)
     py::scoped_interpreter python;
     py::object connection = py::none();
     Ptr<SionnaRtChannelModel> model;
+    Ptr<SionnaRtChannelModel> lastActiveModel;
     std::map<SourceSignature,SourceContext> sourceContexts;
     int64_t requestId = 0;
     try
@@ -134,6 +146,7 @@ int main(int argc, char** argv)
         py::dict config = contract.attr("validate_config")(configObject).cast<py::dict>();
         const auto radio = config["radio"].cast<py::dict>();
         const auto solver = radio["solver"].cast<py::dict>();
+        Require(config["fixed_path_storage"].cast<bool>(),"Worker requires explicit resolved fixed_path_storage=True");
         auto mi = py::module_::import("mitsuba");
         mi.attr("set_variant")("cuda_ad_mono_polarized");
         py::module_::import("sionna.rt");
@@ -190,9 +203,11 @@ int main(int argc, char** argv)
             value->SetAttribute("UpdatePeriod", TimeValue(NanoSeconds(1)));
             value->SetUpdateDistanceThreshold(0.); value->SetUpdateJitterFraction(0.);
             value->SetRtPathSolverConfig(settings);
+            value->SetAttribute("FixedPathStorageEnabled",BooleanValue(true));
             return value;
         };
         model=makeModel(radio["frequency_hz"].cast<double>());
+        lastActiveModel=model;
         model->SetReceiverBatchEndpoints(mobility, antennas);
         model->SetReceiverBatchEnabled(true);
         std::map<std::string,SourceSignature> sourceProfiles;
@@ -240,6 +255,7 @@ int main(int argc, char** argv)
             "mitsuba_variant"_a=variant, "gpu_solve_verified"_a=false,
             "applied_config"_a=config, "worker_cache_update_period_ns"_a=1, "render_images"_a=false,
             "scope"_a="public_native_sdk_rt_producer_probe");
+        ready["path_storage"]=PathStorageStats(model->GetPathStorageStats());
         if(!sourceProfiles.empty())
         {
             std::set<double> actualFrequencies;
@@ -255,6 +271,7 @@ int main(int argc, char** argv)
                 contexts.append(py::dict("frequency_hz"_a=signature.first,"pattern"_a=signature.second,
                     "profile_ids"_a=context.profileIds,"source_node_id"_a=stats.sourceNodeId,
                     "source_antenna_id"_a=stats.sourceAntennaId,
+                    "path_storage"_a=PathStorageStats(context.emitter->GetPathStorageStats()),
                     "source_modes"_a=std::vector<std::string>{"pairwise","emitter_batch"}));
             }
             ready["source_model_frequencies_hz"]=std::vector<double>(actualFrequencies.begin(),actualFrequencies.end());
@@ -298,6 +315,7 @@ int main(int argc, char** argv)
                 const auto profileId=sourceJob ? job["profile_id"].cast<std::string>() : std::string();
                 auto* sourceContext=sourceJob ? &sourceContexts.at(sourceProfiles.at(profileId)) : nullptr;
                 auto activeModel=sourceJob ? (emitterJob ? sourceContext->emitter : sourceContext->pairwise) : model;
+                lastActiveModel=activeModel;
                 Ptr<const PhasedArrayModel> anchorArray;
                 if(sourceJob) anchorArray=sourceContext->array;
                 else anchorArray=antennas[anchor];
@@ -394,6 +412,7 @@ int main(int argc, char** argv)
                         "Solve job must perform exactly one explicit fresh batch");
                 result = py::dict("schema"_a=1, "kind"_a="result", "worker_id"_a=workerId,
                     "request_id"_a=requestId, "pairs"_a=pairs);
+                result["path_storage"]=PathStorageStats(activeModel->GetPathStorageStats());
                 if(sourceJob)
                 {
                     DoubleValue actualFrequency; activeModel->GetAttribute("Frequency",actualFrequency);
@@ -450,8 +469,12 @@ int main(int argc, char** argv)
         std::cerr << "Native RT worker failed: " << error.what() << '\n';
         try
         {
-            if (!connection.is_none()) connection.attr("send")(py::dict("schema"_a=1, "kind"_a="error",
-                "worker_id"_a=workerId, "request_id"_a=requestId, "error"_a=error.what()));
+            if (!connection.is_none())
+            {
+                auto failure=py::dict("schema"_a=1,"kind"_a="error","worker_id"_a=workerId,"request_id"_a=requestId,"error"_a=error.what());
+                if(lastActiveModel)failure["path_storage"]=PathStorageStats(lastActiveModel->GetPathStorageStats());
+                connection.attr("send")(failure);
+            }
         }
         catch (const std::exception&) {}
         if (model) model->Dispose();

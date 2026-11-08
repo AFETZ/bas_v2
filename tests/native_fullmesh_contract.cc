@@ -164,7 +164,92 @@ void Cpu(py::dict& report)
     Reject([&]{disabled->RefreshFullMesh();},"Disabled batching invoked full mesh"); disabled->Dispose();
     auto overflow=cohort.Model();overflow->SetAttribute("MaxNumPathsPerSource",UintegerValue(3000000000u));
     Reject([&]{overflow->RefreshFullMesh();},"Full mesh uint32 total allocation overflow accepted");overflow->Dispose();Simulator::Destroy();
+    auto storage=cohort.Model(false);
+    Require(!storage->GetPathStorageStats().enabled && storage->GetPathStorageStats().capacity==0,"Storage optimization changed the default SDK mode");
+    storage->SetAttribute("FixedPathStorageEnabled",BooleanValue(true));
+    const auto initial=storage->GetPathStorageStats();
+    Require(initial.enabled&&initial.capacity==90&&!initial.sourceHashesVerified&&initial.attemptedCalls==0&&
+        initial.pathsSourceSha256.empty()&&initial.sionnaVersion.empty(),"Unsolved storage getter claimed source/GPU verification");
+    storage->SetAttribute("MaxNumberOfPaths",DoubleValue(90.5));Reject([&]{storage->GetPathStorageStats();},"Fractional fixed storage axis silently rounded");
+    storage->SetAttribute("MaxNumberOfPaths",DoubleValue(90));storage->Dispose();
     report["scope"]="CPU production tensor conversion and native cache/candidate/epoch guards; no RT solve or RF acceptance";
+}
+
+void StorageGpu(const std::string& scene,py::dict& report)
+{
+    auto rt=py::module_::import("sionna.rt");
+    py::object pathClass=rt.attr("Paths");
+    py::object build=pathClass.attr("_build_from_buffer"),empty=pathClass.attr("_build_empty_paths");
+    py::list checks;
+    for(bool normalize:{false,true})
+    {
+        Cohort cohort(3);auto model=cohort.Model(true,normalize,scene),reference=cohort.Model(true,normalize,scene);
+        model->SetAttribute("FixedPathStorageEnabled",BooleanValue(true));model->RefreshFullMesh();reference->RefreshFullMesh();
+        for(size_t a=0;a<3;++a)for(size_t b=a+1;b<3;++b)
+        {
+            auto actual=model->GetChannel(cohort.poses[a],cohort.poses[b],cohort.arrays[a],cohort.arrays[b]);
+            auto expected=reference->GetChannel(cohort.poses[a],cohort.poses[b],cohort.arrays[a],cohort.arrays[b]);
+            auto params=model->GetParams(cohort.poses[a],cohort.poses[b]),baseline=reference->GetParams(cohort.poses[a],cohort.poses[b]);
+            Require(actual->m_channel.GetNumPages()==1&&std::abs(actual->m_channel(0,0,0)-expected->m_channel(0,0,0))<1e-8&&
+                params->m_delay==baseline->m_delay,"Fixed storage changed clear-LoS public CIR/delay normalization");
+        }
+        const auto stats=model->GetPathStorageStats();
+        Require(stats.enabled&&stats.capacity==90&&stats.sourceHashesVerified&&stats.attemptedCalls==1&&stats.completedCalls==1&&
+            stats.exportCalls==1&&stats.verifiedTrimCalls==1&&stats.originalAxis==1&&stats.storageAxis==90&&stats.exportedAxis==1&&
+            stats.verifiedTrim&&!stats.officialEmpty&&stats.sionnaVersion=="1.2.0"&&stats.drjitVersion=="1.2.0",
+            "Actual fixed storage solve/export/trim proof missing");
+        Require(pathClass.attr("_build_from_buffer").is(build)&&pathClass.attr("_build_empty_paths").is(empty),"Class hooks leaked after successful solve");
+        // Pairwise uses the same wrapper and inspects an angle before cir().
+        auto pairwise=cohort.Model(false,normalize,scene);pairwise->SetAttribute("FixedPathStorageEnabled",BooleanValue(true));
+        auto matrix=pairwise->GetChannel(cohort.poses[0],cohort.poses[1],cohort.arrays[0],cohort.arrays[1]);
+        Require(matrix->m_channel.GetNumPages()==1&&pairwise->GetPathStorageStats().exportCalls==1&&
+            pairwise->GetPathStorageStats().verifiedTrimCalls==1,"Pairwise pre-CIR scalar access bypassed the common verified export");
+        auto noPaths=cohort.Model(true,normalize,scene);noPaths->SetAttribute("FixedPathStorageEnabled",BooleanValue(true));
+        auto flags=noPaths->GetRtPathSolverConfig();flags.los=false;noPaths->SetRtPathSolverConfig(flags);noPaths->RefreshFullMesh();
+        const auto zero=noPaths->GetPathStorageStats();
+        Require(zero.officialEmpty&&zero.officialEmptyCalls==1&&zero.originalAxis==0&&zero.storageAxis==0&&zero.exportedAxis==0&&
+            zero.verifiedTrim&&zero.exportCalls==1&&noPaths->GetChannel(cohort.poses[0],cohort.poses[1],cohort.arrays[0],cohort.arrays[1])->m_channel.GetNumPages()==0,
+            "Official empty path branch was hidden/replaced");
+        flags.los=true;noPaths->SetRtPathSolverConfig(flags);noPaths->RefreshFullMesh();
+        Require(noPaths->GetPathStorageStats().completedCalls==2&&noPaths->GetPathStorageStats().officialEmptyCalls==1&&
+            !noPaths->GetPathStorageStats().officialEmpty&&noPaths->GetPathStorageStats().originalAxis==1,
+            "Official empty to nonempty transition changed outputs/counters");
+        // An actual two-path (LoS plus ground reflection) control must reject a
+        // capacity1 before allocation, then restore every temporary class hook.
+        auto limited=cohort.Model(true,normalize,scene);limited->SetAttribute("FixedPathStorageEnabled",BooleanValue(true));
+        limited->SetAttribute("MaxNumberOfPaths",DoubleValue(1));auto reflected=limited->GetRtPathSolverConfig();
+        reflected.maxDepth=1;reflected.specularReflection=true;limited->SetRtPathSolverConfig(reflected);
+        Reject([&]{limited->RefreshFullMesh();},"Actual path count above capacity was silently clipped");
+        Require(pathClass.attr("_build_from_buffer").is(build)&&pathClass.attr("_build_empty_paths").is(empty),"Class hooks leaked after failed solver construction");
+        py::dict lifetime;
+        py::exec(R"(
+import gc, weakref
+def _storage_helpers():
+    return {id(value):weakref.ref(value) for value in gc.get_objects()
+            if type(value).__name__ == '_PathStorageAdapter'}
+)",lifetime);
+        const auto before=lifetime["_storage_helpers"]().cast<py::dict>();
+        auto disposable=cohort.Model(true,normalize,scene);
+        disposable->SetAttribute("FixedPathStorageEnabled",BooleanValue(true));disposable->RefreshFullMesh();
+        const auto after=lifetime["_storage_helpers"]().cast<py::dict>();py::list references;
+        for(auto entry:after)if(!before.contains(entry.first))references.append(entry.second);
+        Require(references.size()==1,"Could not identify the actual enabled model's sole helper instance");
+        {
+            py::gil_scoped_release released;
+            disposable->Dispose(); // Must acquire the GIL and DECREF, never detach a live helper.
+        }
+        lifetime["gc"].attr("collect")();
+        Require(references[0]().is_none(),"Dispose with released GIL detached/leaked the live storage helper");
+        Require(disposable->GetPathStorageStats().completedCalls==1&&disposable->GetPathStorageStats().verifiedTrim,
+            "Released-GIL cleanup lost the final actual storage statistics");
+        Require(pathClass.attr("_build_from_buffer").is(build)&&pathClass.attr("_build_empty_paths").is(empty),
+            "Storage class hooks survived released-GIL disposal");
+        checks.append(py::dict("normalize_delays"_a=normalize,"original_axis"_a=stats.originalAxis,"storage_axis"_a=stats.storageAxis,
+            "exported_axis"_a=stats.exportedAxis,"official_empty"_a=zero.officialEmpty,"paths_source_sha256"_a=stats.pathsSourceSha256));
+        model->Dispose();reference->Dispose();pairwise->Dispose();noPaths->Dispose();limited->Dispose();Simulator::Destroy();
+    }
+    report["fixed_storage_public_checks"]=checks;
+    report["fixed_storage_open_edge"]="An initially empty role may still compile its first nonempty tensor family later; dynamic-scene deadline acceptance remains open";
 }
 void Gpu(const std::string& scene,py::dict& report)
 {
@@ -234,7 +319,7 @@ int main(int argc,char** argv)
     const std::filesystem::path output=argv[argc-1];
     if(std::filesystem::exists(output)) throw std::runtime_error("Preserve prior result");
     py::scoped_interpreter python;py::dict report;std::string error;
-    try {if(cpu)Cpu(report);else Gpu(std::filesystem::absolute(argv[2]).string(),report);}
+    try {if(cpu)Cpu(report);else {Gpu(std::filesystem::absolute(argv[2]).string(),report);StorageGpu(std::filesystem::absolute(argv[2]).string(),report);}}
     catch(const std::exception& failure){error=failure.what();Simulator::Destroy();}
     report["schema"]=1;report["passed"]=error.empty();report["checks"]=checks;report["error"]=error;
     const auto encoded=py::module_::import("json").attr("dumps")(report,"indent"_a=2,"allow_nan"_a=false).cast<std::string>();

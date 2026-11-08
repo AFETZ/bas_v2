@@ -39,6 +39,7 @@ PATCH_NAMES = (
     'mr2608-dynamic-rt-inputs.patch',
     'mr2608-fullmesh.patch',
     'mr2608-emitter-batch.patch',
+    'mr2608-fixed-path-storage.patch',
 )
 SCRATCH_FILES = (
     'upstream-sionna-tap-spike.cc', 'native-geometry-loss.h', 'native-spectrum-sources.h',

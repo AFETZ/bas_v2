@@ -1,0 +1,263 @@
+diff --git a/src/spectrum/model/sionna-rt-channel-model.cc b/src/spectrum/model/sionna-rt-channel-model.cc
+index 6424df1..dabe9c3 100644
+--- a/src/spectrum/model/sionna-rt-channel-model.cc
++++ b/src/spectrum/model/sionna-rt-channel-model.cc
+@@ -92,6 +92,16 @@ SionnaRtChannelModel::~SionnaRtChannelModel()
+ void
+ SionnaRtChannelModel::DoDispose()
+ {
++    if (m_pathStorageAdapter)
++    {
++        if (Py_IsInitialized())
++        {
++            py::gil_scoped_acquire gil;
++            (void)GetPathStorageStats();
++            m_pathStorageAdapter=py::none();
++        }
++        else (void)m_pathStorageAdapter.release();
++    }
+     m_emitterMobility = nullptr; m_emitterAntenna = nullptr;
+     m_emitterMounts.clear(); m_emitterPublished = false;
+     m_receiverBatchMobility.clear();
+@@ -124,6 +134,10 @@ SionnaRtChannelModel::GetTypeId()
+             .SetGroupName("Spectrum")
+             .SetParent<MatrixBasedChannelModel>()
+             .AddConstructor<SionnaRtChannelModel>()
++            .AddAttribute("FixedPathStorageEnabled",
++                          "Pinned private Sionna1.2 storage axis from integer MaxNumberOfPaths; verified zero tails are removed before native export",
++                          BooleanValue(false),MakeBooleanAccessor(&SionnaRtChannelModel::m_fixedPathStorageEnabled),
++                          MakeBooleanChecker())
+             .AddAttribute("Frequency",
+                           "The operating Frequency in Hz",
+                           DoubleValue(500.0e6),
+@@ -394,6 +408,7 @@ SionnaRtChannelModel::CalculateReceiverBatchPaths(const py::module_ rt, const py
+             }
+             return buffer;
+         });
++    solver=WrapPathStorageSolver(rt,solver);
+     auto paths = solver(py::arg("scene") = scene,
+         py::arg("samples_per_src") = m_samplesPerSource,
+         py::arg("max_num_paths_per_src") = stats.lastAllocatedMaxPathsPerSource,
+@@ -1168,7 +1183,7 @@ SionnaRtChannelModel::CalculatePaths(const py::module_ rt, const py::object scen
+     NS_LOG_FUNCTION(this);
+     MakeDynamicDeviceInputsOpaque(scene);
+     py::object PathSolver = rt.attr("PathSolver");
+-    py::object psolver = PathSolver();
++    py::object psolver = WrapPathStorageSolver(rt,PathSolver());
+ 
+     static std::string rt_version = py::str(rt.attr("__version__"));
+     NS_LOG_INFO("Using Sionna RT version: " << rt_version);
+@@ -1249,7 +1264,7 @@ SionnaRtChannelModel::SceneRenderImageToFile(const py::module_ rt,
+         renderer(py::arg("camera") = Mycamera,
+                  py::arg("filename") = m_outputImageDirectory + "/" + m_outputImageName +
+                                        std::to_string(count) + ".png",
+-                 py::arg("paths") = paths);
++                 py::arg("paths") = (m_fixedPathStorageEnabled ? paths.attr("_sionna_paths").cast<py::object>() : paths));
+     NS_LOG_INFO("Scene image rendered");
+     count += 1;
+ }
+@@ -1915,6 +1930,7 @@ SionnaRtChannelModel::RefreshFullMesh()
+         ValidateFullMeshCandidates(count,capacity,counts,self);
+         return buffer;
+     });
++    solver=WrapPathStorageSolver(rt,solver);
+     auto paths = solver(py::arg("scene")=m_cachedScene,py::arg("samples_per_src")=m_samplesPerSource,
+         py::arg("max_num_paths_per_src")=perTxCap,py::arg("max_depth")=m_RtPathSolverConfig.maxDepth,
+         py::arg("los")=m_RtPathSolverConfig.los,py::arg("specular_reflection")=m_RtPathSolverConfig.specularReflection,
+@@ -1946,4 +1962,159 @@ SionnaRtChannelModel::RefreshFullMesh()
+ }
+ 
+ 
++uint32_t
++SionnaRtChannelModel::PathStorageCapacity() const
++{
++    if (!std::isfinite(m_maxNumberOfPaths) || m_maxNumberOfPaths<1 ||
++        std::floor(m_maxNumberOfPaths)!=m_maxNumberOfPaths ||
++        m_maxNumberOfPaths>std::numeric_limits<uint32_t>::max())
++        throw std::invalid_argument("Fixed path storage requires integer positive uint32 MaxNumberOfPaths");
++    return static_cast<uint32_t>(m_maxNumberOfPaths);
++}
++
++py::object
++SionnaRtChannelModel::WrapPathStorageSolver(const py::module_ rt,py::object solver)
++{
++    if (!m_fixedPathStorageEnabled) return solver;
++    const auto capacity=PathStorageCapacity();
++    if (!m_pathStorageAdapter || m_pathStorageAdapter.is_none())
++    {
++        py::dict scope;
++        py::exec(R"BAS_STORAGE(
++# Pinned Sionna1.2 storage adapter. Stock propagation and CIR functions are reused.
++import contextlib
++import hashlib
++import inspect
++from importlib.metadata import version
++from pathlib import Path
++import numpy as np
++
++class _PathStorageAdapter:
++    def __init__(self, rt, capacity):
++        self.rt,self.capacity=rt,capacity
++        expected={'paths.py':'8526de9e478100d87c4f08969ade5f8e32f8499d13c21f5c310fdfd1e4b54765',
++                  'path_solver.py':'0b32228bdde831079cfa4478d092d4634e2e994ecae1b5cbd843404bb2d2afe2'}
++        if version('sionna-rt')!='1.2.0' or version('drjit')!='1.2.0':
++            raise RuntimeError('Fixed path storage requires pinned SionnaRT1.2.0/DrJit1.2.0')
++        hashes={}
++        for cls in (rt.Paths,rt.PathSolver):
++            source=Path(inspect.getfile(cls));actual=hashlib.sha256(source.read_bytes()).hexdigest()
++            if actual!=expected[source.name]:raise RuntimeError('Fixed path storage private source hash mismatch: '+str(source))
++            hashes[source.name]=actual
++        self.stats=dict(source_hashes_verified=True,sionna_version='1.2.0',drjit_version='1.2.0',
++            paths_source_sha256=hashes['paths.py'],path_solver_source_sha256=hashes['path_solver.py'],
++            attempted_calls=0,completed_calls=0,export_calls=0,verified_trim_calls=0,official_empty_calls=0,
++            original_axis=0,storage_axis=0,exported_axis=0,verified_trim=False,official_empty=False)
++
++    @contextlib.contextmanager
++    def _storage(self):
++        cls=self.rt.Paths
++        build,empty=cls._build_from_buffer,cls._build_empty_paths
++        owner=self
++        def fixed(paths):
++            original=int(paths._max_num_paths)
++            paths._ns3_original_path_axis=original
++            owner.stats.update(original_axis=original,storage_axis=0,exported_axis=0,verified_trim=False,official_empty=False)
++            if original<=0 or original>owner.capacity:
++                raise RuntimeError('Actual paths exceed the unchanged configured path limit; no clipping')
++            paths._max_num_paths=owner.capacity
++            build(paths) # Original allocation/scatter, synthetic-array and CIR math.
++            owner.stats['storage_axis']=owner.capacity
++        def fixed_empty(paths):
++            empty(paths) # The official no-path branch retains storage/output0.
++            paths._ns3_original_path_axis=0
++            owner.stats.update(original_axis=0,storage_axis=0,exported_axis=0,verified_trim=False,official_empty=True)
++        cls._build_from_buffer,cls._build_empty_paths=fixed,fixed_empty
++        try:yield
++        finally:cls._build_from_buffer,cls._build_empty_paths=build,empty
++
++    def wrap_solver(self, solver, normalize_delays):
++        def solve(*args,**kwargs):
++            self.stats['attempted_calls']+=1
++            with self._storage():paths=solver(*args,**kwargs)
++            self.stats['completed_calls']+=1
++            if self.stats['official_empty']:self.stats['official_empty_calls']+=1
++            return _NativePathExport(paths,self,normalize_delays)
++        return solve
++
++    def snapshot(self):return dict(self.stats)
++
++class _NativePathExport:
++    def __init__(self, paths, owner, normalize_delays):
++        self._sionna_paths,self.owner=paths,owner
++        self.normalize_delays=normalize_delays
++        self.fields,self.options=None,None
++    def _export(self, options):
++        if self.fields is not None:
++            if options!=self.options:raise RuntimeError('Native CIR export options changed within a sampled Paths object')
++            return
++        if options.get('out_type')!='numpy' or options.get('num_time_steps',1)!=1 or options.get('reverse_direction',False):
++            raise RuntimeError('Fixed storage supports the native NumPy single-epoch export')
++        paths=self._sionna_paths
++        a,tau=paths.cir(**options) # Never replace stock normalization/carrier phase.
++        fields=dict(a=np.asarray(a),tau=np.asarray(tau))
++        for name in ('valid','doppler','phi_r','theta_r','phi_t','theta_t'):
++            fields[name]=np.asarray(getattr(paths,name))
++        original=paths._ns3_original_path_axis
++        storage=fields['a'].shape[-2]
++        if storage!=(self.owner.capacity if original else 0):raise RuntimeError('Unexpected actual path storage axis')
++        for name,value in fields.items():
++            if not np.all(np.isfinite(value)):raise RuntimeError('Nonfinite stock CIR export: '+name)
++            if name!='a' and value.shape[-1]!=storage:raise RuntimeError('Inconsistent scalar path storage axis')
++        if np.any(fields['valid'][...,original:]) or np.any(fields['a'][...,original:,:]!=0) or np.any(fields['tau'][...,original:]!=-1):
++            raise RuntimeError('Cannot trim an active, nonzero or nonpadding path')
++        self.fields={name:np.ascontiguousarray(value[...,:original,:] if name=='a' else value[...,:original]) for name,value in fields.items()}
++        self.options=dict(options)
++        self.owner.stats.update(original_axis=original,storage_axis=storage,exported_axis=original,
++            verified_trim=True,official_empty=(original==0))
++        self.owner.stats['export_calls']+=1;self.owner.stats['verified_trim_calls']+=1
++    def cir(self,**options):
++        self._export(options)
++        return self.fields['a'],self.fields['tau']
++    def __getattr__(self,name):
++        if name in ('valid','doppler','phi_r','theta_r','phi_t','theta_t'):
++            # The pairwise SDK queries an angle to inspect the path count before
++            # requesting CIR. Export once with this solve's actual normalization.
++            self._export(dict(normalize_delays=self.normalize_delays,out_type='numpy'))
++            return self.fields[name]
++        return getattr(self._sionna_paths,name)
++
++)BAS_STORAGE",scope);
++        m_pathStorageAdapter=scope["_PathStorageAdapter"](rt,capacity);
++    }
++    else if(m_pathStorageAdapter.attr("capacity").cast<uint32_t>()!=capacity)
++        throw std::logic_error("Fixed path storage capacity changed after initialization; create a fresh model");
++    return m_pathStorageAdapter.attr("wrap_solver")(solver,m_normalizeDelays);
++}
++
++SionnaRtChannelModel::PathStorageStats
++SionnaRtChannelModel::GetPathStorageStats() const
++{
++    auto stats=m_pathStorageStats;
++    if(m_pathStorageAdapter && !m_pathStorageAdapter.is_none() && Py_IsInitialized())
++    {
++        py::gil_scoped_acquire gil;
++        const auto values=m_pathStorageAdapter.attr("snapshot")().cast<py::dict>();
++        stats.sourceHashesVerified=values["source_hashes_verified"].cast<bool>();
++        stats.sionnaVersion=values["sionna_version"].cast<std::string>();
++        stats.drjitVersion=values["drjit_version"].cast<std::string>();
++        stats.pathsSourceSha256=values["paths_source_sha256"].cast<std::string>();
++        stats.pathSolverSourceSha256=values["path_solver_source_sha256"].cast<std::string>();
++        stats.attemptedCalls=values["attempted_calls"].cast<uint64_t>();
++        stats.completedCalls=values["completed_calls"].cast<uint64_t>();
++        stats.exportCalls=values["export_calls"].cast<uint64_t>();
++        stats.verifiedTrimCalls=values["verified_trim_calls"].cast<uint64_t>();
++        stats.officialEmptyCalls=values["official_empty_calls"].cast<uint64_t>();
++        stats.originalAxis=values["original_axis"].cast<uint32_t>();
++        stats.storageAxis=values["storage_axis"].cast<uint32_t>();
++        stats.exportedAxis=values["exported_axis"].cast<uint32_t>();
++        stats.verifiedTrim=values["verified_trim"].cast<bool>();
++        stats.officialEmpty=values["official_empty"].cast<bool>();
++        m_pathStorageStats=stats;
++    }
++    stats.enabled=m_fixedPathStorageEnabled;
++    stats.capacity=m_fixedPathStorageEnabled ? PathStorageCapacity() : 0;
++    return stats;
++}
++
+ } // namespace ns3
+diff --git a/src/spectrum/model/sionna-rt-channel-model.h b/src/spectrum/model/sionna-rt-channel-model.h
+index 16a4414..cbae06a 100644
+--- a/src/spectrum/model/sionna-rt-channel-model.h
++++ b/src/spectrum/model/sionna-rt-channel-model.h
+@@ -129,6 +129,20 @@ class SionnaRtChannelModel : public MatrixBasedChannelModel
+      */
+     static TypeId GetTypeId();
+ 
++    /** Storage-only optimization, disabled by default. Uses pinned private
++     * Sionna1.2 tensor construction; all propagation/CIR formulas are stock.
++     */
++    struct PathStorageStats
++    {
++        bool enabled{false},sourceHashesVerified{false};
++        uint32_t capacity{0};
++        std::string sionnaVersion,drjitVersion,pathsSourceSha256,pathSolverSourceSha256;
++        uint64_t attemptedCalls{0},completedCalls{0},exportCalls{0},verifiedTrimCalls{0},officialEmptyCalls{0};
++        uint32_t originalAxis{0},storageAxis{0},exportedAxis{0};
++        bool verifiedTrim{false},officialEmpty{false};
++    };
++    PathStorageStats GetPathStorageStats() const;
++
+     /** Explicit one external TX -> registered CP/UAV RX batch. Mount/pattern
+      * and carrier are immutable; measured body P/O/V may change before refresh.
+      * Cache reads never invoke a solver or fall back to receiver/receiver links.
+@@ -835,6 +849,11 @@ class SionnaRtChannelModel : public MatrixBasedChannelModel
+     /** Exact endpoint positions at the last solve, indexed by reciprocal pair key. */
+     std::unordered_map<uint64_t, PairPositionSnapshot> m_pairPositionSnapshots;
+     /** Reusable Sionna scene geometry and its live tx/rx objects. */
++    bool m_fixedPathStorageEnabled{false};
++    py::object m_pathStorageAdapter;
++    mutable PathStorageStats m_pathStorageStats;
++    uint32_t PathStorageCapacity() const;
++    py::object WrapPathStorageSolver(const py::module_ rt,py::object solver);
+     mutable py::object m_cachedScene;
+     mutable std::string m_cachedSceneFingerprint;
+ 

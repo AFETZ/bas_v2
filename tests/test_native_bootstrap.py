@@ -275,10 +275,11 @@ class NativeBootstrapTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'sionna-rt-spectrum-propagation-loss-model'):
             bootstrap.verify_cache(self.root)
 
-    def test_all_twelve_runtime_patches_and_both_native_targets_are_prepared(self):
-        self.assertEqual(len(bootstrap.PATCH_NAMES), 12)
-        self.assertEqual(len(set(bootstrap.PATCH_NAMES)), 12)
-        self.assertEqual(bootstrap.PATCH_NAMES[-2:], ('mr2608-fullmesh.patch', 'mr2608-emitter-batch.patch'))
+    def test_all_thirteen_runtime_patches_and_both_native_targets_are_prepared(self):
+        self.assertEqual(len(bootstrap.PATCH_NAMES), 13)
+        self.assertEqual(len(set(bootstrap.PATCH_NAMES)), 13)
+        self.assertEqual(bootstrap.PATCH_NAMES[-3:], ('mr2608-fullmesh.patch', 'mr2608-emitter-batch.patch',
+                                                    'mr2608-fixed-path-storage.patch'))
         runner = (bootstrap.ROOT / 'network/ns3/run_native_radio_five_uav.sh').read_text()
         for name in bootstrap.PATCH_NAMES + bootstrap.SCRATCH_FILES:
             self.assertTrue(name in runner, f'Runner does not include {name}')
@@ -469,6 +470,20 @@ class NativeSdkPreservationTests(unittest.TestCase):
         self.assertEqual(result['expanded_non_runtime_doc_symlinks'], [])
         self.assertEqual(result['git_index_status'], 'present_verified')
         self.assertEqual(self.git('diff', '--cached'), '')
+
+    def test_exact_prefix_without_last_patch_layer_is_rejected_and_not_restored(self):
+        self.git('apply', '--reverse', str(bootstrap.patches(self.root)[-1]))
+        before = (self.sdk / 'source').read_bytes()
+        with self.assertRaisesRegex(RuntimeError, 'M source'):
+            self.verify_preserving_git()
+        self.assertEqual((self.sdk / 'source').read_bytes(), before)
+
+    def test_dependent_patch_layer_order_cannot_be_swapped(self):
+        names = bootstrap.PATCH_NAMES[:-2] + tuple(reversed(bootstrap.PATCH_NAMES[-2:]))
+        before = (self.sdk / 'source').read_bytes()
+        with patch.object(bootstrap, 'PATCH_NAMES', names), self.assertRaises(RuntimeError):
+            self.verify_preserving_git()
+        self.assertEqual((self.sdk / 'source').read_bytes(), before)
 
     def test_only_explicit_absent_non_runtime_paths_pass_and_are_reported(self):
         for name in bootstrap.HISTORICAL_MISSING_NON_RUNTIME:

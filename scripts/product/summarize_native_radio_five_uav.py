@@ -704,6 +704,78 @@ def _native_rt_source_contract(stats, rt, cohort, run_dir):
     return result
 
 
+def _native_rt_path_storage_contract(workers, capacity):
+    """Verify SDK13 only when its request exists in the frozen worker config."""
+    mapping, integer = _contract_mapping, _contract_integer
+    configured = [item for item in workers if isinstance(item, dict)
+                  and "fixed_path_storage" in mapping(mapping(item.get("ready")).get("applied_config"))]
+    result = dict(status="not_requested_legacy", workers=[],
+                  scope="Fixed storage and verified export shape only; no RF accuracy or hardware qualification")
+    if not configured:
+        return {}, result
+    checks = dict(worker_fixed_path_storage_request=True, worker_fixed_path_storage_ready=True,
+                  worker_fixed_path_storage_solved=True, worker_fixed_path_storage_job_counts=True)
+    counters = ("attempted_calls", "completed_calls", "export_calls", "verified_trim_calls", "official_empty_calls")
+    axes = ("original_axis", "storage_axis", "exported_axis")
+    strings = ("sionna_version", "drjit_version", "paths_source_sha256", "path_solver_source_sha256")
+    for item in workers:
+        item = mapping(item); ready = mapping(item.get("ready")); config = mapping(ready.get("applied_config"))
+        row = dict(worker_id=item.get("worker_id"), status="not_requested_legacy")
+        result["workers"].append(row)
+        if "fixed_path_storage" not in config:
+            continue  # Never normalize a historical applied_config into a new request.
+        if config["fixed_path_storage"] is not True:
+            checks["worker_fixed_path_storage_request"] = False
+            row.update(status="invalid", error="fixed_path_storage must be True when present")
+            continue
+        try:
+            from scripts.product.native_rt_workers import validate_path_storage_stats, PATH_STORAGE_SOURCE_HASHES
+            if (not integer(capacity, 1) or capacity > 90
+                    or not _contract_number(mapping(config.get("radio")).get("max_number_of_paths"))
+                    or config["radio"]["max_number_of_paths"] != capacity):
+                raise ValueError("fixed path capacity differs from the resolved radio profile")
+            initial = ready.get("path_storage")
+            validate_path_storage_stats(initial, capacity)
+            if (not isinstance(initial, dict) or any(type(initial.get(key)) is not int or initial[key] != 0 for key in counters + axes)
+                    or initial.get("source_hashes_verified") is not False
+                    or any(initial.get(key) != "" for key in strings)
+                    or initial.get("verified_trim") is not False or initial.get("official_empty") is not False):
+                raise ValueError("worker readiness must report configured storage before the first solve")
+            result["expected_source_hashes"] = dict(PATH_STORAGE_SOURCE_HASHES)
+        except (ImportError, ValueError, TypeError, KeyError, OverflowError) as error:
+            checks["worker_fixed_path_storage_ready"] = False
+            row.update(status="invalid", error=str(error))
+        completed, final = item.get("completed"), item.get("last_path_storage_stats")
+        if not integer(completed):
+            checks["worker_fixed_path_storage_job_counts"] = False
+            row.update(status="invalid", error="worker completed count is not a nonnegative integer")
+            continue
+        if completed == 0:
+            if final is not None:
+                checks["worker_fixed_path_storage_solved"] = False
+                row.update(status="invalid", error="idle worker reports a solver result")
+            elif row["status"] != "invalid":
+                row.update(status="configured_idle_no_solve", completed_calls=0)
+            continue
+        try:
+            from scripts.product.native_rt_workers import validate_path_storage_stats
+            validate_path_storage_stats(final, capacity, require_solve=True)
+            if final["completed_calls"] != completed:
+                checks["worker_fixed_path_storage_job_counts"] = False
+                raise ValueError("path-storage solve count differs from actual single-solve worker jobs")
+            if row["status"] != "invalid":
+                row.update(status="verified_runtime_storage", completed_calls=completed,
+                           official_empty=final["official_empty"], original_axis=final["original_axis"],
+                           storage_axis=final["storage_axis"], exported_axis=final["exported_axis"])
+        except (ImportError, ValueError, TypeError, KeyError, OverflowError) as error:
+            checks["worker_fixed_path_storage_solved"] = False
+            row.update(status="invalid", error=str(error))
+    result["status"] = ("verified_runtime_storage" if all(checks.values())
+                        and any(row["status"] == "verified_runtime_storage" for row in result["workers"])
+                        else "configured_no_solve" if all(checks.values()) else "invalid")
+    return checks, result
+
+
 def native_rt_worker_contract(stats: dict[str, Any], scenario_config: dict[str, Any], *,
                               run_dir: Path | None = None) -> dict[str, Any]:
     """Validate observed worker/cache participation for the configured 1..5 UAVs."""
@@ -960,10 +1032,14 @@ def native_rt_worker_contract(stats: dict[str, Any], scenario_config: dict[str, 
                 and type(pair.get("due")) is bool and isinstance(pair.get("reason"), str) and bool(pair["reason"]))
             observed.add(pair_key)
         checks["worker_cache_pair_provenance"] = valid and observed == expected
+    storage_checks, storage_proof = _native_rt_path_storage_contract(workers if isinstance(workers, list) else [],
+                                                                   rt.get("max_number_of_paths"))
+    checks.update(storage_checks)
     return {"passed": all(checks.values()), "checks": checks,
             "rejection_reasons": [name for name, passed in checks.items() if not passed],
             "expected_worker_count": count, "expected_cohort": cohort, "scene_sha256": scene_hash,
             "expected_desired_mode": desired_mode, "full_mesh_sampling_equivalence": "not_evaluated" if full_mesh else None,
+            "path_storage": storage_proof,
             "source_bundle": {key: value for key, value in source_proof.items() if key not in ("roles", "expected_source_profiles")}
                              if source_proof is not None else None}
 

@@ -313,13 +313,19 @@ docker image inspect "$IMAGE" --format '{{.Id}}'
 пользователь в отдельной чистой рабочей копии. Новый
 `scripts/product/bootstrap_native_runtime.py` использует canonical mount
 `/workspace/multiagent_simulation`, общий lock стенда и собирает ROS-пакет,
-ns-3.48 `d2add90b452d600cfb4859baed8e9ea633519447`, двенадцать patches и оба native targets.
+ns-3.48 `d2add90b452d600cfb4859baed8e9ea633519447`, тринадцать patches и оба native targets.
 Симуляторы при этом не запускаются, GPU не требуется.
 Bootstrap использует переносимый `default` профиль с `-O3 -g -DNDEBUG`, сохраняя
 `NS3_ASSERT` и `NS3_LOG`; `-march=native` не включается, имена бинарников остаются
 с суффиксом `default`. Cache и фактические compile commands проверяются. Прежняя
 fresh-сборка `f2557bc` использовала штатный `-Os`; её receipt не заменяет проверку
 нового профиля. Ускорение и E2E для `-O3` проверяются отдельно.
+
+Последний private SDK patch `mr2608-fixed-path-storage.patch` добавляет фиксированное
+хранение путей для ограничения JIT-перекомпиляций при изменении их числа. Состав
+patches и исходники фиксируются в receipt; runtime проверяет также актуальность
+Spectrum library. Прежние fresh-сборки с 10 и 12 patches относятся к своим версиям;
+они не подтверждают установку текущего набора из 13 patches или его E2E-приёмку.
 
 ```sh
 python3 scripts/product/bootstrap_native_runtime.py --check-only

@@ -16,7 +16,8 @@ import unittest
 import queue
 import copy
 
-from scripts.product.native_rt_workers import NativeRtWorkerPool, validate_config, validate_job
+from scripts.product.native_rt_workers import (NativeRtWorkerPool, validate_config, validate_job,
+    validate_path_storage_stats, PATH_STORAGE_SOURCE_HASHES)
 
 
 STUB = r'''
@@ -73,6 +74,17 @@ def emitter_job():
     return value
 
 
+def storage_stats(*, solved=False, empty=False, calls=1):
+    return dict(enabled=True,capacity=90,source_hashes_verified=solved,
+        sionna_version='1.2.0' if solved else '',drjit_version='1.2.0' if solved else '',
+        **(PATH_STORAGE_SOURCE_HASHES if solved else {key:'' for key in PATH_STORAGE_SOURCE_HASHES}),
+        attempted_calls=calls if solved else 0,completed_calls=calls if solved else 0,
+        export_calls=calls if solved else 0,verified_trim_calls=calls if solved else 0,
+        official_empty_calls=1 if solved and empty else 0,original_axis=0 if empty or not solved else 17,
+        storage_axis=0 if empty or not solved else 90,exported_axis=0 if empty or not solved else 17,
+        verified_trim=solved,official_empty=empty if solved else False)
+
+
 def emitter_reply(value,config):
     """Transport validation fixture only: it does not simulate an RF channel."""
     count=len(config['cohort']);radio=config['radio'];cap=radio['max_paths_per_source']*count
@@ -84,6 +96,7 @@ def emitter_reply(value,config):
             source_request_id=value['request_id'],sample_host_monotonic_ns=value['sample_host_monotonic_ns'],
             poses=copy.deepcopy(value['poses']),fresh_for_request=True))
     return dict(schema=1,kind='result',worker_id=0,request_id=value['request_id'],
+        path_storage=storage_stats(solved=True),
         channel_mode='source_star',source_mode='emitter_batch',profile_id=value['profile_id'],
         frequency_hz=profile['frequency_hz'],new_emitter_batch_calls=1,pairs=pairs,
         allocated_candidate_cap=cap,candidate_count=count,candidate_buffer_size=cap,
@@ -112,6 +125,33 @@ class SourceStarValidationTests(unittest.TestCase):
 
     def tearDown(self):
         self.directory.cleanup()
+
+    def test_fixed_storage_default_is_explicit_in_frozen_config_and_cannot_be_disabled(self):
+        self.assertNotIn('fixed_path_storage',self.config)
+        self.assertIs(validate_config(self.config)['fixed_path_storage'],True)
+        self.assertNotIn('fixed_path_storage',self.config)
+        for value in (False,None,1,0,'true',{}):
+            with self.subTest(value=value),self.assertRaises(ValueError):validate_config(self.config|{'fixed_path_storage':value})
+        bad=copy.deepcopy(self.config);bad['radio']['max_number_of_paths']=1.5
+        with self.assertRaisesRegex(ValueError,'integer'):validate_config(bad)
+        integral=copy.deepcopy(self.config);integral['radio']['max_number_of_paths']=90.0
+        self.assertIs(validate_config(integral)['fixed_path_storage'],True)
+
+    def test_storage_proof_is_pinned_typed_preserves_original_axis_and_labels_empty(self):
+        validate_path_storage_stats(storage_stats(),90)
+        with self.assertRaises(ValueError):validate_path_storage_stats(storage_stats(),90,require_solve=True)
+        validate_path_storage_stats(storage_stats(solved=True,calls=3),90.0,require_solve=True)
+        validate_path_storage_stats(storage_stats(solved=True,empty=True,calls=3),90,require_solve=True)
+        for key,value in [('enabled',1),('capacity',True),('source_hashes_verified',False),
+                ('paths_source_sha256','0'*64),('path_solver_source_sha256','f'*64),('sionna_version','1.1.0'),
+                ('drjit_version','1.3.0'),('exported_axis',90),('storage_axis',17),('original_axis',91),
+                ('verified_trim',False),('verified_trim_calls',2),('completed_calls',True),('official_empty',True)]:
+            item=storage_stats(solved=True,calls=3);item[key]=value
+            with self.subTest(key=key,value=value),self.assertRaises(ValueError):validate_path_storage_stats(item,90,require_solve=True)
+        item=storage_stats(solved=True,empty=True);item['official_empty']=False
+        with self.assertRaises(ValueError):validate_path_storage_stats(item,90,require_solve=True)
+        item=storage_stats();item['paths_source_sha256']=PATH_STORAGE_SOURCE_HASHES['paths_source_sha256']
+        with self.assertRaises(ValueError):validate_path_storage_stats(item,90)
 
     def test_registry_is_optional_and_freezes_exact_source_profiles(self):
         frozen=validate_config(self.config)
@@ -186,6 +226,9 @@ class SourceStarValidationTests(unittest.TestCase):
         self.assertEqual((response['kind'],worker.completed,worker.emitter_batch_completed_jobs),('result',1,1))
         response['emitter_batch_stats']['completed_calls']=999
         self.assertEqual(worker.last_emitter_batch_stats['completed_calls'],1)
+        self.assertEqual(worker.last_path_storage_stats['original_axis'],17)
+        response['path_storage']['original_axis']=89
+        self.assertEqual(worker.last_path_storage_stats['original_axis'],17)
         mutations=[lambda r:r.pop('emitter_batch_stats'),
             lambda r:r.update(new_emitter_batch_calls=True),lambda r:r.update(new_pairwise_calls=1),
             lambda r:r['emitter_batch_stats'].update(last_candidate_count=6000),
@@ -203,6 +246,9 @@ class SourceStarValidationTests(unittest.TestCase):
                 response,worker=receive(reply)
                 self.assertEqual((response['kind'],worker.completed,worker.emitter_batch_completed_jobs),('error',0,0))
                 self.assertIn('emitter-batch producer proof',response['error'])
+        bad=emitter_reply(value,config);bad['path_storage']['verified_trim']=False
+        response,worker=receive(bad)
+        self.assertEqual(response['kind'],'error');self.assertIn('path_storage',response['error'])
 
     def test_source_rosters_one_to_five_uavs_and_source_pose_are_validated(self):
         for count in range(2,7):

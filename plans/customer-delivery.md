@@ -201,6 +201,15 @@ Private pinned-1.2 проба `shape-01` прошла: фиксированны�
 17/17/18 путей после проверки пустого хвоста; actual zero-path branch отдельно прошёл.
 Холодные времена stock/fixed не сравниваются: процессы разные, disk kernel cache общий.
 SDK13-адаптер с версиями и source-hash gates реализуется; полный запуск с ним ещё не проверен.
+SDK13 `mr2608-fixed-path-storage.patch` готов (SHA-256 `196866eb…`): public SDK default
+остаётся выключенным, worker явно включает и сохраняет `fixed_path_storage: true`.
+Эпохи, бюджеты, seed и исходный размер экспортированного CIR сохраняются; empty branch
+обозначается отдельно. Добавлены CPU/schema и native GPU-регрессии, включая Dispose/GIL;
+применение к ПК4 и полные прогоны ещё не проверены.
+UI `2a1a436` прошёл 15 localhost tests и реальную Chrome-проверку source-конфига:
+в основной таблице показаны фактический cache expiry и допуск 100 мс. Артефакты:
+`control/operator-ui-20261108/reason-delivery-rt-source-bundle-n1-20261108-01.{json,png}`.
+Правка payload interval 0,3 с в этой UI-пробе проверяла валидацию, новый опыт не запускался.
 На `e430570` CPU source-waveform contract — 189 проверок: фактические SpectrumChannel
 TxSigParams подтверждают PSD, feed gain, полосу, длительность и отдельные physical/sweep bindings.
 Это TX readback до распространения, не приём, PHY/MAC-эффект или аппаратная приёмка.

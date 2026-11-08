@@ -340,6 +340,88 @@ class NativeRadioContractTests(unittest.TestCase):
         self.assertTrue(report['passed'],report)
         self.assertIsNone(report['source_bundle'])
 
+    def path_storage_evidence(self, stats, scenario, *, empty=False):
+        from scripts.product.native_rt_workers import PATH_STORAGE_SOURCE_HASHES
+        capacity=scenario['sionna']['max_number_of_paths']
+        for worker in stats['sionna_rt_workers']['pool']['workers']:
+            worker['ready']['applied_config']['fixed_path_storage']=True
+            initial=dict(enabled=True,capacity=capacity,source_hashes_verified=False,
+                sionna_version='',drjit_version='',paths_source_sha256='',path_solver_source_sha256='',
+                attempted_calls=0,completed_calls=0,export_calls=0,verified_trim_calls=0,official_empty_calls=0,
+                original_axis=0,storage_axis=0,exported_axis=0,verified_trim=False,official_empty=False)
+            worker['ready']['path_storage']=initial
+            completed=worker['completed']
+            worker['last_path_storage_stats']=(dict(initial,**dict(PATH_STORAGE_SOURCE_HASHES,
+                source_hashes_verified=True,sionna_version=VERSIONS['sionna_rt'],drjit_version=VERSIONS['drjit'],
+                attempted_calls=completed,completed_calls=completed,export_calls=completed,verified_trim_calls=completed,
+                official_empty_calls=completed if empty else 0,original_axis=0 if empty else 17,
+                storage_axis=0 if empty else capacity,exported_axis=0 if empty else 17,
+                verified_trim=True,official_empty=empty)) if completed else None)
+
+    def test_legacy_storage_absence_remains_unrequested_and_is_not_normalized(self):
+        stats,scenario=self.evidence(pool=True,full_mesh=True)
+        original=copy.deepcopy(stats)
+        report=native_rt_worker_contract(stats,scenario)
+        self.assertTrue(report['passed'],report)
+        self.assertEqual(report['path_storage']['status'],'not_requested_legacy')
+        self.assertNotIn('worker_fixed_path_storage_solved',report['checks'])
+        self.assertEqual(stats,original)
+
+    def test_present_storage_request_rejects_false_or_non_boolean_values(self):
+        original,scenario=self.evidence(pool=True,full_mesh=True)
+        for flag in (False,0,1,'true',None):
+            stats=copy.deepcopy(original)
+            for worker in stats['sionna_rt_workers']['pool']['workers']:
+                worker['ready']['applied_config']['fixed_path_storage']=flag
+            with self.subTest(flag=flag):
+                self.assertIn('worker_fixed_path_storage_request',
+                    native_rt_worker_contract(stats,scenario)['rejection_reasons'])
+
+    def test_fixed_storage_actual_exports_and_official_empty_are_separate_from_rf_acceptance(self):
+        for empty in (False,True):
+            stats,scenario=self.evidence(pool=True,full_mesh=True)
+            self.path_storage_evidence(stats,scenario,empty=empty)
+            report=native_rt_worker_contract(stats,scenario)
+            with self.subTest(empty=empty):
+                self.assertTrue(report['passed'],report)
+                self.assertEqual(report['path_storage']['status'],'verified_runtime_storage')
+                self.assertEqual(report['path_storage']['workers'][0]['official_empty'],empty)
+
+    def test_fixed_storage_source_roles_include_idle_without_fabricated_solve(self):
+        stats,scenario,run=self.source_evidence(2)
+        self.path_storage_evidence(stats,scenario)
+        report=native_rt_worker_contract(stats,scenario,run_dir=run)
+        self.assertTrue(report['passed'],report)
+        self.assertEqual(report['path_storage']['workers'][2]['status'],'configured_idle_no_solve')
+        self.assertIsNone(stats['sionna_rt_workers']['pool']['workers'][2]['last_path_storage_stats'])
+        stats['sionna_rt_workers']['pool']['workers'][2]['last_path_storage_stats']=copy.deepcopy(
+            stats['sionna_rt_workers']['pool']['workers'][1]['last_path_storage_stats'])
+        self.assertIn('worker_fixed_path_storage_solved',
+            native_rt_worker_contract(stats,scenario,run_dir=run)['rejection_reasons'])
+
+    def test_fixed_storage_rejects_missing_or_forged_source_axes_and_counters(self):
+        original,scenario=self.evidence(pool=True,full_mesh=True)
+        self.path_storage_evidence(original,scenario)
+        changes=[lambda w:w.pop('last_path_storage_stats'),
+            lambda w:w['ready'].pop('path_storage'),
+            lambda w:w['ready']['path_storage'].update(completed_calls=1),
+            lambda w:w['last_path_storage_stats'].update(source_hashes_verified=False),
+            lambda w:w['last_path_storage_stats'].update(paths_source_sha256='a'*64),
+            lambda w:w['last_path_storage_stats'].update(path_solver_source_sha256='z'*64),
+            lambda w:w['last_path_storage_stats'].update(sionna_version='2.2.0'),
+            lambda w:w['last_path_storage_stats'].update(capacity=91),
+            lambda w:w['last_path_storage_stats'].update(original_axis=91,exported_axis=91),
+            lambda w:w['last_path_storage_stats'].update(storage_axis=89),
+            lambda w:w['last_path_storage_stats'].update(exported_axis=16),
+            lambda w:w['last_path_storage_stats'].update(verified_trim=False),
+            lambda w:w['last_path_storage_stats'].update(completed_calls=True),
+            lambda w:w['last_path_storage_stats'].update(completed_calls=11,attempted_calls=11,export_calls=11,verified_trim_calls=11),
+            lambda w:w['last_path_storage_stats'].update(official_empty=True)]
+        for change in changes:
+            stats=copy.deepcopy(original);change(stats['sionna_rt_workers']['pool']['workers'][0])
+            with self.subTest(change=change):
+                self.assertFalse(native_rt_worker_contract(stats,scenario)['passed'])
+
     def test_full_mesh_requires_observed_coherent_pose_proof(self):
         stats, scenario = self.evidence(pool=True, full_mesh=True)
         del stats['pose_application']

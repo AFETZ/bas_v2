@@ -224,6 +224,7 @@ void Gpu(const std::string& scene,py::dict& report)
     for(double frequency:{carrier,carrier+10000000})for(bool directional:{false,true})for(bool normalize:{false,true})
     {
         Cohort cohort(6,directional);cohort.frequencyHz=frequency;auto batch=cohort.Model(true,normalize,scene);
+        batch->SetAttribute("FixedPathStorageEnabled",BooleanValue(true));
         for(size_t phase=0;phase<3;++phase)
         {
             if(phase==1)cohort.moving[6]->orientation={M_PI,0,0};
@@ -253,6 +254,11 @@ void Gpu(const std::string& scene,py::dict& report)
                     "gain"_a=gain,"delay_s"_a=params->m_delay[0],"doppler_hz"_a=params->m_doppler[0],"angles_rad"_a=params->m_angle));
             }
             const auto stats=batch->GetEmitterBatchStats();
+            const auto storage=batch->GetPathStorageStats();
+            Require(storage.enabled&&storage.capacity==90&&storage.sourceHashesVerified&&storage.completedCalls==2*phase+1&&
+                storage.exportCalls==storage.completedCalls&&storage.verifiedTrimCalls==storage.exportCalls&&
+                storage.originalAxis==1&&storage.storageAxis==90&&storage.exportedAxis==1&&storage.verifiedTrim,
+                "Actual emitter storage optimization proof missing or native path axis inflated");
             Require(stats.sourceMode=="emitter_batch" && stats.completedCalls==2*phase+1 && stats.generatedLinks==6*(2*phase+1) &&
                 stats.lastTransmitterCount==1 && stats.lastReceiverCount==6 && stats.lastAllocatedCandidateCap==6000 &&
                 stats.frequencyHz==frequency && stats.lastCandidateBufferSize==6000 && stats.lastCandidateCount==6 && stats.lastRetainedPathsPerReceiver==std::vector<uint32_t>(6,1) &&

@@ -168,6 +168,14 @@ int main(int argc, char** argv)
         const auto second = read(batch, 0, 2, "batch_second_rx_cache");
         Require(batch->GetReceiverBatchStats().completedCalls == 1, "The second receiver did not use the populated cache");
         compare(firstReference, first); compare(secondReference, second);
+        auto fixed=configure(true);fixed->SetAttribute("FixedPathStorageEnabled",BooleanValue(true));
+        compare(firstReference,read(fixed,0,1,"fixed_storage_first_rx"));
+        compare(secondReference,read(fixed,0,2,"fixed_storage_second_rx_cache"));
+        const auto fixedStats=fixed->GetPathStorageStats();
+        Require(fixedStats.enabled&&fixedStats.capacity==90&&fixedStats.sourceHashesVerified&&fixedStats.completedCalls==1&&
+            fixedStats.exportCalls==1&&fixedStats.verifiedTrimCalls==1&&fixedStats.originalAxis==1&&fixedStats.storageAxis==90&&
+            fixedStats.exportedAxis==1&&fixedStats.verifiedTrim,"Receiver-batch storage optimization bypassed the common verified export");
+        fixed->Dispose();
         auto reverse = batch->GetChannel(mobility[2], mobility[0], antennas[2], antennas[0]);
         Require(reverse == second.matrix, "Reverse direction did not reuse the reciprocal cached matrix");
         compare(read(pairwise, 1, 2, "pairwise_other_tx"), read(batch, 1, 2, "batch_other_tx"));

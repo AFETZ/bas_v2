@@ -24,14 +24,55 @@ import time
 
 
 VERSIONS = {'sionna_rt': '1.2.0', 'mitsuba': '3.7.1', 'drjit': '1.2.0'}
+PATH_STORAGE_SOURCE_HASHES = {
+    'paths_source_sha256': '8526de9e478100d87c4f08969ade5f8e32f8499d13c21f5c310fdfd1e4b54765',
+    'path_solver_source_sha256': '0b32228bdde831079cfa4478d092d4634e2e994ecae1b5cbd843404bb2d2afe2',
+}
+
+
+def validate_path_storage_stats(stats, capacity, *, require_solve=False):
+    """Validate actual SDK13 worker storage evidence, not a new RF model."""
+    booleans = {'enabled', 'source_hashes_verified', 'verified_trim', 'official_empty'}
+    counters = {'attempted_calls', 'completed_calls', 'export_calls', 'verified_trim_calls', 'official_empty_calls'}
+    axes = {'original_axis', 'storage_axis', 'exported_axis'}
+    strings = {'sionna_version', 'drjit_version', *PATH_STORAGE_SOURCE_HASHES}
+    if (type(stats) is not dict or set(stats) != booleans | counters | axes | strings | {'capacity'}
+            or any(type(stats[k]) is not bool for k in booleans)
+            or any(type(stats[k]) is not int or stats[k] < 0 for k in counters | axes)
+            or any(type(stats[k]) is not str for k in strings)):
+        raise ValueError('invalid actual path_storage fields/types')
+    if (type(capacity) not in (int, float) or not math.isfinite(capacity) or capacity < 1
+            or int(capacity) != capacity or type(stats['capacity']) is not int
+            or stats['capacity'] != capacity or stats['enabled'] is not True):
+        raise ValueError('path_storage capacity/enabled differs from frozen configuration')
+    if stats['attempted_calls'] == 0:
+        if (require_solve or any(stats[k] for k in counters | axes) or stats['source_hashes_verified']
+                or stats['verified_trim'] or stats['official_empty'] or any(stats[k] for k in strings)):
+            raise ValueError('unsolved path_storage claimed computation/verification')
+        return
+    if (stats['source_hashes_verified'] is not True or stats['sionna_version'] != VERSIONS['sionna_rt']
+            or stats['drjit_version'] != VERSIONS['drjit'] or any(stats[k] != v for k, v in PATH_STORAGE_SOURCE_HASHES.items())
+            or not stats['attempted_calls'] == stats['completed_calls'] == stats['export_calls'] == stats['verified_trim_calls']
+            or stats['official_empty_calls'] > stats['completed_calls'] or stats['verified_trim'] is not True):
+        raise ValueError('path_storage pinned source/actual solve/export verification missing')
+    original, storage, exported = (stats[k] for k in ('original_axis', 'storage_axis', 'exported_axis'))
+    if not 0 <= original <= capacity or exported != original:
+        raise ValueError('path_storage changed the original exported path axis')
+    if original == 0:
+        if storage != 0 or stats['official_empty'] is not True or stats['official_empty_calls'] < 1:
+            raise ValueError('path_storage official empty branch proof missing')
+    elif storage != capacity or stats['official_empty'] is not False:
+        raise ValueError('path_storage fixed tensor axis/verified trim proof missing')
 
 
 def validate_config(value):
-    """Explicit frozen input for the public native SDK worker; no defaults."""
+    """Validate worker input and make the computational default explicit."""
     keys = {'schema', 'root', 'scene', 'normalize_delays', 'cohort', 'radio'}
-    if (type(value) is not dict or not keys <= set(value) <= keys | {'source_profiles', 'desired_mode'}
+    if (type(value) is not dict or not keys <= set(value) <= keys | {'source_profiles', 'desired_mode', 'fixed_path_storage'}
             or type(value['schema']) is not int or value['schema'] != 1):
         raise ValueError('invalid native worker config schema/fields')
+    if value.get('fixed_path_storage', True) is not True:
+        raise ValueError('native worker fixed_path_storage must be True')
     mode = value.get('desired_mode', 'receiver_batch')
     if type(mode) is not str or mode not in ('receiver_batch', 'full_mesh'):
         raise ValueError('desired_mode must be receiver_batch or full_mesh')
@@ -64,6 +105,8 @@ def validate_config(value):
     for key in ('frequency_hz', 'max_number_of_paths'):
         if type(radio[key]) not in (int, float) or not math.isfinite(radio[key]) or radio[key] <= 0:
             raise ValueError(f'{key} must be finite and positive')
+    if int(radio['max_number_of_paths']) != radio['max_number_of_paths']:
+        raise ValueError('fixed path storage requires integer max_number_of_paths capacity')
     if not 500e6 <= radio['frequency_hz'] <= 100e9:
         raise ValueError('carrier outside the native SDK supported range')
     if 'source_profiles' in value:
@@ -98,6 +141,7 @@ def validate_config(value):
     if type(value['normalize_delays']) is not bool or type(radio['merge_shapes']) is not bool:
         raise ValueError('NormalizeDelays and merge_shapes must be explicit bools')
     frozen = copy.deepcopy(value)
+    frozen['fixed_path_storage'] = True
     frozen['root'], frozen['scene']['path'] = str(root), str(scene)
     return frozen
 
@@ -233,6 +277,7 @@ class _Worker:
     # Complete Connection.recv/decode observed by the receiver thread. This is
     # transport evidence only; correlation/producer validation stays in poll().
     last_transport_receive: dict | None = None
+    last_path_storage_stats: dict | None = None
 
 
 class NativeRtWorkerPool:
@@ -335,6 +380,11 @@ class NativeRtWorkerPool:
                     raise RuntimeError(f'worker {identity}: pinned CUDA versions not confirmed')
                 if not stub and message.get('applied_config') != self.applied_config:
                     raise RuntimeError(f'worker {identity}: applied configuration does not match the frozen input')
+                if not stub and self.applied_config.get('fixed_path_storage') is True:
+                    validate_path_storage_stats(message.get('path_storage'),
+                        self.applied_config['radio']['max_number_of_paths'])
+                    if message['path_storage']['attempted_calls'] != 0:
+                        raise RuntimeError('worker readiness must precede its first solver request')
                 if worker.ready is not None:
                     raise RuntimeError('duplicate worker readiness')
                 worker.ready = dict(message, receiver_enqueued_host_monotonic_ns=received_ns)
@@ -390,12 +440,23 @@ class NativeRtWorkerPool:
                 stats = message.get('full_mesh_stats')
                 emitter_batch = pending.get('source_mode') == 'emitter_batch'
                 emitter_error = None
+                storage_error = None
+                if getattr(self, 'applied_config', None) is not None and self.applied_config.get('fixed_path_storage') is True:
+                    try:
+                        validate_path_storage_stats(message.get('path_storage'),
+                            self.applied_config['radio']['max_number_of_paths'], require_solve=True)
+                    except ValueError as error:
+                        storage_error = str(error)
                 if emitter_batch:
                     try:
                         _validate_emitter_result(message, pending, self.count, self.applied_config)
                     except (KeyError, TypeError, ValueError, StopIteration) as error:
                         emitter_error = str(error)
-                if full_mesh and (message.get('channel_mode') != 'full_mesh'
+                if storage_error is not None:
+                    worker.failed = 'native path_storage producer proof missing: ' + storage_error
+                    message = dict(schema=1,kind='error',worker_id=identity,
+                                   request_id=pending['request_id'],error=worker.failed)
+                elif full_mesh and (message.get('channel_mode') != 'full_mesh'
                         or type(message.get('new_full_mesh_calls')) is not int or message['new_full_mesh_calls'] != 1
                         or type(stats) is not dict or stats.get('source_mode') != 'full_mesh'):
                     worker.failed = 'full-mesh producer proof missing or incompatible with the submitted job'
@@ -413,6 +474,8 @@ class NativeRtWorkerPool:
                     if emitter_batch:
                         worker.emitter_batch_completed_jobs += 1
                         worker.last_emitter_batch_stats = copy.deepcopy(message['emitter_batch_stats'])
+                    if getattr(self, 'applied_config', None) is not None and self.applied_config.get('fixed_path_storage') is True:
+                        worker.last_path_storage_stats = copy.deepcopy(message['path_storage'])
             worker.pending = None
             message = dict(message, receiver_enqueued_host_monotonic_ns=received_ns,
                            received_host_monotonic_ns=time.monotonic_ns())
@@ -438,7 +501,8 @@ class NativeRtWorkerPool:
                 'last_full_mesh_stats': copy.deepcopy(w.last_full_mesh_stats),
                 'emitter_batch_completed_jobs': w.emitter_batch_completed_jobs,
                 'last_emitter_batch_stats': copy.deepcopy(w.last_emitter_batch_stats),
-                'last_transport_receive': copy.deepcopy(w.last_transport_receive)} for w in self._workers.values()]}
+                'last_transport_receive': copy.deepcopy(w.last_transport_receive),
+                'last_path_storage_stats': copy.deepcopy(getattr(w, 'last_path_storage_stats', None))} for w in self._workers.values()]}
 
     def close(self):
         if self._closing.is_set():
