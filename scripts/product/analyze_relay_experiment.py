@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter, defaultdict
 import csv
+import hashlib
 import importlib.util
 import itertools
 import json
@@ -373,6 +374,201 @@ def group_goal_decomposition(completions: list[dict[str, Any]], commands: list[d
     return result
 
 
+def analyze_payload_lineage(run_dir: Path, start_ns=None, end_ns=None, *, complete=False):
+    """Audit existing BSF1/MAVLink observations; never substitute ACKs or RF power."""
+    run_dir = Path(run_dir)
+    errors = []
+    ground = run_dir / 'payload/logs/scenario_events.jsonl'
+    paths = [ground, *sorted((run_dir / 'logs').glob('payload_uart_uav*.jsonl'))]
+    initial_files={path:(path.stat().st_size,path.stat().st_mtime_ns) for path in paths if path.is_file()}
+    rows = [dict(row, _path=path.relative_to(run_dir).as_posix()) for path in paths
+            for row in read_jsonl(path, errors)]
+    sessions = defaultdict(dict)
+    for row in rows:
+        if row.get('event') in ('payload_lineage_started', 'payload_lineage_closed'):
+            sessions[(row['_path'], row.get('process_epoch'))][row['event']] = row
+    result = dict(status='not_evaluated_missing_trace', measurement_eligible=False,
+        byte_definition='Actual MAVLink wire body bytes; excludes MAVLink/BSF1/IP framing and is not semantic customer video/file bytes.',
+        timestamp_scope='Host UART ingress to GCS CRC parse; GCS creation to UART OS-write end. Sensor creation and physical final wire bit are not measured.',
+        goodput_definition='Unique valid offers and acceptances inside the same measurement window; post-window drain receipts remain deadline outcomes but are excluded from goodput.',
+        service_class_availability='not_evaluated_requires_qualified_load_and_series',
+        minimum_distinct_seeds=ENGINEERING_DELIVERY_V1['minimum_distinct_rng_seeds'],
+        minimum_samples_per_stream=ENGINEERING_DELIVERY_V1['minimum_samples_per_uav'],
+        records=[], per_stream={}, audit_errors=errors,trace_files=[])
+    if not any(path == ground.relative_to(run_dir).as_posix() for path, _epoch in sessions):
+        logging=read_json(run_dir/'metrics/payload_channel.json').get('application_lineage',{})
+        if isinstance(logging,dict) and logging.get('event_logging')=='metrics_only':
+            result['status']='not_evaluated_logging_disabled'
+        return result
+    from pymavlink.dialects.v20 import ardupilotmega as mavlink
+    from network.scripts.serial_transport import mavlink_payload_lineage
+    offers, received, transmitted, record_sends = [], defaultdict(list), defaultdict(list), defaultdict(dict)
+    excluded_foreign = invalid = 0
+    raw_offers = 0
+
+    def validate(row, direction):
+        if (type(row.get('schema')) is not int or row['schema'] != 1 or row.get('run_id') != run_dir.name
+                or row.get('clock_domain') != 'host_monotonic' or row.get('channel') != 'payload'
+                or type(row.get('uav_id')) is not int
+                or row['uav_id'] not in UAVS or not isinstance(row.get('process_epoch'), str)
+                or not row['process_epoch'] or row.get('provenance_valid') is not True):
+            raise ValueError('missing run/clock/UAV/process/BSF1 frame provenance')
+        frame = bytes.fromhex(row['frame_hex'])
+        parser = mavlink.MAVLink(None); parser.robust_parsing = True
+        messages = parser.parse_buffer(frame) or []
+        if len(messages) != 1 or messages[0].get_type() == 'BAD_DATA':
+            raise ValueError('frame is not a single CRC-valid MAVLink message')
+        refs = row['record_references']
+        if (not isinstance(refs, list) or not refs or any(not isinstance(ref, dict)
+                or set(ref) != {'sequence','producer_host_monotonic_ns','offset','length'}
+                or any(type(ref[k]) is not int or ref[k] < 0 for k in ref) or ref['length'] == 0
+                for ref in refs) or sum(ref['length'] for ref in refs) != len(frame)):
+            raise ValueError('invalid original BSF1 byte spans')
+        expected = mavlink_payload_lineage(messages[0], [((r['sequence'],r['producer_host_monotonic_ns']),r['offset'],r['length'])
+            for r in refs], run_id=run_dir.name, uav_id=row['uav_id'], direction=direction)
+        if (not expected['provenance_valid'] or any(type(row.get(key)) is not int for key in ('frame_bytes','mavlink_body_bytes'))
+                or any(row.get(key) != expected[key] for key in ('frame_uid','frame_sha256','frame_bytes','mavlink_body_bytes',
+                    'record_references','source_first_host_monotonic_ns','source_last_host_monotonic_ns',
+                    'message_type','msgid','sysid','compid'))):
+            raise ValueError('frame identity, bytes or original BSF1 references disagree')
+        return expected
+
+    for row in rows:
+        event, stage = row.get('event'), row.get('payload_lineage_stage')
+        direction = row.get('payload_direction', row.get('direction'))
+        if event == 'payload_record_sent':
+            keys=('uav_id','sequence','producer_host_monotonic_ns','fragment_index','fragment_count','record_bytes','record_crc32','transmitted_host_monotonic_ns')
+            if (all(type(row.get(key)) is int and row[key]>=0 for key in keys)
+                    and row['fragment_count']>0 and row['fragment_index']<row['fragment_count']
+                    and row['transmitted_host_monotonic_ns']>=row['producer_host_monotonic_ns']):
+                key = (row['uav_id'],row['sequence'],row['producer_host_monotonic_ns'])
+                record_sends[key].setdefault(row['fragment_index'],row)
+            else:
+                invalid+=1
+            continue
+        offered = event == 'payload_frame_offered' or event == 'mavlink_frame' and stage == 'offered'
+        accepted = event == 'payload_frame_accepted' or event == 'mavlink_frame' and stage == 'accepted'
+        sent = event in ('payload_frame_sent','payload_frame_send_failed')
+        if not (offered or accepted or sent):
+            continue
+        raw_offers += offered
+        try:
+            if direction not in ('uav_to_gcs','gcs_to_uav'):
+                raise ValueError('unsupported payload direction')
+            value = validate(row, direction)
+            if offered and direction == 'uav_to_gcs' and value['sysid'] != row['uav_id']:
+                excluded_foreign += 1
+                continue
+            if offered:
+                created, deadline = row.get('created_host_monotonic_ns'), row.get('deadline_host_monotonic_ns')
+                if (type(created) is not int or type(deadline) is not int or created < 0 or deadline <= created
+                        or created > value['source_first_host_monotonic_ns']
+                        or direction=='uav_to_gcs' and created!=value['source_first_host_monotonic_ns']):
+                    raise ValueError('invalid original creation/deadline clocks')
+                offers.append(dict(row, direction=direction))
+            elif accepted:
+                if type(row.get('accepted_host_monotonic_ns')) is not int:
+                    raise ValueError('missing actual endpoint acceptance time')
+                received[row['frame_uid']].append(row)
+            else:
+                transmitted[row['frame_uid']].append(row)
+        except (ValueError, TypeError, KeyError, OverflowError) as error:
+            invalid += 1
+            if len(errors) < 20:
+                errors.append(str(error))
+    counts = Counter(row['frame_uid'] for row in offers)
+    window_valid = type(start_ns) is int and type(end_ns) is int and 0 <= start_ns < end_ns
+    chosen = [row for row in offers if not window_valid or start_ns <= row['created_host_monotonic_ns'] < end_ns]
+
+    def session_interval(session):
+        opened=session.get('payload_lineage_started',{}).get('observed_host_monotonic_ns')
+        closed=session.get('payload_lineage_closed',{})
+        ended=closed.get('observed_host_monotonic_ns')
+        return ((opened,ended) if type(opened) is int and type(ended) is int
+                and 0<=opened<=ended and closed.get('close_error') is None else None)
+
+    for offer in chosen:
+        uid = offer['frame_uid']; replies = sorted(received[uid], key=lambda row: row['accepted_host_monotonic_ns'])
+        arrival = replies[0]['accepted_host_monotonic_ns'] if replies else None
+        epoch = sessions.get((offer['_path'],offer['process_epoch']), {})
+        target = (ground.relative_to(run_dir).as_posix() if offer['direction']=='uav_to_gcs'
+                  else (Path('logs')/f"payload_uart_uav{offer['uav_id']}.jsonl").as_posix())
+        # Never pair an old process's start with a later restart's close. A
+        # receipt is usable only in its OWN continuous target epoch. Without a
+        # receipt, a clean epoch must individually cover the deadline horizon.
+        targets={process:interval for (path,process),value in sessions.items()
+            if path==target and isinstance(process,str) and process and (interval:=session_interval(value)) is not None
+            and interval[0]<=offer['created_host_monotonic_ns']<=interval[1]}
+        if replies:
+            target_epoch=replies[0]['process_epoch'] if replies[0]['_path']==target else None
+        else:
+            target_epoch=max(targets,key=lambda process:targets[process][1],default=None)
+        target_interval=targets.get(target_epoch)
+        horizon=target_interval[1] if target_interval else -1
+        source_interval=session_interval(epoch)
+        trace_complete=(source_interval is not None
+            and source_interval[0]<=offer['created_host_monotonic_ns']<=source_interval[1]
+            and target_interval is not None and (arrival is None or arrival<=horizon))
+        tx_end = None
+        if offer['direction']=='gcs_to_uav':
+            tx_end = min((row['observed_host_monotonic_ns'] for row in transmitted[uid]
+                if row['event']=='payload_frame_sent' and row.get('sent_fragments')==row.get('expected_fragments')), default=None)
+        else:
+            tx = [record_sends[(offer['uav_id'],r['sequence'],r['producer_host_monotonic_ns'])] for r in offer['record_references']]
+            if all(group and set(group)==set(range(next(iter(group.values())).get('fragment_count',0)))
+                    and all(row['fragment_count']==len(group) for row in group.values()) for group in tx):
+                tx_end = max(row['transmitted_host_monotonic_ns'] for group in tx for row in group.values())
+        outcome = ('unverifiable' if counts[uid]!=1 or not trace_complete else
+            'right_censored' if arrival is None and horizon < offer['deadline_host_monotonic_ns'] else
+            'unverifiable' if tx_end is None and arrival is not None else
+            'not_fully_transmitted' if tx_end is None else 'missing' if arrival is None else
+            'unverifiable' if arrival < max(offer['created_host_monotonic_ns'],offer['source_last_host_monotonic_ns']) else
+            'timely' if arrival <= offer['deadline_host_monotonic_ns'] else 'late')
+        result['records'].append(dict(frame_uid=uid,uav_id=offer['uav_id'],direction=offer['direction'],
+            process_epoch=offer['process_epoch'],message_type=offer['message_type'],mavlink_body_bytes=offer['mavlink_body_bytes'],
+            target_process_epoch=target_epoch,
+            target_observation_start_host_monotonic_ns=target_interval[0] if target_interval else None,
+            target_observation_end_host_monotonic_ns=target_interval[1] if target_interval else None,
+            created_host_monotonic_ns=offer['created_host_monotonic_ns'],transmitted_host_monotonic_ns=tx_end,
+            accepted_host_monotonic_ns=arrival,deadline_host_monotonic_ns=offer['deadline_host_monotonic_ns'],
+            outcome=outcome,duplicate_receipts=max(0,len(replies)-1),
+            latency_ms=(arrival-offer['created_host_monotonic_ns'])/1e6 if arrival is not None and outcome in ('timely','late') else None))
+    grouped = defaultdict(list)
+    for row in result['records']:
+        grouped[(row['uav_id'],row['direction'],row['message_type'],row['process_epoch'])].append(row)
+    duration = (end_ns-start_ns)/1e9 if window_valid else None
+    for key, members in grouped.items():
+        categories = Counter(row['outcome'] for row in members)
+        delivered = [row for row in members if row['outcome'] in ('timely','late')]
+        result['per_stream']['|'.join(map(str,key))] = dict(uav_id=key[0],direction=key[1],message_type=key[2],process_epoch=key[3],
+            offered=len(members),outcomes=dict(categories),timely_per_offered=categories['timely']/len(members),
+            delivered_unique=len(delivered),duplicate_receipts=sum(row['duplicate_receipts'] for row in members),
+            mavlink_body_goodput_bps=sum(row['mavlink_body_bytes'] for row in delivered
+                if start_ns<=row['accepted_host_monotonic_ns']<end_ns)*8/duration if duration else None,
+            offered_mavlink_body_bps=sum(row['mavlink_body_bytes'] for row in members)*8/duration if duration else None,
+            latency_ms=distribution([row['latency_ms'] for row in delivered]))
+    result.update(status='recorded' if window_valid and chosen else 'not_evaluated_measurement_window_or_offers',
+        measurement_eligible=bool(window_valid and complete and chosen and not invalid and not errors
+            and all(row['outcome'] not in ('unverifiable','right_censored') for row in result['records'])),
+        excluded_foreign_source_frames=excluded_foreign,invalid_trace_rows=invalid)
+    result['raw_offered_frames']=raw_offers
+    result['orphan_receipts']=sum(len(value) for uid,value in received.items() if uid not in counts)
+    result['measurement_eligible'] &= result['orphan_receipts']==0
+    for path in paths:
+        if not path.is_file():
+            continue
+        before=path.stat();digest=hashlib.sha256()
+        with path.open('rb') as stream:
+            for block in iter(lambda:stream.read(1024*1024),b''):
+                digest.update(block)
+        after=path.stat()
+        stable=initial_files.get(path)==(before.st_size,before.st_mtime_ns)==(after.st_size,after.st_mtime_ns)
+        result['trace_files'].append(dict(path=path.relative_to(run_dir).as_posix(),sha256=digest.hexdigest(),
+            bytes=after.st_size,status='observed' if stable else 'changing'))
+        result['measurement_eligible'] &= stable
+    return result
+
+
 def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: float = 250.,
                 restricted_s: float = 30., plots: bool = True, live_export: bool = True) -> dict[str, Any]:
     run_dir = run_dir.resolve()
@@ -732,6 +928,15 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
         denominator_definition='All unique measurement-window offers partition into timely at <=250ms, late verified admission, sent but missing admission, unavailable send, or unverifiable lineage/identity. Missing admissions without a fully observed deadline horizon are unverifiable, not asserted losses.')
     result['definitions']['engineering_delivery_limits'] = ENGINEERING_DELIVERY_V1
     result['definitions']['engineering_delivery_roster'] = roster
+    payload_window = timing['window']
+    payload = result['payload_lineage'] = analyze_payload_lineage(run_dir,
+        payload_window['start_host_monotonic_ns'], payload_window['end_host_monotonic_ns'],
+        complete=bool(full_window and meta.get('measurement_validity')=='valid' and timing['eligible']))
+    write_csv(output / 'metrics/payload_records.csv',payload['records'],
+        ['frame_uid','uav_id','direction','process_epoch','message_type','mavlink_body_bytes',
+         'target_process_epoch','target_observation_start_host_monotonic_ns','target_observation_end_host_monotonic_ns',
+         'created_host_monotonic_ns','transmitted_host_monotonic_ns','accepted_host_monotonic_ns',
+         'deadline_host_monotonic_ns','outcome','duplicate_receipts','latency_ms'])
     result["rtf"] = {}
     if live_export and (run_dir / "logs/node_state.jsonl").is_file():
         spec = importlib.util.spec_from_file_location("bas_live_report", Path(__file__).with_name("summarize_native_radio_five_uav.py"))

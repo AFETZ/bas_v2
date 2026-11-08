@@ -159,6 +159,9 @@ class FlightHarnessTelemetryCountersTests(unittest.TestCase):
         harness.transport_counters = {key: TransportCounters()}
         harness.transport_input_frames = {key: MavlinkStreamCounter()}
         harness.transport_output_frames = {key: MavlinkStreamCounter()}
+        harness.transport_receivers = {key: Reassembler(channel='payload', uav_id=1, direction='uart_to_gcs')}
+        harness.stream_provenance = {key: deque()}
+        harness.frame_observer = harness.send_observer = None
         harness.transport_malformed_datagrams = 0
         harness.transport_foreign_sysid_drops = 0
         harness.transport_mavlink_parse_errors = 0

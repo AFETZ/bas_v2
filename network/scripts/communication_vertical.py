@@ -19,11 +19,13 @@ import termios
 import time
 from pathlib import Path
 from typing import Any
+from collections import deque
 
 import simulation_clock as clock
 
 from serial_transport import (Encoder, MavlinkStreamCounter, Reassembler, TransportCounters,
-                              BoundedQueue, radio_is_live, ready_events)
+                              BoundedQueue, radio_is_live, ready_events, decode_chunk,
+                              parse_mavlink_with_provenance, mavlink_payload_lineage)
 
 
 DATA_HEADER = struct.Struct("!4sBBIQ")
@@ -134,6 +136,9 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
     output_parser = mavutil.mavlink.MAVLink(None)
     input_parser.robust_parsing = True
     output_parser.robust_parsing = True
+    frame_pending = {'uart_to_ns3': deque(), 'ns3_to_uart': deque()}
+    lineage_epoch = f'uart:{os.getpid()}:{time.monotonic_ns()}'
+    lineage_run = Path(args.event_log).parent.parent.name
     ready = {
         "status": "ready",
         "simulation_mode": clock.mode(),
@@ -204,12 +209,35 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
             if args.event_logging == "batched_trace":
                 append_jsonl(events, value)
 
-        def emit_mavlink_frames(direction: str, parser: Any, record: bytes, observed_ns: int) -> None:
+        def lineage_event(event, **fields):
+            if args.channel == 'payload':
+                emit_event(dict(schema=1,event=event,run_id=lineage_run,channel='payload',uav_id=args.uav_id,
+                    process_epoch=lineage_epoch,clock_domain='host_monotonic' if clock.mode()=='realtime' else 'simulation',
+                    observed_host_monotonic_ns=clock.monotonic_ns(),**fields))
+
+        lineage_event('payload_lineage_started',endpoint='uart_adapter',deadline_ms=deadline_ms)
+
+        def emit_mavlink_frames(direction: str, parser: Any, record: bytes, observed_ns: int, tag) -> None:
             if args.event_logging != "batched_trace":
                 return
-            for message in parser.parse_buffer(record) or []:
+            for message, spans in parse_mavlink_with_provenance(parser, frame_pending[direction], record, tag):
                 if message.get_type() == "BAD_DATA":
                     continue
+                lineage = {}
+                if args.channel == 'payload':
+                    upward = direction == 'uart_to_ns3'
+                    lineage = mavlink_payload_lineage(message, spans, run_id=lineage_run, uav_id=args.uav_id,
+                        direction='uav_to_gcs' if upward else 'gcs_to_uav')
+                    created = lineage['source_first_host_monotonic_ns']
+                    lineage.update(schema=1,run_id=lineage_run,
+                        clock_domain='host_monotonic' if clock.mode()=='realtime' else 'simulation',process_epoch=lineage_epoch,
+                        payload_direction='uav_to_gcs' if upward else 'gcs_to_uav',
+                        payload_lineage_stage='offered' if upward else 'accepted',
+                        endpoint='host_uart_ingress' if upward else 'uart_os_write_end',
+                        created_host_monotonic_ns=created if upward else None,
+                        deadline_host_monotonic_ns=created+round(deadline_ms*1e6) if upward and created is not None else None,
+                        accepted_host_monotonic_ns=None if upward else observed_ns,
+                        observed_host_monotonic_ns=observed_ns)
                 emit_event(
                     {
                         "event": "mavlink_frame",
@@ -227,6 +255,7 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
                         "target_system": int(message.target_system) if hasattr(message, "target_system") else None,
                         "target_component": int(message.target_component) if hasattr(message, "target_component") else None,
                         "monotonic_ns": observed_ns,
+                        **lineage,
                     },
                 )
         try:
@@ -244,9 +273,9 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
                         to_radio.clear()
                     if reassembler is not None:
                         records = reassembler.expire(now_ns)
-                        for record, sent_ns in zip(records, reassembler.released_sent_ns):
+                        for record, sent_ns, sequence in zip(records, reassembler.released_sent_ns, reassembler.released_sequences):
                             if live:
-                                to_uart.put(record, sent_ns/1e9)
+                                to_uart.put(record, sent_ns/1e9, (sequence,sent_ns,0))
                             else:
                                 stale_radio_drops += 1
                     publish_metrics(time.monotonic_ns())
@@ -261,7 +290,8 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
                             observed_ns = clock.monotonic_ns()
                             counters.uart_input_bytes += len(data)
                             input_frames.feed(data)
-                            emit_mavlink_frames("uart_to_ns3", input_parser, data, observed_ns)
+                            emit_mavlink_frames("uart_to_ns3", input_parser, data, observed_ns,
+                                                (encoder.sequence if encoder else None,observed_ns))
                             datagrams = encoder.encode(data, observed_ns) if encoder else [data]
                             if encoder:
                                 counters.records_encoded += 1
@@ -298,11 +328,12 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
                             observed_ns = clock.monotonic_ns()
                             records = reassembler.ingest(data, observed_ns) if reassembler else [data]
                             sent_times = reassembler.released_sent_ns if reassembler else [observed_ns]
+                            sequences = reassembler.released_sequences if reassembler else [None]
                             if not reassembler:
                                 counters.ns3_output_bytes += len(data)
-                            for record, sent_ns in zip(records, sent_times):
+                            for record, sent_ns, sequence in zip(records, sent_times, sequences):
                                 if live:
-                                    to_uart.put(record, sent_ns/1e9)
+                                    to_uart.put(record, sent_ns/1e9, (sequence,sent_ns,0))
                                 else:
                                     stale_radio_drops += 1
                             emit_event(
@@ -330,22 +361,36 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
                         try:
                             data = to_uart.items[0][0]
                             written = os.write(uart, data)
+                            write_end_ns = clock.monotonic_ns()
                             if written <= 0:
                                 raise OSError("UART closed during exchange")
                             counters.uart_output_bytes += written
                             output_frames.feed(data[:written])
-                            emit_mavlink_frames('ns3_to_uart', output_parser, data[:written], clock.monotonic_ns())
+                            tag = to_uart.metadata[0] or (None,None,0)
+                            emit_mavlink_frames('ns3_to_uart', output_parser, data[:written], write_end_ns,tag)
+                            to_uart.metadata[0] = (tag[0],tag[1],tag[2]+written)
                             to_uart.sent(written)
                         except BlockingIOError:
                             break
                     while live and to_radio.items:
                         try:
-                            written = udp.sendto(to_radio.items[0][0], peer_address)
+                            packet = to_radio.items[0][0]
+                            written = udp.sendto(packet, peer_address)
+                            send_end_ns = clock.monotonic_ns()
+                            if encoder and args.channel == 'payload':
+                                chunk=decode_chunk(packet)
+                                lineage_event('payload_record_sent',direction='uav_to_gcs',sequence=chunk.sequence,
+                                    producer_host_monotonic_ns=chunk.sent_monotonic_ns,
+                                    fragment_index=chunk.fragment_index,fragment_count=chunk.fragment_count,
+                                    record_crc32=chunk.record_crc32,record_bytes=chunk.total_length,
+                                    transmitted_host_monotonic_ns=send_end_ns)
                             counters.ns3_input_bytes += written
                             to_radio.sent(written)
                         except BlockingIOError:
                             break
         finally:
+            lineage_event('payload_lineage_closed',endpoint='uart_adapter',close_error=(
+                str(sys.exc_info()[1]) if sys.exc_info()[0] else None))
             clock.close_participant()
             if reassembler is not None:
                 reassembler.expire(clock.monotonic_ns(), force=True)

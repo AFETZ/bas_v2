@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import binascii
 import dataclasses
+import hashlib
 import struct
 import time
 try:
@@ -271,6 +272,7 @@ class Reassembler:
         self._recent_delivered: deque[int] = deque(maxlen=4096)
         self._recent_set: set[int] = set()
         self.released_sent_ns: list[int] = []
+        self.released_sequences: list[int] = []
         if max_age_ms is not None:
             if not 0 < max_age_ms < float('inf'):
                 raise ValueError('max_age_ms must be finite and positive')
@@ -364,6 +366,7 @@ class Reassembler:
     def expire(self, now_ns: int | None = None, *, force: bool = False) -> list[bytes]:
         observed_ns = clock.monotonic_ns() if now_ns is None else now_ns
         self.released_sent_ns = []
+        self.released_sequences = []
         output: list[bytes] = []
         while True:
             output.extend(self._drain(observed_ns))
@@ -444,6 +447,7 @@ class Reassembler:
             self.counters.ingress_queue_age_samples += 1
             result.append(payload)
             self.released_sent_ns.append(sent_ns)
+            self.released_sequences.append(self.expected_sequence)
             self._advance_expected()
         return result
 
@@ -456,6 +460,71 @@ class Reassembler:
         self.expected_sequence = (sequence + 1) & 0xFFFFFFFF
 
 
+def parse_mavlink_with_provenance(parser, pending, record: bytes, tag):
+    """Share the GCS byte-provenance join, including rejected/BAD_DATA bytes.
+
+    Each span is (original caller tag, original record byte offset, byte count).
+    Missing records never make later frames inherit an earlier record's clock.
+    """
+    pending.append((bytes(record), tag, 0))
+
+    def consume(count):
+        spans = []
+        while count:
+            data, original, offset = pending.popleft()
+            consumed = min(count, len(data))
+            spans.append((original, offset, consumed))
+            if consumed < len(data):
+                pending.appendleft((data[consumed:], original, offset + consumed))
+            count -= consumed
+        return spans
+
+    result = []
+    for message in parser.parse_buffer(record) or []:
+        frame = bytes(message.get_msgbuf())
+        offset = b"".join(part[0] for part in pending).find(frame)
+        if not frame or offset < 0:
+            raise RuntimeError("MAVLink bytes lost their UART production provenance")
+        consume(offset)
+        result.append((message, consume(len(frame))))
+    if sum(len(part[0]) for part in pending) > 8192:
+        raise RuntimeError("MAVLink parser retained an unbounded UART prefix")
+    return result
+
+
+def mavlink_payload_lineage(message, spans, *, run_id: str, uav_id: int, direction: str):
+    """Identify a parsed frame by its ORIGINAL BSF1 record references.
+
+    MAVLink body bytes exclude the MAVLink header, CRC and signature as well as
+    BSF1/IP headers. They are protocol body bytes, not customer video content.
+    Caller tags are (BSF1 sequence, original producer monotonic ns).
+    """
+    frame = bytes(message.get_msgbuf())
+    references = []
+    for tag, offset, count in spans:
+        row = dict(sequence=tag[0], producer_host_monotonic_ns=tag[1],
+                   offset=offset + (tag[2] if len(tag) > 2 else 0), length=count)
+        if (references and all(references[-1][key] == row[key] for key in ('sequence','producer_host_monotonic_ns'))
+                and references[-1]['offset'] + references[-1]['length'] == row['offset']):
+            references[-1]['length'] += count
+        else:
+            references.append(row)
+    valid = bool(references) and all(type(row['sequence']) is int and 0 <= row['sequence'] < 2**32
+        and type(row['producer_host_monotonic_ns']) is int and row['producer_host_monotonic_ns'] >= 0
+        for row in references)
+    digest = hashlib.sha256(frame).hexdigest()
+    stamps = [row['producer_host_monotonic_ns'] for row in references
+              if type(row['producer_host_monotonic_ns']) is int]
+    identity = [run_id, 'payload', uav_id, direction, digest, references]
+    return dict(frame_uid=hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest() if valid else None,
+        record_references=references, frame_sha256=digest, frame_hex=frame.hex(), frame_bytes=len(frame),
+        mavlink_body_bytes=frame[1], message_type=message.get_type(), msgid=int(message.get_msgId()),
+        sysid=int(message.get_srcSystem()), compid=int(message.get_srcComponent()),
+        source_first_host_monotonic_ns=min(stamps, default=None),
+        source_last_host_monotonic_ns=max(stamps, default=None),
+        provenance_valid=valid)
+
+
 class BoundedQueue:
     """FIFO with byte/record bounds and an original-ingress deadline.
 
@@ -466,14 +535,16 @@ class BoundedQueue:
         if packets <= 0 or byte_limit <= 0 or deadline_s <= 0:
             raise ValueError('queue bounds and deadline must be positive')
         self.items = deque()
+        self.metadata = deque()  # Optional observation tags; items/data scheduling is unchanged.
         self.limit, self.byte_limit, self.deadline_s = packets, byte_limit, deadline_s
         self.bytes = self.dropped = self.expired = self.peak = 0
 
-    def put(self, data: bytes, now: float) -> bool:
+    def put(self, data: bytes, now: float, metadata=None) -> bool:
         if len(self.items) >= self.limit or self.bytes+len(data) > self.byte_limit:
             self.dropped += 1
             return False
         self.items.append([bytes(data), now])
+        self.metadata.append(metadata)
         self.bytes += len(data)
         self.peak = max(self.peak, self.bytes)
         return True
@@ -481,18 +552,22 @@ class BoundedQueue:
     def clear(self):
         self.dropped += len(self.items)
         self.items.clear()
+        self.metadata.clear()
         self.bytes = 0
 
     def expire(self, now: float):
         # Source times normally increase, but reject clock-future records too.
         kept = deque()
-        for data, stamp in self.items:
+        metadata = deque()
+        for (data, stamp), tag in zip(self.items, self.metadata, strict=True):
             if stamp > now or now-stamp > self.deadline_s:
                 self.bytes -= len(data)
                 self.expired += 1
             else:
                 kept.append([data, stamp])
+                metadata.append(tag)
         self.items = kept
+        self.metadata = metadata
 
     def sent(self, count: int):
         data, timestamp = self.items[0]
@@ -501,6 +576,7 @@ class BoundedQueue:
         self.bytes -= count
         if count == len(data):
             self.items.popleft()
+            self.metadata.popleft()
         else:
             self.items[0] = [data[count:], timestamp]
 

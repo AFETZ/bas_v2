@@ -7,24 +7,32 @@ No direct SITL socket or fabricated telemetry is used.
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
 
 from network.scripts import simulation_clock as clock
-from scripts.product.town01_full_stack_scenario import FlightHarness, write_json
+from scripts.product.town01_full_stack_scenario import FlightHarness, write_json, append_jsonl
+from network.scripts.serial_transport import mavlink_payload_lineage
 
 
 class PayloadChannel:
     def __init__(self, run_dir: Path, node_state: Path, uav_ids: tuple[int, ...], *,
-                 interval_s: float = .2, heartbeat_s: float = 1., request_s: float = 2.):
+                 interval_s: float = .2, heartbeat_s: float = 1., request_s: float = 2.,
+                 event_logging: str | None = None):
         for name, value in (('interval_s', interval_s), ('heartbeat_s', heartbeat_s), ('request_s', request_s)):
             if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
                 raise ValueError(f'{name} must be finite and positive')
         if clock.mode() != 'realtime':
             raise ValueError('coordinator payload observations require realtime')
+        self.event_logging = os.environ.get('BAS_NATIVE_EVENT_LOGGING', 'metrics_only') if event_logging is None else event_logging
+        if self.event_logging not in ('metrics_only', 'batched_trace'):
+            raise ValueError('event_logging must be metrics_only or batched_trace')
         self.run_dir = Path(run_dir)
         self.interval_s, self.heartbeat_s, self.request_s = interval_s, heartbeat_s, request_s
         self.harness = FlightHarness(self.run_dir / 'payload', Path(node_state), 1.,
-                                     channels=('payload',), uav_ids=tuple(uav_ids), observer=self._on_message)
+            channels=('payload',), uav_ids=tuple(uav_ids), observer=self._on_message,
+            frame_observer=self._on_frame if self.event_logging == 'batched_trace' else None,
+            send_observer=self._on_send if self.event_logging == 'batched_trace' else None)
         self.uav_ids = self.harness.uav_ids
         self.mav = self.harness.mavutil.mavlink
         self.started_ns = clock.monotonic_ns()
@@ -36,6 +44,32 @@ class PayloadChannel:
         self.accepted_acknowledgements = {i: 0 for i in self.uav_ids}
         self.backpressure_events = 0
         self.window = None
+        self._lineage_event('payload_lineage_started', uav_ids=list(self.uav_ids))
+
+    def _lineage_event(self, event, **fields):
+        if self.event_logging == 'batched_trace':
+            value = dict(schema=1, event=event, run_id=self.run_dir.name,
+                process_epoch=f'gcs:{self.started_ns}', clock_domain='host_monotonic',
+                observed_host_monotonic_ns=clock.monotonic_ns())
+            value.update(fields)
+            append_jsonl(self.harness.events_path, value)
+
+    def _on_frame(self, channel, system_id, message, observed_ns, spans):
+        lineage = mavlink_payload_lineage(message, spans, run_id=self.run_dir.name,
+                                           uav_id=system_id, direction='uav_to_gcs')
+        self._lineage_event('payload_frame_accepted', channel=channel, uav_id=system_id,
+            direction='uav_to_gcs', endpoint='gcs_crc_parse_release',
+            accepted_host_monotonic_ns=observed_ns, **lineage)
+
+    def _on_send(self, stage, channel, system_id, message, created_ns, producer_ns, sequence, expected, sent, observed_ns):
+        frame = bytes(message.get_msgbuf())
+        lineage = mavlink_payload_lineage(message, [((sequence, producer_ns), 0, len(frame))],
+            run_id=self.run_dir.name, uav_id=system_id, direction='gcs_to_uav')
+        deadline_ns = created_ns + round(self.harness.qos['classes']['payload']['deadline_ms'] * 1e6)
+        self._lineage_event('payload_frame_' + stage, channel=channel, uav_id=system_id,
+            direction='gcs_to_uav', endpoint='gcs_payload_socket', created_host_monotonic_ns=created_ns,
+            deadline_host_monotonic_ns=deadline_ns, expected_fragments=expected, sent_fragments=sent,
+            observed_host_monotonic_ns=observed_ns, **lineage)
 
     def start_measurement(self, start_ns: int, end_ns: int):
         """Observe one half-open host-monotonic window; preflight counts stay separate."""
@@ -156,7 +190,12 @@ class PayloadChannel:
                     observation_scope='payload helper lifetime; not a flight or hardware acceptance',
                     socket_backpressure_events=self.backpressure_events,
                     measurement_window=self.measurement_snapshot(now),
-                    hardware_validation='not_performed', transport=self.harness.transport_summary())
+                    hardware_validation='not_performed', transport=self.harness.transport_summary(),
+                    application_lineage=dict(event_logging=self.event_logging,
+                        status=('gcs_boundary_trace_closed' if self.closed else 'recording_enabled')
+                            if self.event_logging == 'batched_trace' else 'not_evaluated_logging_disabled',
+                        path='payload/logs/scenario_events.jsonl', byte_definition='MAVLink wire body, excluding all framing; not semantic customer content',
+                        service_classes='not_evaluated', sensor_creation_time='not_measured'))
 
     def close(self):
         if not self.closed:
@@ -170,6 +209,7 @@ class PayloadChannel:
             except Exception as exc:
                 error = error or exc
             self.closed = True
+            self._lineage_event('payload_lineage_closed', close_error=str(error) if error else None)
             self.metrics = self.snapshot()
             if error is not None:
                 self.metrics['close_error'] = f'{type(error).__name__}: {error}'

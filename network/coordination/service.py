@@ -24,7 +24,8 @@ from typing import Any
 
 from .policy import (AdmissionGate, Authority, Command, Grant, MAX_DATAGRAM_BYTES,
                      ProtocolError, UARTAdmission, decode, encode, make_command)
-from network.scripts.serial_transport import Encoder, Reassembler, decode_chunk, radio_is_live
+from network.scripts.serial_transport import (Encoder, Reassembler, decode_chunk, radio_is_live,
+                                             parse_mavlink_with_provenance)
 
 
 UAV_IDS = tuple(range(1, 6))
@@ -527,32 +528,16 @@ class GCSService(Network):
                 continue
             self.deliver(i, record, producer_ns=producer, grant=grant)
 
-    def consume_provenance(self, i: int, count: int):
-        parts = []
-        while count:
-            data, producer, grant = self.stream_provenance[i].popleft()
-            consumed = min(count, len(data))
-            parts.append((producer, grant))
-            if consumed < len(data):
-                self.stream_provenance[i].appendleft((data[consumed:], producer, grant))
-            count -= consumed
-        return parts
-
     def deliver(self, i: int, record: bytes, *, producer_ns: int, grant: Grant):
         now = time.monotonic_ns()
         if not self.telemetry_eligible(grant, producer_ns, now):
             self.emit("telemetry_record_rejected", uav_id=i, reason="expired_before_MAVLink_parse")
             return
-        self.stream_provenance[i].append((record, producer_ns, grant))
-        messages = self.uart_parsers[i].parse_buffer(record) or []
-        for message in messages:
+        messages = parse_mavlink_with_provenance(self.uart_parsers[i], self.stream_provenance[i],
+                                                record, (producer_ns, grant))
+        for message, spans in messages:
             native_frame = bytes(message.get_msgbuf())
-            pending = b"".join(part[0] for part in self.stream_provenance[i])
-            offset = pending.find(native_frame)
-            if not native_frame or offset < 0:
-                raise RuntimeError("MAVLink bytes lost their UART production provenance")
-            self.consume_provenance(i, offset)
-            parts = self.consume_provenance(i, len(native_frame))
+            parts = [tag for tag, _offset, _count in spans]
             # ArduPilot can route other systems' MAVLink frames across its UARTs.
             # Every parsed byte consumes its production provenance, including
             # rejected frames, so the next own frame cannot inherit old stamps.
@@ -591,8 +576,6 @@ class GCSService(Network):
                 self.emit("autopilot_heartbeat_received", uav_id=i,
                           custom_mode=int(message.custom_mode), base_mode=int(message.base_mode),
                           producer_host_monotonic_ns=produced, received_host_monotonic_ns=now)
-        if sum(len(part[0]) for part in self.stream_provenance[i]) > 8192:
-            raise RuntimeError("MAVLink parser retained an unbounded UART prefix")
 
     def handle(self, packet):
         if packet is None:

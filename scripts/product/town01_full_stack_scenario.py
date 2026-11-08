@@ -14,7 +14,7 @@ import signal
 import socket
 import sys
 import time
-from collections import Counter
+from collections import Counter, defaultdict, deque
 from pathlib import Path
 from typing import Any, Callable
 
@@ -36,6 +36,7 @@ from network.scripts.serial_transport import (  # noqa: E402
     Reassembler,
     TransportCounters,
     decode_chunk,
+    parse_mavlink_with_provenance,
 )
 
 
@@ -213,10 +214,14 @@ class FlightHarness:
     def __init__(self, run_dir: Path, node_state: Path, timeout_scale: float, *,
                  channels: tuple[str, ...] = ("control", "payload", "additional_data"),
                  uav_ids: tuple[int, ...] = UAV_IDS,
-                 observer: Callable[[str, int, Any, int], None] | None = None) -> None:
+                 observer: Callable[[str, int, Any, int], None] | None = None,
+                 frame_observer: Callable | None = None,
+                 send_observer: Callable | None = None) -> None:
         self.channels = tuple(channels)
         self.uav_ids = tuple(uav_ids)
         self.message_observer = observer
+        self.frame_observer, self.send_observer = frame_observer, send_observer
+        self.stream_provenance = defaultdict(deque)
         if (not self.channels or len(set(self.channels)) != len(self.channels)
                 or not set(self.channels) <= {"control", "payload", "additional_data"}):
             raise ValueError("channels must be unique supported channel names")
@@ -365,10 +370,13 @@ class FlightHarness:
         now_ns: int,
     ) -> None:
         key = (channel, system_id)
-        for record in records:
+        receiver = self.transport_receivers[key]
+        for index, record in enumerate(records):
             self.transport_counters[key].uart_output_bytes += len(record)
             self.transport_output_frames[key].feed(record)
-            for message in self.parsers[key].parse_buffer(record) or []:
+            tag = (receiver.released_sequences[index], receiver.released_sent_ns[index]) if (
+                len(receiver.released_sequences) == len(receiver.released_sent_ns) == len(records)) else (None, None)
+            for message, spans in parse_mavlink_with_provenance(self.parsers[key], self.stream_provenance[key], record, tag):
                 if message.get_type() == "BAD_DATA":
                     self.transport_mavlink_parse_errors += 1
                     continue
@@ -376,6 +384,8 @@ class FlightHarness:
                 if observed_system_id != system_id:
                     self.transport_foreign_sysid_drops += 1
                     continue
+                if self.frame_observer is not None:
+                    self.frame_observer(channel, system_id, message, clock.monotonic_ns(), spans)
                 message_type = str(message.get_type())
                 self.message_counts[(channel, system_id, message_type)] += 1
                 key_name = (channel, system_id, message_type)
@@ -482,6 +492,7 @@ class FlightHarness:
 
     def _send(self, channel: str, system_id: int, message: Any) -> int:
         key = (channel, system_id)
+        created_ns = clock.monotonic_ns()
         frame = message.pack(self.transmitters[key], force_mavlink1=False)
         if message.get_type() == "COMMAND_LONG":
             # Model time can stay fixed across commands; only a newly received
@@ -491,13 +502,27 @@ class FlightHarness:
         counters = self.transport_counters[key]
         counters.uart_input_bytes += len(frame)
         self.transport_input_frames[key].feed(frame)
-        datagrams = self.transport_encoders[key].encode(frame)
+        encoder = self.transport_encoders[key]
+        sequence, producer_ns = encoder.sequence, clock.monotonic_ns()
+        datagrams = encoder.encode(frame, producer_ns)
+        observer = self.send_observer
+        if observer is not None:
+            observer('offered', channel, system_id, message, created_ns, producer_ns, sequence, len(datagrams), 0, producer_ns)
         counters.records_encoded += 1
         counters.chunks_encoded += len(datagrams)
         sent = 0
-        for datagram in datagrams:
-            sent += self.sockets[channel].sendto(datagram, (endpoint_ip(system_id), port))
-            counters.ns3_input_bytes += len(datagram)
+        completed = 0
+        try:
+            for datagram in datagrams:
+                sent += self.sockets[channel].sendto(datagram, (endpoint_ip(system_id), port))
+                counters.ns3_input_bytes += len(datagram)
+                completed += 1
+        except OSError:
+            if observer is not None:
+                observer('send_failed', channel, system_id, message, created_ns, producer_ns, sequence, len(datagrams), completed, clock.monotonic_ns())
+            raise
+        if observer is not None:
+            observer('sent', channel, system_id, message, created_ns, producer_ns, sequence, len(datagrams), completed, clock.monotonic_ns())
         return sent
 
     def transport_summary(self) -> dict[str, Any]:

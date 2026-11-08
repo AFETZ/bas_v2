@@ -8,7 +8,7 @@ import unittest
 
 from scripts.product.analyze_relay_experiment import (
     ENGINEERING_DELIVERY_V1, MISSION_FIELDS, SERVICE_FIELDS,
-    aggregate_campaign, analyze_run, campaign_record, engineering_delivery, runtime_timing_evidence,
+    aggregate_campaign, analyze_run, campaign_record, engineering_delivery, runtime_timing_evidence, analyze_payload_lineage,
 )
 
 
@@ -284,6 +284,145 @@ class RuntimeTimingEvidenceTests(unittest.TestCase):
             result = self.evidence(value, rows)
             self.assertEqual(result['status'], 'not_evaluated')
             self.assertIn('exact_recorded_host_window_missing_or_invalid', result['coverage_problems'])
+
+
+class PayloadLineageAnalysisTests(unittest.TestCase):
+    """Controlled artifact clocks and actual MAVLink CRC; not a radio run."""
+    def setUp(self):
+        from pymavlink.dialects.v20 import ardupilotmega as mavlink
+        from network.scripts.serial_transport import mavlink_payload_lineage
+        temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup)
+        self.run=Path(temporary.name)
+        self.ground=self.run/'payload/logs/scenario_events.jsonl'
+        self.uart=self.run/'logs/payload_uart_uav1.jsonl'
+        self.rows={self.ground:[],self.uart:[]}
+        tx=mavlink.MAVLink(None,srcSystem=1,srcComponent=1)
+        message=tx.attitude_encode(12345,.1,.2,.3,0.,0.,0.)
+        frame=bytes(message.pack(tx,force_mavlink1=False))
+        parsed=mavlink.MAVLink(None).parse_buffer(frame)[0]
+        self.meta=mavlink_payload_lineage(parsed,[((0,200_000),0,len(frame))],
+            run_id=self.run.name,uav_id=1,direction='uav_to_gcs')
+        for path,epoch in [(self.ground,'gcs:1'),(self.uart,'uart:1')]:
+            for event,stamp in [('payload_lineage_started',100_000),('payload_lineage_closed',2_000_000_000)]:
+                self.rows[path].append(dict(schema=1,event=event,run_id=self.run.name,process_epoch=epoch,
+                    clock_domain='host_monotonic',observed_host_monotonic_ns=stamp,close_error=None))
+        self.offer=dict(self.meta,schema=1,event='mavlink_frame',payload_lineage_stage='offered',
+            payload_direction='uav_to_gcs',run_id=self.run.name,uav_id=1,channel='payload',process_epoch='uart:1',
+            clock_domain='host_monotonic',observed_host_monotonic_ns=200_000,
+            created_host_monotonic_ns=200_000,deadline_host_monotonic_ns=1_000_200_000)
+        self.tx=dict(schema=1,event='payload_record_sent',uav_id=1,sequence=0,producer_host_monotonic_ns=200_000,
+            fragment_index=0,fragment_count=1,record_crc32=123,record_bytes=self.meta['frame_bytes'],
+            transmitted_host_monotonic_ns=300_000)
+        self.receipt=dict(self.meta,schema=1,event='payload_frame_accepted',direction='uav_to_gcs',
+            run_id=self.run.name,uav_id=1,channel='payload',process_epoch='gcs:1',clock_domain='host_monotonic',
+            observed_host_monotonic_ns=500_000,accepted_host_monotonic_ns=500_000)
+
+    def analyze(self):
+        for path,rows in self.rows.items():
+            path.parent.mkdir(parents=True,exist_ok=True)
+            path.write_text(''.join(json.dumps(row)+'\n' for row in rows),encoding='utf-8')
+        return analyze_payload_lineage(self.run,100_000,1_000_000,complete=True)
+
+    def test_unique_payload_body_delivery_has_deadline_and_duplicate_safe_denominator(self):
+        self.rows[self.uart]+=[self.offer,self.tx]
+        self.rows[self.ground]+=[self.receipt,copy.deepcopy(self.receipt)]
+        result=self.analyze()
+        self.assertTrue(result['measurement_eligible'],result)
+        self.assertEqual(result['records'][0]['outcome'],'timely')
+        self.assertEqual(result['records'][0]['duplicate_receipts'],1)
+        stream=next(iter(result['per_stream'].values()))
+        self.assertEqual(stream['offered'],1)
+        self.assertEqual(stream['delivered_unique'],1)
+        self.assertEqual(stream['mavlink_body_goodput_bps'],self.meta['mavlink_body_bytes']*8/.0009)
+        self.assertEqual(result['service_class_availability'],'not_evaluated_requires_qualified_load_and_series')
+
+    def test_missing_tail_and_incomplete_transmission_do_not_become_delivered(self):
+        self.rows[self.uart]+=[self.offer,self.tx]
+        result=self.analyze()
+        self.assertEqual(result['records'][0]['outcome'],'missing')
+        self.assertEqual(next(iter(result['per_stream'].values()))['timely_per_offered'],0.)
+        self.rows[self.uart].remove(self.tx)
+        self.assertEqual(self.analyze()['records'][0]['outcome'],'not_fully_transmitted')
+
+    def test_postwindow_drain_is_a_deadline_outcome_not_inwindow_goodput(self):
+        self.rows[self.uart]+=[self.offer,self.tx]
+        self.receipt['accepted_host_monotonic_ns']=2_000_000
+        self.rows[self.ground].append(self.receipt)
+        result=self.analyze()
+        self.assertEqual(result['records'][0]['outcome'],'timely')
+        self.assertEqual(next(iter(result['per_stream'].values()))['mavlink_body_goodput_bps'],0.)
+
+    def test_censored_missing_or_default_absent_trace_cannot_qualify(self):
+        self.assertEqual(analyze_payload_lineage(self.run)['status'],'not_evaluated_missing_trace')
+        self.rows[self.uart]+=[self.offer,self.tx]
+        self.rows[self.ground][1]['observed_host_monotonic_ns']=900_000
+        result=self.analyze()
+        self.assertEqual(result['records'][0]['outcome'],'right_censored')
+        self.assertFalse(result['measurement_eligible'])
+
+    def test_target_restart_gap_cannot_join_one_epoch_start_to_another_epoch_close(self):
+        self.rows[self.uart]+=[self.offer,self.tx]
+        for first_error in ('crashed',None):
+            with self.subTest(first_error=first_error):
+                self.rows[self.ground][1].update(observed_host_monotonic_ns=250_000,close_error=first_error)
+                self.rows[self.ground]=self.rows[self.ground][:2]
+                for event,stamp in [('payload_lineage_started',1_500_000_000),('payload_lineage_closed',2_000_000_000)]:
+                    self.rows[self.ground].append(dict(schema=1,event=event,run_id=self.run.name,process_epoch='gcs:2',
+                        clock_domain='host_monotonic',observed_host_monotonic_ns=stamp,close_error=None))
+                result=self.analyze()
+                self.assertIn(result['records'][0]['outcome'],('unverifiable','right_censored'))
+                self.assertFalse(result['measurement_eligible'])
+
+    def test_accepted_frame_uses_its_own_receiver_epoch_coverage(self):
+        self.rows[self.uart]+=[self.offer,self.tx]
+        for event,stamp in [('payload_lineage_started',400_000),('payload_lineage_closed',2_000_000_000)]:
+            self.rows[self.ground].append(dict(schema=1,event=event,run_id=self.run.name,process_epoch='gcs:2',
+                clock_domain='host_monotonic',observed_host_monotonic_ns=stamp,close_error=None))
+        self.receipt['process_epoch']='gcs:2'
+        self.rows[self.ground].append(self.receipt)
+        result=self.analyze()
+        self.assertEqual(result['records'][0]['outcome'],'unverifiable')
+        self.assertFalse(result['measurement_eligible'])
+        self.rows[self.ground][2]['observed_host_monotonic_ns']=100_000
+        self.assertTrue(self.analyze()['measurement_eligible'])
+
+    def test_downlink_artifact_ids_are_portable_and_match_the_actual_uart_endpoint(self):
+        from pymavlink.dialects.v20 import ardupilotmega as mavlink
+        from network.scripts.serial_transport import mavlink_payload_lineage
+        tx=mavlink.MAVLink(None,srcSystem=255,srcComponent=190)
+        frame=bytes(tx.heartbeat_encode(mavlink.MAV_TYPE_GCS,mavlink.MAV_AUTOPILOT_INVALID,
+            0,0,mavlink.MAV_STATE_ACTIVE).pack(tx,force_mavlink1=False))
+        message=mavlink.MAVLink(None).parse_buffer(frame)[0]
+        meta=mavlink_payload_lineage(message,[((0,200_000),0,len(frame))],
+            run_id=self.run.name,uav_id=1,direction='gcs_to_uav')
+        common=dict(meta,schema=1,run_id=self.run.name,uav_id=1,channel='payload',clock_domain='host_monotonic')
+        offered=dict(common,event='payload_frame_offered',process_epoch='gcs:1',direction='gcs_to_uav',
+            created_host_monotonic_ns=200_000,deadline_host_monotonic_ns=1_000_200_000,
+            observed_host_monotonic_ns=200_000)
+        self.rows[self.ground]+=[offered,dict(offered,event='payload_frame_sent',
+            expected_fragments=1,sent_fragments=1,observed_host_monotonic_ns=300_000)]
+        self.rows[self.uart].append(dict(common,event='mavlink_frame',payload_lineage_stage='accepted',
+            payload_direction='gcs_to_uav',process_epoch='uart:1',endpoint='uart_os_write_end',
+            accepted_host_monotonic_ns=500_000,observed_host_monotonic_ns=500_000))
+        result=self.analyze()
+        self.assertTrue(result['measurement_eligible'],result)
+        self.assertEqual(result['records'][0]['outcome'],'timely')
+        self.assertEqual(result['records'][0]['target_process_epoch'],'uart:1')
+        self.assertEqual({row['path'] for row in result['trace_files']},
+            {'payload/logs/scenario_events.jsonl','logs/payload_uart_uav1.jsonl'})
+
+    def test_duplicate_offer_or_corrupt_proof_is_unverifiable_not_new_goodput(self):
+        self.rows[self.uart]+=[self.offer,self.tx,copy.deepcopy(self.offer)]
+        self.rows[self.ground]+=[self.receipt]
+        result=self.analyze()
+        self.assertEqual(len(result['records']),2)
+        self.assertTrue(all(row['outcome']=='unverifiable' for row in result['records']))
+        self.assertFalse(result['measurement_eligible'])
+        self.rows[self.uart].pop()
+        self.rows[self.ground][-1]['frame_hex']='00'+self.receipt['frame_hex'][2:]
+        result=self.analyze()
+        self.assertFalse(result['measurement_eligible'])
+        self.assertGreater(result['invalid_trace_rows'],0)
 
 
 if __name__ == '__main__':
