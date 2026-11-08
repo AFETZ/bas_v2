@@ -12,6 +12,7 @@ import time
 import uuid
 import threading
 import signal
+from contextlib import contextmanager
 from types import SimpleNamespace
 from collections import deque, Counter
 from datetime import datetime, timezone
@@ -25,8 +26,15 @@ except ImportError as exc:  # pragma: no cover - dependency check covers this
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
+# The runner invokes this file directly with only the Gazebo site-packages in
+# PYTHONPATH. Resolve the shared project writer without altering that environment.
+if __package__ in (None, ''):
+    sys.path.insert(0, str(ROOT_DIR))
+from network.jsonl import AsyncJsonlWriter
+
 DEFAULT_SCENARIO = ROOT_DIR / "network/config/scenario_5uav.yaml"
 DEFAULT_JAMMERS = ROOT_DIR / "network/config/jammers.yaml"
+JOURNAL_MODE = 'bounded_async_jsonl_v1'
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
@@ -131,9 +139,96 @@ def write_state(output_json: Path, output_jsonl: Path | None, state: dict[str, A
         output_jsonl.parent.mkdir(parents=True, exist_ok=True)
         with output_jsonl.open("a", encoding="utf-8") as stream:
             # Live readers need a bounded history; archive each latest sample once.
-            logged = dict(state, nodes=[{k:v for k,v in node.items() if k != 'history'}
-                                        for node in state['nodes']])
+            logged = _archive_state(state)
             stream.write(json.dumps(logged, separators=(",", ":"), allow_nan=False) + "\n")
+
+
+def _archive_state(state):
+    return dict(state, nodes=[{k:v for k,v in node.items() if k != 'history'} for node in state['nodes']])
+
+
+def _publication_timing():
+    return dict(completed_publications=0,
+        scope='host_monotonic_wall_and_thread_cpu; live rows contain previous completed stage observations')
+
+
+def _observe_publication_stage(timing, stage, wall, cpu):
+    for kind, elapsed in (('wall', time.monotonic_ns()-wall), ('thread_cpu', time.thread_time_ns()-cpu)):
+        timing[f'last_{stage}_{kind}_ns'] = elapsed
+        name = f'maximum_{stage}_{kind}_ns'
+        timing[name] = max(timing.get(name, 0), elapsed)
+    timing[f'{stage}_calls'] = timing.get(f'{stage}_calls', 0)+1
+
+
+def _publish_live_state(output_json, state, journal, timing):
+    # Snapshotting is complete before this function; no odometry/state mutex is
+    # held across atomic-file I/O, encoding or the bounded archive enqueue.
+    if journal is not None:
+        journal.check()
+    state['journal_mode'] = JOURNAL_MODE if journal is not None else 'disabled'
+    state['publication_timing'] = dict(timing)
+    wall, cpu = time.monotonic_ns(), time.thread_time_ns()
+    try:
+        write_state(output_json, None, state)
+    finally:
+        _observe_publication_stage(timing, 'atomic_publish', wall, cpu)
+    if journal is not None:
+        wall, cpu = time.monotonic_ns(), time.thread_time_ns()
+        try:
+            journal.write(json.dumps(_archive_state(state), separators=(',', ':'), allow_nan=False))
+        finally:
+            _observe_publication_stage(timing, 'archive_enqueue', wall, cpu)
+    timing['completed_publications'] += 1
+
+
+@contextmanager
+def _live_journal(output_json, output_jsonl, state, timing):
+    if output_jsonl is None:
+        yield None
+        return
+    output_jsonl.parent.mkdir(parents=True, exist_ok=True)
+    audit_path = Path(str(output_jsonl)+'.writer.json')
+    if audit_path.exists():
+        raise FileExistsError(f'Position journal audit already exists: {audit_path}')
+    journal = AsyncJsonlWriter(output_jsonl)
+    producer_error = close_error = None
+    audit_owned = False
+
+    def audit(status, *, initial=False):
+        nonlocal audit_owned
+        value = dict(journal.snapshot(), schema=1, journal_mode=JOURNAL_MODE,
+            source=state.source, session_id=state.session, status=status,
+            live_state_path=str(output_json), producer_error=producer_error,
+            close_error=close_error, publication_timing=dict(timing))
+        encoded = json.dumps(value, indent=2, allow_nan=False)+'\n'
+        if initial:
+            with audit_path.open('x', encoding='utf-8') as stream:
+                audit_owned = True
+                stream.write(encoded)
+        else:
+            temporary = Path(str(audit_path)+'.tmp')
+            temporary.write_text(encoded, encoding='utf-8')
+            os.replace(temporary, audit_path)
+
+    try:
+        # An interrupted/killed producer leaves recording, never a successful
+        # closed artifact. The archive itself is exclusively owned by the writer.
+        audit('recording', initial=True)
+        yield journal
+    except BaseException as error:
+        producer_error = f'{type(error).__name__}: {error}'
+        raise
+    finally:
+        failure = None
+        try:
+            journal.close()
+        except Exception as error:
+            failure = error
+            close_error = f'{type(error).__name__}: {error}'
+        if audit_owned:
+            audit('failed' if producer_error is not None or close_error is not None else 'closed')
+        if failure is not None and producer_error is None:
+            raise failure
 
 
 def run_config_once(args: argparse.Namespace) -> int:
@@ -273,7 +368,9 @@ def run_gazebo_tracker(args: argparse.Namespace) -> int:
                       os.environ.get('BAS_SIMULATION_MODE', 'realtime'))
     state.source = 'gazebo_odometry'
     mutex, stop = threading.Lock(), threading.Event()
-    node = Node()
+    output_json = Path(args.output_json).resolve()
+    output_jsonl = Path(args.output_jsonl).resolve() if args.output_jsonl else None
+    timing = _publication_timing()
     def receive_clock(msg):
         with mutex:
             state.clock(msg.sim.sec + msg.sim.nsec / 1e9, time.monotonic_ns())
@@ -287,26 +384,28 @@ def run_gazebo_tracker(args: argparse.Namespace) -> int:
         with mutex:
             if state.odometry(name, adapted, time.monotonic_ns()):
                 state.history[name][-1]['source_topic'] = f'/model/{name}/odometry'
-    if not node.subscribe(Clock, f'/world/{args.world_name}/clock', receive_clock):
-        raise RuntimeError('cannot subscribe to Gazebo world clock')
-    for name in state.history:
-        if not node.subscribe(Odometry, f'/model/{name}/odometry',
-                              lambda msg, name=name: receive_pose(name, msg)):
-            raise RuntimeError(f'cannot subscribe to Gazebo odometry: {name}')
-    signal.signal(signal.SIGTERM, lambda *_: stop.set())
-    signal.signal(signal.SIGINT, lambda *_: stop.set())
-    def publish():
-        with mutex:
-            value = state.snapshot(time.monotonic_ns())
-        write_state(Path(args.output_json), Path(args.output_jsonl) if args.output_jsonl else None, value)
-    try:
-        _publish_periodically(stop, period_ns, publish)
-    finally:
-        # Release native callbacks while Python is still running, before
-        # interpreter teardown races Gazebo Transport's receiving threads.
-        for topic in node.subscribed_topics():
-            node.unsubscribe(topic)
-        del node
+    with _live_journal(output_json, output_jsonl, state, timing) as journal:
+        node = Node()
+        try:
+            if not node.subscribe(Clock, f'/world/{args.world_name}/clock', receive_clock):
+                raise RuntimeError('cannot subscribe to Gazebo world clock')
+            for name in state.history:
+                if not node.subscribe(Odometry, f'/model/{name}/odometry',
+                                      lambda msg, name=name: receive_pose(name, msg)):
+                    raise RuntimeError(f'cannot subscribe to Gazebo odometry: {name}')
+            signal.signal(signal.SIGTERM, lambda *_: stop.set())
+            signal.signal(signal.SIGINT, lambda *_: stop.set())
+            def publish():
+                with mutex:
+                    value = state.snapshot(time.monotonic_ns())
+                _publish_live_state(output_json, value, journal, timing)
+            _publish_periodically(stop, period_ns, publish)
+        finally:
+            # Release native callbacks before archive draining and interpreter
+            # teardown, including failed subscriptions and writer errors.
+            for topic in node.subscribed_topics():
+                node.unsubscribe(topic)
+            del node
     return 0
 
 
@@ -336,11 +435,13 @@ def run_ros_tracker(args: argparse.Namespace) -> int:
     output_jsonl = Path(args.output_jsonl).resolve() if args.output_jsonl else None
     stale_after_s = float(args.stale_after_s)
     rate_hz = float(args.rate_hz)
+    live_state = LiveState(scenario, stale_after_s, os.environ.get("BAS_SIMULATION_MODE", "realtime"))
+    timing = _publication_timing()
 
     class RadioPositionTracker(Node):
         def __init__(self) -> None:
             super().__init__("network_radio_position_tracker")
-            self.state = LiveState(scenario, stale_after_s, os.environ.get("BAS_SIMULATION_MODE", "realtime"))
+            self.state = live_state
             self.robot_names = [robot["name"] for robot in scenario.get("robots", [])]
             lockstep = self.state.simulation_mode == 'lockstep'
             qos = QoSProfile(depth=32 if lockstep else 1,
@@ -367,20 +468,23 @@ def run_ros_tracker(args: argparse.Namespace) -> int:
         def _publish_state(self) -> None:
             state = self.state.snapshot(time.monotonic_ns())
             state['emitters'] = jammer_emitters(jammers, enabled_only=True, jammers_source=jammers_source)
-            write_state(output_json, output_jsonl, state)
+            _publish_live_state(output_json, state, journal, timing)
             if state['missing_nodes'] or state['stale_nodes'] or state['fault']:
                 self.get_logger().warn(
                     f"missing={state['missing_nodes']} stale={state['stale_nodes']} fault={state['fault']}"
                 )
 
     rclpy.init(args=None)
-    node = RadioPositionTracker()
     try:
-        rclpy.spin(node)
+        with _live_journal(output_json, output_jsonl, live_state, timing) as journal:
+            node = RadioPositionTracker()
+            try:
+                rclpy.spin(node)
+            finally:
+                node.destroy_node()
     except KeyboardInterrupt:
         return 130
     finally:
-        node.destroy_node()
         rclpy.try_shutdown()
     return 0
 

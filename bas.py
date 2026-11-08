@@ -7,7 +7,7 @@ import heapq
 import json
 import math
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import signal
 import subprocess
@@ -341,6 +341,73 @@ def snapshot_inputs(config, folder, env):
     return hashes
 
 
+def node_state_journal_verification(raw):
+    """Check published bytes against the closed shared-writer ledger, without rewriting poses."""
+    state_path, audit_path = raw / 'logs/node_state.json', raw / 'logs/node_state.jsonl.writer.json'
+    result = dict(status='invalid_position_journal', passed=False)
+    try:
+        environment = raw / 'environment.txt'
+        declared = re.search(r'^position_journal_mode=(.+)$',
+            environment.read_text(encoding='utf-8') if environment.exists() else '', re.M)
+        if declared and declared.group(1).strip() != 'bounded_async_jsonl_v1':
+            raise ValueError('unsupported advertised position journal mode')
+        if not declared and not state_path.exists() and not audit_path.exists():
+            return dict(status='not_requested_legacy', passed=None)
+        state = json.loads(state_path.read_text(encoding='utf-8'),
+                           object_pairs_hook=unique_json_fields, parse_constant=reject_json_constant)
+        if not declared and isinstance(state, dict) and 'journal_mode' not in state and not audit_path.exists():
+            return dict(status='not_requested_legacy', passed=None)
+        audit = json.loads(audit_path.read_text(encoding='utf-8'),
+                           object_pairs_hook=unique_json_fields, parse_constant=reject_json_constant)
+        if not isinstance(state, dict) or not isinstance(audit, dict):
+            raise ValueError('position state and writer audit must be JSON objects')
+        producer, writer = audit.get('producer'), audit.get('writer')
+        if not isinstance(producer, dict) or not isinstance(writer, dict):
+            raise ValueError('position writer process and thread identity is missing')
+        parts = PurePosixPath(audit['path'].replace('\\', '/')).parts if isinstance(audit.get('path'), str) else ()
+        checks = dict(
+            metadata=(type(audit.get('schema')) is int and audit['schema'] == 1
+                and state.get('journal_mode') == audit.get('journal_mode') == 'bounded_async_jsonl_v1'
+                and state.get('source') in ('gazebo_odometry', 'ros_odometry')
+                and audit.get('source') == state['source'] and isinstance(state.get('session_id'), str)
+                and bool(state['session_id']) and audit.get('session_id') == state['session_id']
+                and audit.get('status') == 'closed'
+                and all(key in audit and audit[key] is None for key in ('producer_error', 'close_error'))),
+            closed=(audit.get('closed') is True and audit.get('drained') is True and audit.get('listener_alive') is False
+                and all(type(audit.get(key)) is int and audit[key] == 0 for key in ('queue_depth', 'failed', 'rejected', 'error_count'))
+                and audit.get('first_exception') is None and audit.get('last_exception') is None
+                and audit.get('unwritten_records') == [] and audit.get('in_progress_record') is None
+                and audit.get('rejected_record') is None),
+            ledger=(all(type(audit.get(key)) is int and audit[key] > 0
+                for key in ('accepted', 'written', 'accepted_bytes', 'written_bytes', 'capacity', 'max_record_bytes'))
+                and audit.get('accepted') == audit.get('written') and audit.get('accepted_bytes') == audit.get('written_bytes')
+                and audit['capacity'] <= 512 and audit['max_record_bytes'] <= 65536
+                and type(audit.get('max_queue')) is int and 0 <= audit['max_queue'] <= audit['capacity']),
+            identity=(all(type(item.get(key)) is int and item[key] > 0
+                for item in (producer, writer) for key in ('pid', 'thread_id', 'native_thread_id'))
+                and producer.get('pid') == writer.get('pid') and producer.get('native_thread_id') != writer.get('native_thread_id')
+                and '..' not in parts and parts[-3:] == (raw.name, 'logs', 'node_state.jsonl')))
+        path = raw / 'logs/node_state.jsonl'
+        if not path.resolve().is_relative_to(raw.resolve()):
+            raise ValueError('position journal is outside its run')
+        digest, count, size, largest = hashlib.sha256(), 0, 0, 0
+        with path.open('rb') as stream:
+            while line := stream.readline(65537):
+                if len(line) > 65536 or not line.endswith(b'\n'):
+                    raise ValueError('position journal record is oversized or incomplete')
+                digest.update(line); count += 1; size += len(line); largest = max(largest, len(line))
+        checks['file'] = (checks['ledger'] and largest <= audit['max_record_bytes']
+                          and count == audit.get('written') and size == audit.get('written_bytes')
+                          and digest.hexdigest() == audit.get('sha256'))
+        result.update(checks=checks, rows=count, bytes=size, sha256=digest.hexdigest(),
+                      path='logs/node_state.jsonl', audit_path='logs/node_state.jsonl.writer.json')
+        if all(checks.values()):
+            result.update(status='verified_closed_position_journal', passed=True)
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        result['error'] = str(error)
+    return result
+
+
 def recorded_outcome(raw, code, summary, *, source_configured=False):
     """Use backend evidence as well as mission status; never infer success from exit 0."""
     result = {key: summary.get(key, 'not_evaluated') for key in
@@ -366,6 +433,10 @@ def recorded_outcome(raw, code, summary, *, source_configured=False):
         verification_errors.append('native_capture_publication_not_confirmed')
     if not (raw / 'configuration/final/manifest.json').is_file():
         verification_errors.append('final_configuration_capture_missing')
+    result['node_state_journal_verification'] = node_state_journal_verification(raw)
+    if result['node_state_journal_verification']['passed'] is False:
+        verification_errors.append('node_state_journal_invalid')
+        result['measurement_validity'] = 'invalid'
     if (not verification_errors and result['runtime_status'] == 'completed'
             and result['measurement_validity'] == 'valid'):
         source_input = raw / 'logs/native_sources.json'

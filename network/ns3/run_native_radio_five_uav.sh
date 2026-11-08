@@ -875,7 +875,7 @@ PY
   printf 'scenario_key=%s\nscenario=%s\nmap_id=%s\nworld=%s\nscene=%s\n' \
     "$SCENARIO_KEY" "$SCENARIO" "$MAP_ID" "$WORLD" "$SCENE"
   printf 'gui=%s\n' "$GUI"
-  printf 'capture_images=%s\nstate_transport=gazebo\n' "$CAPTURE_IMAGES"
+  printf 'capture_images=%s\nstate_transport=gazebo\nposition_journal_mode=bounded_async_jsonl_v1\n' "$CAPTURE_IMAGES"
   printf 'launch_world=%s\ngazebo_requested_rtf=%s\nscenario_timeout_scale=%s\n' \
     "$LAUNCH_WORLD" "$GAZEBO_RTF" "$SCENARIO_TIMEOUT_SCALE"
   printf 'stack_cpuset=%s\nradio_cpuset=%s\n' "$STACK_CPUSET" "$RADIO_CPUSET"
@@ -1042,6 +1042,7 @@ capture_effective_configuration() {
     --config "native_routes=$RUN_DIR/logs/native_routes.txt"
     --config "native_neighbors=$RUN_DIR/logs/static_neighbors.txt"
     --config "native_capture_storage=$RUN_DIR/logs/native_capture_storage.json"
+    --config "async_jsonl_writer=$ROOT_DIR/network/jsonl.py"
     --config "sionna_solver_budget_patch=$SOLVER_BUDGET_PATCH"
     --config "sionna_baseband_phase_patch=$BASEBAND_PHASE_PATCH"
     --config "sionna_doppler_epoch_patch=$DOPPLER_EPOCH_PATCH"
