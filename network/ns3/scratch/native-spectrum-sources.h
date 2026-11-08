@@ -78,6 +78,15 @@ class SourcePropagation : public PhasedArraySpectrumPropagationLossModel
     std::map<Ptr<SpectrumPhy>, Ptr<SpectrumValue>> sourcePsds;
     std::map<Ptr<SpectrumPhy>, std::array<double, 4>> sourceTimes;
 
+    static void ValidateProfile(const std::string& value)
+    {
+        if (value == "hybrid")
+            throw std::invalid_argument("hybrid propagation is not qualified: the coordinate-only Friis "
+                                        "gate did not check shared geometry or Fresnel clearance");
+        if (value != "sionna" && value != "friis")
+            throw std::invalid_argument("source propagation profile must be sionna or friis");
+    }
+
     ~SourcePropagation() override { ClearSourceSchedule(); }
 
     void ConfigureSourceSchedule(const std::string& config, pybind11::dict resolved,
@@ -301,11 +310,10 @@ class SourcePropagation : public PhasedArraySpectrumPropagationLossModel
         Ptr<const MobilityModel> b, Ptr<const PhasedArrayModel> aa,
         Ptr<const PhasedArrayModel> ba) const override
     {
-        const auto x = a->GetPosition();
-        const auto y = b->GetPosition();
-        const bool farField = x.x > 2000 && y.x > 2000 && x.z >= 200 && y.z >= 200 &&
-                              CalculateDistance(x, y) >= 500;
-        if (profile == "friis" || (profile == "hybrid" && farField))
+        // Validate every dispatch as profile is also assigned directly by the
+        // low-level runner. An unavailable/unknown model must never select Friis.
+        ValidateProfile(profile);
+        if (profile == "friis")
         {
             NS_ABORT_MSG_IF(!DynamicCast<const IsotropicAntennaModel>(aa->GetAntennaElement()) ||
                             !DynamicCast<const IsotropicAntennaModel>(ba->GetAntennaElement()),
@@ -337,6 +345,8 @@ inline Ptr<SourcePropagation> InstallSpectrumSources(
     bool referenceUsesReceiverBatch = false,
     std::function<std::string()> phaseProvider = {})
 {
+    // Reject before reading source files, allocating devices or configuring RT.
+    SourcePropagation::ValidateProfile(profile);
     namespace py = pybind11;
     auto router = CreateObject<SourcePropagation>();
     router->reference = reference;
