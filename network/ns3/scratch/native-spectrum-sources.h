@@ -19,9 +19,13 @@
 #include <map>
 #include <chrono>
 #include <optional>
+#include <sstream>
+#include <iomanip>
 #include <vector>
 #include <stdexcept>
 #include <utility>
+#include <algorithm>
+#include <cmath>
 
 namespace bas
 {
@@ -114,10 +118,24 @@ class SourcePropagation : public PhasedArraySpectrumPropagationLossModel
                                                  this, std::string("simulation_start"));
     }
 
+    void ObserveTransmissions(Ptr<MultiModelSpectrumChannel> channel)
+    {
+        if (m_traceChannel || !channel || m_scheduleCleared)
+            throw std::logic_error("source transmission observer must be installed once before Run");
+        if (!channel->TraceConnectWithoutContext("TxSigParams",MakeCallback(&SourcePropagation::ObserveTransmission,this)))
+            throw std::runtime_error("native SpectrumChannel TxSigParams trace is unavailable");
+        m_traceChannel=channel;
+    }
+
     void ClearSourceSchedule()
     {
         if (m_scheduleCleared) return;
         m_scheduleCleared = true;
+        if (m_traceChannel)
+        {
+            m_traceChannel->TraceDisconnectWithoutContext("TxSigParams",MakeCallback(&SourcePropagation::ObserveTransmission,this));
+            m_traceChannel=nullptr;
+        }
         if (m_phaseEvent.PeekEventImpl()) m_phaseEvent.Cancel();
         for (auto& source : m_schedule)
         {
@@ -168,8 +186,32 @@ class SourcePropagation : public PhasedArraySpectrumPropagationLossModel
     std::function<std::string()> m_phaseProvider;
     std::string m_config;
     EventId m_phaseEvent;
+    Ptr<MultiModelSpectrumChannel> m_traceChannel; // Disconnected/released by ClearSourceSchedule.
     unsigned m_activeSources{0};
     bool m_scheduleCleared{false};
+
+    void ObserveTransmission(Ptr<SpectrumSignalParameters> params)
+    {
+        const auto found=std::find_if(m_schedule.begin(),m_schedule.end(),
+            [&](const auto& source){return source.generator==params->txPhy;});
+        if (found==m_schedule.end()) return;
+        if (!params->psd || params->psd->GetValuesN()!=1 || params->duration<=NanoSeconds(0))
+            throw std::runtime_error("source waveform does not have the supported rectangular PSD and positive duration");
+        const auto band=params->psd->ConstBandsBegin();
+        const double power=Integral(*params->psd);
+        if (!std::isfinite(power) || power<=0 || !std::isfinite(band->fc) || band->fh<=band->fl)
+            throw std::runtime_error("invalid actual source waveform spectrum");
+        const auto position=params->txPhy->GetMobility()->GetPosition();
+        std::ostringstream details;
+        details << std::setprecision(17)
+            << "observer=ns3::SpectrumChannel::TxSigParams;stage=before_propagation;segment_index=" << found->binding.segmentIndex
+            << ";spectrum_uid=" << params->psd->GetSpectrumModelUid()
+            << ";low_hz=" << band->fl << ";center_hz=" << band->fc << ";high_hz=" << band->fh
+            << ";bandwidth_hz=" << band->fh-band->fl << ";psd_w_hz=" << (*params->psd)[0]
+            << ";psd_integral_w=" << power << ";duration_ns=" << params->duration.GetNanoSeconds()
+            << ";position_x_m=" << position.x << ";position_y_m=" << position.y << ";position_z_m=" << position.z;
+        m_emit("source_waveform_tx",found->id,power,details.str());
+    }
 
     void ObserveSourcePhase()
     {
@@ -426,6 +468,7 @@ inline Ptr<SourcePropagation> InstallSpectrumSources(
         binding.array = array;
         router->AddSourceSchedule(generator, id, power, details, std::move(binding));
     }
+    router->ObserveTransmissions(channel);
     router->ArmSourceSchedule(relative);
     return router;
 }

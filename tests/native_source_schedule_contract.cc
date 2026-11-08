@@ -33,8 +33,10 @@ void LifetimeDestroyed(void* value)
 }
 struct Observation
 {
+    struct Waveform { std::string id; int64_t timeNs; double powerW; std::string details; };
     std::vector<int64_t> waves;
     std::vector<std::pair<std::string, int64_t>> events;
+    std::vector<Waveform> sourceWaveforms;
     unsigned polls{0};
     bool pollHadGil{false};
 };
@@ -134,7 +136,12 @@ struct Fixture
             WatchedLoads watch;
             SionnaRtChannelModel::RtPathSolverConfig solver;
             owner = bas::InstallSpectrumSources(nullptr, channel, path.string(), "not_loaded.xml", solver, 90,
-                "friis", [this](const auto& event, const auto&, double, const auto&) {
+                "friis", [this](const auto& event, const auto& id, double value, const auto& details) {
+                    if (event=="source_waveform_tx")
+                    {
+                        observation.sourceWaveforms.push_back({id,Simulator::Now().GetNanoSeconds(),value,details});
+                        return;
+                    }
                     observation.events.emplace_back(event, Simulator::Now().GetNanoSeconds());
                     if (event == "source_time_anchor")
                         Require(PyGILState_Check(), "Commit did not acquire the GIL");
@@ -172,6 +179,14 @@ struct Fixture
     }
 };
 
+double Detail(const Observation::Waveform& wave, const std::string& key)
+{
+    const auto marker=key+"=";
+    const auto offset=wave.details.find(marker);
+    Require(offset!=std::string::npos,"Actual waveform readback omitted "+key);
+    return std::stod(wave.details.substr(offset+marker.size()));
+}
+
 void ObservedMeasurement(const std::filesystem::path& path)
 {
     Fixture fixture(path, true);
@@ -190,6 +205,13 @@ void ObservedMeasurement(const std::filesystem::path& path)
             "Phase polling did not execute at 0/20/40/60ms with the GIL released");
     Require(fixture.observation.waves == std::vector<int64_t>{70000000,80000000,90000000},
             "Materialized offsets changed the real waveform ticks");
+    Require(fixture.observation.sourceWaveforms.size()==3,"Stock channel trace missed a real source waveform");
+    for (const auto& wave:fixture.observation.sourceWaveforms)
+        Require(wave.id=="cpu_source" && wave.powerW==1. && Detail(wave,"psd_integral_w")==1. &&
+            Detail(wave,"center_hz")==2412000000. && Detail(wave,"bandwidth_hz")==20000000. &&
+            Detail(wave,"duration_ns")==10000000. && Detail(wave,"position_z_m")==10. &&
+            wave.details.find("stage=before_propagation")!=std::string::npos,
+            "Transmitted PSD/band/duration readback differs from the actual waveform configuration");
     Require(fixture.observation.events == std::vector<std::pair<std::string,int64_t>>{
                 {"source_time_anchor",60000000},{"jammer_on",70000000},{"jammer_off",100000000}},
             "Anchor/on/off events changed or the source committed more than once");
@@ -309,6 +331,23 @@ void PhysicalBindings(const std::filesystem::path& path)
                 after[i].end->GetNanoSeconds() == segment["stop_ns"].cast<int64_t>(),
                 "Physical descriptor window differs from actual materialized native ticks");
     }
+    std::vector<size_t> transmitted(4,0);
+    for (const auto& wave:fixture.observation.sourceWaveforms)
+    {
+        const size_t segment=static_cast<size_t>(Detail(wave,"segment_index"));
+        Require(segment<after.size(),"Transmitted waveform has an unknown physical binding");
+        const auto& binding=after[segment];
+        const double expectedPower=binding.powerW*std::pow(10.,binding.feedGainDbi/10.);
+        Require(wave.id==binding.id && std::abs(wave.powerW-expectedPower)<1e-12 &&
+            std::abs(Detail(wave,"psd_integral_w")-expectedPower)<1e-12 &&
+            Detail(wave,"center_hz")==binding.centerHz && Detail(wave,"bandwidth_hz")==binding.bandwidthHz &&
+            Detail(wave,"duration_ns")==5000000. && Detail(wave,"position_x_m")==binding.positionM.x &&
+            Detail(wave,"position_y_m")==binding.positionM.y && Detail(wave,"position_z_m")==binding.positionM.z &&
+            wave.timeNs>=binding.begin->GetNanoSeconds() && wave.timeNs<binding.end->GetNanoSeconds(),
+            "Actual channel waveform lost feed gain, spectral/duty settings, geometry or its materialized interval");
+        ++transmitted[segment];
+    }
+    Require(transmitted==std::vector<size_t>{3,3,1,1},"Actual waveform trace merged same-frequency/sweep bindings");
     // The first source is pulsed at 50% duty: 76ms is in an RF off interval,
     // but its propagation binding stays required throughout the outer window.
     Require(after[0].RequiredAt(MilliSeconds(76)) && !after[0].RequiredAt(MilliSeconds(100)) &&
@@ -338,7 +377,7 @@ int main(int argc, char** argv)
     report << py::module_::import("json").attr("dumps")(py::dict("schema"_a=1, "passed"_a=error.empty(),
         "checks"_a=checks, "error"_a=error, "python_lifetimes_destroyed"_a=destroyed,
         "destructors_without_gil"_a=destroyedWithoutGil,
-        "scope"_a="CPU production source bindings/schedule/phase/commit/cancel/Destroy under released GIL; no RT/RF/HIL qualification"))
+        "scope"_a="CPU production source bindings/schedule/actual TxSigParams PSD/phase/commit/cancel/Destroy under released GIL; no received RF/HIL qualification"))
         .cast<std::string>() << '\n';
     if (!error.empty()) std::cerr << error << '\n';
     return error.empty() ? 0 : 1;
