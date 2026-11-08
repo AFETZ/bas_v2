@@ -138,7 +138,13 @@ Linux-теста исправлены отдельно (`72985b1`, `7d951c7`); �
 На `7d951c7` real control-PTY прошёл отдельно и в полном наборе:
 475 tests (474 pass, 1 skip), `checks-17-command.json`, `development-control-solo-02/`
 и `development-paced-control-03/`. Это программные границы, без RF/hardware.
-Стенд с обеими новыми UART clocks пока не прошёл новый полный RT цикл.
+Новый диагностический N=1 RT `delivery-payload-n1-10kbps-perf-20261108-01` на чистом
+`9747259` прошёл весь цикл за 120,27 с: completed / succeeded / valid, 4924 RT records
+сверены, оба paced UART, 391/391 payload timely, 10009,6 бит/с, p95 8,47 мс.
+Независимый анализ `rt-perf-n1-payload-analysis-01/` подтвердил lineage и sampled runtime
+timing; это одиночный опыт с диагностической нагрузкой, не доказательство устойчивости.
+Perf/proc сохранили данные, но завершились с ошибкой identity guard при выходе процессов;
+валидность границ и символов проверяется отдельно, статусы collector не переписываются.
 На `e734ab4` простой профиль `delivery-simple-payload-n1-10kbps-20261108-01`
 выполнил весь полёт с обоими paced UART и нагрузкой. Однако отдельный анализ
 отклонил load-window: source clock завершил фазу чуть раньше заданных 20 с host time.
