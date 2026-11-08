@@ -453,6 +453,15 @@ class ControlUartPtyTests(unittest.TestCase):
         """Production constructor/step, real PTY+UDP; no ns-3, flight controller or hardware claim."""
         import tty
         from pymavlink import mavutil
+        from network.coordination.service import Events
+        artifact_root = os.environ.get('BAS_EXTERNAL_TEST_ARTIFACT_DIR')
+        if artifact_root:
+            run = Path(artifact_root).resolve()/'control_uart_pty'
+            run.mkdir(parents=True, exist_ok=False)
+        else:
+            temporary = tempfile.TemporaryDirectory()
+            self.addCleanup(temporary.cleanup)
+            run = Path(temporary.name)
         master, slave = os.openpty()
         self.addCleanup(os.close, master); self.addCleanup(os.close, slave)
         tty.setraw(slave); os.set_blocking(master, False)
@@ -460,10 +469,16 @@ class ControlUartPtyTests(unittest.TestCase):
         self.addCleanup(peer.close)
         peer.bind(('127.0.0.1', 0)); peer.setblocking(False)
         args = build_parser().parse_args(['uav','--run-id','actual-control-pty','--uav-count','1',
-            '--uav-id','1','--tty',os.ttyname(slave),'--port',str(peer.getsockname()[1])])
+            '--uav-id','1','--tty',os.ttyname(slave),'--port',str(peer.getsockname()[1]),
+            '--event-log',str(run/'events.jsonl')])
         events = []
+        log = Events(args.event_log,args.run_id,1)
+        self.addCleanup(log.stream.close)
+        def emit(event, **fields):
+            log(event,**fields)
+            events.append((event,fields))
         with patch('network.coordination.service.endpoint_ip', lambda i:f'127.0.0.{i+1}'), patch('network.coordination.service.signal.signal'):
-            node = UAVService(args, lambda event,**fields:events.append((event,fields)))
+            node = UAVService(args, emit)
             try:
                 self.assertEqual(node.uart_timing['owner'], 'software_pty')
                 grant = Authority(args.run_id).issue(1,time.monotonic_ns(),2_000_000_000)
@@ -495,6 +510,13 @@ class ControlUartPtyTests(unittest.TestCase):
                 self.assertEqual(node.latest_autopilot_mode['received_host_monotonic_ns'],bodies[0]['producer_ns'])
                 self.assertEqual(node.uart_up_budget.snapshot()['charged_bytes'],len(heartbeat))
                 self.assertEqual(node.uart_down_budget.snapshot()['charged_bytes'],len(frame))
+                (run/'result.json').write_text(json.dumps(dict(
+                    scope='Production control owner with actual PTY and loopback UDP; no RF or hardware proof',
+                    uart_timing=node.uart_timing, up_bytes=len(heartbeat), down_bytes=len(frame),
+                    uart_to_radio=node.uart_up_budget.snapshot(),radio_to_uart=node.uart_down_budget.snapshot(),
+                    original_producer_ns=bodies[0]['producer_ns'],
+                    observed_mode_original_ns=node.latest_autopilot_mode['received_host_monotonic_ns'],
+                    command_id=command.command_id,provenance_verified=True))+'\n')
             finally:
                 node.close()
 
