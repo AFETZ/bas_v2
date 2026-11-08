@@ -132,12 +132,13 @@ class NativeRtPool
 {
   public:
     using Snapshot = std::function<std::vector<MeasuredState>()>;
+    using CommitSnapshot = std::function<void(const std::vector<MeasuredState>&, const std::function<void()>&)>;
     using EventSink = std::function<void(const std::string&, const std::string&, double, const std::string&)>;
 
     NativeRtPool(Ptr<NativeRtCache> cache, std::vector<NativeRtCache::Endpoint> endpoints,
-                 Snapshot snapshot, EventSink event)
+                 Snapshot snapshot, EventSink event, CommitSnapshot commit = {})
         : m_cache(std::move(cache)), m_endpoints(std::move(endpoints)),
-          m_snapshot(std::move(snapshot)), m_event(std::move(event))
+          m_snapshot(std::move(snapshot)), m_event(std::move(event)), m_commit(std::move(commit))
     {
         Require(m_cache && m_snapshot && m_endpoints.size() >= 2 && m_endpoints.size() <= 6,
                 "A fixed cache/cohort and measured-state callback are required");
@@ -162,6 +163,7 @@ class NativeRtPool
         const auto input = m_json.attr("loads")(path(configPath).attr("read_text")("encoding"_a="utf-8"));
         const auto config = module.attr("validate_config")(input).cast<py::dict>();
         m_fullMesh = config.contains("desired_mode") && config["desired_mode"].cast<std::string>() == "full_mesh";
+        Require(!m_fullMesh || static_cast<bool>(m_commit), "Full mesh requires a measured-cohort commit owner");
         m_candidateCap = config["radio"]["max_paths_per_source"].cast<uint32_t>();
         Require(config["root"].cast<std::string>() == path(root).attr("resolve")().attr("__str__")().cast<std::string>(),
                 "Frozen worker root does not match the run root");
@@ -305,6 +307,7 @@ class NativeRtPool
     std::vector<NativeRtCache::Endpoint> m_endpoints;
     Snapshot m_snapshot;
     EventSink m_event;
+    CommitSnapshot m_commit;
     py::object m_pool, m_json;
     std::vector<std::optional<Job>> m_inflight;
     EventId m_next;
@@ -320,6 +323,7 @@ class NativeRtPool
     bool m_fullMesh{false};
     uint32_t m_candidateCap{0};
     uint64_t m_fullMeshCompleted{0};
+    uint64_t m_committedPoseFrames{0};
     std::vector<uint64_t> m_fullMeshCallsByWorker;
     std::string m_lastFullMeshStatsJson;
 
@@ -381,9 +385,11 @@ class NativeRtPool
             // One full-cohort solve covers every unordered pair. Overlapping
             // full jobs duplicate RT work and can only publish older poses.
             if (Busy()) return;
-            const auto urgent = std::find_if(states.begin(),states.end(),[](const auto& state){return state.eligible;});
-            if (urgent == states.end()) return;
-            const NativeRtPrefetch::Choice choice{0,m_endpoints.size()*(m_endpoints.size()-1)/2,*urgent};
+            // A measured velocity can jump at ground contact. Stage the newest
+            // whole cohort continuously; apply it only together with its CIR.
+            // Cache age/pose guards still run and cannot be extended by waiting.
+            Require(!states.empty(),"Full-mesh cohort has no links");
+            const NativeRtPrefetch::Choice choice{0,m_endpoints.size()*(m_endpoints.size()-1)/2,states.front()};
             Submit(0,0,false,&choice);
             return;
         }
@@ -507,19 +513,30 @@ class NativeRtPool
             // Decode/validate the complete response before publishing any pair.
             uint64_t accepted=0,discarded=0;
             py::list outcomes;
-            for(const auto& record:records)
-            {
-                const auto result=job.cold ? NativeRtCache::Publication{false,"cold_warmup_not_served"}
-                                           : m_cache->Publish(record);
-                if(result.accepted) { ++accepted; ++m_publishedPairs; }
-                else
+            const auto publish = [&]() {
+                for(const auto& record:records)
                 {
-                    ++discarded; ++m_discarded; ++m_discardReasons[result.reason];
-                    Require(job.cold || SoftDiscard(result.reason), "Malformed/unusable publication: "+result.reason);
+                    const auto result=job.cold ? NativeRtCache::Publication{false,"cold_warmup_not_served"}
+                                               : m_cache->Publish(record);
+                    if(result.accepted) { ++accepted; ++m_publishedPairs; }
+                    else
+                    {
+                        ++discarded; ++m_discarded; ++m_discardReasons[result.reason];
+                        Require(job.cold || !m_fullMesh,"Coherent full-mesh frame was not admitted in full: "+result.reason);
+                        Require(job.cold || SoftDiscard(result.reason), "Malformed/unusable publication: "+result.reason);
+                    }
+                    outcomes.append(py::dict("first"_a=record.direction[0],"second"_a=record.direction[1],
+                        "accepted"_a=result.accepted,"reason"_a=result.reason));
                 }
-                outcomes.append(py::dict("first"_a=record.direction[0],"second"_a=record.direction[1],
-                    "accepted"_a=result.accepted,"reason"_a=result.reason));
+            };
+            if(m_fullMesh && !job.cold)
+            {
+                // Validate the whole measured cohort, apply it quietly, publish
+                // every CIR, THEN let the owner notify mobility observers.
+                m_commit(job.poses,publish);
+                ++m_committedPoseFrames;
             }
+            else publish();
             ++m_completed; if(job.cold) ++m_cold;
             if(m_fullMesh)
             {
@@ -540,7 +557,7 @@ class NativeRtPool
             log["channel_mode"]=m_fullMesh ? "full_mesh" : "receiver_batch";
             if(m_fullMesh) log["full_mesh_stats"]=value["full_mesh_stats"];
             else log["batch_stats"]=value["batch_stats"];
-            log["prefetch"] = py::dict("method"_a=NativeRtPrefetch::kMethod,"lead_ns"_a=job.leadNs,
+            log["prefetch"] = py::dict("method"_a=(m_fullMesh ? "coherent_pose_frames" : NativeRtPrefetch::kMethod),"lead_ns"_a=job.leadNs,
                 "remaining_ns"_a=job.remainingNs,"urgent_pair"_a=job.urgentPair,
                 "limiting_guard"_a=job.limitingGuard,"before_cache_half_threshold"_a=job.forecastBeforeHalf,
                 "covered_due_pairs"_a=job.coveredDuePairs,"pose_to_receipt_ns"_a=receivedNs-oldestPose);
@@ -591,6 +608,8 @@ class NativeRtPool
             "miss_reasons"_a=stats.missReasons,"pairs"_a=pairs);
         return py::dict("schema"_a=1,"execution_mode"_a="worker_pool","started"_a=m_started,"closed"_a=m_closed,
             "desired_mode"_a=(m_fullMesh ? "full_mesh" : "receiver_batch"),
+            "pose_commit_policy"_a=(m_fullMesh ? "with_full_mesh_result" : "independent"),
+            "committed_pose_frames"_a=m_committedPoseFrames,
             "full_mesh_completed_jobs"_a=m_fullMeshCompleted,
             "last_full_mesh_stats"_a=(m_lastFullMeshStatsJson.empty() ? py::dict() :
                 m_json.attr("loads")(m_lastFullMeshStatsJson).cast<py::dict>()),
@@ -599,7 +618,7 @@ class NativeRtPool
             "published_results"_a=m_publishedResults,"published_pairs"_a=m_publishedPairs,
             "discarded_pairs"_a=m_discarded,"discard_reasons"_a=m_discardReasons,
             "poll_calls"_a=m_pollCalls,"poll_period_ns"_a=kPollPeriodNs,
-            "prefetch"_a=py::dict("method"_a=NativeRtPrefetch::kMethod,
+            "prefetch"_a=py::dict("method"_a=(m_fullMesh ? "coherent_pose_frames" : NativeRtPrefetch::kMethod),
                 "growth_safety_factor"_a=NativeRtPrefetch::kGrowthFactor,
                 "minimum_lead_ns"_a=NativeRtPrefetch::kMinimumLeadNs,"lead_ns"_a=leadNs,
                 "hot_window_capacity"_a=NativeRtPrefetch::kWindow,"hot_window_size"_a=m_prefetch.WindowSize(),

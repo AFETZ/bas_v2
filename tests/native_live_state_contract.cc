@@ -100,6 +100,136 @@ void Test(const std::filesystem::path& input)
     std::ofstream bad(input,std::ios::binary|std::ios::trunc); bad << "{"; bad.close();
     Reject([&]{read(base,base+40*ms);},"Malformed publication reused the prior valid root");
 }
+
+struct CommitObserver
+{
+    const std::vector<Ptr<MobilityModel>>& mobility;
+    const std::vector<Vector>& positions;
+    const std::vector<bas::MeasuredState>& applied;
+    const std::vector<bas::MeasuredState>* expected;
+    const size_t& dependentMarker;
+    size_t expectedMarker;
+    size_t notifications{0};
+    void Changed(Ptr<const MobilityModel>)
+    {
+        ++notifications;
+        Require(dependentMarker==expectedMarker,"CourseChange ran before the matching dependent CIR frame was published");
+        Require(applied.size()==expected->size(),"CourseChange observed incomplete applied metadata");
+        for(size_t i=0;i<expected->size();++i)
+        {
+            VectorValue orientation;mobility[i]->GetAttribute("Orientation",orientation);
+            Require(mobility[i]->GetPosition()==(*expected)[i].position && positions[i]==(*expected)[i].position &&
+                mobility[i]->GetVelocity()==(*expected)[i].velocity && orientation.Get()==(*expected)[i].orientation &&
+                applied[i].sampleNs==(*expected)[i].sampleNs && applied[i].sourceTime==(*expected)[i].sourceTime,
+                "CourseChange observed a partially committed cohort or changed source epoch");
+        }
+    }
+};
+void CohortCommit()
+{
+    std::vector<Ptr<MobilityModel>> mobility;
+    std::vector<Vector> positions(3);
+    std::vector<bas::MeasuredState> applied,states(3);
+    for(size_t i=0;i<3;++i)
+    {
+        mobility.push_back(CreateObject<bas::MeasuredMobility>());
+        states[i].position={double(i+1),double(i+2),20.+i};
+        states[i].velocity={double(i),.2*double(i),-.1*double(i)};
+        states[i].orientation={.1*double(i),.01*double(i),-.02*double(i)};
+        states[i].sampleNs=i ? base-20*ms+10*ms*(i-1) : base;
+        states[i].sourceTime=i ? 1.+.02*(i-1) : 0.;
+    }
+    size_t dependentMarker=0,publishCalls=0,expectedNotifications=0;
+    CommitObserver observer{mobility,positions,applied,&states,dependentMarker,1};
+    const auto publish=[&] {
+        ++publishCalls;
+        Require(observer.notifications==expectedNotifications,"Notification preceded synchronous dependent publication");
+        for(size_t i=0;i<states.size();++i)
+            Require(mobility[i]->GetPosition()==(*observer.expected)[i].position && positions[i]==(*observer.expected)[i].position,
+                    "Dependent publication did not see the whole new measured geometry");
+        dependentMarker=observer.expectedMarker;
+    };
+    for(auto model:mobility)
+        Require(model->TraceConnectWithoutContext("CourseChange",MakeCallback(&CommitObserver::Changed,&observer)),
+                "Cannot observe actual cohort CourseChange notifications");
+    bas::CommitMeasuredCohort(states,mobility,positions,applied,base+5*ms,base+5*ms,100*ms,true,publish);
+    Require(observer.notifications==3,"A complete commit did not notify every actual mobility");
+    Require(applied[1].sampleNs==base-20*ms && applied[1].sourceTime==1.,"Commit freshened a measured pose epoch");
+    bas::ValidateMeasuredCohort(applied,3,base+80*ms,base+80*ms,100*ms);
+    Require(bas::MaximumMeasuredPoseAgeNs(applied,base+80*ms)==100*ms,"Exact100ms applied age changed");
+    Reject([&]{bas::ValidateMeasuredCohort(applied,3,base+80*ms+1,base+80*ms+1,100*ms);},
+           "Applied frame silently survived beyond its100ms budget");
+    auto observed=states;
+    for(auto& state:observed){state.sampleNs+=100*ms; if(state.sourceTime)state.sourceTime+=.1;}
+    bas::ValidateMeasuredCohort(observed,3,base+110*ms,base+110*ms,100*ms);
+    Require(bas::MaximumMeasuredPoseAgeNs(applied,base+110*ms)==130*ms &&
+        bas::MaximumMeasuredPoseAgeNs(observed,base+110*ms)==30*ms,"Fresh observed frame changed applied age");
+    Reject([&]{bas::ValidateMeasuredCohort(applied,3,base+110*ms,base+110*ms,100*ms);},
+           "Fresh observations hid stale held geometry");
+    const auto before=observer.notifications;
+    const auto rejectCommit=[&](const std::vector<bas::MeasuredState>& bad) {
+        Reject([&]{bas::CommitMeasuredCohort(bad,mobility,positions,applied,base+5*ms,base+5*ms,100*ms,true,publish);},
+               "Invalid cohort reached a geometry commit");
+        Require(observer.notifications==before && publishCalls==1 && applied[1].sampleNs==states[1].sampleNs &&
+            positions[0]==states[0].position && mobility[2]->GetPosition()==states[2].position,
+            "Failed validation partially mutated the cohort");
+    };
+    auto bad=states;bad.pop_back();rejectCommit(bad);
+    bad=states;bad[2].orientation.y=std::numeric_limits<double>::quiet_NaN();rejectCommit(bad);
+    bad=states;bad[1].sampleNs=base+5*ms+1;rejectCommit(bad);
+    bad=states;bad[1].sampleNs=base-100*ms;rejectCommit(bad);
+    bad=states;bad[1].sourceTime=-1;rejectCommit(bad);
+    bad=states;bad[1].sourceTime=1e20;rejectCommit(bad);
+    bad=states;bad[2].sourceTime=states[1].sourceTime+.100000001;rejectCommit(bad);
+    bad=states;--bad[1].sampleNs;rejectCommit(bad);
+    bad=states;bad[2].sourceTime-=.01;rejectCommit(bad);
+    bas::ValidateMeasuredCohort(bad,3,base+5*ms,base+5*ms,100*ms); // No previous-frame guard in immediate mode.
+    auto invalidModels=mobility;invalidModels[2]=CreateObject<ConstantPositionMobilityModel>();
+    Reject([&]{bas::CommitMeasuredCohort(states,invalidModels,positions,applied,base+5*ms,base+5*ms,100*ms,true,publish);},
+           "Non-measured last node allowed a partial first-node application");
+    Require(observer.notifications==before,"Incompatible mobility emitted a partial update");
+    auto skewBoundary=states;skewBoundary[2].sourceTime=skewBoundary[1].sourceTime+.1;
+    bas::ValidateMeasuredCohort(skewBoundary,3,base+5*ms,base+5*ms,100*ms);
+    observer.expected=&observed;
+    observer.expectedMarker=2;expectedNotifications=before;
+    bas::CommitMeasuredCohort(observed,mobility,positions,applied,base+110*ms,base+110*ms,100*ms,true,publish);
+    Require(observer.notifications==before+3 && applied[1].sampleNs==observed[1].sampleNs,
+            "Fresh complete frame did not replace all original epochs");
+    const auto completed=observer.notifications;
+    Reject([&]{bas::CommitMeasuredCohort(observed,mobility,positions,applied,base+110*ms,base+110*ms,100*ms,true,
+        []{throw std::runtime_error("injected dependent publication failure");});},
+        "Dependent publication failure was hidden");
+    Require(observer.notifications==completed,"An uncommitted dependent graph emitted CourseChange");
+}
+
+void EpochTransition(const std::filesystem::path& input)
+{
+    Require(!std::filesystem::exists(input),"Preserve existing transition input");
+    std::ofstream(input)<<py::module_::import("json").attr("dumps")(Fixture()).cast<std::string>();
+    bas::LiveStateReader reader;
+    const int64_t epoch=base+10*ms,native=5*ms,wall=base+30*ms;
+    const auto warm=bas::MeasuredEventHostNs(true,false,0,0,base+10*ms);
+    const auto preReady=bas::MeasuredEventHostNs(true,false,epoch,native,wall);
+    const auto ready=bas::MeasuredEventHostNs(true,true,epoch,native,wall);
+    Require(warm==base+10*ms && preReady==base+15*ms && preReady==ready,
+            "Deferred cutoff changed when readiness flipped or native epoch was ignored");
+    Require(bas::MeasuredEventHostNs(false,false,epoch,native,wall)==wall &&
+        bas::MeasuredEventHostNs(false,true,epoch,native,wall)==epoch+native,
+        "Default immediate cutoff changed");
+    std::vector<bas::MeasuredState> applied;
+    for(const auto event:{warm,preReady,ready})
+    {
+        auto observed=reader.Read(input.string(),{"cp","uav1"},event,wall,100*ms);
+        Require(observed[1].sourceTime==1. && observed[1].sampleNs==base-20*ms,
+                "Pre-ready observation admitted a future native pose or rolled back on readiness");
+        bas::ValidateMeasuredCohort(observed,2,event,wall,100*ms,&applied);
+        applied=observed;
+    }
+    auto immediate=reader.Read(input.string(),{"cp","uav1"},wall,wall,100*ms);
+    Require(immediate[1].sourceTime==1.04,"Controlled immediate history no longer reaches its old host cutoff");
+    Reject([&]{bas::MeasuredEventHostNs(true,true,std::numeric_limits<int64_t>::max(),1,wall);},
+           "Native/host epoch addition overflowed silently");
+}
 } // namespace
 int main(int argc,char** argv)
 {
@@ -108,11 +238,12 @@ int main(int argc,char** argv)
     const auto input=std::string(argv[1])+".snapshot.json";
     if(std::filesystem::exists(input)) throw std::runtime_error("Preserve the previous reader input");
     std::string error;
-    try { Test(input); } catch(const std::exception& failure) { error=failure.what(); }
+    try { Test(input); CohortCommit(); EpochTransition(input+".transition.json"); }
+    catch(const std::exception& failure) { error=failure.what(); }
     std::ofstream report(argv[1]);
     report << py::module_::import("json").attr("dumps")(py::dict("schema"_a=1,"passed"_a=error.empty(),
         "checks"_a=checks,"error"_a=error,
-        "scope"_a="CPU production pose reader: parsing reuse and causal/schema/clock/session guards; no simulator hardware acceptance")).cast<std::string>() << '\n';
+        "scope"_a="CPU production reader/whole-cohort commit/age/causal/readiness guards; no full-stack or hardware acceptance")).cast<std::string>() << '\n';
     if(!error.empty()) std::cerr << error << '\n';
     return error.empty()?0:1;
 }

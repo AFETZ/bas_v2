@@ -101,8 +101,84 @@ class NativeRadioContractTests(unittest.TestCase):
                     last_generated_ns=40_000_000+identity*20_000_000, scene_prepare_ns=100, solver_ns=5000,
                     extraction_ns=1000, cache_publish_ns=100, batch_ns=10000, max_batch_ns=12000)
             stats['sionna_rt_workers'].update(desired_mode='full_mesh', full_mesh_completed_jobs=36,
-                last_full_mesh_stats=copy.deepcopy(workers[-1]['last_full_mesh_stats']))
+                last_full_mesh_stats=copy.deepcopy(workers[-1]['last_full_mesh_stats']),
+                pose_commit_policy='with_full_mesh_result', committed_pose_frames=accepted)
+            stats['pose_application'] = dict(mode='coherent_rt', observed_snapshots=100,
+                applied_snapshots=accepted, maximum_applied_pose_age_ns=50_000_000,
+                state_max_age_ns=round(scenario['coupling']['state_max_age_s']*1e9))
         return stats, scenario
+
+    def test_full_mesh_requires_observed_coherent_pose_proof(self):
+        stats, scenario = self.evidence(pool=True, full_mesh=True)
+        del stats['pose_application']
+        self.assertIn('worker_full_mesh_pose_commit', native_rt_worker_contract(stats, scenario)['rejection_reasons'])
+        for field in ('pose_commit_policy', 'committed_pose_frames'):
+            stats, scenario = self.evidence(pool=True, full_mesh=True)
+            del stats['sionna_rt_workers'][field]
+            self.assertIn('worker_full_mesh_pose_commit', native_rt_worker_contract(stats, scenario)['rejection_reasons'])
+
+    def test_full_mesh_first_hot_commit_counts_one_and_not_cold_jobs(self):
+        stats, scenario = self.evidence(pool=True, full_mesh=True)
+        snapshot = stats['sionna_rt_workers']
+        pair_count = len(snapshot['cache']['pairs'])
+        snapshot.update(committed_pose_frames=1, published_results=1, published_pairs=pair_count)
+        snapshot['cache']['accepted'] = pair_count
+        stats['pose_application'].update(applied_snapshots=1, observed_snapshots=1)
+        self.assertGreater(snapshot['cold_warmup_jobs'], 1)
+        self.assertTrue(native_rt_worker_contract(stats, scenario)['passed'])
+
+    def test_full_mesh_pose_commits_match_published_and_applied_frames(self):
+        changes = [lambda s: s['sionna_rt_workers'].update(pose_commit_policy='independent'),
+                   lambda s: s['sionna_rt_workers'].update(committed_pose_frames=0),
+                   lambda s: s['sionna_rt_workers'].update(committed_pose_frames=True),
+                   lambda s: s['sionna_rt_workers'].update(committed_pose_frames=29),
+                   lambda s: s['pose_application'].update(mode='observed_only'),
+                   lambda s: s['pose_application'].update(applied_snapshots=29),
+                   lambda s: s['pose_application'].update(applied_snapshots=True),
+                   lambda s: s['pose_application'].update(observed_snapshots=29),
+                   lambda s: s['pose_application'].update(observed_snapshots=True)]
+        for change in changes:
+            stats, scenario = self.evidence(pool=True, full_mesh=True)
+            change(stats)
+            with self.subTest(change=change):
+                self.assertIn('worker_full_mesh_pose_commit', native_rt_worker_contract(stats, scenario)['rejection_reasons'])
+
+    def test_full_mesh_pose_age_uses_configured_boundary_without_relaxing_it(self):
+        for seconds in (.1, .5):
+            stats, scenario = self.evidence(pool=True, full_mesh=True)
+            scenario['coupling']['state_max_age_s'] = seconds
+            boundary = round(seconds*1e9)
+            stats['pose_application'].update(state_max_age_ns=boundary, maximum_applied_pose_age_ns=boundary)
+            with self.subTest(seconds=seconds):
+                self.assertTrue(native_rt_worker_contract(stats, scenario)['passed'])
+                stats['pose_application']['maximum_applied_pose_age_ns'] += 1
+                self.assertIn('worker_full_mesh_pose_commit', native_rt_worker_contract(stats, scenario)['rejection_reasons'])
+        stats, scenario = self.evidence(pool=True, full_mesh=True)
+        scenario['coupling']['state_max_age_s'] = .1  # A stale reported 500 ms limit cannot satisfy 100 ms.
+        self.assertIn('worker_full_mesh_pose_commit', native_rt_worker_contract(stats, scenario)['rejection_reasons'])
+
+    def test_full_mesh_pose_proof_rejects_missing_malformed_and_unbounded_ages(self):
+        for field in ('mode', 'observed_snapshots', 'applied_snapshots', 'maximum_applied_pose_age_ns', 'state_max_age_ns'):
+            stats, scenario = self.evidence(pool=True, full_mesh=True)
+            del stats['pose_application'][field]
+            with self.subTest(missing=field):
+                self.assertIn('worker_full_mesh_pose_commit', native_rt_worker_contract(stats, scenario)['rejection_reasons'])
+        for field, value in [('maximum_applied_pose_age_ns', -1), ('maximum_applied_pose_age_ns', True),
+                             ('state_max_age_ns', 500_000_000.), ('state_max_age_ns', 500_000_001)]:
+            stats, scenario = self.evidence(pool=True, full_mesh=True)
+            stats['pose_application'][field] = value
+            self.assertIn('worker_full_mesh_pose_commit', native_rt_worker_contract(stats, scenario)['rejection_reasons'])
+        for value in (None, True, 0, -.1, .50001, float('nan'), float('inf'), '0.1'):
+            stats, scenario = self.evidence(pool=True, full_mesh=True)
+            scenario['coupling']['state_max_age_s'] = value
+            with self.subTest(configured=value):
+                self.assertIn('worker_full_mesh_pose_commit', native_rt_worker_contract(stats, scenario)['rejection_reasons'])
+
+    def test_receiver_batch_legacy_proof_does_not_require_full_mesh_pose_fields(self):
+        stats, scenario = self.evidence(pool=True)
+        self.assertNotIn('pose_application', stats)
+        self.assertNotIn('pose_commit_policy', stats['sionna_rt_workers'])
+        self.assertTrue(native_rt_worker_contract(stats, scenario)['passed'])
 
     def test_full_mesh_actual_producer_stats_support_one_to_five_with_monostatic_paths(self):
         for count in range(1, 6):

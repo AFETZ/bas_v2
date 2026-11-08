@@ -800,6 +800,16 @@ class LivePositionSource
     LivePositionSource(std::string path, std::vector<Ptr<MobilityModel>> mobility)
         : m_path(std::move(path)), m_mobility(std::move(mobility)) {}
 
+    void SetDeferredApplication(bool deferred)
+    {
+        if (m_started) throw std::logic_error("Pose application mode must be selected before the first refresh");
+        m_deferred = deferred;
+    }
+    bool DeferredApplication() const { return m_deferred; }
+    uint64_t ObservedSnapshots() const { return m_observedSnapshots; }
+    uint64_t AppliedSnapshots() const { return m_appliedSnapshots; }
+    uint64_t MaximumAppliedPoseAgeNs() const { return m_maximumAppliedAgeNs; }
+
     void Poll()
     {
         if (!Refresh()) return;
@@ -809,13 +819,12 @@ class LivePositionSource
 
     bool Refresh()
     {
+        m_started = true;
         py::gil_scoped_acquire gil;
-        const int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-        const int64_t eventNs = g_runtimeOperational
-            ? g_radioEpochNs + Simulator::Now().GetNanoSeconds() : nowNs;
+        const int64_t nowNs = HostNowNs();
         try
         {
+            const int64_t eventNs = EventHostNs(nowNs);
             if (!g_lockstep && g_runtimeOperational && (nowNs-eventNs)/1e6 > g_runtimeLagMaxMs)
                 throw std::runtime_error("native scheduler exceeded live coupling deadline");
             const auto readerStarted = std::chrono::steady_clock::now();
@@ -829,39 +838,49 @@ class LivePositionSource
             g_poseReaderMaxWallNs = std::max(g_poseReaderMaxWallNs, readerNs);
             if (!g_lockstep && g_runtimeOperational && snapshot.size()>1)
                 m_clockAlignment.Check(snapshot[1].sourceTime, Simulator::Now().GetSeconds(), g_stateMaxAgeS);
-            // Commit only after every node and the source clock have been checked.
-            for (std::size_t i=0; i<snapshot.size(); ++i)
-            {
-                DynamicCast<bas::MeasuredMobility>(m_mobility[i])->Apply(snapshot[i]);
-                g_positions[i]=snapshot[i].position;
-                const double ageMs = g_lockstep ? (i==0 ? 0 :
-                    (g_lockstep->SourceTime(Simulator::Now().GetSeconds())-snapshot[i].sourceTime)*1000)
-                    : (nowNs-snapshot[i].sampleNs)/1e6;
-                LogEvent("live_pose", g_nodeNames[i], "", 0, ageMs,
-                    "measured_pose_age_ms;source_sim_s="+std::to_string(snapshot[i].sourceTime)+
-                    ";read_publication_host_ns="+std::to_string(m_reader.LastPublicationNs()));
-            }
-            if (g_geometry) g_geometry->ObserveAll();
+            // Observation never changes the geometry in deferred mode. The RT
+            // owner later commits its ORIGINAL complete measured job frame.
             m_latest = snapshot;
-            ++g_poseSnapshots;
+            ++m_observedSnapshots;
+            if (m_deferred)
+            {
+                const int64_t receiptNs = HostNowNs();
+                for (size_t i=0; i<snapshot.size(); ++i)
+                    LogEvent("live_pose_observed", g_nodeNames[i], "", 0, (receiptNs-snapshot[i].sampleNs)/1e6,
+                        "measured_pose_age_ms;source_sim_s="+std::to_string(snapshot[i].sourceTime)+
+                        ";sample_host_ns="+std::to_string(snapshot[i].sampleNs)+
+                        ";read_publication_host_ns="+std::to_string(m_reader.LastPublicationNs())+
+                        ";application_mode=deferred_rt_frame;row_xyz=applied_geometry"+
+                        ";observed_x_m="+std::to_string(snapshot[i].position.x)+
+                        ";observed_y_m="+std::to_string(snapshot[i].position.y)+
+                        ";observed_z_m="+std::to_string(snapshot[i].position.z));
+                CheckAppliedFreshness(eventNs,receiptNs);
+            }
+            else ApplySnapshot(snapshot,eventNs,nowNs);
             g_liveStateValid=true;
         }
         catch (const std::exception& error)
         {
-            g_liveStateValid=false;
-            LogEvent("position_snapshot_rejected", "tracker", "", 0,
-                     std::numeric_limits<double>::quiet_NaN(), error.what());
-            if (g_runtimeOperational || g_lockstep)
-            {
-                ++g_stalePoseSamples;
-                g_stopReason="state_coupling_deadline";
-                std::filesystem::remove(g_runtimeHeartbeat);
-                LogEvent("fail_closed", "tracker", "", 0);
-                Simulator::Stop();
-                return false;
-            }
+            return RejectSnapshot(error);
         }
         return true;
+    }
+    void Commit(const std::vector<bas::MeasuredState>& snapshot,
+                const std::function<void()>& publishDependents={})
+    {
+        m_started = true;
+        try
+        {
+            if (!m_deferred) throw std::logic_error("Explicit RT pose commit requires deferred application mode");
+            const int64_t receiptNs = HostNowNs(), eventNs = EventHostNs(receiptNs);
+            CheckAppliedFreshness(eventNs,receiptNs);
+            ApplySnapshot(snapshot,eventNs,receiptNs,publishDependents);
+        }
+        catch (const std::exception& error)
+        {
+            RejectSnapshot(error);
+            throw;
+        }
     }
     std::vector<bas::MeasuredState> Snapshot() const
     {
@@ -870,12 +889,97 @@ class LivePositionSource
         return m_latest;
     }
   private:
+    static int64_t HostNowNs()
+    {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+    int64_t EventHostNs(int64_t wallNs) const
+    {
+        return bas::MeasuredEventHostNs(m_deferred,g_runtimeOperational,g_radioEpochNs,
+                                        Simulator::Now().GetNanoSeconds(),wallNs);
+    }
+    void CheckAppliedFreshness(int64_t eventNs, int64_t wallNs)
+    {
+        if (!m_deferred || !g_runtimeOperational) return;
+        // Record a known violating age before rejecting it. A fresh observation
+        // cannot make an old held geometry frame fresh or invent an application.
+        m_maximumAppliedAgeNs = std::max(m_maximumAppliedAgeNs,bas::MaximumMeasuredPoseAgeNs(m_applied,wallNs));
+        bas::ValidateMeasuredCohort(m_applied,m_mobility.size(),eventNs,wallNs,
+                                   static_cast<int64_t>(g_stateMaxAgeS*1e9));
+    }
+    void ApplySnapshot(const std::vector<bas::MeasuredState>& snapshot, int64_t eventNs, int64_t wallNs,
+                       const std::function<void()>& publishDependents={})
+    {
+        if (m_deferred)
+        {
+            bas::CommitMeasuredCohort(snapshot,m_mobility,g_positions,m_applied,eventNs,wallNs,
+                static_cast<int64_t>(g_stateMaxAgeS*1e9),true,[&] {
+                    if (publishDependents) publishDependents();
+                    const int64_t appliedNs = HostNowNs();
+                    CheckAppliedFreshness(EventHostNs(appliedNs),appliedNs);
+                    RecordApplication(snapshot,appliedNs);
+                });
+        }
+        else
+        {
+            // Keep the existing immediate/lockstep behavior and clock domain.
+            for (size_t i=0; i<snapshot.size(); ++i)
+            {
+                DynamicCast<bas::MeasuredMobility>(m_mobility[i])->Apply(snapshot[i]);
+                g_positions[i]=snapshot[i].position;
+            }
+            m_applied = snapshot;
+            RecordApplication(snapshot,wallNs);
+        }
+    }
+    void RecordApplication(const std::vector<bas::MeasuredState>& snapshot, int64_t wallNs)
+    {
+        ++m_appliedSnapshots;
+        ++g_poseSnapshots;
+        if (m_deferred && g_runtimeOperational)
+            m_maximumAppliedAgeNs = std::max(m_maximumAppliedAgeNs,bas::MaximumMeasuredPoseAgeNs(m_applied,wallNs));
+        for (size_t i=0; i<snapshot.size(); ++i)
+        {
+            const double ageMs = g_lockstep ? (i==0 ? 0 :
+                (g_lockstep->SourceTime(Simulator::Now().GetSeconds())-snapshot[i].sourceTime)*1000)
+                : (wallNs-snapshot[i].sampleNs)/1e6;
+            const auto origin = m_deferred ? ";sample_host_ns="+std::to_string(snapshot[i].sampleNs)+
+                ";application_mode=deferred_rt_frame" :
+                ";read_publication_host_ns="+std::to_string(m_reader.LastPublicationNs());
+            LogEvent("live_pose",g_nodeNames[i],"",0,ageMs,
+                "measured_pose_age_ms;source_sim_s="+std::to_string(snapshot[i].sourceTime)+origin);
+        }
+        if (g_geometry) g_geometry->ObserveAll();
+    }
+    bool RejectSnapshot(const std::exception& error)
+    {
+        g_liveStateValid=false;
+        LogEvent("position_snapshot_rejected","tracker","",0,
+                 std::numeric_limits<double>::quiet_NaN(),error.what());
+        if (g_runtimeOperational || g_lockstep)
+        {
+            ++g_stalePoseSamples;
+            g_stopReason="state_coupling_deadline";
+            std::filesystem::remove(g_runtimeHeartbeat);
+            LogEvent("fail_closed","tracker","",0);
+            Simulator::Stop();
+            return false;
+        }
+        return true;
+    }
     std::string m_path;
     std::vector<Ptr<MobilityModel>> m_mobility;
     bas::LiveStateReader m_reader;
     bas::ClockAlignment m_clockAlignment;
     std::vector<bas::MeasuredState> m_latest;
+    std::vector<bas::MeasuredState> m_applied;
+    bool m_deferred{false}, m_started{false};
+    uint64_t m_observedSnapshots{0}, m_appliedSnapshots{0}, m_maximumAppliedAgeNs{0};
 };
+
+// Non-owning statistics view; the run closes it before the local pose owner dies.
+LivePositionSource* g_poseSourceForStats{nullptr};
 
 class NativeRuntimeSampler
 {
@@ -1315,6 +1419,12 @@ WriteStats(const std::string& path)
            << "  \"channel_state_max_age_s\": " << g_channelStateMaxAgeS << ",\n"
            << "  \"endpoint_displacement_threshold_m\": " << g_updateDistanceThresholdM << ",\n"
            << "  \"pose_snapshots\": " << g_poseSnapshots << ",\n"
+           << "  \"pose_application\": {\"mode\":\""
+           << (g_poseSourceForStats && g_poseSourceForStats->DeferredApplication() ? "coherent_rt" : "independent")
+           << "\",\"observed_snapshots\":" << (g_poseSourceForStats ? g_poseSourceForStats->ObservedSnapshots() : 0)
+           << ",\"applied_snapshots\":" << (g_poseSourceForStats ? g_poseSourceForStats->AppliedSnapshots() : 0)
+           << ",\"maximum_applied_pose_age_ns\":" << (g_poseSourceForStats ? g_poseSourceForStats->MaximumAppliedPoseAgeNs() : 0)
+           << ",\"state_max_age_ns\":" << static_cast<int64_t>(g_stateMaxAgeS*1e9) << "},\n"
            << "  \"pose_poll_period_ms\": " << g_posePollPeriodMs << ",\n"
            << "  \"successful_pose_reader_calls\": " << g_poseReaderCalls << ",\n"
            << "  \"successful_pose_reader_wall_ns\": " << g_poseReaderWallNs << ",\n"
@@ -2109,6 +2219,8 @@ main(int argc, char* argv[])
     }
 
     LivePositionSource positions(positionFile, mobility);
+    positions.SetDeferredApplication(useRtWorkers && sionnaReceiverBatchMode == "full_mesh");
+    g_poseSourceForStats = &positions;
     Ptr<SionnaRtChannelModel> originalRtModel = sionna
         ? DynamicCast<SionnaRtChannelModel>(sionna->GetChannelModel()) : nullptr;
     Ptr<bas::NativeRtCache> rtCache;
@@ -2182,7 +2294,12 @@ main(int argc, char* argv[])
             rtPool = std::make_unique<bas::NativeRtPool>(rtCache, endpoints,
                 [&positions]() { return positions.Snapshot(); },
                 [](const std::string& event, const std::string& id, double value,
-                   const std::string& details) { LogEvent(event, id, "", 0, value, details); });
+                   const std::string& details) { LogEvent(event, id, "", 0, value, details); },
+                sionnaReceiverBatchMode == "full_mesh" ? bas::NativeRtPool::CommitSnapshot(
+                    [&positions](const std::vector<bas::MeasuredState>& state, const std::function<void()>& publish) {
+                        positions.Commit(state,publish);
+                    })
+                    : bas::NativeRtPool::CommitSnapshot{});
             try
             {
                 rtPool->Start(projectRoot, sionnaWorkerBinary, sionnaWorkerConfig,
@@ -2202,6 +2319,7 @@ main(int argc, char* argv[])
                 catch (const std::exception& cleanupError) { std::cerr << cleanupError.what() << std::endl; }
                 Simulator::Destroy();
                 WriteStats(statsFile);
+                g_poseSourceForStats = nullptr;
                 FlushEvents();
                 return 6;
             }
@@ -2380,6 +2498,7 @@ main(int argc, char* argv[])
     }
     Simulator::Destroy();
     WriteStats(statsFile);
+    g_poseSourceForStats = nullptr;
     FlushEvents();
     g_events.close();
     g_radioPcap = nullptr;

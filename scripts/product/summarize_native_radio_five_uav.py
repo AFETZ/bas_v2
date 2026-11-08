@@ -462,6 +462,23 @@ def native_rt_worker_contract(stats: dict[str, Any], scenario_config: dict[str, 
     if full_mesh:
         checks.update(worker_full_mesh_counters=False, worker_full_mesh_producers=False,
                       worker_full_mesh_snapshot_stats=False, worker_full_mesh_epoch_coverage=False)
+        pose_application = mapping(stats.get("pose_application"))
+        state_age_s = mapping(scenario_config.get("coupling")).get("state_max_age_s")
+        state_age_ns = (round(state_age_s * 1e9)
+                        if number(state_age_s) and 0 < state_age_s <= .5 else None)
+        committed, applied = snapshot.get("committed_pose_frames"), pose_application.get("applied_snapshots")
+        checks["worker_full_mesh_pose_commit"] = (
+            snapshot.get("pose_commit_policy") == "with_full_mesh_result"
+            and pose_application.get("mode") == "coherent_rt"
+            and integer(committed, 1) and integer(applied, 1)
+            and integer(snapshot.get("published_results"), 1)
+            and committed == applied == snapshot.get("published_results")
+            and integer(pose_application.get("observed_snapshots"))
+            and applied <= pose_application["observed_snapshots"]
+            and integer(state_age_ns, 1) and integer(pose_application.get("state_max_age_ns"), 1)
+            and pose_application["state_max_age_ns"] == state_age_ns
+            and integer(pose_application.get("maximum_applied_pose_age_ns"))
+            and pose_application["maximum_applied_pose_age_ns"] <= state_age_ns)
 
     def full_mesh_stats_valid(value):
         """SDK11 counters prove the selected operation, not MC/physical accuracy."""

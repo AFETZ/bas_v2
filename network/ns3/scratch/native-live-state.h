@@ -8,6 +8,7 @@
 #include <cmath>
 #include <chrono>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <limits>
 #include <stdexcept>
@@ -34,10 +35,11 @@ public:
                 VectorValue(), MakeVectorAccessor(&MeasuredMobility::m_orientation), MakeVectorChecker());
         return tid;
     }
-    void Apply(const MeasuredState& state) {
+    void Apply(const MeasuredState& state, bool notify=true) {
         m_position=state.position; m_velocity=state.velocity; m_orientation=state.orientation;
-        NotifyCourseChange();
+        if (notify) NotifyCourseChange();
     }
+    void NotifyApplied() { NotifyCourseChange(); }
     Ptr<MobilityModel> Copy() const override { return CreateObject<MeasuredMobility>(*this); }
 private:
     Vector DoGetPosition() const override { return m_position; }
@@ -45,6 +47,78 @@ private:
     void DoSetPosition(const Vector& p) override { m_position=p; NotifyCourseChange(); }
     Vector m_position, m_velocity, m_orientation;
 };
+
+// Host cutoff of the native event, independently from the readiness flag.
+// Deferred RT frames use the native epoch as soon as Run starts. Warmup still
+// uses the current host clock; the default immediate path keeps its old cutoff.
+inline int64_t MeasuredEventHostNs(bool deferred, bool operational, int64_t radioEpochNs,
+                                  int64_t nativeNowNs, int64_t wallNowNs) {
+    if (!(deferred ? radioEpochNs>0 : operational)) return wallNowNs;
+    if (radioEpochNs<0 || nativeNowNs<0 || radioEpochNs>std::numeric_limits<int64_t>::max()-nativeNowNs)
+        throw std::runtime_error("invalid native/host pose clock mapping");
+    return radioEpochNs+nativeNowNs;
+}
+
+inline uint64_t MaximumMeasuredPoseAgeNs(const std::vector<MeasuredState>& states, int64_t wallNs) {
+    uint64_t maximum=0;
+    for (const auto& state:states)
+        if (state.sampleNs>=0 && state.sampleNs<=wallNs)
+            maximum=std::max(maximum,static_cast<uint64_t>(wallNs-state.sampleNs));
+    return maximum;
+}
+
+inline void ValidateMeasuredCohort(const std::vector<MeasuredState>& states, size_t expected,
+                                 int64_t eventNs, int64_t wallNs, int64_t maxAgeNs,
+                                 const std::vector<MeasuredState>* previous=nullptr) {
+    if (!expected || states.size()!=expected || eventNs<0 || wallNs<0 || maxAgeNs<=0 ||
+        (previous && !previous->empty() && previous->size()!=expected))
+        throw std::runtime_error("incomplete measured pose cohort or invalid age domain");
+    int64_t oldest=std::numeric_limits<int64_t>::max(), newest=0;
+    for (size_t i=0;i<states.size();++i) {
+        const auto& state=states[i];
+        for (const auto& value:{state.position,state.velocity,state.orientation})
+            if (!std::isfinite(value.x) || !std::isfinite(value.y) || !std::isfinite(value.z))
+                throw std::runtime_error("nonfinite measured pose cohort");
+        if (state.sampleNs<0 || state.sampleNs>eventNs || state.sampleNs>wallNs || wallNs-state.sampleNs>maxAgeNs)
+            throw std::runtime_error("applied pose is stale or future to the native event/receipt");
+        if (!std::isfinite(state.sourceTime) || state.sourceTime<0 ||
+            state.sourceTime>=static_cast<double>(std::numeric_limits<int64_t>::max())/1e9)
+            throw std::runtime_error("invalid measured source clock");
+        if (previous && !previous->empty() && (state.sampleNs<(*previous)[i].sampleNs ||
+                                               state.sourceTime<(*previous)[i].sourceTime))
+            throw std::runtime_error("deferred measured frame would roll back an applied source epoch");
+        if (i) {
+            const auto sourceNs=std::llround(state.sourceTime*1e9);
+            oldest=std::min(oldest,sourceNs); newest=std::max(newest,sourceNs);
+        }
+    }
+    if (states.size()>1 && newest-oldest>100000000LL)
+        throw std::runtime_error("measured cohort source skew exceeds100ms");
+}
+
+// Validate and allocate before mutating; notify only after every mobility,
+// positions entry, original sample/clock epoch and synchronous dependents
+// describe the same frame. A dependent failure propagates before notification.
+inline void CommitMeasuredCohort(const std::vector<MeasuredState>& states,
+    const std::vector<Ptr<MobilityModel>>& mobility, std::vector<Vector>& positions,
+    std::vector<MeasuredState>& applied, int64_t eventNs, int64_t wallNs,
+    int64_t maxAgeNs, bool deferred, const std::function<void()>& publishDependents={}) {
+    ValidateMeasuredCohort(states,mobility.size(),eventNs,wallNs,maxAgeNs,deferred ? &applied : nullptr);
+    if (positions.size()!=mobility.size()) throw std::runtime_error("measured position roster differs from mobility");
+    std::vector<Ptr<MeasuredMobility>> receivers;
+    for (const auto& model:mobility) {
+        auto measured=DynamicCast<MeasuredMobility>(model);
+        if (!measured) throw std::runtime_error("pose cohort contains a non-measured mobility model");
+        receivers.push_back(measured);
+    }
+    auto original=states;
+    for (size_t i=0;i<states.size();++i) {
+        receivers[i]->Apply(states[i],false); positions[i]=states[i].position;
+    }
+    applied.swap(original);
+    if (publishDependents) publishDependents();
+    for (const auto& model:receivers) model->NotifyApplied();
+}
 
 inline Vector ReadVector(py::handle object, const char* key) {
     auto v = object[key].cast<std::vector<double>>();
