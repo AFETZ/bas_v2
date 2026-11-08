@@ -18,6 +18,7 @@
 #include <memory>
 #include <map>
 #include <chrono>
+#include <optional>
 #include <vector>
 #include <stdexcept>
 #include <utility>
@@ -27,6 +28,32 @@ namespace bas
 using namespace ns3;
 using EventSink = std::function<void(const std::string&, const std::string&, double,
                                      const std::string&)>;
+
+// A value snapshot of one physical WaveformGenerator/array binding. Read a new
+// snapshot after schedule materialization; old copies retain their old state.
+struct SourceBinding
+{
+    std::string id;
+    size_t segmentIndex{0};
+    double centerHz{0}, bandwidthHz{0}, powerW{0}, feedGainDbi{0};
+    std::string pattern;
+    Vector positionM, velocityMps, orientationRad; // UPA yaw, downtilt, roll=0.
+    Ptr<SpectrumPhy> phy;
+    Ptr<PhasedArrayModel> array;
+    bool scheduleCommitted{false};
+    std::optional<Time> begin, end; // Native absolute ticks; never unresolved offsets.
+
+    bool RequiredAt(Time now, Time lookahead = NanoSeconds(0)) const
+    {
+        if (now < NanoSeconds(0) || lookahead < NanoSeconds(0))
+            throw std::invalid_argument("source requirement times must be nonnegative");
+        // Keep the entire [begin,end) interval, including duty-cycle holes. This
+        // is a cache requirement, not a statement that the transmitter is on.
+        // Subtraction avoids overflowing now+lookahead near the native limit.
+        return scheduleCommitted && begin && end && now < *end &&
+               (now >= *begin || *begin - now <= lookahead);
+    }
+};
 
 // Select exactly one upstream propagation model per transmission. No loss formula,
 // packet-error decision, or fallback is implemented in this dispatcher.
@@ -60,10 +87,19 @@ class SourcePropagation : public PhasedArraySpectrumPropagationLossModel
         m_phaseProvider = std::move(phaseProvider);
     }
 
-    void AddSourceSchedule(Ptr<WaveformGenerator> generator, const std::string& id,
-                           double power, const std::string& details)
+    std::vector<SourceBinding> GetSourceBindings() const
     {
-        m_schedule.push_back({generator, id, power, details, {}, {}});
+        std::vector<SourceBinding> result;
+        result.reserve(m_schedule.size());
+        for (const auto& source : m_schedule) result.push_back(source.binding);
+        return result;
+    }
+
+    void AddSourceSchedule(Ptr<WaveformGenerator> generator, const std::string& id,
+                           double power, const std::string& details, SourceBinding binding)
+    {
+        binding.segmentIndex = m_schedule.size();
+        m_schedule.push_back({generator, id, power, details, {}, {}, std::move(binding)});
     }
 
     void ArmSourceSchedule(bool relative)
@@ -124,6 +160,7 @@ class SourcePropagation : public PhasedArraySpectrumPropagationLossModel
         std::string details;
         EventId begin;
         EventId end;
+        SourceBinding binding;
     };
     std::unique_ptr<PythonSchedule> m_python;
     std::vector<ScheduledSource> m_schedule;
@@ -208,6 +245,9 @@ class SourcePropagation : public PhasedArraySpectrumPropagationLossModel
             source.generator->SetPeriod(NanoSeconds(interval["period_ns"].cast<int64_t>()));
             sourceTimes[source.generator][0] = begin.GetSeconds();
             sourceTimes[source.generator][1] = end.GetSeconds();
+            source.binding.begin = begin;
+            source.binding.end = end;
+            source.binding.scheduleCommitted = true;
             source.begin = Simulator::Schedule(begin - Simulator::Now(), &SourcePropagation::StartSource, this, i);
             source.end = Simulator::Schedule(end - Simulator::Now(), &SourcePropagation::StopSource, this, i);
         }
@@ -372,7 +412,19 @@ inline Ptr<SourcePropagation> InstallSpectrumSources(
             ";gain_dbi=" + std::to_string(gain) + ";pattern=" + pattern +
             ";azimuth_rad=" + std::to_string(angles[0]) + ";downtilt_rad=" + std::to_string(angles[1]) +
             ";duty_cycle=" + std::to_string(duty) + ";period_s=" + std::to_string(period);
-        router->AddSourceSchedule(generator, id, power, details);
+        SourceBinding binding;
+        binding.id = id;
+        binding.centerHz = hz;
+        binding.bandwidthHz = bandwidth;
+        binding.powerW = power;
+        binding.feedGainDbi = gain;
+        binding.pattern = pattern;
+        binding.positionM = mobility->GetPosition();
+        binding.velocityMps = mobility->GetVelocity();
+        binding.orientationRad = {angles[0], angles[1], 0.0};
+        binding.phy = generator;
+        binding.array = array;
+        router->AddSourceSchedule(generator, id, power, details, std::move(binding));
     }
     router->ArmSourceSchedule(relative);
     return router;

@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 
 using namespace ns3;
 namespace py = pybind11;
@@ -51,7 +52,7 @@ py::dict ReadJson(const std::filesystem::path& path)
     const std::string text((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
     return py::module_::import("json").attr("loads")(text).cast<py::dict>();
 }
-void WriteInput(const std::filesystem::path& path, bool relative)
+void WriteInput(const std::filesystem::path& path, bool relative, bool multiple = false)
 {
     Require(!std::filesystem::exists(path) && !std::filesystem::exists(ActualPath(path)),
             "Preserve the previous source input and actual schedule");
@@ -60,7 +61,33 @@ void WriteInput(const std::filesystem::path& path, bool relative)
         "pattern"_a="iso", "gain_dbi"_a=0., "power_w"_a=1., "bandwidth_hz"_a=20000000.,
         "center_hz"_a=2412000000., "start_s"_a=.01, "stop_s"_a=.04,
         "period_s"_a=.01, "duty_cycle"_a=1.);
-    py::list sources; sources.append(source);
+    py::list sources;
+    if (multiple)
+    {
+        source["mode"] = "pulsed";
+        source["duty_cycle"] = .5;
+    }
+    sources.append(source);
+    if (multiple)
+    {
+        auto other = source.attr("copy")().cast<py::dict>();
+        other["id"] = "cpu_other";
+        other["position_m"] = py::cast(std::vector<double>{10,20,30});
+        other["orientation_rad"] = py::cast(std::vector<double>{.5,.25});
+        other["power_w"] = 2.;
+        other["gain_dbi"] = 3.;
+        other["start_s"] = .02;
+        other["stop_s"] = .05;
+        sources.append(other);
+        auto sweep = source.attr("copy")().cast<py::dict>();
+        sweep["id"] = "cpu_sweep";
+        sweep["mode"] = "sweep";
+        sweep.attr("pop")("center_hz");
+        sweep["sweep_hz"] = py::cast(std::vector<double>{2412000000.,2417000000.});
+        sweep["dwell_s"] = .01;
+        sweep["stop_s"] = .03;
+        sources.append(sweep);
+    }
     auto input = py::dict("time_reference"_a=relative ? "measurement_start" : "simulation_start", "sources"_a=sources);
     const auto resolved = py::module_::import("scripts.product.prepare_native_sources").attr("prepare")(input);
     std::ofstream output(path);
@@ -98,10 +125,11 @@ struct Fixture
     Ptr<bas::SourcePropagation> owner;
     std::filesystem::path input;
     size_t initialDestroyed{destroyed};
-    Fixture(const std::filesystem::path& path, bool relative, bool reachPhase = true) : input(path)
+    Fixture(const std::filesystem::path& path, bool relative, bool reachPhase = true,
+            bool multiple = false) : input(path)
     {
         current = &observation;
-        WriteInput(path, relative);
+        WriteInput(path, relative, multiple);
         {
             WatchedLoads watch;
             SionnaRtChannelModel::RtPathSolverConfig solver;
@@ -118,7 +146,7 @@ struct Fixture
                 });
         }
         channel->AddPhasedArraySpectrumPropagationLossModel(owner);
-        Require(owner->sourceTimes.size() == 1, "Production source generator is missing");
+        Require(owner->sourceTimes.size() == (multiple ? 4u : 1u), "Production source generators are missing");
         const auto generator = DynamicCast<WaveformGenerator>(owner->sourceTimes.begin()->first);
         Require(generator && generator->TraceConnectWithoutContext("TxStart", MakeCallback(&WaveformStarted)),
                 "Cannot observe real WaveformGenerator transmissions");
@@ -147,6 +175,16 @@ struct Fixture
 void ObservedMeasurement(const std::filesystem::path& path)
 {
     Fixture fixture(path, true);
+    auto before = fixture.owner->GetSourceBindings();
+    Require(before.size() == 1 && before[0].id == "cpu_source" && before[0].segmentIndex == 0 &&
+            before[0].centerHz == 2412000000. && before[0].bandwidthHz == 20000000. &&
+            before[0].powerW == 1. && before[0].feedGainDbi == 0. && before[0].pattern == "iso" &&
+            before[0].positionM == Vector(0,0,10) && before[0].velocityMps == Vector() &&
+            before[0].orientationRad == Vector() && before[0].phy && before[0].array,
+            "Binding metadata does not describe the actual static source");
+    Require(!before[0].scheduleCommitted && !before[0].begin && !before[0].end &&
+            !before[0].RequiredAt(NanoSeconds(0), Seconds(1)),
+            "Measurement offsets were exposed as committed native intervals before the phase anchor");
     fixture.Run(MilliSeconds(125));
     Require(fixture.observation.polls == 4 && !fixture.observation.pollHadGil,
             "Phase polling did not execute at 0/20/40/60ms with the GIL released");
@@ -165,6 +203,26 @@ void ObservedMeasurement(const std::filesystem::path& path)
             "Actual JSON does not retain the observed anchor and native interval ticks");
     Require(ReadJson(path.string()+".state")["enabled_sources"].cast<unsigned>() == 0,
             "Existing enabled_sources counter did not return to zero");
+    const auto after = fixture.owner->GetSourceBindings();
+    Require(after.size() == 1 && after[0].scheduleCommitted && after[0].begin == MilliSeconds(70) &&
+            after[0].end == MilliSeconds(100), "Binding did not retain the materialized native interval");
+    Require(!before[0].scheduleCommitted && !before[0].RequiredAt(MilliSeconds(80)),
+            "A historical binding value silently changed after materialization");
+    Require(!after[0].RequiredAt(NanoSeconds(69999999)) &&
+            after[0].RequiredAt(NanoSeconds(69999999), NanoSeconds(1)) &&
+            after[0].RequiredAt(MilliSeconds(70)) && after[0].RequiredAt(NanoSeconds(99999999)) &&
+            !after[0].RequiredAt(MilliSeconds(100)) && !after[0].RequiredAt(MilliSeconds(100), Seconds(1)),
+            "Source requirement lookahead or half-open native interval boundaries are wrong");
+    Require(after[0].RequiredAt(MilliSeconds(60), NanoSeconds(std::numeric_limits<int64_t>::max())),
+            "Source requirement overflowed now+lookahead instead of comparing the bounded difference");
+    for (const auto times : {std::pair{NanoSeconds(-1), NanoSeconds(0)},
+                             std::pair{NanoSeconds(0), NanoSeconds(-1)}})
+    {
+        bool rejected = false;
+        try { after[0].RequiredAt(times.first, times.second); }
+        catch (const std::invalid_argument&) { rejected = true; }
+        Require(rejected, "Negative source requirement time was accepted");
+    }
     Require(destroyed == fixture.initialDestroyed, "Python schedule was destroyed before Simulator::Destroy");
     fixture.Destroy();
 }
@@ -172,6 +230,10 @@ void ObservedMeasurement(const std::filesystem::path& path)
 void CancelActive(const std::filesystem::path& path)
 {
     Fixture fixture(path, false);
+    const auto uncommitted = fixture.owner->GetSourceBindings();
+    Require(uncommitted.size() == 1 && !uncommitted[0].scheduleCommitted &&
+            !uncommitted[0].begin && !uncommitted[0].end,
+            "Default absolute schedule was reported committed before its native commit event");
     Simulator::Schedule(MilliSeconds(25), [pointer = PeekPointer(fixture.owner)] { pointer->Dispose(); });
     fixture.Run(MilliSeconds(80));
     Require(fixture.observation.polls == 0 && fixture.observation.waves == std::vector<int64_t>{10000000,20000000},
@@ -183,6 +245,7 @@ void CancelActive(const std::filesystem::path& path)
     Require(destroyed == fixture.initialDestroyed + 1, "Explicit Dispose did not clear Python storage");
     Require(ReadJson(path.string()+".state")["enabled_sources"].cast<unsigned>() == 0,
             "Cancelled waveform remains active in the published source state");
+    Require(fixture.owner->GetSourceBindings().empty(), "Disposed source still exposes live physical bindings");
     { py::gil_scoped_release release; fixture.owner->Dispose(); }
     fixture.Destroy();
 }
@@ -197,6 +260,10 @@ void UnreachedOrCancelled(const std::filesystem::path& path, bool cancel)
             "Cancelled phase poll survived or pending phase did not poll normally");
     Require(fixture.observation.events.empty() && fixture.observation.waves.empty() &&
             !std::filesystem::exists(ActualPath(path)), "Unobserved phase fabricated an anchor or transmitted");
+    const auto bindings = fixture.owner->GetSourceBindings();
+    Require(cancel ? bindings.empty() : bindings.size() == 1 && !bindings[0].scheduleCommitted &&
+            !bindings[0].begin && !bindings[0].end && !bindings[0].RequiredAt(Seconds(1), Seconds(1)),
+            "Unobserved/cancelled phase exposes a committed source requirement");
     Require(destroyed == fixture.initialDestroyed + (cancel ? 1u : 0u), "Unexpected pre-Destroy Python lifetime");
     fixture.Destroy();
 }
@@ -206,6 +273,48 @@ void DestroyBeforeRun(const std::filesystem::path& path)
     fixture.owner = nullptr; // Only native ownership remains; no Python closure retains it.
     fixture.Destroy();
     Require(!std::filesystem::exists(ActualPath(path)), "Destroy before Run fabricated an actual schedule");
+}
+
+void PhysicalBindings(const std::filesystem::path& path)
+{
+    Fixture fixture(path, true, true, true);
+    const auto before = fixture.owner->GetSourceBindings();
+    Require(before.size() == 4 && before[0].id == "cpu_source" && before[1].id == "cpu_other" &&
+            before[2].id == "cpu_sweep" && before[3].id == "cpu_sweep",
+            "Physical bindings lost source or repeated sweep segment identities");
+    for (size_t i = 0; i < before.size(); ++i)
+    {
+        Require(before[i].segmentIndex == i && before[i].phy && before[i].array &&
+                !before[i].scheduleCommitted && !before[i].begin && !before[i].end,
+                "Physical segment identity or pre-anchor clock is wrong");
+        Require(before[i].positionM == before[i].phy->GetMobility()->GetPosition() &&
+                before[i].velocityMps == before[i].phy->GetMobility()->GetVelocity(),
+                "Source descriptor differs from the actual emitter mobility");
+        for (size_t j = 0; j < i; ++j)
+            Require(before[i].phy != before[j].phy && before[i].array != before[j].array,
+                    "Same-frequency or repeated-ID segments share a physical PHY/array identity");
+    }
+    Require(before[0].centerHz == before[1].centerHz && before[1].centerHz == before[2].centerHz &&
+            before[3].centerHz == 2417000000. && before[1].positionM == Vector(10,20,30) &&
+            before[1].orientationRad == Vector(.5,.25,0) && before[1].powerW == 2. &&
+            before[1].feedGainDbi == 3., "Binding fields were copied from another source/segment");
+    fixture.Run(MilliSeconds(125));
+    const auto after = fixture.owner->GetSourceBindings();
+    const auto actual = ReadJson(ActualPath(path))["segments"].cast<py::list>();
+    for (size_t i = 0; i < after.size(); ++i)
+    {
+        auto segment = actual[i].cast<py::dict>();
+        Require(after[i].scheduleCommitted && after[i].begin && after[i].end &&
+                after[i].begin->GetNanoSeconds() == segment["start_ns"].cast<int64_t>() &&
+                after[i].end->GetNanoSeconds() == segment["stop_ns"].cast<int64_t>(),
+                "Physical descriptor window differs from actual materialized native ticks");
+    }
+    // The first source is pulsed at 50% duty: 76ms is in an RF off interval,
+    // but its propagation binding stays required throughout the outer window.
+    Require(after[0].RequiredAt(MilliSeconds(76)) && !after[0].RequiredAt(MilliSeconds(100)) &&
+            after[1].RequiredAt(MilliSeconds(100)) && !after[1].RequiredAt(MilliSeconds(110)),
+            "Required window incorrectly follows duty-cycle holes or another source interval");
+    fixture.Destroy();
 }
 } // namespace
 
@@ -221,6 +330,7 @@ int main(int argc, char** argv)
         UnreachedOrCancelled(std::string(argv[1])+".unreached.json", false);
         UnreachedOrCancelled(std::string(argv[1])+".cancel-poll.json", true);
         DestroyBeforeRun(std::string(argv[1])+".before-run.json");
+        PhysicalBindings(std::string(argv[1])+".bindings.json");
     }
     catch (const std::exception& failure) { error = failure.what(); }
     { py::gil_scoped_release release; Simulator::Destroy(); }
@@ -228,7 +338,7 @@ int main(int argc, char** argv)
     report << py::module_::import("json").attr("dumps")(py::dict("schema"_a=1, "passed"_a=error.empty(),
         "checks"_a=checks, "error"_a=error, "python_lifetimes_destroyed"_a=destroyed,
         "destructors_without_gil"_a=destroyedWithoutGil,
-        "scope"_a="CPU production source schedule/phase/commit/cancel/Destroy under released GIL; no RT/RF/HIL qualification"))
+        "scope"_a="CPU production source bindings/schedule/phase/commit/cancel/Destroy under released GIL; no RT/RF/HIL qualification"))
         .cast<std::string>() << '\n';
     if (!error.empty()) std::cerr << error << '\n';
     return error.empty() ? 0 : 1;
