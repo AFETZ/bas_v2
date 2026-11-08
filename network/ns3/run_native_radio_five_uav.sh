@@ -447,6 +447,7 @@ DYNAMIC_RT_INPUTS_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-dynamic-rt-inputs.
 FULL_MESH_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-fullmesh.patch"
 EMITTER_BATCH_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-emitter-batch.patch"
 FIXED_PATH_STORAGE_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-fixed-path-storage.patch"
+PROMISC_QOS_RECEIVE_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-promisc-qos-receive-context.patch"
 TAP_QUEUE_SELECTION_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-tap-device-queue-selection.patch"
 if [[ "$SCENARIO_KEY" == urban ]]; then
   SCENARIO="$URBAN_OUTPUT/scenario.yaml"
@@ -454,7 +455,6 @@ elif [[ "$SCENARIO_KEY" == customer ]]; then
   SCENARIO="$ROOT_DIR/network/config/scenario_5uav_customer_native_product.yaml"
 elif [[ "$SCENARIO_KEY" == rock_demo ]]; then
   SCENARIO="$ROOT_DIR/network/config/scenario_5uav_rock_demo_native_product.yaml"
-PROMISC_QOS_RECEIVE_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-promisc-qos-receive-context.patch"
 else
   SCENARIO="$ROOT_DIR/network/config/scenario_${UAV_COUNT}uav_town01_native_product.yaml"
 fi
@@ -795,6 +795,10 @@ if [[ "${BAS_NATIVE_FIVE_SKIP_BUILD:-0}" == 1 ]]; then
   # launcher. Check the artifact that actually implements each patched method.
   SPECTRUM_LIBRARY="$NS3_DIR/build/lib/libns3.48-spectrum-default.so"
   TAP_LIBRARY="$NS3_DIR/build/lib/libns3.48-tap-bridge-default.so"
+  WIFI_LIBRARY="$NS3_DIR/build/lib/libns3.48-wifi-default.so"
+  [[ -s "$WIFI_LIBRARY" && "$WIFI_LIBRARY" -nt "$PROMISC_QOS_RECEIVE_PATCH" ]] || {
+    printf 'Wi-Fi library predates promiscuous QoS receive context fix.\n' >&2; exit 2;
+  }
   [[ "$SPECTRUM_LIBRARY" -nt "$DYNAMIC_RT_INPUTS_PATCH" ]] || {
     printf 'Spectrum library predates dynamic RT input storage fix.\n' >&2; exit 2;
   }
@@ -802,10 +806,6 @@ if [[ "${BAS_NATIVE_FIVE_SKIP_BUILD:-0}" == 1 ]]; then
     printf 'Spectrum library predates the full-mesh SDK extension.\n' >&2; exit 2;
   }
   [[ "$SPECTRUM_LIBRARY" -nt "$EMITTER_BATCH_PATCH" ]] || {
-  WIFI_LIBRARY="$NS3_DIR/build/lib/libns3.48-wifi-default.so"
-  [[ -s "$WIFI_LIBRARY" && "$WIFI_LIBRARY" -nt "$PROMISC_QOS_RECEIVE_PATCH" ]] || {
-    printf 'Wi-Fi library predates promiscuous QoS receive context fix.\n' >&2; exit 2;
-  }
     printf 'Spectrum library predates the emitter-batch SDK extension.\n' >&2; exit 2;
   }
   [[ "$SPECTRUM_LIBRARY" -nt "$FIXED_PATH_STORAGE_PATCH" ]] || {
@@ -1063,6 +1063,7 @@ capture_effective_configuration() {
     --config "sionna_full_mesh_patch=$FULL_MESH_PATCH"
     --config "sionna_emitter_batch_patch=$EMITTER_BATCH_PATCH"
     --config "sionna_fixed_path_storage_patch=$FIXED_PATH_STORAGE_PATCH"
+    --config "promisc_qos_receive_context_patch=$PROMISC_QOS_RECEIVE_PATCH"
     --observed-params "native_sdk_sources=$RUN_DIR/logs/native_sdk_source_verification.json"
     --config "tap_queue_selection_patch=$TAP_QUEUE_SELECTION_PATCH"
     --config "native_rt_pool_source=$ROOT_DIR/network/ns3/scratch/native-rt-pool.h"
@@ -1070,7 +1071,6 @@ capture_effective_configuration() {
   )
   if [[ "$SIONNA_RT_EXECUTION_MODE" == worker_pool ]]; then
     config_args+=(--config "native_rt_worker_source=$ROOT_DIR/network/ns3/scratch/native-rt-worker.cc"
-    --config "promisc_qos_receive_context_patch=$PROMISC_QOS_RECEIVE_PATCH"
                   --config "native_rt_pool_adapter=$ROOT_DIR/scripts/product/native_rt_workers.py")
     if [[ "$stage" == final ]]; then
       config_args+=(--observed-params "native_rt_worker_config=$RT_WORKER_CONFIG"
