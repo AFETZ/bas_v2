@@ -68,6 +68,42 @@ def source_job(peer=0,profile='cochannel_iso'):
     return value
 
 
+def emitter_job():
+    value=source_job();del value['peer_index'];value['source_mode']='emitter_batch'
+    return value
+
+
+def emitter_reply(value,config):
+    """Transport validation fixture only: it does not simulate an RF channel."""
+    count=len(config['cohort']);radio=config['radio'];cap=radio['max_paths_per_source']*count
+    profile=next(item for item in config['source_profiles'] if item['id']==value['profile_id'])
+    pairs=[]
+    for peer in range(count):
+        pairs.append(dict(pair=[count,peer],direction=[count,peer],coefficient_shape=[1,1,1],
+            generated_ns=value['sample_native_ns'],sample_native_ns=value['sample_native_ns'],
+            source_request_id=value['request_id'],sample_host_monotonic_ns=value['sample_host_monotonic_ns'],
+            poses=copy.deepcopy(value['poses']),fresh_for_request=True))
+    return dict(schema=1,kind='result',worker_id=0,request_id=value['request_id'],
+        channel_mode='source_star',source_mode='emitter_batch',profile_id=value['profile_id'],
+        frequency_hz=profile['frequency_hz'],new_emitter_batch_calls=1,pairs=pairs,
+        allocated_candidate_cap=cap,candidate_count=count,candidate_buffer_size=cap,
+        candidate_count_scope='actual_public_emitter_batch_api',
+        emitter_batch_stats=dict(source_mode='emitter_batch',pattern=profile['pattern'],bound=True,
+            has_published_batch=True,candidate_allocation_valid=True,frequency_hz=float(profile['frequency_hz']),
+            registered_receivers=count,configured_samples_per_source=radio['samples_per_source'],
+            configured_max_paths_per_source=radio['max_paths_per_source'],
+            configured_max_number_of_paths=float(radio['max_number_of_paths']),configured_candidate_cap=cap,
+            last_transmitter_count=1,last_receiver_count=count,last_allocated_candidate_cap=cap,
+            last_candidate_count=count,last_candidate_buffer_size=cap,candidate_capacity_reached_calls=0,
+            last_generated_ns=value['sample_native_ns'],attempted_calls=1,completed_calls=1,generated_links=count,
+            cache_read_hits=count,cache_read_misses=0,source_node_id=100,source_antenna_id=200,
+            receiver_node_ids=list(range(count)),receiver_antenna_ids=list(range(count)),
+            last_source_position_m=value['poses'][count]['position_m'],
+            last_source_velocity_m_s=value['poses'][count]['velocity_m_s'],
+            last_source_orientation_rad=value['poses'][count]['orientation_rad'],
+            last_retained_paths_per_receiver=[1]*count))
+
+
 class SourceStarValidationTests(unittest.TestCase):
     def setUp(self):
         self.directory=tempfile.TemporaryDirectory()
@@ -115,6 +151,58 @@ class SourceStarValidationTests(unittest.TestCase):
         validate_job(desired,6,validate_config(self.config))
         desired['poses'].append(copy.deepcopy(desired['poses'][0]))
         with self.assertRaises(ValueError):validate_job(desired,6,validate_config(self.config))
+
+    def test_emitter_batch_is_explicit_and_includes_the_entire_cp_uav_roster(self):
+        for count in range(2,7):
+            config=copy.deepcopy(self.config);config['cohort']=config['cohort'][:count]
+            value=emitter_job();value['anchor_index']=count;value['poses']=value['poses'][:count+1]
+            validate_job(value,count,validate_config(config))
+        for mode in (True,None,'pairwise','full_mesh','all'):
+            value=emitter_job();value['source_mode']=mode
+            with self.subTest(mode=mode),self.assertRaises(ValueError):validate_job(value,6,validate_config(self.config))
+        value=emitter_job();value['peer_index']=0
+        with self.assertRaises(ValueError):validate_job(value,6,validate_config(self.config))
+        value=emitter_job();del value['profile_id']
+        with self.assertRaises(ValueError):validate_job(value,6,validate_config(self.config))
+        validate_job(source_job(),6,validate_config(self.config))
+
+    def test_emitter_capacity_guard_does_not_break_legacy_pairwise_configs(self):
+        config=copy.deepcopy(self.config);config['radio']['max_paths_per_source']=800_000_000
+        applied=validate_config(config) #5*800M is valid;6*800M would overflow.
+        validate_job(source_job(),6,applied)
+        with self.assertRaisesRegex(ValueError,'emitter-batch.*uint32'):validate_job(emitter_job(),6,applied)
+
+    def test_emitter_results_require_real_sdk_proof_original_epochs_and_full_coverage(self):
+        value=emitter_job();config=validate_config(self.config)
+        def receive(message):
+            pool=object.__new__(NativeRtWorkerPool)
+            worker=SimpleNamespace(failed=None,pending=copy.deepcopy(value),submitted_ns=time.monotonic_ns(),
+                completed=0,emitter_batch_completed_jobs=0,last_emitter_batch_stats=None)
+            pool._workers,pool._messages,pool.job_timeout_ns={0:worker},queue.Queue(2),10**9
+            pool.count,pool.applied_config=6,config
+            pool._messages.put((0,message,time.monotonic_ns()))
+            return pool.poll()[0],worker
+        response,worker=receive(emitter_reply(value,config))
+        self.assertEqual((response['kind'],worker.completed,worker.emitter_batch_completed_jobs),('result',1,1))
+        response['emitter_batch_stats']['completed_calls']=999
+        self.assertEqual(worker.last_emitter_batch_stats['completed_calls'],1)
+        mutations=[lambda r:r.pop('emitter_batch_stats'),
+            lambda r:r.update(new_emitter_batch_calls=True),lambda r:r.update(new_pairwise_calls=1),
+            lambda r:r['emitter_batch_stats'].update(last_candidate_count=6000),
+            lambda r:r['emitter_batch_stats'].update(frequency_hz=2.422e9),
+            lambda r:r['emitter_batch_stats'].update(cache_read_misses=1),
+            lambda r:r['emitter_batch_stats'].update(receiver_node_ids=[0]*6),
+            lambda r:r['emitter_batch_stats'].update(last_source_position_m=[1,2,3]),
+            lambda r:r['pairs'].pop(0),lambda r:r['pairs'][0].update(pair=[0,1]),
+            lambda r:r['pairs'][5].update(generated_ns=value['sample_native_ns']+1),
+            lambda r:r['pairs'][0].update(sample_host_monotonic_ns=value['sample_host_monotonic_ns']+1),
+            lambda r:r['pairs'][0].update(source_request_id=999)]
+        for mutate in mutations:
+            reply=emitter_reply(value,config);mutate(reply)
+            with self.subTest(mutation=mutate):
+                response,worker=receive(reply)
+                self.assertEqual((response['kind'],worker.completed,worker.emitter_batch_completed_jobs),('error',0,0))
+                self.assertIn('emitter-batch producer proof',response['error'])
 
     def test_source_rosters_one_to_five_uavs_and_source_pose_are_validated(self):
         for count in range(2,7):
@@ -201,7 +289,7 @@ class JobValidationTests(unittest.TestCase):
         pool._workers, pool._messages, pool.job_timeout_ns = {0:worker}, queue.Queue(2), 10**9
         for _ in range(100):
             self.assertEqual(pool.poll(), [])
-        pool._messages.put((0, dict(schema=1, kind='result', worker_id=0, request_id=2)))
+        pool._messages.put((0, dict(schema=1, kind='result', worker_id=0, request_id=2),time.monotonic_ns()))
         response = pool.poll()[0]
         self.assertEqual((response['kind'], response['request_id']), ('error', 1))
         self.assertIn('uncorrelated', response['error'])
@@ -214,6 +302,53 @@ class JobValidationTests(unittest.TestCase):
         self.assertIn('timeout', pool.poll()[0]['error'])
         self.assertEqual(pool.poll(), [])
 
+    def test_receiver_receipt_precedes_delayed_poll_and_remains_unvalidated_transport(self):
+        incoming=queue.Queue()
+        class Connection:
+            def recv(self):
+                value=incoming.get(timeout=2)
+                if isinstance(value,Exception):raise value
+                return value
+        pool=object.__new__(NativeRtWorkerPool);connection=Connection();pending=job()
+        worker=SimpleNamespace(identity=0,listener=SimpleNamespace(accept=lambda:connection),
+            process=SimpleNamespace(pid=4321),ready=None,failed=None,pending=pending,
+            submitted_ns=time.monotonic_ns(),completed=0,full_mesh_completed_jobs=0,last_full_mesh_stats=None,
+            emitter_batch_completed_jobs=0,last_emitter_batch_stats=None,last_transport_receive=None)
+        pool._workers,pool._messages,pool.job_timeout_ns={0:worker},queue.Queue(2),10**9
+        pool._closing,pool.socket_dir,pool._last_request_id=threading.Event(),None,1
+        pool.allow_development_stub=True
+        thread=threading.Thread(target=pool._receive,args=(worker,))
+        def queued():
+            deadline=time.monotonic()+1
+            while pool._messages.empty():
+                if time.monotonic()>deadline:self.fail('Receiver did not enqueue a complete fixture frame')
+                time.sleep(.001)
+        thread.start()
+        try:
+            original_host=pending['sample_host_monotonic_ns']
+            incoming.put(dict(schema=1,kind='result',worker_id=0,request_id=1,
+                sample_host_monotonic_ns=original_host,receiver_enqueued_host_monotonic_ns=1))
+            queued();state=pool.snapshot()['workers'][0]
+            receipt=state['last_transport_receive']
+            self.assertEqual((receipt['kind'],receipt['request_id'],state['busy'],state['completed']),('result',1,True,0))
+            self.assertIsNone(state['failed'])
+            time.sleep(.02) # Deliberately leave the full response queued before poll.
+            before_poll=time.monotonic_ns();response=pool.poll()[0]
+            self.assertLess(receipt['host_monotonic_ns'],before_poll)
+            self.assertEqual(response['receiver_enqueued_host_monotonic_ns'],receipt['host_monotonic_ns'])
+            self.assertGreaterEqual(response['received_host_monotonic_ns'],before_poll)
+            self.assertEqual(response['sample_host_monotonic_ns'],original_host)
+            # A later receipt with a wrong ID stays unvalidated until poll rejects it.
+            worker.pending=job(2);worker.submitted_ns=time.monotonic_ns()
+            incoming.put(dict(schema=1,kind='result',worker_id=0,request_id=999))
+            queued();state=pool.snapshot()['workers'][0]
+            self.assertEqual(state['last_transport_receive']['request_id'],999)
+            self.assertEqual(state['completed'],1);self.assertIsNone(state['failed'])
+            self.assertEqual(pool.poll()[0]['kind'],'error')
+        finally:
+            pool._closing.set();incoming.put(EOFError('fixture stop'));thread.join(timeout=1)
+            self.assertFalse(thread.is_alive())
+
     def test_full_mesh_reply_proof_is_correlated_and_frozen_per_producer(self):
         pool=object.__new__(NativeRtWorkerPool)
         pending=job();pending['channel_mode']='full_mesh'
@@ -222,13 +357,13 @@ class JobValidationTests(unittest.TestCase):
         pool._workers,pool._messages,pool.job_timeout_ns={0:worker},queue.Queue(2),10**9
         stats=dict(source_mode='full_mesh',completed_calls=1)
         pool._messages.put((0,dict(schema=1,kind='result',worker_id=0,request_id=1,
-                                  channel_mode='full_mesh',new_full_mesh_calls=1,full_mesh_stats=stats)))
+                                  channel_mode='full_mesh',new_full_mesh_calls=1,full_mesh_stats=stats),time.monotonic_ns()))
         result=pool.poll()
         self.assertEqual((worker.completed,worker.full_mesh_completed_jobs),(1,1))
         result[0]['full_mesh_stats']['completed_calls']=999
         self.assertEqual(worker.last_full_mesh_stats['completed_calls'],1)
         worker.pending=job(2);worker.pending['channel_mode']='full_mesh'
-        pool._messages.put((0,dict(schema=1,kind='result',worker_id=0,request_id=2,new_batch_calls=1)))
+        pool._messages.put((0,dict(schema=1,kind='result',worker_id=0,request_id=2,new_batch_calls=1),time.monotonic_ns()))
         self.assertEqual(pool.poll()[0]['kind'],'error')
         self.assertEqual((worker.completed,worker.full_mesh_completed_jobs),(1,1))
 
@@ -245,7 +380,7 @@ class JobValidationTests(unittest.TestCase):
         pool._started, pool._closing, pool._last_request_id, pool.count = True, threading.Event(), 0, 2
         first = job(2); first['sample_native_ns'] = 0
         self.assertTrue(pool.submit(0, first))
-        pool._messages.put((0, dict(schema=1, kind='result', worker_id=0, request_id=2)))
+        pool._messages.put((0, dict(schema=1, kind='result', worker_id=0, request_id=2),time.monotonic_ns()))
         self.assertEqual(pool.poll()[0]['request_id'], 2)
         for identity in (2, 1):
             with self.subTest(identity=identity), self.assertRaisesRegex(ValueError, 'increasing'):

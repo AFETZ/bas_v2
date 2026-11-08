@@ -110,10 +110,11 @@ def integer(value, name, minimum=0):
 
 def validate_job(job, count, config=None):
     expected = {'kind', 'request_id', 'sample_native_ns', 'sample_host_monotonic_ns', 'anchor_index', 'poses'}
-    source = type(job) is dict and ('profile_id' in job or 'peer_index' in job)
+    source = type(job) is dict and any(key in job for key in ('profile_id', 'peer_index', 'source_mode'))
+    emitter_batch = source and 'source_mode' in job
     full_mesh = not source and type(config) is dict and config.get('desired_mode') == 'full_mesh'
     if source:
-        expected |= {'profile_id', 'peer_index'}
+        expected |= {'profile_id', 'source_mode'} if emitter_batch else {'profile_id', 'peer_index'}
     elif full_mesh:
         expected.add('channel_mode')
     if type(job) is not dict or set(job) != expected or job['kind'] != 'solve':
@@ -128,7 +129,12 @@ def validate_job(job, count, config=None):
             raise ValueError('source job requires a known immutable profile_id')
         if integer(job['anchor_index'], 'anchor_index') != count:
             raise ValueError('source STAR anchor must follow the complete desired cohort')
-        if not 0 <= integer(job['peer_index'], 'peer_index') < count:
+        if emitter_batch:
+            if type(job['source_mode']) is not str or job['source_mode'] != 'emitter_batch':
+                raise ValueError('source_mode must explicitly select emitter_batch; legacy jobs use peer_index')
+            if config['radio']['max_paths_per_source'] * count >= 2**32:
+                raise ValueError('emitter-batch candidate capacity exceeds native uint32')
+        elif not 0 <= integer(job['peer_index'], 'peer_index') < count:
             raise ValueError('source STAR peer must be one of CP/UAV receivers')
     elif full_mesh:
         if job['channel_mode'] != 'full_mesh' or integer(job['anchor_index'], 'anchor_index') != 0:
@@ -149,6 +155,64 @@ def validate_job(job, count, config=None):
                 raise ValueError(f'{key} requires three finite numbers')
 
 
+def _validate_emitter_result(message, job, count, config):
+    """Check the actual public SDK12 proof against the immutable submitted job."""
+    profile = next(item for item in config['source_profiles'] if item['id'] == job['profile_id'])
+    stats, radio = message.get('emitter_batch_stats'), config['radio']
+    if (message.get('channel_mode') != 'source_star' or message.get('source_mode') != 'emitter_batch'
+            or message.get('profile_id') != job['profile_id'] or message.get('frequency_hz') != profile['frequency_hz']
+            or type(message.get('new_emitter_batch_calls')) is not int or message['new_emitter_batch_calls'] != 1
+            or type(stats) is not dict or 'new_pairwise_calls' in message):
+        raise ValueError('emitter-batch mode/profile/fresh-solve proof missing')
+    cap = radio['max_paths_per_source'] * count
+    required = dict(source_mode='emitter_batch', pattern=profile['pattern'], bound=True, has_published_batch=True,
+        candidate_allocation_valid=True, frequency_hz=float(profile['frequency_hz']), registered_receivers=count,
+        configured_samples_per_source=radio['samples_per_source'], configured_max_paths_per_source=radio['max_paths_per_source'],
+        configured_max_number_of_paths=float(radio['max_number_of_paths']), configured_candidate_cap=cap,
+        last_transmitter_count=1, last_receiver_count=count, last_allocated_candidate_cap=cap,
+        last_candidate_buffer_size=cap, candidate_capacity_reached_calls=0, last_generated_ns=job['sample_native_ns'])
+    for key, expected in required.items():
+        actual = stats.get(key)
+        if actual != expected or (type(expected) in (int, bool) and type(actual) is not type(expected)):
+            raise ValueError(f'emitter-batch applied {key} differs from the submitted profile')
+    candidates = stats.get('last_candidate_count')
+    if (type(candidates) is not int or not 0 <= candidates < cap
+            or message.get('allocated_candidate_cap') != cap or message.get('candidate_buffer_size') != cap
+            or message.get('candidate_count') != candidates
+            or message.get('candidate_count_scope') != 'actual_public_emitter_batch_api'):
+        raise ValueError('emitter-batch candidate occupancy/allocation proof missing')
+    for key in ('attempted_calls', 'completed_calls', 'generated_links', 'cache_read_hits'):
+        if type(stats.get(key)) is not int or stats[key] < (count if key in ('generated_links', 'cache_read_hits') else 1):
+            raise ValueError(f'emitter-batch actual counter {key} missing')
+    if type(stats.get('cache_read_misses')) is not int or stats['cache_read_misses'] != 0:
+        raise ValueError('emitter-batch read missed the refreshed STAR')
+    for identities, source in (('receiver_node_ids', 'source_node_id'), ('receiver_antenna_ids', 'source_antenna_id')):
+        values = stats.get(identities)
+        if (type(values) is not list or len(values) != count or any(type(v) is not int or v < 0 for v in values)
+                or len(set(values)) != count or type(stats.get(source)) is not int or stats[source] < 0 or stats[source] in values):
+            raise ValueError('emitter-batch native endpoint identities are not a complete distinct STAR')
+    for output, original in (('last_source_position_m', 'position_m'), ('last_source_velocity_m_s', 'velocity_m_s'),
+                             ('last_source_orientation_rad', 'orientation_rad')):
+        if stats.get(output) != job['poses'][count][original]:
+            raise ValueError('emitter-batch source pose differs from the original sampled input')
+    pairs, retained = message.get('pairs'), stats.get('last_retained_paths_per_receiver')
+    if type(pairs) is not list or len(pairs) != count or type(retained) is not list or len(retained) != count:
+        raise ValueError('emitter-batch did not return every CP/UAV receiver')
+    for peer, pair in enumerate(pairs):
+        if (type(pair) is not dict or pair.get('pair') != [count, peer] or pair.get('direction') != [count, peer]
+                or pair.get('fresh_for_request') is not True or pair.get('poses') != job['poses']):
+            raise ValueError('emitter-batch STAR coverage/direction/original poses differ from the request')
+        for field, original in (('generated_ns', 'sample_native_ns'), ('sample_native_ns', 'sample_native_ns'),
+                                ('source_request_id', 'request_id'), ('sample_host_monotonic_ns', 'sample_host_monotonic_ns')):
+            if type(pair.get(field)) is not int or pair[field] != job[original]:
+                raise ValueError('emitter-batch replaced the original request identity or sample epoch')
+        shape = pair.get('coefficient_shape')
+        if (type(shape) is not list or len(shape) != 3 or shape[:2] != [1, 1]
+                or type(shape[2]) is not int or not 0 <= shape[2] <= radio['max_number_of_paths']
+                or type(retained[peer]) is not int or not 0 <= retained[peer] <= shape[2]):
+            raise ValueError('emitter-batch retained paths disagree with the actual native CIR shape')
+
+
 @dataclass
 class _Worker:
     identity: int
@@ -164,6 +228,11 @@ class _Worker:
     completed: int = 0
     full_mesh_completed_jobs: int = 0
     last_full_mesh_stats: dict | None = None
+    emitter_batch_completed_jobs: int = 0
+    last_emitter_batch_stats: dict | None = None
+    # Complete Connection.recv/decode observed by the receiver thread. This is
+    # transport evidence only; correlation/producer validation stays in poll().
+    last_transport_receive: dict | None = None
 
 
 class NativeRtWorkerPool:
@@ -193,10 +262,10 @@ class NativeRtWorkerPool:
         self.socket_dir = None
         self._started = False
 
-    def _emit(self, identity, message):
+    def _emit(self, identity, message, received_ns=None):
         while not self._closing.is_set():
             try:
-                self._messages.put((identity, message), timeout=.05)
+                self._messages.put((identity, message, received_ns), timeout=.05)
                 return
             except queue.Full:
                 pass
@@ -206,7 +275,14 @@ class NativeRtWorkerPool:
             connection = worker.listener.accept()
             worker.connection = connection
             while not self._closing.is_set():
-                self._emit(worker.identity, connection.recv())
+                message = connection.recv()
+                received_ns = time.monotonic_ns()
+                # Publish one coherent observation before queue insertion, even
+                # when the main thread has not polled a completed result yet.
+                worker.last_transport_receive = dict(host_monotonic_ns=received_ns,
+                    kind=message.get('kind') if type(message) is dict else None,
+                    request_id=message.get('request_id') if type(message) is dict else None)
+                self._emit(worker.identity, message, received_ns)
         except Exception as error:
             self._emit(worker.identity, {'kind': 'transport_error', 'error': f'{type(error).__name__}: {error}'})
 
@@ -242,7 +318,7 @@ class NativeRtWorkerPool:
                 if remaining <= 0:
                     raise TimeoutError('native RT worker startup timeout')
                 try:
-                    identity, message = self._messages.get(timeout=min(.05, remaining))
+                    identity, message, received_ns = self._messages.get(timeout=min(.05, remaining))
                 except queue.Empty:
                     exited = [w.identity for w in self._workers.values() if w.ready is None and w.process.poll() is not None]
                     if exited:
@@ -261,7 +337,7 @@ class NativeRtWorkerPool:
                     raise RuntimeError(f'worker {identity}: applied configuration does not match the frozen input')
                 if worker.ready is not None:
                     raise RuntimeError('duplicate worker readiness')
-                worker.ready = message
+                worker.ready = dict(message, receiver_enqueued_host_monotonic_ns=received_ns)
             return self
         except BaseException:
             self.close()
@@ -293,7 +369,7 @@ class NativeRtWorkerPool:
         completed = []
         while True:
             try:
-                identity, message = self._messages.get_nowait()
+                identity, message, received_ns = self._messages.get_nowait()
             except queue.Empty:
                 break
             worker = self._workers[identity]
@@ -312,10 +388,21 @@ class NativeRtWorkerPool:
             else:
                 full_mesh = pending.get('channel_mode') == 'full_mesh'
                 stats = message.get('full_mesh_stats')
+                emitter_batch = pending.get('source_mode') == 'emitter_batch'
+                emitter_error = None
+                if emitter_batch:
+                    try:
+                        _validate_emitter_result(message, pending, self.count, self.applied_config)
+                    except (KeyError, TypeError, ValueError, StopIteration) as error:
+                        emitter_error = str(error)
                 if full_mesh and (message.get('channel_mode') != 'full_mesh'
                         or type(message.get('new_full_mesh_calls')) is not int or message['new_full_mesh_calls'] != 1
                         or type(stats) is not dict or stats.get('source_mode') != 'full_mesh'):
                     worker.failed = 'full-mesh producer proof missing or incompatible with the submitted job'
+                    message = dict(schema=1,kind='error',worker_id=identity,
+                                   request_id=pending['request_id'],error=worker.failed)
+                elif emitter_error is not None or (not emitter_batch and message.get('source_mode') == 'emitter_batch'):
+                    worker.failed = 'emitter-batch producer proof incompatible with the submitted job: ' + (emitter_error or 'unsolicited mode')
                     message = dict(schema=1,kind='error',worker_id=identity,
                                    request_id=pending['request_id'],error=worker.failed)
                 else:
@@ -323,8 +410,12 @@ class NativeRtWorkerPool:
                     if full_mesh:
                         worker.full_mesh_completed_jobs += 1
                         worker.last_full_mesh_stats = copy.deepcopy(stats)
+                    if emitter_batch:
+                        worker.emitter_batch_completed_jobs += 1
+                        worker.last_emitter_batch_stats = copy.deepcopy(message['emitter_batch_stats'])
             worker.pending = None
-            message = dict(message, received_host_monotonic_ns=time.monotonic_ns())
+            message = dict(message, receiver_enqueued_host_monotonic_ns=received_ns,
+                           received_host_monotonic_ns=time.monotonic_ns())
             completed.append(message)
         now = time.monotonic_ns()
         for identity, worker in self._workers.items():
@@ -344,7 +435,10 @@ class NativeRtWorkerPool:
                 'busy': w.pending is not None, 'request_id': w.pending['request_id'] if w.pending else None,
                 'failed': w.failed, 'completed': w.completed,
                 'full_mesh_completed_jobs': w.full_mesh_completed_jobs,
-                'last_full_mesh_stats': copy.deepcopy(w.last_full_mesh_stats)} for w in self._workers.values()]}
+                'last_full_mesh_stats': copy.deepcopy(w.last_full_mesh_stats),
+                'emitter_batch_completed_jobs': w.emitter_batch_completed_jobs,
+                'last_emitter_batch_stats': copy.deepcopy(w.last_emitter_batch_stats),
+                'last_transport_receive': copy.deepcopy(w.last_transport_receive)} for w in self._workers.values()]}
 
     def close(self):
         if self._closing.is_set():

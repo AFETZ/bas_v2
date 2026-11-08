@@ -11,6 +11,7 @@
 #include <cmath>
 #include <iostream>
 #include <map>
+#include <set>
 #include <stdexcept>
 
 using namespace ns3;
@@ -25,6 +26,39 @@ class SourceArray : public UniformPlanarArray
   public:
     void ForceFresh() const { InvalidateChannels(); }
 };
+using SourceSignature=std::pair<double,std::string>;
+struct SourceContext
+{
+    Ptr<SourceArray> array;
+    Ptr<SionnaRtChannelModel> pairwise,emitter;
+    std::vector<std::string> profileIds;
+};
+std::vector<double> Coordinates(const Vector& value) {return {value.x,value.y,value.z};}
+py::dict EmitterStats(const SionnaRtChannelModel::EmitterBatchStats& stats)
+{
+    return py::dict("source_mode"_a=stats.sourceMode,"pattern"_a=stats.pattern,
+        "bound"_a=stats.bound,"has_published_batch"_a=stats.hasPublishedBatch,
+        "frequency_hz"_a=stats.frequencyHz,"source_node_id"_a=stats.sourceNodeId,
+        "source_antenna_id"_a=stats.sourceAntennaId,"receiver_node_ids"_a=stats.receiverNodeIds,
+        "receiver_antenna_ids"_a=stats.receiverAntennaIds,"registered_receivers"_a=stats.registeredReceivers,
+        "configured_samples_per_source"_a=stats.configuredSamplesPerSource,
+        "configured_max_paths_per_source"_a=stats.configuredMaxPathsPerSource,
+        "configured_max_number_of_paths"_a=stats.configuredMaxNumberOfPaths,
+        "candidate_allocation_valid"_a=stats.candidateAllocationValid,
+        "configured_candidate_cap"_a=stats.configuredCandidateCap,
+        "attempted_calls"_a=stats.attemptedCalls,"completed_calls"_a=stats.completedCalls,
+        "generated_links"_a=stats.generatedLinks,"candidate_capacity_reached_calls"_a=stats.candidateCapacityReachedCalls,
+        "cache_read_calls"_a=stats.cacheReadCalls,"cache_read_hits"_a=stats.cacheReadHits,"cache_read_misses"_a=stats.cacheReadMisses,
+        "last_transmitter_count"_a=stats.lastTransmitterCount,"last_receiver_count"_a=stats.lastReceiverCount,
+        "last_allocated_candidate_cap"_a=stats.lastAllocatedCandidateCap,
+        "last_candidate_count"_a=stats.lastCandidateCount,"last_candidate_buffer_size"_a=stats.lastCandidateBufferSize,
+        "last_retained_paths_per_receiver"_a=stats.lastRetainedPathsPerReceiver,"last_generated_ns"_a=stats.lastGeneratedNs,
+        "last_source_position_m"_a=Coordinates(stats.lastSourcePosition),"last_source_velocity_m_s"_a=Coordinates(stats.lastSourceVelocity),
+        "last_source_orientation_rad"_a=Coordinates(stats.lastSourceOrientation),
+        "scene_prepare_ns"_a=stats.lastScenePrepareWallNs,"solver_ns"_a=stats.lastSolverWallNs,
+        "extraction_ns"_a=stats.lastExtractionWallNs,"cache_publish_ns"_a=stats.lastCachePublishWallNs,
+        "batch_ns"_a=stats.lastBatchWallNs,"max_batch_ns"_a=stats.maxBatchWallNs);
+}
 
 void Require(bool condition, const std::string& reason)
 {
@@ -87,7 +121,7 @@ int main(int argc, char** argv)
     py::scoped_interpreter python;
     py::object connection = py::none();
     Ptr<SionnaRtChannelModel> model;
-    std::map<double,Ptr<SionnaRtChannelModel>> sourceModels;
+    std::map<SourceSignature,SourceContext> sourceContexts;
     int64_t requestId = 0;
     try
     {
@@ -161,34 +195,39 @@ int main(int argc, char** argv)
         model=makeModel(radio["frequency_hz"].cast<double>());
         model->SetReceiverBatchEndpoints(mobility, antennas);
         model->SetReceiverBatchEnabled(true);
-        struct SourceProfile { double frequency; Ptr<SourceArray> array; };
-        std::map<std::string,SourceProfile> sourceProfiles;
+        std::map<std::string,SourceSignature> sourceProfiles;
         if(config.contains("source_profiles"))
         {
-            // CP and every desired receiver retain indices0..baseCount-1.
-            // Only source jobs append the measured source at indexbaseCount.
+            // The one measured emitter retains semantic indexbaseCount. RF
+            // aliases share fixed arrays/models, never mutable pattern changes.
             auto node=CreateObject<Node>(); auto pose=CreateObject<bas::MeasuredMobility>();
             node->AggregateObject(pose); measured.push_back(pose); mobility.push_back(pose);
             semanticIds.emplace(node->GetId(),baseCount);
             for(auto item:config["source_profiles"].cast<py::list>())
             {
-                auto profile=py::reinterpret_borrow<py::dict>(item);
+                const auto profile=py::reinterpret_borrow<py::dict>(item);
                 const auto id=profile["id"].cast<std::string>();
-                const auto frequency=profile["frequency_hz"].cast<double>();
-                if(!sourceModels.count(frequency)) sourceModels.emplace(frequency,makeModel(frequency));
-                auto array=CreateObject<SourceArray>(); array->SetNumRows(1); array->SetNumColumns(1);
-                if(profile["pattern"].cast<std::string>()=="tr38901")
+                const SourceSignature signature{profile["frequency_hz"].cast<double>(),profile["pattern"].cast<std::string>()};
+                auto found=sourceContexts.find(signature);
+                if(found==sourceContexts.end())
                 {
-                    auto element=CreateObject<ThreeGppAntennaModel>();
-                    element->SetRadiationPattern(ThreeGppAntennaModel::RadiationPattern::OUTDOOR);
-                    array->SetAntennaElement(element);
+                    auto array=CreateObject<SourceArray>(); array->SetNumRows(1); array->SetNumColumns(1);
+                    if(signature.second=="tr38901")
+                    {
+                        auto element=CreateObject<ThreeGppAntennaModel>();
+                        element->SetRadiationPattern(ThreeGppAntennaModel::RadiationPattern::OUTDOOR);
+                        array->SetAntennaElement(element);
+                    }
+                    else array->SetAntennaElement(CreateObject<IsotropicAntennaModel>());
+                    PhasedArrayModel::ComplexVector weights(1); weights[0]={1.,0.}; array->SetBeamformingVector(weights);
+                    auto pairwise=makeModel(signature.first),emitter=makeModel(signature.first);
+                    emitter->SetReceiverBatchEndpoints(std::vector<Ptr<const MobilityModel>>(mobility.begin(),mobility.begin()+baseCount),antennas);
+                    emitter->SetReceiverBatchEnabled(true);
+                    emitter->SetEmitterBatchEndpoint(mobility[baseCount],array);
+                    found=sourceContexts.emplace(signature,SourceContext{array,pairwise,emitter,{}}).first;
                 }
-                else array->SetAntennaElement(CreateObject<IsotropicAntennaModel>());
-                PhasedArrayModel::ComplexVector weights(1); weights[0]={1.,0.};
-                array->SetBeamformingVector(weights);
-                Require(array->GetNumElems()==1 && array->GetNumPorts()==1 &&
-                    array->GetNumPols()==1 && array->GetPolSlant()==0,"Source requires fixed V1x1 array");
-                sourceProfiles.emplace(id,SourceProfile{frequency,array});
+                found->second.profileIds.push_back(id);
+                sourceProfiles.emplace(id,signature);
             }
         }
         std::map<std::pair<std::string,size_t>,Ptr<const MatrixBasedChannelModel::ChannelMatrix>> previousSourceMatrices;
@@ -203,15 +242,24 @@ int main(int argc, char** argv)
             "scope"_a="public_native_sdk_rt_producer_probe");
         if(!sourceProfiles.empty())
         {
-            std::vector<double> actualFrequencies;
-            for(const auto& entry:sourceModels)
+            std::set<double> actualFrequencies;
+            py::list contexts;
+            for(const auto& [signature,context]:sourceContexts)
             {
-                DoubleValue actual; entry.second->GetAttribute("Frequency",actual);
-                Require(actual.Get()==entry.first,"Source model carrier changed at readiness");
-                actualFrequencies.push_back(actual.Get());
+                DoubleValue actual; context.emitter->GetAttribute("Frequency",actual);
+                Require(actual.Get()==signature.first,"Source model carrier changed at readiness");
+                const auto stats=context.emitter->GetEmitterBatchStats();
+                Require(stats.bound && stats.pattern==signature.second && stats.frequencyHz==signature.first &&
+                    stats.registeredReceivers==baseCount,"Source emitter context binding differs from frozen RF signature");
+                actualFrequencies.insert(actual.Get());
+                contexts.append(py::dict("frequency_hz"_a=signature.first,"pattern"_a=signature.second,
+                    "profile_ids"_a=context.profileIds,"source_node_id"_a=stats.sourceNodeId,
+                    "source_antenna_id"_a=stats.sourceAntennaId,
+                    "source_modes"_a=std::vector<std::string>{"pairwise","emitter_batch"}));
             }
-            ready["source_model_frequencies_hz"]=actualFrequencies;
+            ready["source_model_frequencies_hz"]=std::vector<double>(actualFrequencies.begin(),actualFrequencies.end());
             ready["source_profile_count"]=sourceProfiles.size();
+            ready["source_profile_contexts"]=contexts;
         }
         connection.attr("send")(ready);
         int64_t lastRequestId = 0;
@@ -245,22 +293,28 @@ int main(int argc, char** argv)
                 }
                 const auto anchor = job["anchor_index"].cast<size_t>();
                 const bool sourceJob=job.contains("profile_id");
-                const bool fullMeshJob=job.contains("channel_mode"); // Validated against the frozen config.
+                const bool emitterJob=sourceJob && job.contains("source_mode"); // Explicit validated SDK12 opt-in.
+                const bool fullMeshJob=!sourceJob && job.contains("channel_mode"); // Validated against the frozen config.
                 const auto profileId=sourceJob ? job["profile_id"].cast<std::string>() : std::string();
-                auto activeModel=sourceJob ? sourceModels.at(sourceProfiles.at(profileId).frequency) : model;
+                auto* sourceContext=sourceJob ? &sourceContexts.at(sourceProfiles.at(profileId)) : nullptr;
+                auto activeModel=sourceJob ? (emitterJob ? sourceContext->emitter : sourceContext->pairwise) : model;
                 Ptr<const PhasedArrayModel> anchorArray;
-                if(sourceJob) anchorArray=sourceProfiles.at(profileId).array;
+                if(sourceJob) anchorArray=sourceContext->array;
                 else anchorArray=antennas[anchor];
                 py::list pairs;
                 const auto callsBefore = model->GetReceiverBatchStats().completedCalls;
                 const auto fullCallsBefore = model->GetFullMeshStats().completedCalls;
+                const auto emitterCallsBefore=emitterJob ? activeModel->GetEmitterBatchStats().completedCalls : 0;
+                const auto sourceBatchBefore=emitterJob ? activeModel->GetReceiverBatchStats().completedCalls : 0;
                 // Our minimal SDK extension forces prefetch even at the same
                 // simulation timestamp or before ordinary cache expiry.
-                if(sourceJob) sourceProfiles.at(profileId).array->ForceFresh();
+                if(emitterJob) activeModel->RefreshEmitterBatch();
+                else if(sourceJob) sourceContext->array->ForceFresh();
                 else if(fullMeshJob) model->RefreshFullMesh();
                 else model->RefreshReceiverBatch(mobility[anchor], antennas[anchor]);
                 std::vector<std::pair<size_t,size_t>> requested;
-                if(sourceJob) requested.emplace_back(anchor,job["peer_index"].cast<size_t>());
+                if(emitterJob)for(size_t peer=0;peer<baseCount;++peer)requested.emplace_back(anchor,peer);
+                else if(sourceJob) requested.emplace_back(anchor,job["peer_index"].cast<size_t>());
                 else if(fullMeshJob)
                     for(size_t tx=0;tx<baseCount;++tx)
                         for(size_t rx=tx+1;rx<baseCount;++rx) requested.emplace_back(tx,rx);
@@ -278,7 +332,7 @@ int main(int argc, char** argv)
                     {
                         const auto key=std::make_pair(profileId,peer);
                         Require(!previousSourceMatrices.count(key) || previousSourceMatrices.at(key)!=matrix,
-                            "Stock pairwise channel did not refresh after array invalidation");
+                            "Source refresh returned a previous request channel matrix");
                         previousSourceMatrices[key]=matrix;
                     }
                     const auto rows = matrix->m_channel.GetNumRows(), cols = matrix->m_channel.GetNumCols();
@@ -318,7 +372,20 @@ int main(int argc, char** argv)
                     pair["fresh_for_request"] = true;
                     pairs.append(pair);
                 }
-                if(fullMeshJob)
+                if(emitterJob)
+                {
+                    const auto stats=activeModel->GetEmitterBatchStats();
+                    const auto expectedCap=static_cast<uint64_t>(radio["max_paths_per_source"].cast<uint32_t>())*baseCount;
+                    Require(stats.completedCalls-emitterCallsBefore==1 &&
+                        activeModel->GetReceiverBatchStats().completedCalls-sourceBatchBefore==1 &&
+                        stats.lastGeneratedNs==sampleNs && stats.bound && stats.hasPublishedBatch &&
+                        stats.lastTransmitterCount==1 && stats.lastReceiverCount==baseCount &&
+                        stats.lastAllocatedCandidateCap==expectedCap && stats.lastCandidateBufferSize==expectedCap &&
+                        stats.lastCandidateCount<stats.lastCandidateBufferSize && stats.candidateCapacityReachedCalls==0 &&
+                        stats.lastRetainedPathsPerReceiver.size()==baseCount,
+                        "Emitter job must perform one fresh six/registered-RX solve without fallback/clipping");
+                }
+                else if(fullMeshJob)
                     Require(model->GetFullMeshStats().completedCalls-fullCallsBefore==1 &&
                             model->GetFullMeshStats().lastGeneratedNs==sampleNs &&
                             model->GetReceiverBatchStats().completedCalls==callsBefore,
@@ -330,12 +397,27 @@ int main(int argc, char** argv)
                 if(sourceJob)
                 {
                     DoubleValue actualFrequency; activeModel->GetAttribute("Frequency",actualFrequency);
-                    Require(actualFrequency.Get()==sourceProfiles.at(profileId).frequency,"Source carrier was changed");
+                    Require(actualFrequency.Get()==sourceProfiles.at(profileId).first,"Source carrier was changed");
                     result["profile_id"]=profileId; result["channel_mode"]="source_star";
-                    result["new_pairwise_calls"]=1; result["frequency_hz"]=actualFrequency.Get();
-                    result["allocated_candidate_cap"]=radio["max_paths_per_source"];
-                    result["candidate_count"]=py::none();
-                    result["candidate_count_scope"]="not_exposed_by_public_pairwise_api";
+                    result["frequency_hz"]=actualFrequency.Get();
+                    if(emitterJob)
+                    {
+                        const auto stats=activeModel->GetEmitterBatchStats();
+                        result["source_mode"]="emitter_batch";
+                        result["new_emitter_batch_calls"]=stats.completedCalls-emitterCallsBefore;
+                        result["emitter_batch_stats"]=EmitterStats(stats);
+                        result["allocated_candidate_cap"]=stats.lastAllocatedCandidateCap;
+                        result["candidate_count"]=stats.lastCandidateCount;
+                        result["candidate_buffer_size"]=stats.lastCandidateBufferSize;
+                        result["candidate_count_scope"]="actual_public_emitter_batch_api";
+                    }
+                    else
+                    {
+                        result["new_pairwise_calls"]=1;
+                        result["allocated_candidate_cap"]=radio["max_paths_per_source"];
+                        result["candidate_count"]=py::none();
+                        result["candidate_count_scope"]="not_exposed_by_public_pairwise_api";
+                    }
                 }
                 else if(fullMeshJob)
                 {
@@ -359,7 +441,7 @@ int main(int argc, char** argv)
             requestId = 0;
         }
         model->Dispose();
-        for(auto& entry:sourceModels) entry.second->Dispose();
+        for(auto& [signature,context]:sourceContexts) {context.pairwise->Dispose();context.emitter->Dispose();}
         Simulator::Destroy(); connection.attr("close")();
         return 0;
     }
@@ -373,7 +455,7 @@ int main(int argc, char** argv)
         }
         catch (const std::exception&) {}
         if (model) model->Dispose();
-        for(auto& entry:sourceModels) entry.second->Dispose();
+        for(auto& [signature,context]:sourceContexts) {context.pairwise->Dispose();context.emitter->Dispose();}
         Simulator::Destroy();
         return 1;
     }
