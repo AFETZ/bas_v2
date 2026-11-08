@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 import threading
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -239,7 +239,7 @@ def make_server(port=8765, *, state=None):
                         stream.seek(0)
                         self.send_response(200)
                         self.send_header('Content-Type', 'application/octet-stream')
-                        self.send_header('Content-Disposition', 'attachment; filename="artifact.bin"')
+                        self.send_header('Content-Disposition', "attachment; filename*=UTF-8''" + quote(path.name, safe=''))
                         self.send_header('Content-Length', str(size))
                         self.send_header('Cache-Control', 'no-store')
                         self.send_header('X-Content-Type-Options', 'nosniff')

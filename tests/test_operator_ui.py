@@ -3,6 +3,8 @@ import copy
 import hashlib
 import http.client
 import json
+import os
+from email.message import Message
 from pathlib import Path
 import tempfile
 import threading
@@ -142,6 +144,27 @@ class OperatorUITests(unittest.TestCase):
         self.assertEqual(self.request('/api/config?path=missing.json')[0], 404)
         self.assertEqual(self.request('/api/status?run_id=../bad')[0], 400)
         self.assertEqual(self.request('/api/status?run_id=unknown')[0], 404)
+
+    def test_download_preserves_filename_and_bytes_without_header_injection(self):
+        folder = self.root / 'runs/export'
+        folder.mkdir(parents=True)
+        names = ['\u043c\u0435\u0442\u0440\u0438\u043a\u0438 \u21161.json']
+        if os.name == 'posix':
+            names.append('quoted"\r\n\r\nbody.json')
+        for name in names:
+            with self.subTest(name=name):
+                path = folder / name
+                content = b'{"observed":true}\n'
+                path.write_bytes(content)
+                code, raw, headers = self.request('/artifact?' + urlencode({'path': path.relative_to(self.root).as_posix()}))
+                self.assertEqual((code, raw), (200, content))
+                value = headers['Content-Disposition']
+                message = Message()
+                message['Content-Disposition'] = value
+                self.assertEqual(message.get_filename(), name)
+                self.assertTrue(value.isascii())
+                self.assertNotIn('\r', value)
+                self.assertNotIn('\n', value)
 
     def test_real_config_and_scene_validation_without_launch(self):
         payload = self.payload(scene=copy.deepcopy(self.scene))
