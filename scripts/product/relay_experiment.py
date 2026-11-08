@@ -842,7 +842,7 @@ class RelayExperiment:
         self.summary["measurement_start_host_monotonic_ns"] = start_ns
         self.observation_end_source_s = start_source + self.args.duration_s
         self.summary["measurement_end_source_sim_time_s"] = self.observation_end_source_s
-        refresh_end_ns = start_ns + int(self.args.duration_s * 1e9)
+        refresh_end_ns = start_ns + round(self.args.duration_s * 1e9)
         self.summary["measurement_refresh_schedule_end_host_monotonic_ns"] = refresh_end_ns
         if getattr(self, "payload_channel", None) is not None:
             self.payload_channel.start_measurement(start_ns, refresh_end_ns)

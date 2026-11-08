@@ -168,6 +168,15 @@ class RelayExperimentTests(unittest.TestCase):
         self.assertNotIn(103.,observed)
         self.assertNotIn(103.02,observed)
 
+    def test_fractional_duration_uses_the_same_nearest_nanosecond_as_load_audit(self):
+        for duration in (1.001,1.003,1.005):
+            with self.subTest(duration=duration):
+                start=10_000_000_000
+                expected_end=start+round(duration*1e9)
+                samples=[(100.,start),(100.+duration+.01,expected_end+10_000_000)]
+                scenario,_,_,_=measure_clock_samples(samples,duration_s=duration,task_period_s=20.)
+                self.assertEqual(scenario.summary['measurement_refresh_schedule_end_host_monotonic_ns'],expected_end)
+
     def test_guided_is_reestablished_after_brake_and_requires_post_request_heartbeat(self):
         now = 2_000_000_000
         grant = Authority("run").issue(1, now - 100_000_000, 2_000_000_000)
