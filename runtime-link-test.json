@@ -1,0 +1,18 @@
+{
+  "environment": {"engine": "gazebo", "scene": "network/config/link_test_mission.json"},
+  "drone": {"autopilot": "ardupilot_sitl", "count": 5},
+  "propagation": {"model": "geometry_logdistance"},
+  "network": {"engine": "ns3", "topology": "adhoc"},
+  "flows": {
+    "channels": ["control", "payload"],
+    "payload_attitude_interval_s": 0.2,
+    "payload_load": {"class": "10kbps", "uav_ids": [1, 2, 3, 4, 5]}
+  },
+  "experiment": {"policy": "failover", "duration_s": 20, "seed": 1, "run": 1},
+  "runtime": {
+    "clock": "realtime",
+    "image": "sha256:89d78eff9914b1644a1b01b793612e9ee8b19916c5a7bf5f578ba6d8bfbfafe5",
+    "land_timeout_s": 120,
+    "event_logging": "batched_trace"
+  }
+}

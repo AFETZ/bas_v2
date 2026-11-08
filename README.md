@@ -31,6 +31,25 @@ realtime и ad-hoc; по умолчанию — geometry_logdistance. Непод
 `--duration 60` задаёт короткое измерительное окно; подготовка и посадка идут отдельно.
 Это проверка соединения компонентов, а не воспроизведение всей серии статьи.
 
+Короткий пример `runtime-link-test.json` задаёт 5 UAV, два UART-канала
+control/payload с эмуляцией baud и 20 секунд измерений. Downlink-нагрузка —
+10 кбит/с полезных тестовых данных на каждый UAV (50 кбит/с суммарно);
+включён `batched_trace`. Миссия — `network/config/link_test_mission.json`,
+радиопрофиль — существующий native Wi-Fi с `geometry_logdistance`.
+Подготовка, взлёт и посадка выполняются вне измерительного окна:
+
+```sh
+python3 bas.py inspect --config runtime-link-test.json
+python3 bas.py run --config runtime-link-test.json --run-id link-test-01
+python3 scripts/product/analyze_relay_experiment.py \
+  --run-dir runs/native-radio-realtime/link-test-01 \
+  --output-dir runs/analysis/link-test-01 --no-plots --skip-live-export
+```
+
+Для повторного опыта выберите новый run ID и каталог анализа. Это базовая
+программная интеграция на плоской сцене с некалиброванной радиомоделью.
+Sionna RT, карта 10×10 км, аппаратная приёмка и SLA этим примером не проверяются.
+
 Локальный интерфейс использует тот же конфиг и контроллер:
 
 ```sh
