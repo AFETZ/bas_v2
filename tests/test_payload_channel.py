@@ -270,7 +270,7 @@ class PayloadOfferedLoadTests(unittest.TestCase):
         patch.object(town, 'endpoint_ip', lambda _: '127.0.0.1').start()
         patch.dict(town.CHANNEL_PORTS, payload=base).start()
 
-    def exercise(self, name='10kbps', *, delayed=False, duration_ns=240_000_000):
+    def exercise(self, name='10kbps', *, delayed=False, duration_ns=240_000_000, observation_tail_ns=0):
         from scripts.product.town01_full_stack_scenario import append_jsonl
         from scripts.product.analyze_relay_experiment import analyze_payload_lineage
         profile = normalize_payload_load({'class': name}, (1,))
@@ -278,7 +278,8 @@ class PayloadOfferedLoadTests(unittest.TestCase):
                                 event_logging='batched_trace', load=profile)
         self.addCleanup(helper.close)
         (self.run/'metrics').mkdir(exist_ok=True)
-        (self.run/'metrics/relay_experiment_config.json').write_text(json.dumps(dict(uav_count=1, payload_load=profile)))
+        (self.run/'metrics/relay_experiment_config.json').write_text(json.dumps(
+            dict(uav_count=1, payload_load=profile, duration_s=duration_ns/1e9)))
         log = self.run/'logs/payload_uart_uav1.jsonl'
         def emit(event, **fields):
             append_jsonl(log, dict(schema=1, event=event, run_id=self.run.name, process_epoch='pipe:1',
@@ -319,8 +320,25 @@ class PayloadOfferedLoadTests(unittest.TestCase):
             os.close(read_fd); os.close(write_fd)
         emit('payload_lineage_closed', close_error=None)
         metrics = helper.close()
-        result = analyze_payload_lineage(self.run, start, end, complete=True)
+        result = analyze_payload_lineage(self.run, start, end+observation_tail_ns, complete=True)
         return profile, metrics, result, received
+
+    def test_load_schedule_retains_frozen_end_when_flight_phase_finishes_later(self):
+        from scripts.product.analyze_relay_experiment import analyze_payload_lineage
+        _, metrics, result, _ = self.exercise(observation_tail_ns=2_001_918)
+        load = result['offered_load']
+        self.assertTrue(load['generator_eligible'], load)
+        window = metrics['measurement_window']
+        start, end = window['start_host_monotonic_ns'], window['end_host_monotonic_ns']
+        self.assertEqual(load['load_window']['end_host_monotonic_ns'], end)
+        self.assertEqual(load['enclosing_observation_end_host_monotonic_ns'], end+2_001_918)
+        truncated = analyze_payload_lineage(self.run, start, end-1, complete=True)
+        self.assertFalse(truncated['offered_load']['generator_eligible'])
+        path = self.run/'metrics/relay_experiment_config.json'
+        config = json.loads(path.read_text()); config['duration_s'] += .001
+        path.write_text(json.dumps(config))
+        self.assertFalse(analyze_payload_lineage(self.run, start, end+2_001_918,
+                                              complete=True)['offered_load']['generator_eligible'])
 
     def test_real_downlink_10kbps_bytes_have_distinct_useful_and_wire_metrics(self):
         # Each invocation uses fresh per-run files and endpoints.

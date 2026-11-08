@@ -392,6 +392,18 @@ def analyze_payload_load(run_dir, rows, records, start_ns, end_ns):
         profile = normalize_payload_load(config['payload_load'], tuple(range(1, count + 1)))
         if profile != config['payload_load'] or len(starts) != 1:
             raise ValueError('one normalized frozen load and one start are required')
+        # The source-time flight phase may finish slightly after its planned
+        # host-time load schedule. Audit that EXACT frozen schedule; phase-loop
+        # overhead must not silently lengthen the requested load denominator.
+        observed_end_ns = end_ns
+        duration_s = config.get('duration_s')
+        if (type(start_ns) is not int or type(end_ns) is not int or not 0 <= start_ns < end_ns < 2**63
+                or type(duration_s) not in (int, float) or finite(duration_s) is None
+                or not 0 < duration_s <= (2**63 - 1 - start_ns) / 1e9):
+            raise ValueError('exact observed window and frozen load duration are required')
+        end_ns = start_ns + round(duration_s * 1e9)
+        if not start_ns < end_ns <= observed_end_ns:
+            raise ValueError('the complete frozen load schedule is not inside the observed window')
         begin = starts[0]
         epoch = begin.get('process_epoch')
         ground = 'payload/logs/scenario_events.jsonl'
@@ -412,12 +424,15 @@ def analyze_payload_load(run_dir, rows, records, start_ns, end_ns):
         closed = closes[0].get('offered_load', {})
         if not isinstance(closed, dict) or not isinstance(closed.get('per_uav'), dict):
             raise ValueError('closed generator ledger is missing')
-        if (type(begin.get('planned_slots_per_uav')) is not int or begin['planned_slots_per_uav'] != planned or closed.get('status') != 'closed'
+        channel = read_json(run_dir / 'metrics/payload_channel.json')
+        if (channel.get('measurement_window', {}).get('start_host_monotonic_ns') != start_ns
+                or channel.get('measurement_window', {}).get('end_host_monotonic_ns') != end_ns
+                or type(begin.get('planned_slots_per_uav')) is not int or begin['planned_slots_per_uav'] != planned or closed.get('status') != 'closed'
                 or closed.get('configured') is not True or closed.get('profile') != profile
                 or type(closed.get('planned_slots_per_uav')) is not int or closed['planned_slots_per_uav'] != planned
                 or begin['observed_host_monotonic_ns'] > closes[0]['observed_host_monotonic_ns']
                 or closes[0]['observed_host_monotonic_ns'] < end_ns
-                or closed != read_json(run_dir / 'metrics/payload_channel.json').get('offered_load')):
+                or closed != channel.get('offered_load')):
             raise ValueError('closed generator ledger does not match the observed trace')
         ranges = []
         for row in rows:
@@ -482,6 +497,9 @@ def analyze_payload_load(run_dir, rows, records, start_ns, end_ns):
         if closed.get('generator_eligible') is not eligible:
             raise ValueError('claimed generator eligibility disagrees with actual slot coverage')
         result.update(status='recorded', generator_eligible=eligible, profile=profile, per_uav=per_uav,
+            load_window=dict(start_host_monotonic_ns=start_ns, end_host_monotonic_ns=end_ns,
+                basis='frozen duration_s and observed measurement start; half-open'),
+            enclosing_observation_end_host_monotonic_ns=observed_end_ns,
             byte_definition='TUNNEL payload[:payload_length], excluding all protocol headers; synthetic test bytes',
             receipt_boundary='UART OS-write end; not flight-controller application acceptance',
             config_sha256=hashlib.sha256(config_path.read_bytes()).hexdigest())
