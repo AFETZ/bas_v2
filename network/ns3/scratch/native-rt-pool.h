@@ -493,7 +493,10 @@ class NativeRtPool
     static void SleepWarm()
     {
         py::gil_scoped_release release;
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        // Bootstrap obeys the same bounded receipt latency as the live drain.
+        // A coarse 20ms sleep can consume most of a 100ms frame's remaining
+        // lifetime before ConfigStore and the first Simulator::Run events.
+        std::this_thread::sleep_for(std::chrono::nanoseconds(kPollPeriodNs));
     }
     std::string Encode(py::handle value)
     {
