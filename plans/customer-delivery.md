@@ -18,7 +18,7 @@
 
 | Требование | Подтверждённое состояние и следующий шаг |
 |---|---|
-| 1–5 UAV | Проверено на `4ef00a8`: короткие полные циклы N=1..5 с обоими paced UART и 10 Кбит/с payload на UAV; все маршруты, посадки и разоружения подтверждены. Runtime и lineage пригодны. У N=5 payload p95 до 435,55 мс и 4–6 missing/391 у UAV2..5: цели качества связи не выполнены. Proof: `control/delivery-fixed-path-storage-runtime-20261108/simple-series-02-verification.json`. RT, нагрузочные серии и совместная приёмка открыты. |
+| 1–5 UAV | Проверено на `4ef00a8`: полные короткие циклы N=1..5 с обоими paced UART и 10 Кбит/с payload на UAV. Найденная потеря retry исправлена в SDK14. Новый публичный N=5 на `e703c86`: все маршруты, посадки, разоружения; 391/391 timely на каждый UAV, payload p95 20,71–23,37 мс, p99 28,70–34,59 мс. Runtime и lineage пригодны. Proof: `control/delivery-fixed-path-storage-runtime-20261108/public-n5-link-analysis-02/`. Статистические серии, RT и совместная приёмка открыты. |
 | Жизненный цикл | Проверено в указанных коротких циклах: свежий фактический LAND не заменяется BRAKE при expiry lease; посадка имеет отдельную наблюдаемую provenance. Пересылаемые ArduPilot MAVLink с чужим SYSID отбрасываются с сохранением очереди provenance, не останавливая миссию. Длительный исходный `delivery-five-20261107-01` оборван watchdog из-за 34,8 с отставания; причина не установлена, результат сохранён. |
 | Результаты | Проверено на реальных запусках: runtime_status, mission_outcome, measurement_validity; native stop reason, capture publication и обязательные артефакты участвуют в итоговом критерии. Незавершённые маршруты не становятся успешными по окончании окна. |
 | Serial/Ethernet | Частично: `delivery-native-pty-n1-20261107-01` проверил два Serial PTY через действующий native PHY/MAC; `delivery-native-ethernet-n1-20261107-01` — UDP control + TCP payload через штатный socat к реальным UART SITL. В обоих 24/24 команды приняты, payload AUTOPILOT_VERSION получен. Ethernet-прогон также подтвердил no-bypass: PHY sleep 10,52 с, UART источника продолжает выдачу, до НПУ не дошло ни одного кадра обоих потоков. Артефакты: `control/delivery-native-{pty,ethernet}-20261107/`, `native-radio-realtime/<ID>/metrics/`. Физическое оборудование отсутствует. |
@@ -160,11 +160,19 @@ p95 36,63–435,55 мс, p99 до 523,02 мс. Это исправный изм�
 `simple-series-02-verification.json` в той же папке control.
 Отдельная регрессия дробных duration 1,001/1,003/1,005 с устранила рассогласование
 `int`/`round` на 1 нс между `measure` и аудитом нагрузки; 54 focused tests прошли.
-Минимальный публичный вход этого опыта — `runtime-link-test.json` с tracked миссией,
-без ссылок на `runs/`; inspect проверен, полный запуск публичного входа ещё не выполнен.
-Разбор N=5 локализовал 19 missing между успешным PHY retry и TAP, а задержку доставленных
-кадров — в ordered BSF1 после пропуска. Вероятная причина потери в promiscuous MAC
-duplicate bookkeeping проверяется отдельной регрессией; смена timeout сама потерю не исправит.
+Минимальный публичный вход — `runtime-link-test.json` с tracked миссией, без ссылок на `runs/`.
+Разбор 19 missing доказал ошибку promiscuous MacRxMiddle: чужой адресат загрязнял
+учёт одинакового source/TID/sequence, свой успешный retry терялся до TAP, затем BSF1
+удерживал следующие записи. SDK14 разделяет QoS unicast state по RA; PHY/ARQ/promisc
+и timeout не менялись. Actual FEM/RxMiddle regression RED (retry/fragment cases) → GREEN
+(6 cases), четыре stock Wi-Fi suites: 119 child PASS. Доказательства и SHA:
+`simple-n5-10kbps-causal-01/{causal.json,red01,green02}/` в той же папке control.
+Публичный `delivery-public-link-n5-macfixed-20261108-02` на чистом `e703c86` прошёл весь
+цикл за 185,90 с: 391/391 timely на каждый UAV, 10009,6 бит/с, p95 20,71–23,37 мс,
+p99 28,70–34,59 мс; независимые runtime/lineage checks прошли. Это один опыт, не SLA серии.
+Предыдущий `…-01` остановился до симуляции из-за неверно размещённой shell declaration
+в раздельном коммите; исправление проверено actual Bash для всех четырёх scene branches
+(`launcher-declaration-regression-01.json`), исходный failed attempt сохранён.
 
 Источники действительно влияют на Spectrum PHY. Старый полный N=1 на `2065c4e`
 и контроль со сдвигом 2412→2447 МГц разделили cochannel loss и внеполосный источник:
