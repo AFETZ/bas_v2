@@ -1,5 +1,6 @@
 """Composition/transport and onboard failsafe checks; no flight or hardware claims."""
 import copy
+import base64
 import json
 import os
 import select
@@ -505,7 +506,8 @@ class ControlUartPtyTests(unittest.TestCase):
                 self.assertTrue(any(event=='uart_admitted' for event,_ in events))
                 self.assertEqual(len(bodies),1)
                 receiver = Reassembler(channel='control',uav_id=1,direction='uart_to_gcs')
-                self.assertEqual(receiver.ingest(bodies[0]['payload'],time.monotonic_ns()),[heartbeat])
+                self.assertEqual(receiver.ingest(base64.b64decode(bodies[0]['payload'],validate=True),
+                                                time.monotonic_ns()),[heartbeat])
                 self.assertEqual(receiver.released_sent_ns,[bodies[0]['producer_ns']])
                 self.assertEqual(node.latest_autopilot_mode['received_host_monotonic_ns'],bodies[0]['producer_ns'])
                 self.assertEqual(node.uart_up_budget.snapshot()['charged_bytes'],len(heartbeat))
