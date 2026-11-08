@@ -2268,7 +2268,7 @@ main(int argc, char* argv[])
     for (uint32_t index = 0; index < radioDevices.GetN(); ++index)
         g_wifiRadioIndices[Mac48Address::ConvertFrom(radioDevices.Get(index)->GetAddress())] = index;
     g_runtimeHeartbeat = readyFile + ".heartbeat";
-    if (g_executionMode == "realtime") positions.Poll();
+    if (g_executionMode == "realtime") positions.Refresh();
     if (sionna && g_executionMode == "realtime" && radioBackend == "wifi")
     {
         NS_ABORT_MSG_IF(!g_liveStateValid, "Sionna preparation requires an initial valid pose snapshot");
@@ -2451,6 +2451,10 @@ main(int argc, char* argv[])
     }
     NativeRuntimeSampler metrics(sionna ? sionna->GetChannelModel() : nullptr, cpMobility, uavMobility);
     g_runtimeSampler = &metrics;
+    // Preparation reads do not schedule the live timer. Observe at native zero
+    // before the first RT dispatch: ConfigStore and Run initialization may have
+    // outlived the last pre-Run source publication. Preserve measured epochs.
+    if (g_executionMode == "realtime") Simulator::ScheduleNow(&LivePositionSource::Poll, &positions);
     if (rtPool) Simulator::ScheduleNow(&bas::NativeRtPool::Poll, rtPool.get());
     Simulator::ScheduleNow(&NativeRuntimeSampler::PollLag, &metrics);
     Simulator::Schedule(Seconds(1), &NativeRuntimeSampler::PollSionnaPaths, &metrics);
