@@ -49,6 +49,10 @@ INPUTS = ('.devcontainer/requirements-native.in', '.devcontainer/requirements-na
 LOCK_NAMES = ('requirements-native.lock', 'requirements-native-tooling.lock')
 RECEIPT = '.external/native-bootstrap.json'
 ACTIVE_LOG = None  # Set only within an explicit mutating CLI attempt.
+NATIVE_CONFIGURE_ARGV = (
+    './ns3', 'configure', '--build-profile=default', '--enable-examples', '--enable-tests',
+    '--enable-python-bindings', '--', '-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O3 -g -DNDEBUG',
+)
 HISTORICAL_MISSING_NON_RUNTIME = frozenset((
     '.vscode/.gitignore', '.vscode/launch.json', '.vscode/tasks.json', 'AGENTS.md',
 ))
@@ -409,6 +413,7 @@ def input_identity(root, bundle, image):
     sources = [*patches(root), *(root / 'network/ns3/scratch' / n for n in SCRATCH_FILES),
                *(p for p in (root / 'src').rglob('*') if p.is_file() and '__pycache__' not in p.parts)]
     return dict(image_id=image, ns3_sha=NS3_SHA, bundle_sha256=sha256(bundle / 'manifest.json'),
+                native_configure_argv=list(NATIVE_CONFIGURE_ARGV),
                 files={p.relative_to(root).as_posix(): sha256(p) for p in sorted(sources)})
 
 
@@ -419,11 +424,34 @@ def verify_cache(root):
     required = 'CMAKE_HOME_DIRECTORY:INTERNAL=' + MOUNT + '/' + SDK_PATH
     if required not in path.read_text().splitlines():
         raise ValueError('CMake cache points outside the canonical SDK mount; left untouched')
+    values = {line.split('=', 1)[0].split(':', 1)[0]: line.split('=', 1)[1]
+              for line in path.read_text().splitlines() if ':' in line and '=' in line}
+    expected = dict(CMAKE_BUILD_TYPE='default', CMAKE_CXX_FLAGS_RELWITHDEBINFO='-O3 -g -DNDEBUG',
+                    NS3_ASSERT='ON', NS3_LOG='ON', NS3_NATIVE_OPTIMIZATIONS='OFF')
+    if any(values.get(key) != value for key, value in expected.items()):
+        raise ValueError('Native cache must use default/O3 with NS3 assert/log enabled and native optimizations off')
+    commands = json.loads((path.parent / 'compile_commands.json').read_text())
+    if not isinstance(commands, list):
+        raise ValueError('Native compile commands must be a list')
+    units = ('src/spectrum/model/sionna-rt-channel-model.cc',
+             'src/spectrum/model/sionna-rt-spectrum-propagation-loss-model.cc',
+             'scratch/upstream-sionna-tap-spike.cc', 'scratch/native-rt-worker.cc')
+    required_flags = {'-O3', '-g', '-DNDEBUG', '-DNS3_ASSERT_ENABLE', '-DNS3_LOG_ENABLE'}
+    for unit in units:
+        rows = [row for row in commands if isinstance(row, dict)
+                and row.get('file') == f'{MOUNT}/{SDK_PATH}/{unit}']
+        compile_command = rows[0].get('command') if len(rows) == 1 else None
+        flags = shlex.split(compile_command) if isinstance(compile_command, str) else []
+        if (not required_flags <= set(flags) or any(flag in flags for flag in
+                ('-O0', '-O1', '-O2', '-Os', '-Og', '-Ofast', '-ffast-math', '-march=native', '-mtune=native'))):
+            raise ValueError(f'Native compile flags do not match portable default/O3 with assert/log: {unit}')
+    return dict(expected, checked_translation_units=list(units))
 
 
 def inspect(root, image, bundle):
     gaps = []
     sdk_verification = {}
+    build_configuration = {}
     def check(name, fn):
         try:
             fn()
@@ -432,7 +460,7 @@ def inspect(root, image, bundle):
     check('image', lambda: image_id(image))
     check('wheel_bundle', lambda: validate_bundle(root, bundle, image))
     check('ns3', lambda: sdk_verification.update(verify_sdk(root, root / SDK_PATH)))
-    check('cmake_cache', lambda: verify_cache(root))
+    check('cmake_cache', lambda: build_configuration.update(verify_cache(root)))
     for name in SCRATCH_FILES:
         src, dst = root / 'network/ns3/scratch' / name, root / SDK_PATH / 'scratch' / name
         if not dst.is_file() or sha256(src) != sha256(dst):
@@ -461,6 +489,7 @@ def inspect(root, image, bundle):
                       environment_script(f'{SDK_PATH}/{d}', environment_versions(manifest, t)), readonly=True))
     return dict(schema_version=1, mode='check_only', image_id=image, ns3_sha=NS3_SHA,
                 native_sdk_source_verification=sdk_verification or None,
+                native_build_configuration=build_configuration or None,
                 ready=not gaps, gaps=gaps, gpu_checked=False, runtime_started=False,
                 clean_machine_acceptance='not_performed')
 
@@ -531,17 +560,19 @@ def bootstrap(root, image, bundle):
               'export PATH="$PWD/.tooling-py310/bin:$PATH"\n'
               'export PYTHONPATH="$PWD/.tooling-py310:$PWD/.python-deps-py310"\n'
               'if [[ ! -f cmake-cache/CMakeCache.txt ]]; then\n'
-              '  ./ns3 configure --enable-examples --enable-tests --enable-python-bindings\nfi\n'
+              f'  {shlex.join(NATIVE_CONFIGURE_ARGV)}\nfi\n'
               './ns3 build upstream-sionna-tap-spike\n./ns3 build native-rt-worker', log=log)
-    verify_cache(root)
+    build_configuration = verify_cache(root)
     outputs = ['install/setup.bash',
                SDK_PATH + '/cmake-cache/CMakeCache.txt',
+               SDK_PATH + '/cmake-cache/compile_commands.json',
                SDK_PATH + '/build/scratch/ns3.48-upstream-sionna-tap-spike-default',
                SDK_PATH + '/build/scratch/ns3.48-native-rt-worker-default',
                SDK_PATH + '/build/lib/libns3.48-spectrum-default.so',
                SDK_PATH + '/build/lib/libns3.48-tap-bridge-default.so']
     result = dict(schema_version=1, status='built', inputs=identity,
                   native_sdk_source_verification=sdk_verification,
+                  native_build_configuration=build_configuration,
                   environments={d: environment_hash(sdk / d) for d in ['.python-deps-py310', '.tooling-py310']},
                   ros_trees={d: environment_hash(root / d, allow_links=True) for d in ['build', 'install']},
                   outputs={p: sha256(root / p) for p in outputs}, runtime_started=False,

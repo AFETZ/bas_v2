@@ -312,6 +312,11 @@ docker image inspect "$IMAGE" --format '{{.Id}}'
 `/workspace/multiagent_simulation`, общий lock стенда и собирает ROS-пакет,
 ns-3.48 `d2add90b452d600cfb4859baed8e9ea633519447`, двенадцать patches и оба native targets.
 Симуляторы при этом не запускаются, GPU не требуется.
+Bootstrap использует переносимый `default` профиль с `-O3 -g -DNDEBUG`, сохраняя
+`NS3_ASSERT` и `NS3_LOG`; `-march=native` не включается, имена бинарников остаются
+с суффиксом `default`. Cache и фактические compile commands проверяются. Прежняя
+fresh-сборка `f2557bc` использовала штатный `-Os`; её receipt не заменяет проверку
+нового профиля. Ускорение и E2E для `-O3` проверяются отдельно.
 
 ```sh
 python3 scripts/product/bootstrap_native_runtime.py --check-only

@@ -42,6 +42,23 @@ class NativeBootstrapTests(unittest.TestCase):
                             f'Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n')
         return p
 
+    def native_cache(self, **overrides):
+        directory = self.root / bootstrap.SDK_PATH / 'cmake-cache'
+        directory.mkdir(parents=True, exist_ok=True)
+        values = dict(CMAKE_HOME_DIRECTORY=f'{bootstrap.MOUNT}/{bootstrap.SDK_PATH}', CMAKE_BUILD_TYPE='default',
+            CMAKE_CXX_FLAGS_RELWITHDEBINFO='-O3 -g -DNDEBUG', NS3_ASSERT='ON', NS3_LOG='ON', NS3_NATIVE_OPTIMIZATIONS='OFF')
+        values.update(overrides)
+        (directory / 'CMakeCache.txt').write_text(''.join(
+            f'{key}:{"INTERNAL" if key == "CMAKE_HOME_DIRECTORY" else "STRING"}={value}\n'
+            for key, value in values.items()))
+        rows = [dict(file=f'{bootstrap.MOUNT}/{bootstrap.SDK_PATH}/{unit}',
+            command='/usr/bin/c++ -DNS3_ASSERT_ENABLE -DNS3_LOG_ENABLE -O3 -g -DNDEBUG -c source.cc')
+            for unit in ('src/spectrum/model/sionna-rt-channel-model.cc',
+                         'src/spectrum/model/sionna-rt-spectrum-propagation-loss-model.cc',
+                         'scratch/upstream-sionna-tap-spike.cc', 'scratch/native-rt-worker.cc')]
+        (directory / 'compile_commands.json').write_text(json.dumps(rows))
+        return directory
+
     def test_full_resolved_bundle_contains_transitive_hash_and_separate_tooling(self):
         result = bootstrap.validate_bundle(self.root, self.bundle, IMAGE)
         runtime = (self.bundle / bootstrap.LOCK_NAMES[0]).read_text()
@@ -216,15 +233,47 @@ class NativeBootstrapTests(unittest.TestCase):
                 self.assertTrue((root / source).is_file(), source)
 
     def test_cache_requires_canonical_in_container_source_directory(self):
-        cache = self.root / bootstrap.SDK_PATH / 'cmake-cache/CMakeCache.txt'
-        cache.parent.mkdir(parents=True)
-        cache.write_text('CMAKE_HOME_DIRECTORY:INTERNAL=/home/bas/old-copy\n')
+        cache = self.native_cache(CMAKE_HOME_DIRECTORY='/home/bas/old-copy') / 'CMakeCache.txt'
         before = cache.read_bytes()
         with self.assertRaisesRegex(ValueError, 'canonical SDK mount'):
             bootstrap.verify_cache(self.root)
         self.assertEqual(cache.read_bytes(), before)
-        cache.write_text(f'CMAKE_HOME_DIRECTORY:INTERNAL={bootstrap.MOUNT}/{bootstrap.SDK_PATH}\n')
+        self.native_cache()
         bootstrap.verify_cache(self.root)
+
+    def test_native_configure_argv_matches_audited_portable_o3_profile(self):
+        expected = ['./ns3', 'configure', '--build-profile=default', '--enable-examples', '--enable-tests',
+                    '--enable-python-bindings', '--', '-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O3 -g -DNDEBUG']
+        self.assertEqual(list(bootstrap.NATIVE_CONFIGURE_ARGV), expected)
+        self.assertEqual(shlex.split(shlex.join(bootstrap.NATIVE_CONFIGURE_ARGV)), expected)
+
+    def test_cache_rejects_old_os_profile_or_disabled_guards(self):
+        for key, value in [('CMAKE_CXX_FLAGS_RELWITHDEBINFO', '-O2 -g -DNDEBUG'), ('CMAKE_BUILD_TYPE', 'release'),
+                           ('NS3_ASSERT', 'OFF'), ('NS3_LOG', 'OFF'), ('NS3_NATIVE_OPTIMIZATIONS', 'ON')]:
+            self.native_cache(**{key: value})
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, 'default/O3'):
+                bootstrap.verify_cache(self.root)
+
+    def test_actual_compile_commands_must_match_profile_not_only_cache_label(self):
+        for bad_flag in ('-Os', '-march=native', '-mtune=native', '-ffast-math'):
+            directory = self.native_cache()
+            rows = json.loads((directory / 'compile_commands.json').read_text())
+            rows[0]['command'] += ' ' + bad_flag
+            (directory / 'compile_commands.json').write_text(json.dumps(rows))
+            with self.subTest(flag=bad_flag), self.assertRaisesRegex(ValueError, 'compile flags'):
+                bootstrap.verify_cache(self.root)
+        directory = self.native_cache()
+        rows = json.loads((directory / 'compile_commands.json').read_text())
+        rows[1]['command'] = rows[1]['command'].replace('-DNS3_ASSERT_ENABLE', '')
+        (directory / 'compile_commands.json').write_text(json.dumps(rows))
+        with self.assertRaisesRegex(ValueError, 'compile flags'):
+            bootstrap.verify_cache(self.root)
+        directory = self.native_cache()
+        rows = json.loads((directory / 'compile_commands.json').read_text())
+        rows[1]['command'] += ' -Os'  # A per-file PSD override must not escape the profile guard.
+        (directory / 'compile_commands.json').write_text(json.dumps(rows))
+        with self.assertRaisesRegex(ValueError, 'sionna-rt-spectrum-propagation-loss-model'):
+            bootstrap.verify_cache(self.root)
 
     def test_all_twelve_runtime_patches_and_both_native_targets_are_prepared(self):
         self.assertEqual(len(bootstrap.PATCH_NAMES), 12)
