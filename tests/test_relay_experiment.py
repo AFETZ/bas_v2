@@ -156,6 +156,18 @@ class RelayExperimentTests(unittest.TestCase):
         self.assertAlmostEqual(scenario.summary["measurement_duration_source_s"], 40.013)
         self.assertAlmostEqual(scenario.summary["measurement_duration_wall_s"], 40.028)
 
+    def test_fast_source_clock_does_not_truncate_the_declared_host_load_window(self):
+        samples=[(100.,10_000_000_000),(101.,11_000_000_000),(102.,12_000_000_000),
+                 (103.,12_998_000_000),(103.02,13_002_000_000)]
+        scenario,offers,events,observed=measure_clock_samples(samples,duration_s=3.,task_period_s=3.)
+        self.assertGreaterEqual(scenario.summary['measurement_duration_wall_s'],3.)
+        self.assertEqual(scenario.summary['measurement_refresh_schedule_end_host_monotonic_ns'],13_000_000_000)
+        self.assertEqual(scenario.summary['measurement_end_host_monotonic_ns'],13_002_000_000)
+        self.assertEqual(len(offers),15)
+        self.assertTrue(all(row['source_sim_time_s']<103. for row in offers))
+        self.assertNotIn(103.,observed)
+        self.assertNotIn(103.02,observed)
+
     def test_guided_is_reestablished_after_brake_and_requires_post_request_heartbeat(self):
         now = 2_000_000_000
         grant = Authority("run").issue(1, now - 100_000_000, 2_000_000_000)

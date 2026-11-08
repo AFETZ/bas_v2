@@ -847,13 +847,17 @@ class RelayExperiment:
         if getattr(self, "payload_channel", None) is not None:
             self.payload_channel.start_measurement(start_ns, refresh_end_ns)
         current_goal, goals, next_refresh = -1, {}, start_ns
-        while self.source_s - start_source < self.args.duration_s:
+        # Preserve the source-time control window AND observe the entire
+        # predeclared host-time load schedule. A slightly fast source clock
+        # must not move LAND into the last offered-load milliseconds.
+        while (self.source_s - start_source < self.args.duration_s
+               or time.monotonic_ns() < refresh_end_ns):
             self.pump()
             elapsed = self.source_s - start_source
-            if elapsed >= self.args.duration_s:
-                break  # a new source sample may cross the half-open measurement window
             if time.monotonic_ns() - start_ns > int((self.args.duration_s * 1.1 + 10) * 1e9):
                 raise MeasurementError("measurement failed to advance at live rate")
+            if elapsed >= self.args.duration_s:
+                continue  # Drain host-time payload only; no new source-window control offers/goals.
             phase = ("experiment_normal" if getattr(self, "urban", None) or elapsed < self.args.fault_start_s else
                      "experiment_fault" if elapsed < self.args.fault_end_s else "experiment_recovery")
             self.phase(phase)
@@ -876,7 +880,10 @@ class RelayExperiment:
                 self.refresh(goals, scheduled_ns=next_refresh)
                 next_refresh += int(self.args.command_period_s * 1e9)
         self.summary["measurement_duration_source_s"] = self.source_s - start_source
-        self.summary["measurement_duration_wall_s"] = (time.monotonic_ns() - start_ns) / 1e9
+        end_ns = time.monotonic_ns()
+        self.summary['measurement_end_host_monotonic_ns'] = end_ns
+        self.summary['measurement_window_policy'] = 'complete_source_control_window_and_host_load_schedule'
+        self.summary["measurement_duration_wall_s"] = (end_ns - start_ns) / 1e9
         self.summary["measurement_integral_rtf"] = self.summary["measurement_duration_source_s"] / self.summary["measurement_duration_wall_s"]
         self.summary["completed_goals"] = list(self.observer.completed.values())
         if getattr(self, "urban", None):

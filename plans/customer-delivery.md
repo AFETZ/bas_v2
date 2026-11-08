@@ -106,8 +106,14 @@ thread CPU / GC / DrJit kernel-cache timing; затем исправление �
 16..23 являются SMT-соседями stack CPU 0..7, хотя прежний radio mask 8..31 их включал.
 Новый per-run partition использует sysfs package/core и фактически доступный affinity,
 сохраняет SMT-соседей в одной роли; применяет существующий taskset, хост не перенастраивает.
-50 локальных tests прошли, включая noncontiguous masks, два socket и отсутствие topology.
-Целевое применение mask и влияние на RT ещё требуют проверки; CPU-tail этим не объявлен устранённым.
+50 локальных и target tests прошли, включая noncontiguous masks, два socket и отсутствие topology.
+`checks-18` подтвердил actual taskset child masks и ноль физических пересечений:
+`cpu-topology-application-01.json`. N=1 10kbps `…-03` всё равно failed до нагрузки:
+последний завершённый job 21,48 мс, следующий ответ не наблюдался за 51,37 мс.
+Native lag 0,275 мс, tracker исправен. Proof: `n1-10kbps-03-causal-analysis.json`.
+CPU-tail этим исправлением не устранён. Replay 50 original-pose заданий без retimestamp
+дал hot p95 16,81 мс, новых JIT misses/GC внутри producer не наблюдалось;
+live причину это не устанавливает: `trace05-replay-02-derived-verification.json`.
 
 Нагрузочный downlink `flows.payload_load` реализован штатным MAVLink TUNNEL через
 существующий FlightHarness/BSF1/общий канал, без нового транспорта. На `5be6c3f`
@@ -133,6 +139,13 @@ Linux-теста исправлены отдельно (`72985b1`, `7d951c7`); �
 475 tests (474 pass, 1 skip), `checks-17-command.json`, `development-control-solo-02/`
 и `development-paced-control-03/`. Это программные границы, без RF/hardware.
 Стенд с обеими новыми UART clocks пока не прошёл новый полный RT цикл.
+На `e734ab4` простой профиль `delivery-simple-payload-n1-10kbps-20261108-01`
+выполнил весь полёт с обоими paced UART и нагрузкой. Однако отдельный анализ
+отклонил load-window: source clock завершил фазу чуть раньше заданных 20 с host time.
+Исправление `measure()` ожидает оба объявленных интервала и сохраняет exact host end;
+после source cutoff новые control offers/goals не создаются. Причинная регрессия
+2,998 с вместо 3 с воспроизведена RED, затем 67 tests (65 pass, 2 POSIX skip) GREEN.
+Старый анализ сохранён; нагрузочная проверка и составы 1–5 требуют новых прогонов.
 
 Источники действительно влияют на Spectrum PHY. Старый полный N=1 на `2065c4e`
 и контроль со сдвигом 2412→2447 МГц разделили cochannel loss и внеполосный источник:
