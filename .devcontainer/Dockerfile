@@ -33,6 +33,9 @@ RUN sudo apt update
 # Install Git
 RUN sudo apt install -y git
 
+# Header-only native trace formatter, also present in the pinned runtime image.
+RUN sudo apt-get install -y libfmt-dev=8.1.1+ds1-2
+
 # Rosdep update
 RUN rosdep update
 

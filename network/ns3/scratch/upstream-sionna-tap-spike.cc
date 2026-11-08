@@ -1,3 +1,6 @@
+// fmt 8.1.1 (MIT) is installed in the pinned runtime; header-only needs no new link target.
+#define FMT_HEADER_ONLY 1
+#include <fmt/format.h>
 #include "pybind11/embed.h"
 
 #include "ns3/adhoc-aloha-noack-ideal-phy-helper.h"
@@ -34,6 +37,7 @@
 #include "native-lockstep.h"
 #include "native-geometry-loss.h"
 #include "native-rt-pool.h"
+#include "native-log-phase.h"
 #include <memory>
 
 #include <algorithm>
@@ -45,6 +49,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <iterator>
 #include <limits>
 #include <optional>
 #include <sstream>
@@ -110,6 +115,7 @@ uint32_t g_couplingStepMs = 20;
 uint64_t g_completedSteps = 0;
 double g_stepTimeoutS = 60;
 std::string g_phaseFile;
+std::unique_ptr<bas::NativeLogPhase> g_logPhase;
 std::string g_eventLogging{"batched_trace"};
 uint32_t g_flushEveryEvents{256};
 uint32_t g_flushMaxDelayMs{25};
@@ -287,6 +293,14 @@ HandleSignal(int)
     g_stopRequested = 1;
 }
 
+const std::string&
+ReadLogPhase()
+{
+    if (!g_logPhase)
+        g_logPhase = std::make_unique<bas::NativeLogPhase>(g_phaseFile, ReadPhase);
+    return g_logPhase->Get();
+}
+
 void
 LogEvent(const std::string& event,
          const std::string& node,
@@ -321,14 +335,24 @@ LogEvent(const std::string& event,
     const auto wallNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
                             std::chrono::steady_clock::now().time_since_epoch())
                             .count();
-    g_events << std::fixed << std::setprecision(6) << Simulator::Now().GetSeconds() << ',' << wallNs
-             << ',' << ReadPhase() << ',' << event << ',' << node << ',' << peer << ',' << bytes
-             << ',' << position.x << ',' << position.y << ',' << position.z << ',';
+    fmt::memory_buffer line;
+    const auto simulationSeconds = Simulator::Now().GetSeconds();
+    const auto& phase = ReadLogPhase();
     if (std::isfinite(value))
     {
-        g_events << value;
+        fmt::format_to(std::back_inserter(line),
+                       "{:.6f},{},{},{},{},{},{},{:.6f},{:.6f},{:.6f},{:.6f},{}\n",
+                       simulationSeconds, wallNs, phase, event, node, peer, bytes,
+                       position.x, position.y, position.z, value, details);
     }
-    g_events << ',' << details << '\n';
+    else
+    {
+        fmt::format_to(std::back_inserter(line),
+                       "{:.6f},{},{},{},{},{},{},{:.6f},{:.6f},{:.6f},,{}\n",
+                       simulationSeconds, wallNs, phase, event, node, peer, bytes,
+                       position.x, position.y, position.z, details);
+    }
+    g_events.write(line.data(), static_cast<std::streamsize>(line.size()));
     ++g_pendingEventWrites;
     const auto now = std::chrono::steady_clock::now();
     if (g_pendingEventWrites >= g_flushEveryEvents ||
@@ -1523,13 +1547,25 @@ WriteStats(const std::string& path)
            << "  \"successful_pose_reader_calls\": " << g_poseReaderCalls << ",\n"
            << "  \"successful_pose_reader_wall_ns\": " << g_poseReaderWallNs << ",\n"
            << "  \"successful_pose_reader_max_wall_ns\": " << g_poseReaderMaxWallNs << ",\n"
-           << "  \"event_trace_timing\": {\"scope\":\"native_main_thread;phase_and_flush_nested_in_log_event;includes_warmup\",\"log_event\":";
+           << "  \"event_trace_formatter\": {\"backend\":\"fmt_memory_buffer\",\"fmt_version\":" << FMT_VERSION << "},\n"
+           << "  \"event_trace_timing\": {\"scope\":\"native_main_thread;phase_reads_include_control_and_log_reload;flush_nested_in_log_event;includes_warmup\",\"log_event\":";
     WriteTraceTiming(output,g_eventTraceTiming);
     output << ",\"read_phase\":";
     WriteTraceTiming(output,g_phaseReadTiming);
     output << ",\"flush\":";
     WriteTraceTiming(output,g_eventFlushTiming);
-    output << "},\n"
+    output << "},\n";
+    const auto phaseStats = g_logPhase ? g_logPhase->GetStats() : bas::NativeLogPhase::Stats{};
+    output << "  \"log_phase_observation\": {\"backend\":\"inotify_cached_log_only\","
+           << "\"lookups\":" << phaseStats.lookups << ",\"cache_hits\":" << phaseStats.cacheHits
+           << ",\"reloads\":" << phaseStats.reloads << ",\"relevant_events\":" << phaseStats.relevantEvents
+           << ",\"ignored_events\":" << phaseStats.ignoredEvents << ",\"overflows\":" << phaseStats.overflows
+           << ",\"watch_failures\":" << phaseStats.watchFailures << ",\"read_errors\":" << phaseStats.readErrors
+           << ",\"fallback_calls\":" << phaseStats.fallbackCalls << ",\"rebinds\":" << phaseStats.rebinds
+           << ",\"watch_active\":" << (phaseStats.watchActive ? "true" : "false")
+           << ",\"closed\":" << (phaseStats.closed ? "true" : "false")
+           << ",\"notification_fd\":" << phaseStats.notificationFd << ",\"last_errno\":" << phaseStats.lastErrno
+           << ",\"last_fallback_reason\":" << std::quoted(phaseStats.lastFallbackReason) << "},\n"
            << "  \"desired_spectrum_boundary\": {\"calls\":" << g_spectrumCalls
            << ",\"wall_ns\":" << g_spectrumWallNs << ",\"max_wall_ns\":" << g_spectrumMaxWallNs
            << ",\"max_wall_native_ns\":" << g_spectrumMaxWallNativeNs
@@ -2644,6 +2680,7 @@ main(int argc, char* argv[])
         g_sionnaReceiverBatchStatsJson = observed.str();
     }
     Simulator::Destroy();
+    if (g_logPhase) g_logPhase->Close();
     WriteStats(statsFile);
     g_poseSourceForStats = nullptr;
     FlushEvents();

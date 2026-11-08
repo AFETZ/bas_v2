@@ -778,6 +778,7 @@ export PYTHONPATH="$PYTHON_TOOLING:$PYTHON_DEPS:${PYTHONPATH:-}"
 cp "$PROJECT_SOURCE" "$UPSTREAM_SOURCE"
 cp "$ROOT_DIR/network/ns3/scratch/native-geometry-loss.h" "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" "$ROOT_DIR/network/ns3/scratch/native-live-state.h" "$ROOT_DIR/network/ns3/scratch/native-lockstep.h" "$NS3_DIR/scratch/"
 cp "$ROOT_DIR/network/ns3/scratch/native-rt-cache.h" "$ROOT_DIR/network/ns3/scratch/native-rt-pool.h" "$ROOT_DIR/network/ns3/scratch/native-rt-worker.cc" "$NS3_DIR/scratch/"
+cp "$ROOT_DIR/network/ns3/scratch/native-log-phase.h" "$NS3_DIR/scratch/"
 source_args=()
 if [[ "$SCENARIO_KEY" == urban ]]; then
   cp "$GEOMETRY_CONFIG" "$RUN_DIR/logs/urban_scenario.json"
@@ -823,6 +824,9 @@ if [[ "${BAS_NATIVE_FIVE_SKIP_BUILD:-0}" == 1 ]]; then
   }
   [[ "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-rt-cache.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-rt-pool.h" ]] || {
     printf 'Binary predates native RT cache/pool header.\n' >&2; exit 2;
+  }
+  [[ "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-log-phase.h" ]] || {
+    printf 'Binary predates logging phase observer.\n' >&2; exit 2;
   }
   if [[ "$SIONNA_RT_EXECUTION_MODE" == worker_pool ]]; then
     [[ -x "$RT_WORKER_BINARY" && "$RT_WORKER_BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-rt-worker.cc" && "$RT_WORKER_BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-live-state.h" ]] || {
@@ -1075,6 +1079,7 @@ capture_effective_configuration() {
     --config "tap_queue_selection_patch=$TAP_QUEUE_SELECTION_PATCH"
     --config "native_rt_pool_source=$ROOT_DIR/network/ns3/scratch/native-rt-pool.h"
     --config "native_rt_cache_source=$ROOT_DIR/network/ns3/scratch/native-rt-cache.h"
+    --config "native_log_phase_header=$ROOT_DIR/network/ns3/scratch/native-log-phase.h"
   )
   if [[ "$SIONNA_RT_EXECUTION_MODE" == worker_pool ]]; then
     config_args+=(--config "native_rt_worker_source=$ROOT_DIR/network/ns3/scratch/native-rt-worker.cc"

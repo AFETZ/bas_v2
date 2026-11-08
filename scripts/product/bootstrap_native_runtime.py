@@ -45,7 +45,7 @@ PATCH_NAMES = (
 SCRATCH_FILES = (
     'upstream-sionna-tap-spike.cc', 'native-geometry-loss.h', 'native-spectrum-sources.h',
     'native-live-state.h', 'native-lockstep.h', 'native-rt-cache.h',
-    'native-rt-pool.h', 'native-rt-worker.cc',
+    'native-rt-pool.h', 'native-rt-worker.cc', 'native-log-phase.h',
 )
 INPUTS = ('.devcontainer/requirements-native.in', '.devcontainer/requirements-native-tooling.in')
 LOCK_NAMES = ('requirements-native.lock', 'requirements-native-tooling.lock')
