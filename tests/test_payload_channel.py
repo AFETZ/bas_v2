@@ -1,5 +1,6 @@
 """Actual UDP/BSF1/MAVLink integration; run with target pymavlink dependencies."""
 import json
+import os
 from pathlib import Path
 import socket
 import tempfile
@@ -322,6 +323,195 @@ class PayloadByteProvenanceTests(unittest.TestCase):
         output=parse_mavlink_with_provenance(parser,pending,self.frame,(0,200_000_000))
         self.assertEqual(len(output),1)
         self.assertEqual(self.lineage(*output[0])['source_first_host_monotonic_ns'],200_000_000)
+
+
+@unittest.skipUnless(os.name == 'posix' and hasattr(os, 'openpty'),
+    'production dual-PTY UART software boundary requires POSIX; physical hardware is not tested')
+class PayloadUartAdapterPosixTests(unittest.TestCase):
+    def test_production_control_and_payload_pty_trace_preserves_both_directions(self):
+        """Two real adapter processes/PTYs/UDP sockets; no simulated RF or hardware SLA."""
+        from contextlib import ExitStack
+        import selectors
+        import subprocess
+        import sys
+        import tty
+        from pymavlink.dialects.v20 import ardupilotmega as mavlink
+        from network.scripts.serial_transport import decode_chunk, CHANNEL_IDS
+
+        root = Path(__file__).resolve().parents[1]
+        with ExitStack() as resources:
+            resources.enter_context(patch.dict(os.environ, {'BAS_SIMULATION_MODE': 'realtime', 'MAVLINK20': '1'}))
+            artifacts = os.environ.get('BAS_EXTERNAL_TEST_ARTIFACT_DIR')
+            if artifacts:
+                run = Path(artifacts).resolve() / 'dual_pty_payload'
+                run.mkdir(parents=True, exist_ok=False)  # Never overwrite another attempt.
+            else:
+                run = Path(resources.enter_context(tempfile.TemporaryDirectory(prefix='bas-payload-pty-')))
+            logs = run / 'logs'; logs.mkdir()
+            channels, commands = {}, {}
+
+            def close_fd(descriptor):
+                os.close(descriptor)
+
+            def stop_owned(process):
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        process.kill(); process.wait(timeout=2)
+
+            for channel in ('control', 'payload'):
+                master, slave = os.openpty()
+                resources.callback(close_fd, slave); resources.callback(close_fd, master)
+                tty.setraw(slave); os.set_blocking(master, False)
+                radio = resources.enter_context(socket.socket(socket.AF_INET, socket.SOCK_DGRAM))
+                radio.bind(('127.0.0.1', 0)); radio.setblocking(False)
+                ready = logs / (channel + '.ready.json')
+                event = logs / (channel + '_uart_uav1.jsonl')
+                metrics = logs / (channel + '.metrics.json')
+                output = logs / (channel + '.process.log')
+                stream = resources.enter_context(output.open('xb'))
+                argv = [sys.executable, str(root/'network/scripts/communication_vertical.py'), 'uart-adapter',
+                    '--channel', channel, '--tty', os.ttyname(slave), '--bind', '127.0.0.1:0',
+                    '--peer', f'127.0.0.1:{radio.getsockname()[1]}', '--event-log', str(event),
+                    '--ready-file', str(ready), '--metrics-output', str(metrics), '--framed',
+                    '--chunk-payload-bytes', '8', '--event-logging', 'batched_trace']
+                process = subprocess.Popen(argv, cwd=root, stdin=subprocess.DEVNULL, stdout=stream,
+                                           stderr=subprocess.STDOUT, env=os.environ.copy(), close_fds=True)
+                resources.callback(stop_owned, process)
+                channels[channel] = dict(master=master, radio=radio, process=process, output=output,
+                    ready=ready, event=event, metrics=metrics, records=[], chunks=[], uplink_lineage=[],
+                    parser=mavlink.MAVLink(None), pending=deque(),
+                    decoder=Reassembler(channel=channel, uav_id=1, direction='uart_to_gcs'))
+                channels[channel]['parser'].robust_parsing = True
+                commands[channel] = dict(pid=process.pid, argv=argv)
+            (run/'commands.json').write_text(json.dumps(commands, indent=2)+'\n')
+
+            def ensure_running():
+                for channel, state in channels.items():
+                    self.assertIsNone(state['process'].poll(),
+                        f'{channel} adapter stopped: {state["output"].read_text()}')
+
+            deadline = time.monotonic() + 5
+            while not all(state['ready'].exists() for state in channels.values()):
+                ensure_running(); self.assertLess(time.monotonic(), deadline, 'Both UART adapters did not become ready')
+                time.sleep(.005)
+            ensure_running()
+            for channel, state in channels.items():
+                ready = json.loads(state['ready'].read_text())
+                self.assertEqual((ready['pid'], ready['channel'], ready['uav_id']),
+                                 (state['process'].pid, channel, 1))
+                self.assertEqual(ready['baud_rate'], 115200)
+                self.assertEqual(ready['tos'], 184 if channel == 'control' else 40)
+                self.assertEqual(ready['simulation_mode'], 'realtime')
+
+            uav = mavlink.MAVLink(None, srcSystem=1, srcComponent=1)
+            gcs = mavlink.MAVLink(None, srcSystem=255, srcComponent=190)
+            control_up = bytes(uav.heartbeat_encode(mavlink.MAV_TYPE_QUADROTOR,
+                mavlink.MAV_AUTOPILOT_ARDUPILOTMEGA, 0, 0, mavlink.MAV_STATE_STANDBY).pack(uav))
+            payload_up = bytes(uav.attitude_encode(12345, .1, .2, .3, 0., 0., 0.).pack(uav))
+            control_down = bytes(gcs.command_long_encode(1, 1, mavlink.MAV_CMD_REQUEST_MESSAGE, 0,
+                float(mavlink.MAVLINK_MSG_ID_AUTOPILOT_VERSION), 0, 0, 0, 0, 0, 0).pack(gcs))
+            payload_down = bytes(gcs.heartbeat_encode(mavlink.MAV_TYPE_GCS,
+                mavlink.MAV_AUTOPILOT_INVALID, 0, 0, mavlink.MAV_STATE_ACTIVE).pack(gcs))
+            uplink = {'control': control_up, 'payload': payload_up*2}
+            downlink = {'control': control_down, 'payload': payload_down*2}
+            # Both adapters are live before either direction is exercised. Learn
+            # their ephemeral bind ports from real datagrams instead of racing
+            # reservation/rebind of fixed test ports.
+            for channel, state in channels.items():
+                self.assertEqual(os.write(state['master'], uplink[channel]), len(uplink[channel]))
+            with selectors.DefaultSelector() as selector:
+                for channel, state in channels.items(): selector.register(state['radio'], selectors.EVENT_READ, channel)
+                deadline = time.monotonic() + 3
+                while any(len(b''.join(s['records'])) < len(uplink[c]) for c,s in channels.items()):
+                    ensure_running(); self.assertLess(time.monotonic(), deadline, 'UART uplinks did not reach BSF1 receivers')
+                    for key, _ in selector.select(.02):
+                        channel, state = key.data, channels[key.data]
+                        packet, address = state['radio'].recvfrom(65535)
+                        self.assertEqual(state.setdefault('adapter_address', address), address)
+                        chunk = decode_chunk(packet); state['chunks'].append(chunk)
+                        self.assertEqual(chunk.channel_id, CHANNEL_IDS[channel])
+                        records = state['decoder'].ingest(packet, time.monotonic_ns())
+                        for record, sequence, stamp in zip(records, state['decoder'].released_sequences,
+                                                          state['decoder'].released_sent_ns, strict=True):
+                            state['records'].append(record)
+                            for message, spans in parse_mavlink_with_provenance(state['parser'], state['pending'], record, (sequence,stamp)):
+                                self.assertNotEqual(message.get_type(), 'BAD_DATA')
+                                if channel == 'payload':
+                                    state['uplink_lineage'].append(mavlink_payload_lineage(message, spans,
+                                        run_id=run.name, uav_id=1, direction='uav_to_gcs'))
+            for channel, state in channels.items():
+                self.assertEqual(b''.join(state['records']), uplink[channel])
+                self.assertEqual(list(state['pending']), [])
+            self.assertNotEqual(channels['control']['adapter_address'], channels['payload']['adapter_address'])
+
+            expected_down = []
+            for channel, state in channels.items():
+                produced = time.monotonic_ns()
+                encoder = Encoder(channel=channel, uav_id=1, direction='gcs_to_uart', max_payload=8)
+                state['downlink_produced_ns'] = produced
+                packets = encoder.encode(downlink[channel], produced)
+                for packet in packets:
+                    self.assertEqual(state['radio'].sendto(packet, state['adapter_address']), len(packet))
+                if channel == 'payload':
+                    parser = mavlink.MAVLink(None); parser.robust_parsing = True
+                    expected_down = [mavlink_payload_lineage(message, spans, run_id=run.name, uav_id=1,
+                        direction='gcs_to_uav') for message, spans in parse_mavlink_with_provenance(
+                            parser, deque(), downlink[channel], (0,produced))]
+            received = {channel: bytearray() for channel in channels}
+            with selectors.DefaultSelector() as selector:
+                for channel, state in channels.items(): selector.register(state['master'], selectors.EVENT_READ, channel)
+                deadline = time.monotonic() + 3
+                while any(len(received[c]) < len(downlink[c]) for c in channels):
+                    ensure_running(); self.assertLess(time.monotonic(), deadline, 'BSF1 downlinks did not reach actual PTYs')
+                    for key, _ in selector.select(.02):
+                        received[key.data].extend(os.read(key.fileobj, 4096))
+            for channel in channels: self.assertEqual(bytes(received[channel]), downlink[channel])
+
+            # Graceful shutdown flushes the real buffered trace. Kill is only an
+            # owned-PID cleanup fallback on failure, never the success path.
+            for state in channels.values(): state['process'].terminate()
+            for state in channels.values():
+                self.assertEqual(state['process'].wait(timeout=2), 0, state['output'].read_text())
+            result = dict(scope='POSIX production adapter with two PTYs and localhost UDP; no RF, physical UART or SLA qualification',
+                          uart_acceptance='os.write return; physical final wire bit is not measured', channels={})
+            payload_rows = None
+            for channel, state in channels.items():
+                metrics = json.loads(state['metrics'].read_text())
+                self.assertEqual(metrics['uart_input_bytes'], len(uplink[channel]))
+                self.assertEqual(metrics['uart_output_bytes'], len(downlink[channel]))
+                rows = [json.loads(line) for line in state['event'].read_text().splitlines()]
+                result['channels'][channel] = dict(pid=state['process'].pid, bytes_up=len(uplink[channel]),
+                    bytes_down=len(downlink[channel]), metrics=metrics)
+                if channel == 'payload': payload_rows = rows
+                else: self.assertFalse(any('frame_uid' in row for row in rows), 'Control trace inherited payload metadata')
+            offers = [r for r in payload_rows if r.get('payload_lineage_stage')=='offered']
+            accepts = [r for r in payload_rows if r.get('payload_lineage_stage')=='accepted']
+            self.assertEqual([r['frame_uid'] for r in offers], [r['frame_uid'] for r in channels['payload']['uplink_lineage']])
+            self.assertEqual([r['frame_uid'] for r in accepts], [r['frame_uid'] for r in expected_down])
+            self.assertEqual(len({r['frame_uid'] for r in offers}), 2)
+            self.assertEqual(len({r['frame_uid'] for r in accepts}), 2)
+            for row in offers + accepts:
+                self.assertEqual(row['run_id'], run.name)
+                self.assertTrue(row['provenance_valid'])
+                self.assertEqual(sum(r['length'] for r in row['record_references']), row['frame_bytes'])
+            for row in accepts:
+                self.assertEqual(row['endpoint'], 'uart_os_write_end')
+                self.assertEqual(row['accepted_host_monotonic_ns'], row['observed_host_monotonic_ns'])
+                self.assertGreaterEqual(row['accepted_host_monotonic_ns'], channels['payload']['downlink_produced_ns'])
+            sent = [r for r in payload_rows if r.get('event')=='payload_record_sent']
+            self.assertEqual({(r['sequence'],r['producer_host_monotonic_ns'],r['fragment_index']) for r in sent},
+                {(c.sequence,c.sent_monotonic_ns,c.fragment_index) for c in channels['payload']['chunks']})
+            self.assertEqual([r['event'] for r in payload_rows if r['event'].startswith('payload_lineage_')],
+                             ['payload_lineage_started','payload_lineage_closed'])
+            self.assertIsNone(payload_rows[-1]['close_error'])
+            result['payload_offers'], result['payload_acceptances'] = offers, accepts
+            (run/'result.json').write_text(json.dumps(result, indent=2)+'\n')
+            print(json.dumps(dict(probe='production_dual_pty_payload_trace', bytes={c:{'up':len(uplink[c]),
+                'down':len(downlink[c])} for c in channels}, payload_offered_uids=[r['frame_uid'] for r in offers],
+                payload_accepted_uids=[r['frame_uid'] for r in accepts], hardware_validation='not_performed')))
 
 
 if __name__ == '__main__':
