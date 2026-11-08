@@ -40,6 +40,8 @@
 #include <chrono>
 #include <cmath>
 #include <csignal>
+#include <ctime>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -113,6 +115,58 @@ uint32_t g_flushEveryEvents{256};
 uint32_t g_flushMaxDelayMs{25};
 uint64_t g_pendingEventWrites{0};
 std::chrono::steady_clock::time_point g_lastEventFlush{std::chrono::steady_clock::now()};
+
+// Bounded diagnostics for the native event trace. Nested phase/flush timings
+// are INCLUDED in LogEvent, not additional costs to sum with it.
+struct TraceTiming
+{
+    uint64_t calls{0}, wallNs{0}, cpuNs{0}, maxWallNs{0};
+    int64_t maxBeginHostNs{0}, maxEndHostNs{0}, maxNativeNs{0};
+};
+TraceTiming g_eventTraceTiming, g_phaseReadTiming, g_eventFlushTiming;
+
+class TraceTimingScope
+{
+  public:
+    explicit TraceTimingScope(TraceTiming& target)
+        : m_target(target), m_begin(HostNs()), m_cpu(CpuNs()) {}
+    ~TraceTimingScope()
+    {
+        const auto cpu=CpuNs()-m_cpu;
+        const auto end=HostNs();
+        const auto elapsed=static_cast<uint64_t>(end-m_begin);
+        ++m_target.calls; m_target.wallNs+=elapsed; m_target.cpuNs+=cpu;
+        if (elapsed>m_target.maxWallNs)
+        {
+            m_target.maxWallNs=elapsed; m_target.maxBeginHostNs=m_begin;
+            m_target.maxEndHostNs=end; m_target.maxNativeNs=Simulator::Now().GetNanoSeconds();
+        }
+    }
+  private:
+    static int64_t HostNs()
+    {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+    static uint64_t CpuNs()
+    {
+        timespec value{};
+        if (clock_gettime(CLOCK_THREAD_CPUTIME_ID,&value)!=0) std::terminate();
+        return static_cast<uint64_t>(value.tv_sec)*1000000000ULL+value.tv_nsec;
+    }
+    TraceTiming& m_target;
+    int64_t m_begin;
+    uint64_t m_cpu;
+};
+
+void WriteTraceTiming(std::ostream& output, const TraceTiming& timing)
+{
+    output << "{\"calls\":" << timing.calls << ",\"wall_ns\":" << timing.wallNs
+           << ",\"thread_cpu_ns\":" << timing.cpuNs << ",\"max_wall_ns\":" << timing.maxWallNs
+           << ",\"max_begin_host_ns\":" << timing.maxBeginHostNs
+           << ",\"max_end_host_ns\":" << timing.maxEndHostNs
+           << ",\"max_native_ns\":" << timing.maxNativeNs << '}';
+}
 std::unordered_map<uint64_t, Time> g_queueEnqueueAt;
 std::vector<Ptr<Queue<Packet>>> g_queues;
 std::vector<Ptr<StaWifiMac>> g_wifiStations;
@@ -209,6 +263,7 @@ void ObserveReceivedPath(uint32_t nodeIndex, Ptr<const Packet> packet);
 std::string
 ReadPhase()
 {
+    TraceTimingScope timing(g_phaseReadTiming);
     std::ifstream input(g_phaseFile);
     std::string phase = "unclassified";
     if (input.is_open())
@@ -252,6 +307,7 @@ LogEvent(const std::string& event,
     {
         return;
     }
+    TraceTimingScope timing(g_eventTraceTiming);
     Vector position;
     for (std::size_t index = 0; index < g_nodeNames.size(); ++index)
     {
@@ -277,6 +333,7 @@ LogEvent(const std::string& event,
     if (g_pendingEventWrites >= g_flushEveryEvents ||
         now - g_lastEventFlush >= std::chrono::milliseconds(g_flushMaxDelayMs))
     {
+        TraceTimingScope flushTiming(g_eventFlushTiming);
         g_events.flush();
         g_pendingEventWrites = 0;
         g_lastEventFlush = now;
@@ -288,6 +345,7 @@ FlushEvents()
 {
     if (g_events.is_open())
     {
+        TraceTimingScope flushTiming(g_eventFlushTiming);
         g_events.flush();
         g_pendingEventWrites = 0;
         g_lastEventFlush = std::chrono::steady_clock::now();
@@ -1464,6 +1522,13 @@ WriteStats(const std::string& path)
            << "  \"successful_pose_reader_calls\": " << g_poseReaderCalls << ",\n"
            << "  \"successful_pose_reader_wall_ns\": " << g_poseReaderWallNs << ",\n"
            << "  \"successful_pose_reader_max_wall_ns\": " << g_poseReaderMaxWallNs << ",\n"
+           << "  \"event_trace_timing\": {\"scope\":\"native_main_thread;phase_and_flush_nested_in_log_event;includes_warmup\",\"log_event\":";
+    WriteTraceTiming(output,g_eventTraceTiming);
+    output << ",\"read_phase\":";
+    WriteTraceTiming(output,g_phaseReadTiming);
+    output << ",\"flush\":";
+    WriteTraceTiming(output,g_eventFlushTiming);
+    output << "},\n"
            << "  \"desired_spectrum_boundary\": {\"calls\":" << g_spectrumCalls
            << ",\"wall_ns\":" << g_spectrumWallNs << ",\"max_wall_ns\":" << g_spectrumMaxWallNs
            << ",\"max_wall_native_ns\":" << g_spectrumMaxWallNativeNs

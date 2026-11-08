@@ -278,7 +278,17 @@ N=1 source `delivery-rt-source-bundle-n1-20261108-07` на том же `42dc494`
 в `network/config/`: явные маршруты пяти UAV, профиль 100 мс и расписание источника.
 Они используют штатный `prepare_terrain_scene.py --output .external/terrain-reference`,
 не зависят от каталогов прежних опытов. Локальная генерация и real loader проверены;
-новый совместный GPU-прогон именно этих входов — следующий шаг.
+Совместный `delivery-terrain-five-source-public-20261108-01` на `3314484` failed / invalid
+до измерений (native 4,544 с): cache host age >100 мс, источник ещё не включался.
+Контроль `delivery-terrain-five-trace-20261108-01` без источника также failed / invalid.
+OBJ старого и нового bundle побитово совпадают. Публикации поз идут каждые 10 мс,
+но native lag нарастает примерно до 52 мс; следующий dispatch уже имеет исходный
+возраст позы 63 мс. В source-попытке 180925 CSV событий / 42,9 MB; RT main Poll
+max 0,684 мс, CIR→PSD total 450 мс, reader total 341 мс (включая warmup).
+Полная подробная трассировка N=5 пока неработоспособна в заданном бюджете.
+Добавлены ограниченные aggregate wall/thread-CPU замеры LogEvent/ReadPhase/flush;
+следующий шаг — целевая сборка и повтор того же trace-контроля, затем исправление
+измеренной причины. Исторический metrics_only успех не заменяет эту проверку.
 `0e8910a` добавил per-offer payload lineage через существующий BSF1, оба направления,
 исходные byte refs и actual OS write-end; loss/duplicate/censor сохраняются в анализе.
 Linux dual-PTY на `38bb2aa` проверил оба production adapter одновременно:
