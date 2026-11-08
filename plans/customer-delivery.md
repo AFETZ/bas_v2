@@ -190,21 +190,36 @@ N=5 `...-03` остановился на прогреве из-за конвер
 на 44,08 с host cache expiry. Средний CIR→PSD wall cost 48 → 19,3 мкс/вызов,
 1994 согласованных кадра, 248407 hits / 1 miss. Новое RT-задание 1998 ещё не было
 получено через 47,56 мс после отправки; обычные соседние занимали около 22 мс.
-Следующий шаг — установить причину RT-tail на этих исходных позах, не увеличивая 100 мс.
+Разбор `n5-04-causal-analysis.json` (24 input SHA) не обнаружил длительного main halt:
+последний lag 2 мс, девять pose reads после отправки незавершённого задания.
+Replay на точных позах воспроизвёл переход 17→18 путей: пять новых JIT-ядер,
+23,39 мс compilation и первый job 40,68 мс, повторные около 16,4 мс.
+Это подтверждённый механизм replay, не точное измерение незавершённого live-задания.
+Private pinned-1.2 проба `shape-01` прошла: фиксированный storage axis 90 до построения
+тензоров убрал новые misses на переходе; первый job 17,15 мс. Same-buffer проверки всех
+6×6 a/tau/valid/Doppler/углов на трёх позах дали побитовое совпадение. Экспорт сохраняет
+17/17/18 путей после проверки пустого хвоста; actual zero-path branch отдельно прошёл.
+Холодные времена stock/fixed не сравниваются: процессы разные, disk kernel cache общий.
+SDK13-адаптер с версиями и source-hash gates реализуется; полный запуск с ним ещё не проверен.
 На `e430570` CPU source-waveform contract — 189 проверок: фактические SpectrumChannel
 TxSigParams подтверждают PSD, feed gain, полосу, длительность и отдельные physical/sweep bindings.
 Это TX readback до распространения, не приём, PHY/MAC-эффект или аппаратная приёмка.
 На `26cb01a` source producer собран и прошёл 22 Linux tests и GPU 38 jobs,
 12 batch / 72 STAR links включая CP, реальный cap 6000; hot median 21,567 мс.
 `control/delivery-source-emitter-batch-probe-20261108/{build-and-probe-01-command,derived-verification}.json`.
-Fixed RF aliases и receipt/poll timestamps проверены; совместные desired/emitter
-frames с affinity ещё интегрируются. SDK12-контракт не закрывает live source integration.
+Fixed RF aliases и receipt/poll timestamps проверены; реализация live desired/emitter
+frames с affinity описана ниже. SDK12-контракт не закрывает их совместную приёмку.
 Live-интеграция worker_pool с источниками реализована: только full_mesh, отдельный STAR-кэш
 на физический источник, fixed RF roles, общий кадр desired/source перед CourseChange.
 Настройка отклоняет нехватку roles; источник не попадает в пакетный Python/RT путь.
-CPU-контракт реального decoder/cache/notify, проверка frozen input/epochs/полного bundle
-и первый полный источник-сценарий ожидают целевого запуска. Локальные 19 profile tests
-и 79 contract/source/runtime tests прошли; это не native CPU/GPU или аппаратная приёмка.
+На `c6a5d58` целевая сборка прошла: 706 native CPU-проверок decoder/cache/notify,
+379 программных тестов (378 pass, 1 skip), включая frozen input/epochs/полный bundle.
+`control/delivery-source-bundle-runtime-20261108/{build-01-command,bundle-cpu-01}.json`.
+Первый `delivery-rt-source-bundle-n1-20261108-01` failed / invalid до полёта по host cache expiry:
+14 полных desired/source кадров применены; у следующего кадра source уже готов,
+desired ещё ожидается. Источник в эфире ещё не включался; результат не закрывает
+пакетное влияние помех, совместный N=5 или аппаратную приёмку. Следующий шаг —
+проба постоянного storage axis PathSolver и повтор этого полного N=1.
 Обязательная совместная приёмка остаётся открыта. Успех отдельных контрактов не считается
 успехом полного тракта.
 Зависимости solver: Sionna RT 1.2.0, Mitsuba 3.7.1, DrJit 1.2.0; фактические бюджеты
