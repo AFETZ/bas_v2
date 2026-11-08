@@ -23,7 +23,9 @@ using namespace pybind11::literals;
 class NativeRtPrefetch
 {
   public:
-    static constexpr int64_t kPollPeriodNs = 5000000;
+    // A ready result must be drained before an independent 5ms pose check.
+    // The measured N5 failure had only 2.95ms between receipt and expiry.
+    static constexpr int64_t kPollPeriodNs = 1000000;
     static constexpr int64_t kMinimumLeadNs = 100000000;
     static constexpr size_t kWindow = 64;
     static constexpr double kGrowthFactor = 2;

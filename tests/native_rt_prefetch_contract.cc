@@ -172,7 +172,7 @@ void ResponseWindowAndClockBudgets()
     for(size_t i=0;i<64;++i) policy.ObserveResponse(20000000,false);
     Require(policy.WindowSize()==64 && policy.LeadNs()==100000000, "Minimum measured lead was reduced");
     for(size_t i=0;i<4;++i) policy.ObserveResponse(120000000,false);
-    Require(policy.WindowSize()==64 && policy.ResponseP95Ns()==120000000 && policy.LeadNs()==125000000,
+    Require(policy.WindowSize()==64 && policy.ResponseP95Ns()==120000000 && policy.LeadNs()==121000000,
             "Nearest-rank hot-response p95 plus poll margin was not applied");
     for(size_t i=0;i<64;++i) policy.ObserveResponse(10000000,false);
     Require(policy.WindowSize()==64 && policy.LeadNs()==100000000, "Old response ages were retained without bound");
