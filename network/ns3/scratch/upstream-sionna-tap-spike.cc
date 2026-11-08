@@ -120,7 +120,7 @@ std::chrono::steady_clock::time_point g_lastEventFlush{std::chrono::steady_clock
 // are INCLUDED in LogEvent, not additional costs to sum with it.
 struct TraceTiming
 {
-    uint64_t calls{0}, wallNs{0}, cpuNs{0}, maxWallNs{0};
+    uint64_t calls{0}, wallNs{0}, cpuNs{0}, maxWallNs{0}, maxWallCpuNs{0};
     int64_t maxBeginHostNs{0}, maxEndHostNs{0}, maxNativeNs{0};
 };
 TraceTiming g_eventTraceTiming, g_phaseReadTiming, g_eventFlushTiming;
@@ -138,7 +138,7 @@ class TraceTimingScope
         ++m_target.calls; m_target.wallNs+=elapsed; m_target.cpuNs+=cpu;
         if (elapsed>m_target.maxWallNs)
         {
-            m_target.maxWallNs=elapsed; m_target.maxBeginHostNs=m_begin;
+            m_target.maxWallNs=elapsed; m_target.maxWallCpuNs=cpu; m_target.maxBeginHostNs=m_begin;
             m_target.maxEndHostNs=end; m_target.maxNativeNs=Simulator::Now().GetNanoSeconds();
         }
     }
@@ -163,6 +163,7 @@ void WriteTraceTiming(std::ostream& output, const TraceTiming& timing)
 {
     output << "{\"calls\":" << timing.calls << ",\"wall_ns\":" << timing.wallNs
            << ",\"thread_cpu_ns\":" << timing.cpuNs << ",\"max_wall_ns\":" << timing.maxWallNs
+           << ",\"max_wall_thread_cpu_ns\":" << timing.maxWallCpuNs
            << ",\"max_begin_host_ns\":" << timing.maxBeginHostNs
            << ",\"max_end_host_ns\":" << timing.maxEndHostNs
            << ",\"max_native_ns\":" << timing.maxNativeNs << '}';
