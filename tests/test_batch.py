@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import bas
 from scripts.product.run_batch import MAX_CASES, execute, numbers, plan_batch
@@ -49,6 +50,49 @@ class BatchTests(unittest.TestCase):
         self.assertTrue(all(row['status'] == 'not_started' for row in plan['cases']))
         self.assertEqual(plan['config']['experiment']['duration_s'], 20)
         self.assertEqual(self.config, original)
+
+    def configure_hitl(self):
+        profiles = self.root / 'network/config/hitl_reference_devices.json'
+        profiles.write_bytes((bas.ROOT / 'network/config/hitl_reference_devices.json').read_bytes())
+        request = dict(controller='pixhawk_6c', radio_device='microhard_p2400', uav_id=1,
+                       channels={c: dict(endpoint=dict(kind='serial', device=f'/dev/ttyUSB{i}', baud=115200))
+                                 for i, c in enumerate(('control', 'payload'))})
+        bas.write_json(self.root / 'request.json', request)
+        self.config['hitl'] = dict(mode='radio_bench', request='request.json')
+        self.config['experiment'].update(policy='off', duration_s=20)
+        bas.write_json(self.root / 'runtime.json', self.config)
+        self.config = bas.load_config(self.root / 'runtime.json', root=self.root)
+
+    def test_bench_batch_freezes_inputs_without_claiming_flight_success(self):
+        self.configure_hitl()
+        plan = self.plan()
+        self.assertEqual(set(plan['input_sha256']), {'scene', 'hitl_request', 'hitl_profiles'})
+        def software_fixture(config, run_id):
+            folder = self.root / 'runs/control' / run_id
+            folder.mkdir(parents=True)
+            with patch.object(bas, 'ROOT', self.root):
+                hashes = bas.snapshot_inputs(config, folder, bas.environment(config, run_id))
+            bas.write_json(folder / 'run.json', dict(runtime_status='completed', mission_outcome='not_applicable',
+                measurement_validity='valid', radio_hitl_verification=dict(passed=True), **hashes))
+            return 0
+        result = execute(plan, root=self.root, run_fn=software_fixture)
+        self.assertEqual(result['status'], 'completed')
+        self.assertTrue(all(c['inputs_match_batch_plan'] is True for c in result['cases']))
+        self.assertTrue(all(c['mission_outcome'] == 'not_applicable' for c in result['cases']))
+        self.assertTrue(all(c['hitl_bundle_sha256'] for c in result['cases']))
+
+    def test_bench_request_and_profile_changes_stop_before_any_case(self):
+        self.configure_hitl()
+        for label in ('hitl_request', 'hitl_profiles'):
+            plan = self.plan(batch_id='changed-' + label)
+            path = self.root / plan['input_sha256'][label]['path']
+            original = path.read_bytes()
+            path.write_bytes(original + b'\n')
+            with self.subTest(label=label):
+                result = execute(plan, root=self.root, run_fn=lambda *_: self.fail('changed input launched'))
+                self.assertEqual(result['stop_reason'], label + '_changed_after_batch_planning')
+                self.assertEqual(result['attempted_cases'], 0)
+            path.write_bytes(original)
 
     def test_duration_override_uses_shared_limit_and_long_trace_storage_validation(self):
         with self.assertRaisesRegex(ValueError, 'requires.*disk'):

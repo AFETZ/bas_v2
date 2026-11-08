@@ -10,7 +10,7 @@ import tempfile
 import time
 import unittest
 
-from scripts.product.test_radio_hitl import CATALOG, ROOT, load_bundle, main, resolve
+from scripts.product.test_radio_hitl import CATALOG, ROOT, load_bundle, main, resolve, run_adapters
 from network.scripts.serial_transport import HEADER, Encoder, Reassembler
 from tests.test_external_endpoint import free_udp_address, udp_socket
 
@@ -153,6 +153,16 @@ class RadioHitlPreparationTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     load_bundle(path, native_uav_count=5)
 
+    def test_profile_change_is_rejected_before_any_adapter_opens(self):
+        bundle = resolve(self.request, self.catalog)
+        bundle['reference_profiles_sha256'] = hashlib.sha256(CATALOG.read_bytes()).hexdigest()
+        with tempfile.TemporaryDirectory() as temporary:
+            profiles, output = Path(temporary) / 'profiles.json', Path(temporary) / 'output'
+            profiles.write_bytes(CATALOG.read_bytes() + b'\n')
+            with self.assertRaisesRegex(ValueError, 'changed before adapter launch'):
+                run_adapters(bundle, output, .01, profiles_path=profiles)
+            self.assertFalse(output.exists())
+
 
 class RadioHitlSoftwarePairTests(unittest.TestCase):
     """Actual two-adapter boundary; loopback contains no simulated PHY/MAC."""
@@ -165,13 +175,15 @@ class RadioHitlSoftwarePairTests(unittest.TestCase):
     def start(self, channels, *, duration=1.2, readiness=2):
         request = dict(controller='pixhawk_6c', radio_device='microhard_pmddl2450', uav_id=2,
                        channels=channels, queues=dict(packets=256, bytes=1048576, deadline_s=2), reconnect_s=.05)
+        profiles = self.folder / 'profiles.json'
+        profiles.write_text(json.dumps(self.catalog, indent=2))
         bundle = resolve(request, self.catalog)
-        bundle['reference_profiles_sha256'] = hashlib.sha256(CATALOG.read_bytes()).hexdigest()
+        bundle['reference_profiles_sha256'] = hashlib.sha256(profiles.read_bytes()).hexdigest()
         path = self.folder / 'bundle.json'
         path.write_text(json.dumps(bundle))
         output = self.folder / 'run'
         process = subprocess.Popen([sys.executable, str(ROOT / 'scripts/product/test_radio_hitl.py'),
-            '--config', str(path), '--run-adapters', '--output', str(output), '--duration-s', str(duration),
+            '--config', str(path), '--profiles', str(profiles), '--run-adapters', '--output', str(output), '--duration-s', str(duration),
             '--readiness-timeout-s', str(readiness)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.addCleanup(self.stop, process)
         return process, output
@@ -204,6 +216,7 @@ class RadioHitlSoftwarePairTests(unittest.TestCase):
         return reply
 
     def test_two_real_udp_tcp_adapters_exchange_both_streams(self):
+        self.catalog['radios']['microhard_pmddl2450']['notes'] = 'Frozen software interface test profile; no hardware claim.'
         with udp_socket() as control_radio, udp_socket() as payload_radio, udp_socket() as device, socket.socket() as listener:
             listener.bind(('127.0.0.1', 0))
             listener.listen()
@@ -234,6 +247,7 @@ class RadioHitlSoftwarePairTests(unittest.TestCase):
             self.assertEqual(result['status'], 'completed')
             self.assertEqual(result['hardware_validation'], 'not_performed')
             self.assertEqual(result['native_phy_validation'], 'not_performed')
+            self.assertEqual((output / 'reference-profiles.json').read_bytes(), (self.folder / 'profiles.json').read_bytes())
             for channel, tos in (('control', 184), ('payload', 40)):
                 metrics = json.loads((output / channel / 'metrics.json').read_text())
                 self.assertEqual(metrics['radio_tos'], tos)
@@ -276,8 +290,26 @@ class RadioHitlSoftwarePairTests(unittest.TestCase):
                 probe.bind(control_address)
 
     @unittest.skipUnless(hasattr(os, 'openpty'), 'two-PTY serial software test requires POSIX; hardware remains untested')
+    def test_serial_symlink_alias_is_rejected_before_adapter_or_socket_launch(self):
+        master, slave = os.openpty()
+        self.addCleanup(os.close, master)
+        self.addCleanup(os.close, slave)
+        path = os.ttyname(slave)
+        alias = self.folder / 'same-tty'
+        alias.symlink_to(path)
+        channels = {channel: dict(endpoint=dict(kind='serial', device=device, baud=115200),
+            radio=dict(bind=free_udp_address(), peer=free_udp_address()))
+            for channel, device in (('control', path), ('payload', str(alias)))}
+        process, output = self.start(channels)
+        stdout, stderr = process.communicate(timeout=5)
+        self.assertEqual(process.returncode, 2, stdout + stderr)
+        self.assertIn('same POSIX serial device', stderr)
+        self.assertFalse(output.exists())
+
+    @unittest.skipUnless(hasattr(os, 'openpty'), 'two-PTY serial software test requires POSIX; hardware remains untested')
     def test_two_real_pty_serial_adapters_preserve_control_payload_bytes(self):
         import select
+        import serial
         import termios
         import tty
         descriptors = [os.openpty(), os.openpty()]
@@ -291,6 +323,9 @@ class RadioHitlSoftwarePairTests(unittest.TestCase):
                 for index, (channel, radio) in enumerate((('control', control_radio), ('payload', payload_radio)))}
             process, output = self.start(channels)
             self.ready(process, output)
+            for channel in ('control', 'payload'):
+                with self.assertRaises(serial.SerialException):
+                    serial.Serial(channels[channel]['endpoint']['device'], baudrate=115200, exclusive=True)
             for index, (channel, radio) in enumerate((('control', control_radio), ('payload', payload_radio))):
                 master, slave = descriptors[index]
                 self.assertEqual(termios.tcgetattr(slave)[4:6], [termios.B115200, termios.B115200])
@@ -301,6 +336,14 @@ class RadioHitlSoftwarePairTests(unittest.TestCase):
                 self.assertEqual(os.read(master, 4096), expected)
             stdout, stderr = process.communicate(timeout=5)
             self.assertEqual(process.returncode, 0, stderr + stdout)
+            identities = json.loads((output / 'result.json').read_text())['serial_device_identities']
+            self.assertNotEqual(identities['control']['st_rdev'], identities['payload']['st_rdev'])
+            for channel in ('control', 'payload'):
+                metrics = json.loads((output / channel / 'metrics.json').read_text())
+                self.assertTrue(metrics['serial_exclusive'])
+                self.assertEqual(metrics['serial_device_identity'], identities[channel]['st_rdev'])
+                with serial.Serial(channels[channel]['endpoint']['device'], baudrate=115200, exclusive=True):
+                    pass  # Actual cooperative lock is released when this owned adapter closes.
 
 
 if __name__ == '__main__':

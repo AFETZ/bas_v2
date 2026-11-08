@@ -2,7 +2,9 @@ import copy
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,6 +29,356 @@ class RuntimeTests(unittest.TestCase):
         path = self.root / 'runtime.json'
         path.write_text(json.dumps(self.config if config is ... else config))
         return bas.load_config(path, self.root)
+
+    def configure_hitl(self, owner=2):
+        """Configuration/parser fixture only; no endpoint is opened."""
+        profiles = self.root / 'network/config/hitl_reference_devices.json'
+        profiles.parent.mkdir(parents=True, exist_ok=True)
+        profiles.write_bytes((bas.ROOT / 'network/config/hitl_reference_devices.json').read_bytes())
+        request = dict(controller='pixhawk_6c', radio_device='microhard_p2400', uav_id=owner,
+                       channels={c: dict(endpoint=dict(kind='serial', device=f'/dev/ttyUSB{i}', baud=115200))
+                                 for i, c in enumerate(('control', 'payload'))})
+        path = self.root / 'hitl-request.json'
+        path.write_text(json.dumps(request))
+        self.config['hitl'] = dict(mode='radio_bench', request=path.name)
+        self.config['experiment'].update(policy='off', duration_s=20)
+        return path, request
+
+    def test_hitl_defaults_preserve_flight_and_do_not_inherit_external_owners(self):
+        resolved = self.load()
+        self.assertIsNone(resolved['hitl'])
+        env = bas.environment(resolved, 'old-config', {'BAS_NATIVE_EXTERNAL_BUNDLE': 'unowned.json'})
+        self.assertNotIn('BAS_NATIVE_EXTERNAL_BUNDLE', env)
+        self.assertNotIn('BAS_NATIVE_EXTERNAL_PROFILES', env)
+        self.assertNotIn('BAS_NATIVE_LATENCY_MODE', env)
+        self.config['experiment']['policy'] = 'off'
+        with self.assertRaisesRegex(ValueError, 'requires explicit hitl'):
+            self.load()
+
+    def test_hitl_native_binding_and_owned_bench_environment_for_every_owner(self):
+        for owner in range(1, 6):
+            with self.subTest(owner=owner):
+                self.configure_hitl(owner)
+                resolved = self.load()
+                _, _, _, bundle = bas._hitl_input(resolved, self.root)
+                self.assertEqual(bundle['native_binding']['uav_id'], owner)
+                for channel, port in (('control', 14600), ('payload', 14700)):
+                    self.assertEqual(bundle['adapters'][channel]['radio'],
+                        dict(bind=[f'10.71.{owner}.10', port + owner], peer=['10.71.0.10', port],
+                             tos=184 if channel == 'control' else 40))
+                env = bas.environment(resolved, 'bench', {'BAS_NATIVE_EXTERNAL_CONFIG': 'old.json',
+                    'BAS_NATIVE_EXTERNAL_BUNDLE': 'old-bundle.json', 'BAS_NATIVE_FLIGHT_DIAGNOSTIC': '1'})
+                self.assertEqual(env['BAS_NATIVE_EXTERNAL_BUNDLE'], 'runs/control/bench/hitl-bundle.json')
+                self.assertEqual(env['BAS_NATIVE_EXTERNAL_PROFILES'], 'runs/control/bench/hitl-reference-profiles.json')
+                self.assertEqual(env['BAS_NATIVE_FIVE_TIMEOUT_SCALE'], '1')
+                self.assertNotIn('BAS_NATIVE_EXTERNAL_CONFIG', env)
+                for key, value in dict(BAS_NATIVE_LATENCY_MODE='1', BAS_NATIVE_COORDINATION_POLICY='off',
+                                      BAS_NATIVE_FLIGHT_DIAGNOSTIC='0', BAS_NATIVE_EXPERIMENT_PILOT='0',
+                                      BAS_NATIVE_OPERATOR_SECONDS='0', BAS_NATIVE_UART_CHANNELS='control,payload').items():
+                    self.assertEqual(env[key], value)
+
+    def test_hitl_rejects_flight_policy_ignored_settings_and_unsupported_input(self):
+        path, request = self.configure_hitl()
+        original = copy.deepcopy(self.config)
+        changes = [('experiment', 'policy', 'failover'), ('experiment', 'policy', 'fixed'),
+                   ('flows', 'channels', ['control']), ('flows', 'payload_load', {'class': '10kbps'}),
+                   ('flows', 'payload_attitude_interval_s', .3), ('runtime', 'land_timeout_s', 121),
+                   ('hitl', 'mode', 'flight'), ('hitl', 'request', True),
+                   ('hitl', 'request', '../other.json'), ('hitl', 'request', '/tmp/request.json'),
+                   ('hitl', 'request', 'C:/request.json'), ('hitl', 'profiles', 'other.json')]
+        for section, key, value in changes:
+            changed = copy.deepcopy(original)
+            changed[section][key] = value
+            with self.subTest(section=section, key=key), self.assertRaises(ValueError):
+                self.load(changed)
+        for value in (False, [], 'request.json', {}, {'mode': 'radio_bench'}):
+            changed = copy.deepcopy(original)
+            changed['hitl'] = value
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.load(changed)
+        for mutate in (lambda r: r.update(uav_id=6),
+                       lambda r: r['channels'].pop('payload'),
+                       lambda r: r['channels']['control'].update(radio_namespace='ams-uav1'),
+                       lambda r: r['channels']['payload']['endpoint'].update(device='/dev/ttyUSB0')):
+            changed = copy.deepcopy(request)
+            mutate(changed)
+            path.write_text(json.dumps(changed))
+            with self.subTest(request=changed), self.assertRaises(ValueError):
+                self.load(original)
+
+    def test_hitl_freezes_exact_request_profiles_and_revalidated_bundle(self):
+        from scripts.product.test_radio_hitl import load_bundle
+        path, request = self.configure_hitl()
+        resolved = self.load()
+        folder = self.root / 'runs/control/bench'
+        folder.mkdir(parents=True)
+        env = bas.environment(resolved, 'bench')
+        with patch.object(bas, 'ROOT', self.root):
+            hashes = bas.snapshot_inputs(resolved, folder, env)
+        self.assertEqual(env['BAS_NATIVE_EXTERNAL_BUNDLE'], 'runs/control/bench/hitl-bundle.json')
+        for name, key in [('hitl-request.json', 'hitl_request_sha256'),
+                          ('hitl-reference-profiles.json', 'hitl_profiles_sha256'),
+                          ('hitl-bundle.json', 'hitl_bundle_sha256')]:
+            self.assertEqual(hashes[key], hashlib.sha256((folder / name).read_bytes()).hexdigest())
+        frozen = (folder / 'hitl-request.json').read_bytes()
+        bundle = load_bundle(folder / 'hitl-bundle.json', folder / 'hitl-reference-profiles.json', native_uav_count=5)
+        self.assertEqual(bundle['source_request'], request)
+        path.write_text('{}')
+        self.assertEqual((folder / 'hitl-request.json').read_bytes(), frozen)
+        with patch.object(bas, 'ROOT', self.root), self.assertRaises(ValueError):
+            bas.snapshot_inputs(resolved, folder, env)
+        self.assertNotIn('BAS_NATIVE_EXTERNAL_BUNDLE', env)
+        self.assertNotIn('BAS_NATIVE_EXTERNAL_PROFILES', env)
+
+    def test_hitl_actual_runner_preflight_consumes_owned_frozen_profiles(self):
+        self.configure_hitl()
+        config = self.load()
+        folder = self.root / 'runs/control/bench'
+        folder.mkdir(parents=True)
+        env = bas.environment(config, 'bench')
+        with patch.object(bas, 'ROOT', self.root):
+            bas.snapshot_inputs(config, folder, env)
+        script = (bas.ROOT / 'network/ns3/run_native_radio_five_uav.sh').read_text()
+        block = script.split("<<'PYEXTERNAL'\n", 1)[1].split('\nPYEXTERNAL', 1)[0]
+        argv = [sys.executable, '-', str(self.root), env['BAS_NATIVE_EXTERNAL_BUNDLE'], '5',
+                env['BAS_NATIVE_EXTERNAL_PROFILES']]
+        result = subprocess.run(argv, input=block, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ['2', env['BAS_NATIVE_EXTERNAL_BUNDLE'], env['BAS_NATIVE_EXTERNAL_PROFILES']])
+        frozen = folder / 'hitl-reference-profiles.json'
+        frozen.write_bytes(frozen.read_bytes() + b'\n')
+        self.assertNotEqual(subprocess.run(argv, input=block, text=True, capture_output=True).returncode, 0)
+
+    def test_hitl_actual_inspect_cli_never_creates_a_bundle_or_opens_endpoints(self):
+        with tempfile.TemporaryDirectory(dir=bas.ROOT / '.external', prefix='hitl-inspect-') as temporary:
+            folder = Path(temporary)
+            config = json.loads((bas.ROOT / 'runtime-link-test.json').read_text())
+            request = dict(controller='pixhawk_6c', radio_device='microhard_p2400', uav_id=1,
+                channels={c: dict(endpoint=dict(kind='serial', device=f'/not-opened-{c}', baud=115200))
+                          for c in ('control', 'payload')})
+            bas.write_json(folder / 'request.json', request)
+            config['hitl'] = dict(mode='radio_bench', request=(folder / 'request.json').relative_to(bas.ROOT).as_posix())
+            config['experiment']['policy'] = 'off'
+            config['flows']['payload_load'] = None
+            bas.write_json(folder / 'runtime.json', config)
+            result = subprocess.run([sys.executable, str(bas.ROOT / 'bas.py'), 'inspect', '--config',
+                str(folder / 'runtime.json'), '--run-id', 'hitl-inspect-unit'], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            resolved = json.loads(result.stdout)
+            self.assertEqual(resolved['environment']['BAS_NATIVE_LATENCY_MODE'], '1')
+            self.assertEqual(resolved['config']['hitl']['request_sha256'], hashlib.sha256((folder / 'request.json').read_bytes()).hexdigest())
+            self.assertEqual({p.name for p in folder.iterdir()}, {'request.json', 'runtime.json'})
+            self.assertFalse((bas.ROOT / 'runs/control/hitl-inspect-unit').exists())
+
+    def test_hitl_valid_request_or_profile_changes_after_validation_are_rejected(self):
+        path, request = self.configure_hitl()
+        resolved = self.load()
+        request['uav_id'] = 3
+        path.write_text(json.dumps(request))
+        with self.assertRaisesRegex(ValueError, 'request_sha256'):
+            bas._hitl_input(resolved, self.root)
+        path.write_text(json.dumps(dict(request, uav_id=2)))
+        profiles = self.root / 'network/config/hitl_reference_devices.json'
+        profiles.write_bytes(profiles.read_bytes() + b'\n')
+        with self.assertRaisesRegex(ValueError, 'profiles_sha256'):
+            bas._hitl_input(resolved, self.root)
+
+    def test_radio_bench_lifetime_covers_host_window_and_keeps_legacy_caps(self):
+        budget = bas.runtime_duration_limits(28800, 120, 5, ['control', 'payload'],
+                                             mode='latency_diagnostic', radio_bench=True)
+        self.assertGreater(budget['native_duration_s'], 28800 + 30)
+        self.assertGreater(budget['service_duration_s'], budget['native_duration_s'])
+        self.assertEqual(budget['native_budgets']['warmup_s'], 30)
+        self.assertEqual(budget['native_budgets']['payload_requests_s'], 15)
+        with self.assertRaisesRegex(ValueError, '86400'):
+            bas.runtime_duration_limits(86400, 120, 5, ['control', 'payload'],
+                                        mode='latency_diagnostic', radio_bench=True)
+        legacy = bas.runtime_duration_limits(28800, 120, 5, ['control', 'payload'], mode='latency_diagnostic')
+        self.assertEqual((legacy['native_duration_s'], legacy['service_duration_s']), (2400, 3600))
+
+    def radio_bench_evidence(self):
+        """Parser fixtures for real artifact contracts; no RF/hardware acceptance claim."""
+        self.configure_hitl()
+        config = self.load()
+        folder = self.root / 'runs/control/bench-proof'
+        raw = self.root / 'runs/native-radio-realtime/bench-proof'
+        folder.mkdir(parents=True)
+        def save(relative, value):
+            path = raw / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            bas.write_json(path, value)
+        with patch.object(bas, 'ROOT', self.root):
+            hashes = bas.snapshot_inputs(config, folder, bas.environment(config, 'bench-proof'))
+        bas.write_json(folder / 'run.json', dict(run_id=raw.name, **hashes))
+        bundle = json.loads((folder / 'hitl-bundle.json').read_text())
+        for adapter in bundle['adapters'].values():
+            adapter['radio_watchdog_file'] = '/tmp/owned-native.heartbeat'
+        save('external_endpoints/bundle.json', bundle)
+        profiles = raw / 'external_endpoints/reference-profiles.json'
+        profiles.write_bytes((folder / 'hitl-reference-profiles.json').read_bytes())
+        identities = {c: dict(configured_path=bundle['adapters'][c]['endpoint']['device'],
+                              resolved_path=f'/dev/ttyUSB{i}', st_rdev=i + 1)
+                      for i, c in enumerate(('control', 'payload'))}
+        save('external_endpoints/result.json', dict(status='stopped', child_returncodes=dict(control=0, payload=0),
+                                                    serial_device_identities=identities))
+        save('external_endpoints/ready.json', dict(adapter_endpoints_connected=True))
+        for channel in ('control', 'payload'):
+            save(f'external_endpoints/{channel}/metrics.json', dict(uav_id=2, channel=channel,
+                controller_kind='serial', endpoint_to_radio_bytes=1000, radio_to_endpoint_bytes=1000,
+                io_errors=0, reconnects=1, serial_exclusive=True,
+                serial_device_identity=identities[channel]['st_rdev']))
+        ids = list(range(1, 6))
+        slots = {f'{c}:uav{i}' for c in ('control', 'payload') for i in ids}
+        diagnostic = dict(uav_count=5, channels=['control', 'payload'], bench_window=dict(
+            status='completed', clock='host_monotonic', requested_duration_s=20,
+            started_host_monotonic_ns=1_000_000_000, ended_host_monotonic_ns=21_000_000_000,
+            message_counts=dict.fromkeys(slots, 20)), payload_version_check=dict(status='passed',
+                uavs={str(i): dict(status='passed', accepted_ack_received=True, response_received=True) for i in ids}))
+        save('metrics/scenario_summary.json', dict(status='diagnostic_complete', mission_outcome='not_applicable',
+            latency_diagnostic=diagnostic, command_operations=[dict(uav=f'uav{i}', channel='control', command=512,
+                attempts=[dict(outcome='ack_received', send_monotonic_ns=1000, ack_gcs_received_monotonic_ns=2000,
+                               command_frame_hex='fd01', ack_frame_hex='fd02')]) for i in ids]))
+        save('metrics/native_radio_stats.json', dict(uav_count=5, radio_node_count=6,
+            shared_spectrum_channel_count=1, native_ns3_phy=True, native_ns3_mac=True, packet_outcome_affected=True,
+            selected_propagation_profile='geometry_logdistance', stop_reason='sionna_ns3_process_stopped'))
+        save('metrics/mavlink_latency_summary.json', dict(attempt_count=5))
+        save('metrics/control_latency_summary.json', dict(status='diagnostic_complete', uav_count=5,
+                                                         mavlink_latency=dict(attempt_count=5)))
+        save('metrics/no_bypass_summary.json', dict(passed=True, uav_ids=ids, channels=['control', 'payload'],
+            uart_metrics_complete=True, transport_sequences_resumed=True, physics_progressed_all_uavs=True,
+            control_ack_absent=True, payload_response_absent=True, reverse_telemetry_absent=True,
+            uart_delivered_bytes_delta=dict.fromkeys(slots, 0), source_uart_bytes_delta=dict.fromkeys(slots, 10)))
+        save('logs/native_capture_storage.json', dict(publication=dict(status='copied', errors=[])))
+        save('configuration/final/manifest.json', {})
+        return raw, folder, config
+
+    def test_radio_bench_proof_preserves_nonflight_scope_and_shared_backend_gates(self):
+        raw, folder, config = self.radio_bench_evidence()
+        summary = bas.radio_bench_summary(raw, 0, config, folder)
+        self.assertTrue(summary['radio_hitl_verification']['passed'], summary)
+        result = bas.recorded_outcome(raw, 0, summary)
+        self.assertEqual((result['runtime_status'], result['mission_outcome'], result['measurement_validity']),
+                         ('completed', 'not_applicable', 'valid'))
+        self.assertEqual(result['hardware_validation'], 'not_performed')
+        path = raw / 'metrics/native_radio_stats.json'
+        stats = json.loads(path.read_text())
+        stats['stop_reason'] = 'state_coupling_deadline'
+        bas.write_json(path, stats)
+        self.assertEqual(bas.recorded_outcome(raw, 0, summary)['runtime_status'], 'failed')
+
+    def test_radio_bench_missing_or_conflicting_actual_evidence_cannot_pass(self):
+        raw, folder, config = self.radio_bench_evidence()
+        for relative in ('external_endpoints/bundle.json', 'external_endpoints/reference-profiles.json', 'external_endpoints/ready.json',
+                         'external_endpoints/result.json', 'external_endpoints/control/metrics.json',
+                         'external_endpoints/payload/metrics.json', 'metrics/scenario_summary.json',
+                         'metrics/control_latency_summary.json', 'metrics/no_bypass_summary.json'):
+            path = raw / relative
+            original = path.read_bytes()
+            path.unlink()
+            with self.subTest(missing=relative):
+                summary = bas.radio_bench_summary(raw, 0, config, folder)
+                self.assertEqual((summary['runtime_status'], summary['measurement_validity']), ('failed', 'invalid'))
+            path.write_bytes(original)
+        for relative, mutate in (
+            ('metrics/scenario_summary.json', lambda s: s['latency_diagnostic']['bench_window'].update(ended_host_monotonic_ns=20_999_999_999)),
+            ('metrics/scenario_summary.json', lambda s: s['latency_diagnostic']['payload_version_check']['uavs']['2'].update(response_received=False)),
+            ('metrics/scenario_summary.json', lambda s: s.update(command_operations=[])),
+            ('external_endpoints/bundle.json', lambda s: s['adapters']['payload'].update(uav_id=3)),
+            ('external_endpoints/payload/metrics.json', lambda s: s.update(radio_to_endpoint_bytes=0)),
+            ('external_endpoints/payload/metrics.json', lambda s: s.update(io_errors=1)),
+            ('external_endpoints/control/metrics.json', lambda s: s.update(reconnects=2)),
+            ('external_endpoints/control/metrics.json', lambda s: s.update(serial_exclusive=False)),
+            ('external_endpoints/payload/metrics.json', lambda s: s.update(serial_device_identity=1)),
+            ('external_endpoints/result.json', lambda s: s['serial_device_identities']['payload'].update(st_rdev=1)),
+            ('external_endpoints/result.json', lambda s: s['child_returncodes'].update(payload=1)),
+            ('metrics/no_bypass_summary.json', lambda s: s['uart_delivered_bytes_delta'].update({'payload:uav2': 1})),
+        ):
+            path = raw / relative
+            original = path.read_bytes()
+            changed = json.loads(original)
+            mutate(changed)
+            bas.write_json(path, changed)
+            with self.subTest(relative=relative, changed=changed):
+                self.assertFalse(bas.radio_bench_summary(raw, 0, config, folder)['radio_hitl_verification']['passed'])
+            path.write_bytes(original)
+        (raw / 'metrics/control_uart_uav2.json').write_text('{}')
+        self.assertFalse(bas.radio_bench_summary(raw, 0, config, folder)['radio_hitl_verification']['passed'])
+
+    def test_radio_bench_malformed_scenario_and_stop_are_not_success(self):
+        raw, folder, config = self.radio_bench_evidence()
+        path = raw / 'metrics/scenario_summary.json'
+        for value in ([], None, 'wrong'):
+            bas.write_json(path, value)
+            with self.subTest(value=value):
+                self.assertFalse(bas.radio_bench_summary(raw, 0, config, folder)['radio_hitl_verification']['passed'])
+        bas.write_json(path, dict(status='stopped', error='operator stop'))
+        result = bas.radio_bench_summary(raw, 130, config, folder)
+        self.assertEqual((result['status'], result['mission_outcome'], result['measurement_validity']),
+                         ('stopped', 'not_applicable', 'not_evaluated'))
+        self.assertFalse(result['radio_hitl_verification']['passed'])
+        outcome = bas.recorded_outcome(raw, 130, result)
+        self.assertEqual((outcome['runtime_status'], outcome['mission_outcome'], outcome['measurement_validity']),
+                         ('completed', 'not_applicable', 'not_evaluated'))
+        stats_path = raw / 'metrics/native_radio_stats.json'
+        stats = json.loads(stats_path.read_text())
+        stats['stop_reason'] = 'state_coupling_deadline'
+        bas.write_json(stats_path, stats)
+        outcome = bas.recorded_outcome(raw, 130, result)
+        self.assertEqual((outcome['runtime_status'], outcome['measurement_validity']), ('failed', 'invalid'))
+
+    def test_actual_shell_status_branch_preserves_cancel_and_runs_cleanup(self):
+        """Execute the production status branch and capture cleanup, without a simulator."""
+        bash = ('C:/Program Files/Git/bin/bash.exe' if sys.platform == 'win32' else shutil.which('bash'))
+        if not bash or not Path(bash).is_file():
+            self.skipTest('Bash is required for the actual shell branch')
+        source = (bas.ROOT / 'network/ns3/run_native_radio_five_uav.sh').read_text()
+        cleanup = 'cleanup() {' + source.split('cleanup() {', 1)[1].split('\ntrap cleanup EXIT', 1)[0]
+        status = 'SCENARIO_STATUS=$?\n' + source.split('SCENARIO_STATUS=$?\n', 1)[1].split('\nif [[ ",$ACTIVE_UART_CHANNELS,', 1)[0]
+        for code in (130, 1):
+            with self.subTest(code=code):
+                folder = self.root / f'shell-{code}'
+                raw = folder / 'raw'
+                for relative in ('logs', 'pcap', 'configuration/final'):
+                    (raw / relative).mkdir(parents=True)
+                bas.write_json(raw / 'logs/native_capture_storage.json', dict(effective_profile='disk'))
+                (raw / 'logs/native_radio_events.csv').write_text('time,event\n')
+                script = '''set -Eeuo pipefail
+RUN_DIR="$PWD/raw"
+NATIVE_EVENT_CSV="$RUN_DIR/logs/native_radio_events.csv"
+NATIVE_PCAP_PREFIX="$RUN_DIR/pcap/native_radio"
+MONITOR_STOP="$RUN_DIR/logs/monitor.stop"
+NODE_STATE="$RUN_DIR/absent-state"
+NS3_READY="$RUN_DIR/absent-ready"
+BAS_SIM_CLOCK="$RUN_DIR/absent-clock"
+RUNTIME_DIR=""
+NS3_PID=""; NS3_LOGGER_PID=""; CLEANUP_ACTIVE=0
+capture_pids=(); managed_pids=(); created_namespaces=()
+python3() { "$BAS_TEST_PYTHON" "$@"; }
+capture_effective_configuration() {
+  printf '{"stage":"%s"}\n' "$1" > "$RUN_DIR/configuration/final/manifest.json"
+}
+'''
+                script += cleanup + '\ntrap cleanup EXIT\nset +e\n'
+                script += f'"$BASH" -c "exit {code}"\n' + status
+                env = dict(os.environ, BAS_TEST_PYTHON=sys.executable.replace('\\', '/'))
+                env.pop('BAS_NATIVE_SOURCES', None)
+                result = subprocess.run([bash, '-c', script], cwd=folder, env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, code, result.stderr)
+                self.assertTrue((raw / 'logs/monitor.stop').exists())
+                self.assertEqual(json.loads((raw / 'configuration/final/manifest.json').read_text()), dict(stage='final'))
+                publication = json.loads((raw / 'logs/native_capture_storage.json').read_text())['publication']
+                self.assertEqual(publication['status'], 'direct_disk')
+                self.assertEqual(publication['errors'], [])
+
+    def test_radio_bench_frozen_input_tamper_cannot_pass(self):
+        raw, folder, config = self.radio_bench_evidence()
+        for name in ('hitl-request.json', 'hitl-reference-profiles.json', 'hitl-bundle.json'):
+            path = folder / name
+            original = path.read_bytes()
+            path.write_bytes(original + b'\n')
+            with self.subTest(name=name):
+                self.assertFalse(bas.radio_bench_summary(raw, 0, config, folder)['radio_hitl_verification']['passed'])
+            path.write_bytes(original)
 
     def test_environment_cannot_activate_old_modes(self):
         env = bas.environment(self.load(), 'test', {

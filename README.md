@@ -292,6 +292,51 @@ python3 bas.py batch --config runtime.json --batch-id example --seeds 1,2 --rng-
 без подтверждения рыночной доли в России, равенства Wi-Fi реальному модему и
 аппаратной приёмки. `--dry-run` печатает разрешённые настройки без открытия устройств.
 
+Общий контроллер и JSON-редактор UI принимают необязательный раздел
+`"hitl": {"mode": "radio_bench", "request": "network/config/my-hitl.json"}`.
+В копии `runtime-link-test.json` задайте также `experiment.policy: "off"` и
+`flows.payload_load: null`. Request выбирает единственный внешний UAV и два
+endpoint; например, для Serial (замените пути фактическими устройствами):
+
+```json
+{
+  "controller": "pixhawk_6c", "radio_device": "microhard_p2400", "uav_id": 1,
+  "channels": {
+    "control": {"endpoint": {"kind": "serial", "device": "/dev/ttyUSB0", "baud": 115200}},
+    "payload": {"endpoint": {"kind": "serial", "device": "/dev/ttyUSB1", "baud": 115200}}
+  }
+}
+```
+
+Профили выбираются из `hitl_reference_devices.json`; `radio_device` задаёт
+совместимость интерфейса, не эквивалентность PHY/MAC модема. UDP/TCP используют
+тот же request/adapter контракт. Оба канала одного UAV занимают его существующие
+TAP-слоты; остальные 0–4 UAV сохраняют SITL. `fixed`/`failover`, генератор нагрузки
+и изменённые ATTITUDE/landing настройки в этом режиме отклоняются: оставьте
+`payload_attitude_interval_s: 0.2` и `land_timeout_s: 120`.
+Сохраните изменённую копию как `runtime-hitl.json`:
+
+```sh
+python3 bas.py inspect --config runtime-hitl.json
+python3 bas.py run --config runtime-hitl.json --run-id hitl-bench-01
+python3 bas.py status hitl-bench-01
+```
+
+`experiment.duration_s` задаёт окно наблюдения по monotonic time хоста после readiness, отдельного
+30-секундного прогрева и диагностических запросов AUTOPILOT_VERSION/PING.
+Запуск сохраняет исходный request, каталог профилей, разрешённый bundle и их
+SHA-256; серии проверяют неизменность входов.
+Loader добавляет `hitl.request_sha256` / `hitl.profiles_sha256`: это проверяемые
+снимком идентификаторы входа; новые исходные конфиги могут их не содержать.
+Изменение request/профилей после валидации отклоняется. Адаптеры и последующая
+проверка используют сохранённый каталог, исходные файлы не переписываются.
+Итог сверяет реальные ответы, оба адаптера, объявленное окно, изоляцию PHY
+и общие проверки стенда.
+Успех программного bench имеет `mission_outcome: "not_applicable"` и
+`hardware_validation: "not_performed"`. Остановка не посылает LAND.
+Это radio-HitL граница: внешний FC не управляет физикой Gazebo через этот режим;
+совместная полётная и аппаратная приёмка остаётся открытой.
+
 ## Обмен и время
 
 ```text

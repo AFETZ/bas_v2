@@ -1,5 +1,6 @@
 """Real UDP/BSF1/MAVLink diagnostics; no simulator or hardware qualification."""
 import copy
+from collections import Counter
 import hashlib
 import json
 from pathlib import Path
@@ -60,6 +61,45 @@ class NativeDiagnosticTests(unittest.TestCase):
             native.load_flight_plan(self.scenario)
         self.write(self.source)
         self.assertEqual(len(native.load_flight_plan(self.scenario)['observations']), 3)
+
+    def test_bench_duration_rejects_invalid_or_flight_mode_before_binding(self):
+        for duration in (True, 0, float('nan'), float('inf'), 86401):
+            with self.subTest(duration=duration), self.assertRaises(ValueError):
+                native.NativeFiveUavHarness(self.arguments(bench_duration_s=duration))
+        with self.assertRaisesRegex(native.ScenarioError, 'latency_diagnostic'):
+            native.NativeFiveUavHarness(self.arguments(mode='product', uav_count=5, bench_duration_s=20))
+
+    def test_bench_window_observes_declared_host_time_and_actual_received_counts(self):
+        harness = native.NativeFiveUavHarness.__new__(native.NativeFiveUavHarness)
+        harness.uav_ids, harness.channels = (1, 2), ('control', 'payload')
+        harness.summary, harness.message_counts = {}, Counter({('control', 1, 'HEARTBEAT'): 7})
+        phases, calls, now = [], [], [100_000_000_000]
+        harness.phase = phases.append
+        def pump(duration):
+            calls.append(duration)
+            now[0] += round(duration * 1e9)
+            for channel in harness.channels:
+                for i in harness.uav_ids:
+                    harness.message_counts[(channel, i, 'HEARTBEAT')] += 1
+        harness.pump = pump
+        with patch.object(native.time, 'monotonic', side_effect=lambda: now[0] / 1e9), \
+             patch.object(native.time, 'monotonic_ns', side_effect=lambda: now[0]), \
+             patch.object(native.clock, 'monotonic', side_effect=AssertionError('model clock used for host window')):
+            harness.observe_bench_window(.5)
+        window = harness.summary['latency_diagnostic']['bench_window']
+        self.assertEqual(phases, ['experiment_normal'])
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(window['ended_host_monotonic_ns'] - window['started_host_monotonic_ns'], 500_000_000)
+        self.assertEqual(window['status'], 'completed')
+        self.assertEqual(window['message_counts'], {f'{c}:uav{i}': 3 for c in harness.channels for i in harness.uav_ids})
+
+    def test_bench_stop_is_checked_before_existing_socket_pump(self):
+        harness = native.NativeFiveUavHarness.__new__(native.NativeFiveUavHarness)
+        harness.stop_file = self.root / 'stop.request'
+        harness.stop_file.touch()
+        with patch.object(town.FlightHarness, 'pump', side_effect=AssertionError('traffic after stop')):
+            with self.assertRaisesRegex(native.BenchStopRequested, 'no flight or LAND'):
+                harness.pump(0)
 
     def test_diagnostic_constructor_binds_exact_roster_and_selected_channels(self):
         self.source['flight'] = {'observations': [{'name': 'unrelated_legacy_flight_point'}]}
@@ -247,6 +287,14 @@ class NoBypassCounterTests(unittest.TestCase):
         source = native._uart_byte_counters(self.root, (1, 2, 3), ('control', 'payload'), 'uart_input_bytes',
             after_ns=self.stamp, watchdog_file=self.watchdog)
         self.assertTrue(all(value == 100 for value in source.values()))
+
+    def test_new_runtime_uses_its_frozen_profiles_instead_of_mutable_checkout(self):
+        profiles = self.root / 'external_endpoints/reference-profiles.json'
+        profiles.write_bytes(CATALOG.read_bytes())
+        with patch('scripts.product.test_radio_hitl.CATALOG', self.root / 'missing-mutable-profiles.json'):
+            self.assertEqual(len(self.read()), 6)
+        profiles.write_bytes(profiles.read_bytes() + b'\n')
+        self.assertIsNone(self.read())
 
     def test_missing_counter_or_either_queue_or_pending_cannot_default_to_zero(self):
         path = self.root / 'external_endpoints/payload/metrics.json'

@@ -48,6 +48,10 @@ DIAGNOSTIC_OPERATIONS_PER_UAV = 10
 DEFAULT_SCENARIO_CONFIG = ROOT / "network/config/scenario_5uav_town01_native_product.yaml"
 
 
+class BenchStopRequested(ScenarioError):
+    """The owning BAS controller cancelled a non-flight radio bench."""
+
+
 def load_flight_plan(path: Path, *, include_flight: bool = True) -> dict[str, Any]:
     """Load and validate the product mission from the selected scenario YAML."""
 
@@ -374,6 +378,14 @@ class NativeFiveUavHarness(FlightHarness):
             raise ScenarioError('full product flight requires all five UAVs and both UART channels')
         if type(args.timeout_scale) not in (int, float) or not math.isfinite(args.timeout_scale) or args.timeout_scale <= 0:
             raise ScenarioError('timeout_scale must be finite and positive')
+        bench_duration = getattr(args, 'bench_duration_s', None)
+        self.stop_file = getattr(args, 'stop_file', None)
+        if bench_duration is not None or self.stop_file is not None:
+            if mode != 'latency_diagnostic':
+                raise ScenarioError('bench duration/stop file require latency_diagnostic mode')
+            from bas import validate_duration
+            if bench_duration is not None:
+                validate_duration(bench_duration)
         self.scenario_config = Path(
             getattr(args, "scenario_config", None) or DEFAULT_SCENARIO_CONFIG
         ).resolve()
@@ -444,6 +456,11 @@ class NativeFiveUavHarness(FlightHarness):
         )
         if not include_flight:
             self.summary.update(mission_outcome='not_applicable', flight_validation='not_applicable')
+
+    def pump(self, timeout_s: float = 0.2) -> None:
+        if self.stop_file is not None and Path(self.stop_file).exists():
+            raise BenchStopRequested('radio bench stop requested; no flight or LAND command was sent')
+        super().pump(timeout_s)
 
     def phase(self, name: str) -> None:
         temporary = self.phase_file.with_name(self.phase_file.name + ".tmp")
@@ -792,7 +809,7 @@ class NativeFiveUavHarness(FlightHarness):
         report['status'] = 'passed'
         return report
 
-    def latency_diagnostics(self, uav_count: int, channels: tuple[str, ...]) -> None:
+    def latency_diagnostics(self, uav_count: int, channels: tuple[str, ...], *, bench_duration_s=None) -> None:
         """Stationary, non-flight decision-gate commands; no synthetic response is used."""
 
         request = int(self.mavutil.mavlink.MAV_CMD_REQUEST_MESSAGE)
@@ -846,6 +863,29 @@ class NativeFiveUavHarness(FlightHarness):
             "retry_candidates_s": list(RETRY_CHARACTERIZATION_CANDIDATES_S),
             "mavlink_ping": self.ping_diagnostics(systems),
         })
+        if bench_duration_s is not None:
+            self.observe_bench_window(bench_duration_s)
+
+    def observe_bench_window(self, duration_s: float) -> None:
+        """Observe the declared host window after readiness, warmup and safe requests."""
+        from bas import validate_duration
+        validate_duration(duration_s)
+        # The shared source scheduler also anchors measurement-relative inputs
+        # to this phase. This is an RF observation, never a flight mission.
+        self.phase('experiment_normal')
+        before = self.message_counts.copy()
+        start_ns = time.monotonic_ns()
+        window = dict(clock='host_monotonic', requested_duration_s=duration_s,
+                      started_host_monotonic_ns=start_ns, status='recording',
+                      scope='stationary radio-HitL observation; no flight or service-class qualification')
+        self.summary.setdefault('latency_diagnostic', {})['bench_window'] = window
+        self.observe_for(duration_s, wall_time=True)
+        end_ns = time.monotonic_ns()
+        window.update(ended_host_monotonic_ns=end_ns, observed_duration_s=(end_ns - start_ns) / 1e9,
+            status='completed', message_counts={f'{channel}:uav{i}': sum(
+                count - before[key] for key, count in self.message_counts.items()
+                if key[0] == channel and key[1] == i)
+                for channel in self.channels for i in self.uav_ids})
 
     def native_command_one(
         self,
@@ -1789,7 +1829,8 @@ def run_scenario(args: argparse.Namespace) -> int:
     try:
         if args.mode == "latency_diagnostic":
             channels = tuple(args.channels.split(","))
-            harness.latency_diagnostics(args.uav_count, channels)
+            harness.latency_diagnostics(args.uav_count, channels,
+                                       bench_duration_s=getattr(args, 'bench_duration_s', None))
             harness.summary["status"] = "diagnostic_complete"
             harness.summary["duration_s"] = round(clock.monotonic() - harness.started, 3)
             summary = harness.summary
@@ -1797,6 +1838,11 @@ def run_scenario(args: argparse.Namespace) -> int:
             summary = harness.diagnostic_flight(args.uav_count)
         else:
             summary = harness.run_native()
+    except BenchStopRequested as error:
+        harness.summary.update(status='stopped', error=str(error), mission_outcome='not_applicable',
+                               duration_s=round(clock.monotonic() - harness.started, 3))
+        write_json(output, harness.summary)
+        return 130
     except Exception as error:
         harness.summary.update(
             {
@@ -1817,7 +1863,7 @@ def run_scenario(args: argparse.Namespace) -> int:
 
 def _uart_byte_counters(run_dir, systems, channels, counter, *, after_ns=0, watchdog_file=None):
     """Accept only identified, fresh, drained counters from the actual owner."""
-    from scripts.product.test_radio_hitl import load_bundle, load_json
+    from scripts.product.test_radio_hitl import CATALOG, load_bundle, load_json
     if counter not in ('uart_input_bytes', 'uart_output_bytes'):
         raise ValueError('unsupported UART byte counter')
     run_dir = Path(run_dir)
@@ -1826,7 +1872,8 @@ def _uart_byte_counters(run_dir, systems, channels, counter, *, after_ns=0, watc
     bundle = None
     try:
         if bundle_path.exists():
-            bundle = load_bundle(bundle_path, native_uav_count=len(systems),
+            profiles = pair / 'reference-profiles.json'
+            bundle = load_bundle(bundle_path, profiles if profiles.exists() else CATALOG, native_uav_count=len(systems),
                                  watchdog_file=watchdog_file, runtime_snapshot=True)
         values = {}
         for system_id in systems:
@@ -2055,6 +2102,9 @@ def parser() -> argparse.ArgumentParser:
     scenario.add_argument("--mode", choices=("product", "latency_diagnostic", "flight_diagnostic"), default="product")
     scenario.add_argument("--uav-count", type=int, choices=UAV_IDS, default=5)
     scenario.add_argument("--channels", default="control,payload")
+    scenario.add_argument('--bench-duration-s', type=float,
+                          help='post-warmup host observation window, latency_diagnostic only')
+    scenario.add_argument('--stop-file', help='owning controller cancellation, latency_diagnostic only')
     scenario.add_argument(
         "--radio-profile", default="native_wifi_80211n_spectrum_reference_v1"
     )

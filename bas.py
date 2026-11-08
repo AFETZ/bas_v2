@@ -23,6 +23,7 @@ SHAPE = {
     'runtime': {'clock', 'image', 'land_timeout_s', 'sionna_log_level', 'event_logging', 'capture_storage'},
     'flows': {'channels', 'payload_attitude_interval_s', 'payload_load'},
     'interference': {'sources'},
+    'hitl': {'mode', 'request', 'request_sha256', 'profiles_sha256'},
 }
 PROPAGATION_FIELDS = {
     'geometry_logdistance': {'model'},
@@ -79,9 +80,29 @@ def validate_capture_storage(config):
         raise ValueError('duration beyond 2400 s requires runtime.capture_storage=disk; long tmpfs capture volume is not qualified')
 
 
-def runtime_duration_limits(duration, land_timeout_s, uav_count, channels, *, mode='relay_experiment', parameter_snapshots=False):
+def runtime_duration_limits(duration, land_timeout_s, uav_count, channels, *, mode='relay_experiment', parameter_snapshots=False,
+                            radio_bench=False):
     """Lifetimes only: existing readiness/flight/stop deadlines remain unchanged."""
     validate_duration(duration)
+    if radio_bench:
+        if mode != 'latency_diagnostic' or type(uav_count) is not int or not 1 <= uav_count <= 5 or channels != ['control', 'payload']:
+            raise ValueError('radio_bench lifetime requires latency_diagnostic and both channels for 1..5 UAVs')
+        # Existing native_radio_five_uav_scenario.py bounds: heartbeat readiness,
+        # 30 s warmup, payload REQUEST_MESSAGE, sequential/parallel operations,
+        # all three retry candidates (including waits) and at most 20 PING/UAV.
+        budgets = dict(native_readiness_s=180, heartbeat_readiness_s=90, warmup_s=30,
+            payload_requests_s=3 * uav_count, sequential_operations_s=10 * uav_count,
+            parallel_operations_s=10, retry_characterization_s=18 * uav_count,
+            ping_s=20 * uav_count, observation_s=duration,
+            no_bypass_readiness_and_draining_s=30, no_bypass_observation_s=10.5,
+            native_stop_wait_s=120, post_capture_wait_s=2, process_term_grace_s=5)
+        native = max(2400, math.ceil(sum(budgets.values())))
+        before_native = 15 * 2 * uav_count + 240 + 180 + uav_count * 30 * (5 + .2) + 15
+        service = max(3600, math.ceil(native + before_native))
+        if service > 86400:
+            raise ValueError('radio_bench observation plus startup/diagnostics exceeds the existing 86400 s external-adapter lifetime')
+        return dict(mode=mode, radio_bench=True, native_duration_s=native, service_duration_s=service,
+                    native_budgets=budgets, basis='declared host window plus unchanged bounded non-flight diagnostics')
     if mode != 'relay_experiment':
         return dict(mode=mode, native_duration_s=2400, service_duration_s=3600,
                     basis='legacy product/diagnostic/operator bounds; no extension from measurement duration')
@@ -152,11 +173,55 @@ def _interference_input(config, root, radio_profile=None):
     return path, raw
 
 
+def _hitl_input(config, root):
+    """Resolve one external dual-channel owner using the existing bench adapter contract."""
+    hitl = config.get('hitl')
+    if hitl is None:
+        return None
+    if (not isinstance(hitl, dict) or set(hitl) - SHAPE['hitl'] or not {'mode', 'request'} <= set(hitl)
+            or hitl.get('mode') != 'radio_bench'):
+        raise ValueError('hitl must be null or {mode: radio_bench, request: workspace-relative JSON path}')
+    if config['experiment']['policy'] != 'off':
+        raise ValueError('hitl radio_bench requires experiment.policy=off; external controllers do not execute the SITL flight mission')
+    if config['flows']['channels'] != ['control', 'payload'] or config['flows'].get('payload_load') is not None:
+        raise ValueError('hitl radio_bench requires both UART channels and payload_load=null')
+    if config['flows']['payload_attitude_interval_s'] != .2 or config['runtime']['land_timeout_s'] != 120:
+        raise ValueError('radio_bench does not use SITL ATTITUDE/landing settings; retain defaults 0.2 s and 120 s')
+    name = hitl['request']
+    if not isinstance(name, str) or not name or ':' in name:
+        raise ValueError('hitl.request must be a workspace-relative JSON path')
+    relative = Path(name.replace('\\', '/'))
+    if relative.is_absolute() or '..' in relative.parts or relative.suffix.lower() != '.json':
+        raise ValueError('hitl.request must be a workspace-relative JSON path without traversal')
+    path = (root / relative).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        raise ValueError('hitl.request must stay inside the workspace') from None
+    request_bytes = path.read_bytes()
+    profiles_bytes = (root / 'network/config/hitl_reference_devices.json').read_bytes()
+    for key, raw in (('request_sha256', request_bytes), ('profiles_sha256', profiles_bytes)):
+        if key in hitl and (not isinstance(hitl[key], str) or not re.fullmatch('[0-9a-f]{64}', hitl[key])
+                            or hitl[key] != hashlib.sha256(raw).hexdigest()):
+            raise ValueError(f'hitl.{key} differs from the validated input; reload the intended request/profiles')
+    def decode(raw):
+        return json.loads(raw.decode('utf-8-sig'), object_pairs_hook=unique_json_fields,
+                          parse_constant=reject_json_constant)
+    from scripts.product.test_radio_hitl import resolve
+    bundle = resolve(decode(request_bytes), decode(profiles_bytes), native_uav_count=config['drone']['count'])
+    bundle['reference_profiles_sha256'] = hashlib.sha256(profiles_bytes).hexdigest()
+    runtime_duration_limits(config['experiment']['duration_s'], config['runtime']['land_timeout_s'],
+                            config['drone']['count'], config['flows']['channels'],
+                            mode='latency_diagnostic', radio_bench=True)
+    return path, request_bytes, profiles_bytes, bundle
+
+
 def load_config(path, root=ROOT):
     config = json.loads(path.read_text(encoding='utf-8-sig'),
                         object_pairs_hook=unique_json_fields, parse_constant=reject_json_constant)
     if isinstance(config, dict):
         config.setdefault('interference', {'sources': None})
+        config.setdefault('hitl', None)
     if not isinstance(config, dict) or set(config) != set(SHAPE):
         raise ValueError('runtime config has missing or unknown sections')
     if isinstance(config['runtime'], dict):
@@ -166,6 +231,11 @@ def load_config(path, root=ROOT):
     if isinstance(config['flows'], dict):
         config['flows'].setdefault('payload_load', None)
     for section, keys in SHAPE.items():
+        if section == 'hitl':
+            if config[section] is not None and (not isinstance(config[section], dict)
+                    or set(config[section]) - keys or not {'mode', 'request'} <= set(config[section])):
+                raise ValueError('hitl requires mode/request and optional validated SHA-256 pins')
+            continue
         if section == 'propagation' and isinstance(config[section], dict):
             model = config[section].get('model')
             if not isinstance(model, str) or model not in PROPAGATION_FIELDS:
@@ -201,8 +271,9 @@ def load_config(path, root=ROOT):
         valid_interval = False
     if not valid_interval:
         raise ValueError('flows.payload_attitude_interval_s must be finite and between .02 and 60 seconds')
-    if config['experiment']['policy'] not in ('fixed', 'failover'):
-        raise ValueError('policy must be fixed or failover')
+    if config['experiment']['policy'] not in ('fixed', 'failover') and not (
+            config['experiment']['policy'] == 'off' and config['hitl'] is not None):
+        raise ValueError('policy must be fixed or failover; off requires explicit hitl radio_bench')
     for section, key in [('experiment', 'duration_s'), ('runtime', 'land_timeout_s')]:
         value = config[section][key]
         try:
@@ -275,6 +346,11 @@ def load_config(path, root=ROOT):
         radio_profile if config['propagation']['model'] == 'sionna' else None)
     if source_path is not None:
         config['interference']['sources'] = source_path.relative_to(root).as_posix()
+    hitl_input = _hitl_input(config, root)
+    if hitl_input is not None:
+        config['hitl']['request'] = hitl_input[0].relative_to(root).as_posix()
+        config['hitl'].update(request_sha256=hashlib.sha256(hitl_input[1]).hexdigest(),
+                              profiles_sha256=hashlib.sha256(hitl_input[2]).hexdigest())
     return config
 
 
@@ -312,6 +388,11 @@ def environment(config, run_id, inherited=None):
                         NATIVE_RT_GROUND_MATERIAL=propagation['ground_material'],
                         NATIVE_RT_BUILDING_MATERIAL=propagation['building_material'],
                         NATIVE_RT_THICKNESS_M=propagation['thickness_m'])
+    if config.get('hitl') is not None:
+        settings.update(NATIVE_EXTERNAL_BUNDLE=f'runs/control/{run_id}/hitl-bundle.json',
+                        NATIVE_EXTERNAL_PROFILES=f'runs/control/{run_id}/hitl-reference-profiles.json',
+                        NATIVE_LATENCY_MODE=1, NATIVE_FLIGHT_DIAGNOSTIC=0, NATIVE_OPERATOR_SECONDS=0,
+                        NATIVE_EXPERIMENT_PILOT=0, NATIVE_FIVE_TIMEOUT_SCALE=1)
     settings['NATIVE_URBAN_OUTPUT'] = f'runs/control/{run_id}/generated'
     env.update({'BAS_' + k: str(v) for k, v in settings.items()})
     return env
@@ -346,6 +427,20 @@ def snapshot_inputs(config, folder, env):
         snapshot.write_bytes(source_bytes)
         env['BAS_NATIVE_SOURCES'] = snapshot.relative_to(ROOT).as_posix()
         hashes['sources_sha256'] = hashlib.sha256(source_bytes).hexdigest()
+    env.pop('BAS_NATIVE_EXTERNAL_BUNDLE', None)
+    env.pop('BAS_NATIVE_EXTERNAL_PROFILES', None)
+    hitl_input = _hitl_input(config, ROOT.resolve())
+    if hitl_input is not None:
+        _, request_bytes, profiles_bytes, bundle = hitl_input
+        (folder / 'hitl-request.json').write_bytes(request_bytes)
+        (folder / 'hitl-reference-profiles.json').write_bytes(profiles_bytes)
+        path = folder / 'hitl-bundle.json'
+        write_json(path, bundle)
+        env['BAS_NATIVE_EXTERNAL_BUNDLE'] = path.relative_to(ROOT).as_posix()
+        env['BAS_NATIVE_EXTERNAL_PROFILES'] = (folder / 'hitl-reference-profiles.json').relative_to(ROOT).as_posix()
+        hashes.update(hitl_request_sha256=hashlib.sha256(request_bytes).hexdigest(),
+                      hitl_profiles_sha256=hashlib.sha256(profiles_bytes).hexdigest(),
+                      hitl_bundle_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
     return hashes
 
 
@@ -416,10 +511,129 @@ def node_state_journal_verification(raw):
     return result
 
 
+def radio_bench_summary(raw, code, config, folder):
+    """Qualify existing non-flight evidence, never physical hardware or flight success."""
+    checks = dict(inputs=False, scenario=False, observation_window=False, native_radio=False,
+                  readonly_exchange=False, external_endpoints=False, no_bypass=False)
+    proof = dict(passed=False, checks=checks, scope='software radio-HitL boundary',
+                 hardware_validation='not_performed', joint_flight_validation='not_performed')
+    def read(path):
+        return json.loads(path.read_text(encoding='utf-8-sig'), object_pairs_hook=unique_json_fields,
+                          parse_constant=reject_json_constant)
+    scenario = {}
+    try:
+        from scripts.product.test_radio_hitl import load_bundle
+        profiles = folder / 'hitl-reference-profiles.json'
+        record = read(folder / 'run.json')
+        checks['inputs'] = all(hashlib.sha256((folder / name).read_bytes()).hexdigest() == record.get(key)
+            for key, name in (('hitl_request_sha256', 'hitl-request.json'),
+                              ('hitl_profiles_sha256', profiles.name), ('hitl_bundle_sha256', 'hitl-bundle.json')))
+        count = config['drone']['count']
+        ids = list(range(1, count + 1))
+        expected = load_bundle(folder / 'hitl-bundle.json', profiles, native_uav_count=count)
+        checks['inputs'] = checks['inputs'] and read(folder / 'hitl-request.json') == expected['source_request']
+        actual_path = raw / 'external_endpoints/bundle.json'
+        checks['inputs'] = checks['inputs'] and (raw / 'external_endpoints/reference-profiles.json').read_bytes() == profiles.read_bytes()
+        watchdog = read(actual_path)['adapters']['control']['radio_watchdog_file']
+        actual = load_bundle(actual_path, profiles, native_uav_count=count,
+                             watchdog_file=watchdog, runtime_snapshot=True)
+        for adapter in expected['adapters'].values():
+            adapter['radio_watchdog_file'] = watchdog
+        checks['inputs'] = checks['inputs'] and actual == expected
+        scenario = read(raw / 'metrics/scenario_summary.json')
+        if not isinstance(scenario, dict):
+            raise ValueError('radio bench scenario summary must be an object')
+        diagnostic = scenario.get('latency_diagnostic', {})
+        checks['scenario'] = (scenario.get('status') == 'diagnostic_complete' and type(diagnostic.get('uav_count')) is int
+            and scenario.get('mission_outcome') == 'not_applicable' and diagnostic.get('uav_count') == count
+            and diagnostic.get('channels') == ['control', 'payload'])
+        window = diagnostic.get('bench_window', {})
+        start, end = window.get('started_host_monotonic_ns'), window.get('ended_host_monotonic_ns')
+        counters = window.get('message_counts', {})
+        checks['observation_window'] = (window.get('status') == 'completed' and window.get('clock') == 'host_monotonic'
+            and window.get('requested_duration_s') == config['experiment']['duration_s']
+            and type(start) is int and type(end) is int and start > 0
+            and end - start >= round(config['experiment']['duration_s'] * 1e9)
+            and set(counters) == {f'{channel}:uav{i}' for channel in ('control', 'payload') for i in ids}
+            and all(type(n) is int and n >= 0 for n in counters.values()))
+        stats = read(raw / 'metrics/native_radio_stats.json')
+        checks['native_radio'] = (type(stats.get('uav_count')) is int and stats.get('uav_count') == count
+            and type(stats.get('radio_node_count')) is int and stats.get('radio_node_count') == count + 1
+            and stats.get('shared_spectrum_channel_count') == 1 and stats.get('native_ns3_phy') is True
+            and stats.get('native_ns3_mac') is True and stats.get('packet_outcome_affected') is True
+            and stats.get('selected_propagation_profile') == config['propagation']['model'])
+        latency = read(raw / 'metrics/control_latency_summary.json')
+        payload = diagnostic.get('payload_version_check', {})
+        operations = scenario.get('command_operations', [])
+        checks['readonly_exchange'] = (latency.get('status') == 'diagnostic_complete'
+            and latency.get('uav_count') == count
+            and latency.get('mavlink_latency') == read(raw / 'metrics/mavlink_latency_summary.json')
+            and payload.get('status') == 'passed' and set(payload.get('uavs', {})) == {str(i) for i in ids}
+            and all(payload['uavs'][str(i)].get('status') == 'passed'
+                    and payload['uavs'][str(i)].get('accepted_ack_received') is True
+                    and payload['uavs'][str(i)].get('response_received') is True for i in ids)
+            and all(any(op.get('uav') == f'uav{i}' and op.get('channel') == 'control' and op.get('command') == 512
+                        and any(a.get('outcome') == 'ack_received' and type(a.get('send_monotonic_ns')) is int
+                                and type(a.get('ack_gcs_received_monotonic_ns')) is int
+                                and a['ack_gcs_received_monotonic_ns'] >= a['send_monotonic_ns']
+                                and a.get('command_frame_hex') and a.get('ack_frame_hex')
+                                for a in op.get('attempts', [])) for op in operations) for i in ids))
+        pair = raw / 'external_endpoints'
+        pair_result, ready = read(pair / 'result.json'), read(pair / 'ready.json')
+        endpoint_checks = []
+        identities = pair_result.get('serial_device_identities', {})
+        serial_channels = {c for c in ('control', 'payload') if expected['adapters'][c]['endpoint']['kind'] == 'serial'}
+        serial_identity_valid = (set(identities) == serial_channels
+            and all(identities[c].get('configured_path') == expected['adapters'][c]['endpoint']['device']
+                    and type(identities[c].get('st_rdev')) is int for c in serial_channels)
+            and len({identities[c]['st_rdev'] for c in serial_channels}) == len(serial_channels))
+        for channel in ('control', 'payload'):
+            metrics = read(pair / channel / 'metrics.json')
+            endpoint_checks.append(metrics.get('uav_id') == expected['native_binding']['uav_id']
+                and metrics.get('channel') == channel
+                and metrics.get('controller_kind') == expected['adapters'][channel]['endpoint']['kind']
+                and all(type(metrics.get(k)) is int and metrics[k] > 0
+                        for k in ('endpoint_to_radio_bytes', 'radio_to_endpoint_bytes'))
+                and type(metrics.get('io_errors')) is int and metrics['io_errors'] == 0
+                and type(metrics.get('reconnects')) is int and metrics['reconnects'] == 1
+                and (channel not in serial_channels or (serial_identity_valid and metrics.get('serial_exclusive') is True
+                    and type(metrics.get('serial_device_identity')) is int
+                    and metrics['serial_device_identity'] == identities[channel]['st_rdev']))
+                and not (raw / f'metrics/{channel}_uart_uav{expected["native_binding"]["uav_id"]}.json').exists())
+        codes = pair_result.get('child_returncodes', {})
+        checks['external_endpoints'] = (ready.get('adapter_endpoints_connected') is True
+            and pair_result.get('status') in ('completed', 'stopped') and not pair_result.get('error')
+            and set(codes) == {'control', 'payload'} and all(type(n) is int and n == 0 for n in codes.values())
+            and serial_identity_valid and all(endpoint_checks))
+        isolation = read(raw / 'metrics/no_bypass_summary.json')
+        slot_ids = {f'{channel}:uav{i}' for channel in ('control', 'payload') for i in ids}
+        checks['no_bypass'] = (isolation.get('passed') is True and isolation.get('uav_ids') == ids
+            and isolation.get('channels') == ['control', 'payload']
+            and all(isolation.get(k) is True for k in ('uart_metrics_complete', 'transport_sequences_resumed',
+                'physics_progressed_all_uavs', 'control_ack_absent', 'payload_response_absent', 'reverse_telemetry_absent'))
+            and set(isolation.get('uart_delivered_bytes_delta', {})) == slot_ids
+            and all(type(n) is int and n == 0 for n in isolation['uart_delivered_bytes_delta'].values())
+            and set(isolation.get('source_uart_bytes_delta', {})) == slot_ids
+            and all(type(n) is int and n > 0 for n in isolation['source_uart_bytes_delta'].values()))
+        proof['passed'] = code == 0 and all(checks.values())
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
+        proof['error'] = str(error)
+    scenario = scenario if isinstance(scenario, dict) else {}
+    stopped = code == 130 and scenario.get('status') == 'stopped'
+    return dict(status='completed' if proof['passed'] else 'stopped' if stopped else 'failed',
+        runtime_status='completed' if proof['passed'] or stopped else 'failed', mission_outcome='not_applicable',
+        measurement_validity='valid' if proof['passed'] else 'not_evaluated' if stopped else 'invalid',
+        error=None if proof['passed'] else scenario.get('error') or 'radio bench evidence is incomplete or inconsistent',
+        radio_hitl_verification=proof)
+
+
 def recorded_outcome(raw, code, summary, *, source_configured=False):
     """Use backend evidence as well as mission status; never infer success from exit 0."""
     result = {key: summary.get(key, 'not_evaluated') for key in
               ('runtime_status', 'mission_outcome', 'measurement_validity')}
+    if 'radio_hitl_verification' in summary:
+        result['radio_hitl_verification'] = summary['radio_hitl_verification']
+        result['hardware_validation'] = 'not_performed'
     stats_path = raw / 'metrics/native_radio_stats.json'
     stats = json.loads(stats_path.read_text()) if stats_path.exists() else {}
     verification_errors = []
@@ -503,7 +717,10 @@ def request_stop(run_id):
     if state['status'] != 'running':
         raise ValueError(f'run is not active: {state["status"]}')
     (folder / 'stop.request').touch()
-    print('Stop requested; the mission will attempt LAND through ns-3. Check status for the outcome.')
+    if state.get('environment', {}).get('BAS_NATIVE_EXTERNAL_BUNDLE'):
+        print('Radio bench stop requested; external controller is not commanded to fly or LAND.')
+    else:
+        print('Stop requested; the mission will attempt LAND through ns-3. Check status for the outcome.')
 
 
 def run(config, run_id):
@@ -551,7 +768,10 @@ def run(config, run_id):
                 code = child.wait()
             summary_path = raw / 'metrics/relay_experiment_summary.json'
             summary = json.loads(summary_path.read_text()) if summary_path.exists() else {}
-            status = summary.get('status', 'failed') if code == 0 else 'failed'
+            if config.get('hitl') is not None:
+                summary = radio_bench_summary(raw, code, config, folder)
+            status = summary.get('status', 'failed') if code == 0 or (
+                config.get('hitl') is not None and code == 130 and summary.get('status') == 'stopped') else 'failed'
             record.update(status=status, returncode=code, mission_error=summary.get('error'))
             record.update(recorded_outcome(raw, code, summary,
                 source_configured=config.get('interference', {}).get('sources') is not None))
@@ -567,7 +787,9 @@ def run(config, run_id):
                          ('run_id', 'runtime_status', 'mission_outcome', 'measurement_validity', 'returncode')}))
         return code if code else (130 if record['status'] == 'stopped' else
                                  0 if record['runtime_status'] == 'completed'
-                                      and record['mission_outcome'] == 'succeeded'
+                                      and (record['mission_outcome'] == 'succeeded' or (
+                                          config.get('hitl') is not None and record['mission_outcome'] == 'not_applicable'
+                                          and record.get('radio_hitl_verification', {}).get('passed') is True))
                                       and record['measurement_validity'] == 'valid' else 1)
 
 

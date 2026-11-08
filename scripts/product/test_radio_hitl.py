@@ -15,9 +15,11 @@ import hashlib
 import ipaddress
 import json
 import math
+import os
 from pathlib import Path
 import signal
 import subprocess
+import stat
 import sys
 import time
 
@@ -232,7 +234,28 @@ def load_bundle(path, catalog_path=CATALOG, *, native_uav_count=None, watchdog_f
     return result
 
 
-def run_adapters(bundle, output, duration_s, readiness_timeout_s=10):
+def serial_device_identities(bundle):
+    """Runtime admission only; inspect/resolve must work without connected devices."""
+    identities = {}
+    if os.name != 'posix':
+        return identities  # Windows serial opens use the driver's exclusive handle.
+    seen = set()
+    for channel, adapter in bundle['adapters'].items():
+        endpoint = adapter['endpoint']
+        if endpoint['kind'] != 'serial':
+            continue
+        resolved = Path(endpoint['device']).resolve(strict=True)
+        info = resolved.stat()
+        if not stat.S_ISCHR(info.st_mode):
+            raise ValueError(f'{channel}: serial endpoint must be a POSIX character device')
+        if info.st_rdev in seen:
+            raise ValueError('control and payload aliases refer to the same POSIX serial device')
+        seen.add(info.st_rdev)
+        identities[channel] = dict(configured_path=endpoint['device'], resolved_path=str(resolved), st_rdev=info.st_rdev)
+    return identities
+
+
+def run_adapters(bundle, output, duration_s, readiness_timeout_s=10, *, profiles_path=CATALOG):
     """Supervise only this pair; native PHY readiness remains the runner's job."""
     _number(duration_s, 'duration_s', minimum=.001)
     _number(readiness_timeout_s, 'readiness_timeout_s', minimum=.001)
@@ -245,13 +268,19 @@ def run_adapters(bundle, output, duration_s, readiness_timeout_s=10):
         raise ValueError('native adapter launch requires the owning runtime watchdog path')
     from network.scripts.external_endpoint import open_radio_socket
     output = Path(output)
+    profile_bytes = Path(profiles_path).read_bytes()
+    if hashlib.sha256(profile_bytes).hexdigest() != bundle.get('reference_profiles_sha256'):
+        raise ValueError('reference profiles changed before adapter launch')
+    serial_identities = serial_device_identities(bundle)
     output.mkdir(parents=True, exist_ok=False)
+    (output / 'reference-profiles.json').write_bytes(profile_bytes)
     bas.write_json(output / 'bundle.json', bundle)
     children, logs, previous = {}, [], {}
     stopped = False
     started = time.monotonic()
     summary = dict(status='starting', hardware_validation='not_performed',
-                   native_phy_validation='not_performed', endpoint_owner='external', child_returncodes={})
+                   native_phy_validation='not_performed', endpoint_owner='external', child_returncodes={},
+                   serial_device_identities=serial_identities)
     def stop(*_):
         nonlocal stopped
         stopped = True
@@ -358,7 +387,8 @@ def main(argv=None):
             if args.output is None:
                 parser.error('--run-adapters requires a new --output directory')
             result = run_adapters(result, args.output, 60 if args.duration_s is None else args.duration_s,
-                                  10 if args.readiness_timeout_s is None else args.readiness_timeout_s)
+                                  10 if args.readiness_timeout_s is None else args.readiness_timeout_s,
+                                  profiles_path=args.profiles)
             print(json.dumps(result, indent=2))
             return 130 if result['status'] == 'stopped' else 0 if result['status'] == 'completed' else 1
         if args.output is not None:

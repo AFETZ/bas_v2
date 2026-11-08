@@ -63,6 +63,9 @@ def plan_batch(config, batch_id, seeds, rng_runs, repeats=1, duration=None, *, r
     sources = config.get('interference', {}).get('sources')
     if sources is not None:
         paths['sources'] = sources
+    if config.get('hitl') is not None:
+        paths.update(hitl_request=config['hitl']['request'],
+                     hitl_profiles='network/config/hitl_reference_devices.json')
     input_hashes = {label: dict(path=name, sha256=hashlib.sha256((root / name).read_bytes()).hexdigest())
                     for label, name in paths.items()}
     scene_sha = input_hashes['scene']['sha256']
@@ -139,7 +142,8 @@ def execute(plan, *, root=None, run_fn=None, fail_fast=False):
             outcome = json.loads(path.read_text()) if path.exists() else {}
             case.update({key: outcome.get(key, 'not_evaluated') for key in
                          ('runtime_status', 'mission_outcome', 'measurement_validity')})
-            for key in ('scene_sha256', 'radio_sha256', 'sources_sha256'):
+            for key in ('scene_sha256', 'radio_sha256', 'sources_sha256',
+                        'hitl_request_sha256', 'hitl_profiles_sha256', 'hitl_bundle_sha256'):
                 if key in outcome:
                     case[key] = outcome[key]
             # Close the check→snapshot race using actual hashes from bas.run.
@@ -163,7 +167,9 @@ def execute(plan, *, root=None, run_fn=None, fail_fast=False):
                 record.update(status='failed', stop_reason='case_runtime_or_measurements_not_valid')
                 exit_code = 2
                 break
-            if code == 0 and case['mission_outcome'] == 'succeeded':
+            bench_passed = (config.get('hitl') is not None and case['mission_outcome'] == 'not_applicable'
+                            and outcome.get('radio_hitl_verification', {}).get('passed') is True)
+            if code == 0 and (case['mission_outcome'] == 'succeeded' or bench_passed):
                 case['outcome'] = 'succeeded'
             elif case['mission_outcome'] in ('failed', 'incomplete'):
                 failed_cases += 1

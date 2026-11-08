@@ -29,7 +29,7 @@
 <section aria-labelledby="status-heading"><h2 id="status-heading">Наблюдение</h2>
 <div class="panel"><div class="row"><label for="recent">Сохранённые опыты<select id="recent"><option value="">Выберите опыт</option></select></label><button id="refresh" type="button">Обновить</button></div>
 <label for="selected">Текущий опыт<input id="selected" spellcheck="false" autocomplete="off"></label>
-<button id="stop" class="stop" type="button">Запросить посадку и остановку</button>
+<button id="stop" class="stop" type="button">Запросить остановку</button>
 <table aria-label="Результаты опыта"><tbody>
 <tr><th scope="row">Состояние стенда</th><td id="runtime">Нет данных</td></tr>
 <tr><th scope="row">Результат миссии</th><td id="mission">Нет данных</td></tr>
@@ -59,7 +59,7 @@ $('load').onclick=action(async()=>{showConfig(await api('/api/config?path='+enco
 $('copy').onclick=()=>{$('run-id').value=newId();$('use-scene').checked=true;message('Копия готова к редактированию. Параметры и сцена сохранятся отдельно при запуске.')};
 $('validate').onclick=action(async()=>{await api('/api/validate',payload());message('Параметры проверены. Аппаратные и полётные критерии проверяются запуском.')});
 $('start').onclick=action(async()=>{const data=await api('/api/start',payload());$('selected').value=data.run_id;message('Контроллер запущен. Ожидайте подготовки компонентов.');await runs();await status()});
-$('stop').onclick=action(async()=>{await api('/api/stop',{run_id:$('selected').value});message('Запрос остановки передан. Результат посадки появится в состоянии опыта.')});
+$('stop').onclick=action(async()=>{await api('/api/stop',{run_id:$('selected').value});message('Запрос остановки передан. Итог появится в состоянии опыта.')});
 $('refresh').onclick=action(async()=>{await runs();await status()});$('recent').onchange=action(async()=>{$('selected').value=$('recent').value;await status()});
 (async()=>{try{const data=await api('/api/bootstrap');showConfig(data);$('run-id').value=newId();$('start').disabled=!data.can_launch;$('platform').textContent=data.can_launch?'Запуск выполняется существующим контроллером BAS.':'На этом компьютере доступны редактирование и проверка. Симуляция запускается на Linux-хосте.';await runs()}catch(error){message(error.message,true)}})();
 setInterval(()=>{if($('selected').value)status().catch(error=>message(error.message,true))},2000);

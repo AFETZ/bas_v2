@@ -1,5 +1,6 @@
 """Real localhost HTTP tests; injected controllers do not qualify a flight or HitL."""
 import copy
+import hashlib
 import http.client
 import json
 from pathlib import Path
@@ -69,6 +70,26 @@ class OperatorUITests(unittest.TestCase):
 
     def payload(self, **changes):
         return dict(config=copy.deepcopy(self.config), run_id='ui-test', **changes)
+
+    def test_hitl_configuration_uses_shared_loader_without_opening_an_endpoint(self):
+        profiles = self.root / 'network/config/hitl_reference_devices.json'
+        profiles.write_bytes((bas.ROOT / 'network/config/hitl_reference_devices.json').read_bytes())
+        request = dict(controller='pixhawk_6c', radio_device='microhard_p2400', uav_id=3,
+                       channels={c: dict(endpoint=dict(kind='serial', device=f'/dev/ttyUSB{i}', baud=115200))
+                                 for i, c in enumerate(('control', 'payload'))})
+        bas.write_json(self.root / 'request.json', request)
+        payload = self.payload()
+        payload['config'].update(hitl=dict(mode='radio_bench', request='request.json'))
+        payload['config']['experiment']['policy'] = 'off'
+        code, data, _ = self.request('/api/validate', payload)
+        self.assertEqual(code, 200, data)
+        self.assertEqual(data['config']['hitl']['mode'], 'radio_bench')
+        self.assertEqual(data['config']['hitl']['request'], 'request.json')
+        self.assertEqual(data['config']['hitl']['request_sha256'], hashlib.sha256((self.root / 'request.json').read_bytes()).hexdigest())
+        self.assertEqual(self.launches, [])
+        payload['config']['experiment']['policy'] = 'failover'
+        self.assertEqual(self.request('/api/validate', payload)[0], 400)
+        self.assertEqual(self.launches, [])
 
     def test_loopback_bootstrap_and_offline_utf8_page(self):
         self.assertEqual(self.server.server_address[0], '127.0.0.1')

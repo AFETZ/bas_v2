@@ -141,6 +141,7 @@ def run(config, output, duration=None):
                    radio_tos=udp.getsockopt(socket.IPPROTO_IP, socket.IP_TOS), pid=os.getpid(),
                    uav_id=int(config['uav_id']), channel=config['channel'],
                    controller_kind=kind, hardware_validation="not_performed",
+                   serial_exclusive=None, serial_device_identity=None,
                    framing="BSF1; unchanged endpoint bytes", clock="host_monotonic")
     output.mkdir(parents=True, exist_ok=True)
     def stop(*_):
@@ -186,7 +187,13 @@ def run(config, output, duration=None):
                         device = serial.Serial(endpoint["device"], baudrate=endpoint["baud"],
                             bytesize=endpoint["bytesize"], parity=endpoint["parity"],
                             stopbits=endpoint["stopbits"], timeout=0, write_timeout=0,
+                            **({'exclusive': True} if os.name == 'posix' else {}),
                             **{key: endpoint[key] for key in ("xonxoff", "rtscts", "dsrdtr") if key in endpoint})
+                        if os.name == 'posix':
+                            # pySerial's cooperative flock protects these BAS
+                            # owners; it is not a kernel ban on unrelated readers.
+                            metrics['serial_exclusive'] = device.exclusive is True
+                            metrics['serial_device_identity'] = os.fstat(device.fileno()).st_rdev
                     elif kind == "udp":
                         device = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                         device.bind(tuple(endpoint["bind"]))

@@ -8,6 +8,7 @@ SCENARIO_KEY="${BAS_NATIVE_FIVE_SCENARIO:-town01}"
 UAV_COUNT="${BAS_NATIVE_UAV_COUNT:-5}"
 [[ "$UAV_COUNT" =~ ^[1-5]$ ]] || { printf 'UAV count must be an integer in 1..5: %s\n' "$UAV_COUNT" >&2; exit 2; }
 EXTERNAL_BUNDLE="${BAS_NATIVE_EXTERNAL_BUNDLE:-}"
+EXTERNAL_PROFILES="${BAS_NATIVE_EXTERNAL_PROFILES:-network/config/hitl_reference_devices.json}"
 EXTERNAL_UAV_ID=""
 EXTERNAL_BUNDLE_PID=""
 EXTERNAL_BENCH=0
@@ -131,7 +132,7 @@ if [[ -n "$EXTERNAL_BUNDLE" ]]; then
      "${BAS_NATIVE_OPERATOR_SECONDS:-0}" == 0 && "${BAS_NATIVE_UART_CHANNELS:-control,payload}" == control,payload ]] || {
     printf 'Dual-channel external bundle requires explicit realtime, coordinator=off, latency=1, both UART channels and no operator/flight mode.\n' >&2; exit 2;
   }
-  mapfile -t external_values < <(python3 - "$ROOT_DIR" "$EXTERNAL_BUNDLE" "$UAV_COUNT" <<'PYEXTERNAL'
+  mapfile -t external_values < <(python3 - "$ROOT_DIR" "$EXTERNAL_BUNDLE" "$UAV_COUNT" "$EXTERNAL_PROFILES" <<'PYEXTERNAL'
 import sys
 from pathlib import Path
 root = Path(sys.argv[1]).resolve()
@@ -139,16 +140,20 @@ sys.path.insert(0, str(root))
 from scripts.product.test_radio_hitl import load_bundle
 path = (root / sys.argv[2]).resolve()
 relative = path.relative_to(root)
-bundle = load_bundle(path, native_uav_count=int(sys.argv[3]))
+profiles = (root / sys.argv[4]).resolve()
+profiles_relative = profiles.relative_to(root)
+bundle = load_bundle(path, profiles, native_uav_count=int(sys.argv[3]))
 print(bundle['native_binding']['uav_id'])
 print(relative.as_posix())
+print(profiles_relative.as_posix())
 PYEXTERNAL
 )
-  [[ "${#external_values[@]}" == 2 && "${external_values[0]}" =~ ^[1-5]$ ]] || {
+  [[ "${#external_values[@]}" == 3 && "${external_values[0]}" =~ ^[1-5]$ ]] || {
     printf 'External bundle failed strict native binding/roster validation.\n' >&2; exit 2;
   }
   EXTERNAL_UAV_ID="${external_values[0]}"
   EXTERNAL_BUNDLE="${external_values[1]}"
+  EXTERNAL_PROFILES="${external_values[2]}"
   EXTERNAL_BENCH=1
 fi
 if [[ "$SCENARIO_KEY" == urban ]]; then
@@ -276,6 +281,7 @@ run_in_container() {
     -e BAS_NATIVE_SOURCES="${BAS_NATIVE_SOURCES:-}" \
     -e BAS_NATIVE_EXTERNAL_CONFIG="${BAS_NATIVE_EXTERNAL_CONFIG:-}" \
     -e BAS_NATIVE_EXTERNAL_BUNDLE="$EXTERNAL_BUNDLE" \
+    -e BAS_NATIVE_EXTERNAL_PROFILES="$EXTERNAL_PROFILES" \
     -e BAS_NATIVE_FIVE_RUN_ID="${BAS_NATIVE_FIVE_RUN_ID:-}" \
     -e BAS_NATIVE_FIVE_SCENARIO="$SCENARIO_KEY" \
     -e BAS_NATIVE_FIVE_GUI="$GUI" \
@@ -390,12 +396,13 @@ fi
 # not change any readiness, ACK, ARM, takeoff, landing or real-time guard.
 mapfile -t RUNTIME_DURATION_VALUES < <(python3 - "$ROOT_DIR" "$SCENARIO_MODE" \
   "${BAS_NATIVE_EXPERIMENT_DURATION_S:-180}" "${BAS_NATIVE_LAND_TIMEOUT_S:-180}" \
-  "$UAV_COUNT" "$ACTIVE_UART_CHANNELS" "${BAS_NATIVE_PARAMETER_SNAPSHOTS:-0}" <<'PYRUNTIMEBUDGET'
+  "$UAV_COUNT" "$ACTIVE_UART_CHANNELS" "${BAS_NATIVE_PARAMETER_SNAPSHOTS:-0}" "$EXTERNAL_BENCH" <<'PYRUNTIMEBUDGET'
 import json, sys
 sys.path.insert(0, sys.argv[1])
 from bas import runtime_duration_limits
 value = runtime_duration_limits(float(sys.argv[3]), float(sys.argv[4]), int(sys.argv[5]),
-    sys.argv[6].split(','), mode=sys.argv[2], parameter_snapshots=sys.argv[7] == '1')
+    sys.argv[6].split(','), mode=sys.argv[2], parameter_snapshots=sys.argv[7] == '1',
+    radio_bench=len(sys.argv) > 8 and sys.argv[8] == '1')
 print(value['native_duration_s'])
 print(value['service_duration_s'])
 print(json.dumps(value, sort_keys=True, separators=(',', ':')))
@@ -1340,7 +1347,7 @@ for index in "${UAV_INDICES[@]}"; do
     if [[ -n "$EXTERNAL_BUNDLE" && "$index" == "$EXTERNAL_UAV_ID" ]]; then
       if [[ "$channel" == control ]]; then
         setsid python3 -u "$ROOT_DIR/scripts/product/test_radio_hitl.py" \
-          --config "$ROOT_DIR/$EXTERNAL_BUNDLE" --run-adapters --native-uav-count "$UAV_COUNT" \
+          --config "$ROOT_DIR/$EXTERNAL_BUNDLE" --profiles "$ROOT_DIR/$EXTERNAL_PROFILES" --run-adapters --native-uav-count "$UAV_COUNT" \
           --radio-watchdog-file "$NS3_READY.heartbeat" --duration-s "$SERVICE_DURATION_S" --readiness-timeout-s 10 \
           --output "$RUN_DIR/external_endpoints" > "$RUN_DIR/logs/external_endpoints.log" 2>&1 &
         EXTERNAL_BUNDLE_PID=$!
@@ -1670,11 +1677,16 @@ if [[ "$COORDINATION_POLICY" != off ]]; then
     python3 -u "$ROOT_DIR/scripts/product/relay_experiment.py" "${experiment_args[@]}" \
     > "$RUN_DIR/logs/flight_scenario.log" 2>&1
 else
+bench_args=()
+if [[ -n "$EXTERNAL_BUNDLE" ]]; then
+  bench_args+=(--bench-duration-s "${BAS_NATIVE_EXPERIMENT_DURATION_S:-180}"
+               --stop-file "$ROOT_DIR/runs/control/$RUN_ID/stop.request")
+fi
 run_with_native_watchdog ip netns exec ams-gcs env BAS_LOCKSTEP_PARTICIPANT=gcs python3 -u "$ROOT_DIR/scripts/product/native_radio_five_uav_scenario.py" run \
   --run-dir "$RUN_DIR" --node-state "$NODE_STATE" --phase-file "$PHASE_FILE" \
   --schedule-file "$SCHEDULE_FILE" --timeout-scale "$SCENARIO_TIMEOUT_SCALE" \
   --mode="$SCENARIO_MODE" --uav-count="$UAV_COUNT" --channels="$ACTIVE_UART_CHANNELS" \
-  --radio-profile="$RADIO_PROFILE" --scenario-config="$SCENARIO" \
+  --radio-profile="$RADIO_PROFILE" --scenario-config="$SCENARIO" "${bench_args[@]}" \
   > "$RUN_DIR/logs/flight_scenario.log" 2>&1
 fi
 SCENARIO_STATUS=$?
