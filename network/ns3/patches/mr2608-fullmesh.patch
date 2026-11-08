@@ -28,7 +28,7 @@
 +  protected:
 +    void ValidateFullMeshCandidates(uint32_t count, uint32_t capacity,
 +        const std::vector<uint32_t>& perTx, const std::vector<uint32_t>& selfPerTx);
-+    void PublishFullMeshArrays(const py::object& coefficients,
++    PYBIND11_EXPORT void PublishFullMeshArrays(const py::object& coefficients,
 +        const std::vector<py::object>& scalars, const py::object& valid);
 +
 +  private:
@@ -40,6 +40,15 @@
      /**
       * @brief Enable or disable shape merging when loading scenes from sionna.rt.
       *
+@@ -415,7 +448,7 @@
+      * @param uAntenna Receiver PhasedArrayModel
+      * @return A pointer to the newly created ChannelMatrix instance
+      */
+-    virtual Ptr<ChannelMatrix> GetNewChannel(py::object paths,
++    PYBIND11_EXPORT virtual Ptr<ChannelMatrix> GetNewChannel(py::object paths,
+                                              const Ptr<const MobilityModel> sMob,
+                                              const Ptr<const MobilityModel> uMob,
+                                              Ptr<const PhasedArrayModel> sAntenna,
 --- a/src/spectrum/model/sionna-rt-channel-model.cc
 +++ b/src/spectrum/model/sionna-rt-channel-model.cc
 @@ -1378,4 +1378,264 @@
