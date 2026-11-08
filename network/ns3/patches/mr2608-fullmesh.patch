@@ -51,7 +51,15 @@
                                               Ptr<const PhasedArrayModel> sAntenna,
 --- a/src/spectrum/model/sionna-rt-channel-model.cc
 +++ b/src/spectrum/model/sionna-rt-channel-model.cc
-@@ -1378,4 +1378,264 @@
+@@ -10,6 +10,7 @@
+ #include "matrix-based-channel-model.h"
+ #include "pybind11/numpy.h"
+ #include "pybind11/pybind11.h"
++#include "pybind11/stl.h"
+ 
+ #include "ns3/antenna-model.h"
+ #include "ns3/double.h"
+@@ -1378,4 +1379,264 @@
      return (numPaths > static_cast<size_t>(m_maxNumberOfPaths));
  }
  
