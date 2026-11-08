@@ -454,6 +454,7 @@ elif [[ "$SCENARIO_KEY" == customer ]]; then
   SCENARIO="$ROOT_DIR/network/config/scenario_5uav_customer_native_product.yaml"
 elif [[ "$SCENARIO_KEY" == rock_demo ]]; then
   SCENARIO="$ROOT_DIR/network/config/scenario_5uav_rock_demo_native_product.yaml"
+PROMISC_QOS_RECEIVE_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-promisc-qos-receive-context.patch"
 else
   SCENARIO="$ROOT_DIR/network/config/scenario_${UAV_COUNT}uav_town01_native_product.yaml"
 fi
@@ -522,7 +523,7 @@ MAP_ID="${SCENARIO_VALUES[5]}"
 
 for required_file in "$ROOT_DIR/scripts/product/capture_effective_config.py" \
   "$PROJECT_SOURCE" "$PATCH_FILE" "$REALTIME_CACHE_PATCH" \
-    "$PHASED_ARRAY_ADAPTER_PATCH" "$LOCKSTEP_TAP_PATCH" "$SOLVER_BUDGET_PATCH" "$BASEBAND_PHASE_PATCH" "$DOPPLER_EPOCH_PATCH" "$RECEIVER_BATCH_PATCH" "$DYNAMIC_RT_INPUTS_PATCH" "$FULL_MESH_PATCH" "$EMITTER_BATCH_PATCH" "$FIXED_PATH_STORAGE_PATCH" "$TAP_QUEUE_SELECTION_PATCH" "$RADIO_CONFIG" "$WORLD" "$CAMERA_FRAGMENT" "$SITL_DEFAULTS"; do
+    "$PHASED_ARRAY_ADAPTER_PATCH" "$LOCKSTEP_TAP_PATCH" "$SOLVER_BUDGET_PATCH" "$BASEBAND_PHASE_PATCH" "$DOPPLER_EPOCH_PATCH" "$RECEIVER_BATCH_PATCH" "$DYNAMIC_RT_INPUTS_PATCH" "$FULL_MESH_PATCH" "$EMITTER_BATCH_PATCH" "$FIXED_PATH_STORAGE_PATCH" "$PROMISC_QOS_RECEIVE_PATCH" "$TAP_QUEUE_SELECTION_PATCH" "$RADIO_CONFIG" "$WORLD" "$CAMERA_FRAGMENT" "$SITL_DEFAULTS"; do
   [[ -f "$required_file" ]] || { printf 'Missing input: %s\n' "$required_file" >&2; exit 2; }
 done
 if [[ "$REQUIRES_RT" == 1 && ! -f "$SCENE" ]]; then
@@ -801,6 +802,10 @@ if [[ "${BAS_NATIVE_FIVE_SKIP_BUILD:-0}" == 1 ]]; then
     printf 'Spectrum library predates the full-mesh SDK extension.\n' >&2; exit 2;
   }
   [[ "$SPECTRUM_LIBRARY" -nt "$EMITTER_BATCH_PATCH" ]] || {
+  WIFI_LIBRARY="$NS3_DIR/build/lib/libns3.48-wifi-default.so"
+  [[ -s "$WIFI_LIBRARY" && "$WIFI_LIBRARY" -nt "$PROMISC_QOS_RECEIVE_PATCH" ]] || {
+    printf 'Wi-Fi library predates promiscuous QoS receive context fix.\n' >&2; exit 2;
+  }
     printf 'Spectrum library predates the emitter-batch SDK extension.\n' >&2; exit 2;
   }
   [[ "$SPECTRUM_LIBRARY" -nt "$FIXED_PATH_STORAGE_PATCH" ]] || {
@@ -1065,6 +1070,7 @@ capture_effective_configuration() {
   )
   if [[ "$SIONNA_RT_EXECUTION_MODE" == worker_pool ]]; then
     config_args+=(--config "native_rt_worker_source=$ROOT_DIR/network/ns3/scratch/native-rt-worker.cc"
+    --config "promisc_qos_receive_context_patch=$PROMISC_QOS_RECEIVE_PATCH"
                   --config "native_rt_pool_adapter=$ROOT_DIR/scripts/product/native_rt_workers.py")
     if [[ "$stage" == final ]]; then
       config_args+=(--observed-params "native_rt_worker_config=$RT_WORKER_CONFIG"

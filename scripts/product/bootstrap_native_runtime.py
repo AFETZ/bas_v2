@@ -40,6 +40,7 @@ PATCH_NAMES = (
     'mr2608-fullmesh.patch',
     'mr2608-emitter-batch.patch',
     'mr2608-fixed-path-storage.patch',
+    'mr2608-promisc-qos-receive-context.patch',
 )
 SCRATCH_FILES = (
     'upstream-sionna-tap-spike.cc', 'native-geometry-loss.h', 'native-spectrum-sources.h',
@@ -436,6 +437,7 @@ def verify_cache(root):
         raise ValueError('Native compile commands must be a list')
     units = ('src/spectrum/model/sionna-rt-channel-model.cc',
              'src/spectrum/model/sionna-rt-spectrum-propagation-loss-model.cc',
+             'src/wifi/model/mac-rx-middle.cc',
              'scratch/upstream-sionna-tap-spike.cc', 'scratch/native-rt-worker.cc')
     required_flags = {'-O3', '-g', '-DNDEBUG', '-DNS3_ASSERT_ENABLE', '-DNS3_LOG_ENABLE'}
     for unit in units:
@@ -470,6 +472,8 @@ def inspect(root, image, bundle):
         receipt = json.loads((root / RECEIPT).read_text())
         if receipt.get('inputs') != input_identity(root, bundle, image) or receipt.get('status') != 'built':
             raise ValueError('Missing current successful build receipt; existing install is not qualified')
+        if SDK_PATH + '/build/lib/libns3.48-wifi-default.so' not in receipt.get('outputs', {}):
+            raise ValueError('Build receipt does not identify the patched Wi-Fi library')
         for path, digest in receipt['outputs'].items():
             if sha256(root / path) != digest:
                 raise ValueError(f'Built output changed: {path}')
@@ -570,6 +574,7 @@ def bootstrap(root, image, bundle):
                SDK_PATH + '/build/scratch/ns3.48-upstream-sionna-tap-spike-default',
                SDK_PATH + '/build/scratch/ns3.48-native-rt-worker-default',
                SDK_PATH + '/build/lib/libns3.48-spectrum-default.so',
+               SDK_PATH + '/build/lib/libns3.48-wifi-default.so',
                SDK_PATH + '/build/lib/libns3.48-tap-bridge-default.so']
     result = dict(schema_version=1, status='built', inputs=identity,
                   native_sdk_source_verification=sdk_verification,

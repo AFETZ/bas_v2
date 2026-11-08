@@ -1,0 +1,28 @@
+diff --git a/src/wifi/model/mac-rx-middle.h b/src/wifi/model/mac-rx-middle.h
+--- a/src/wifi/model/mac-rx-middle.h
++++ b/src/wifi/model/mac-rx-middle.h
+@@ -120,6 +120,11 @@
+     using QosOriginatorsI =
+         std::map<std::pair<Mac48Address, uint8_t>, OriginatorRxStatus, std::less<>>::iterator;
+ 
++    // Promiscuously received QoS unicast frames have independent recipient
++    // sequence/fragment spaces. Keep them separate from our own RA and from
++    // existing groupcast bookkeeping.
++    std::map<Mac48Address, QosOriginators, std::less<>> m_qosUnicastOriginatorStatus;
++
+     Originators m_originatorStatus;       ///< originator status
+     QosOriginators m_qosOriginatorStatus; ///< QOS originator status
+     ForwardUpCallback m_callback;         ///< forward up callback
+diff --git a/src/wifi/model/mac-rx-middle.cc b/src/wifi/model/mac-rx-middle.cc
+--- a/src/wifi/model/mac-rx-middle.cc
++++ b/src/wifi/model/mac-rx-middle.cc
+@@ -171,7 +171,8 @@
+     {
+         /* only for QoS data unicast frames */
+         const auto key = std::make_pair(source, hdr.GetQosTid());
+-        auto [it, inserted] = m_qosOriginatorStatus.try_emplace(key);
++        auto& recipient = m_qosUnicastOriginatorStatus[dest];
++        auto [it, inserted] = recipient.try_emplace(key);
+         return it->second;
+     }
+     else if (hdr.IsQosData() && dest.IsGroup())

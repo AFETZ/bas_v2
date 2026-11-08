@@ -55,6 +55,7 @@ class NativeBootstrapTests(unittest.TestCase):
             command='/usr/bin/c++ -DNS3_ASSERT_ENABLE -DNS3_LOG_ENABLE -O3 -g -DNDEBUG -c source.cc')
             for unit in ('src/spectrum/model/sionna-rt-channel-model.cc',
                          'src/spectrum/model/sionna-rt-spectrum-propagation-loss-model.cc',
+                         'src/wifi/model/mac-rx-middle.cc',
                          'scratch/upstream-sionna-tap-spike.cc', 'scratch/native-rt-worker.cc')]
         (directory / 'compile_commands.json').write_text(json.dumps(rows))
         return directory
@@ -275,16 +276,26 @@ class NativeBootstrapTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'sionna-rt-spectrum-propagation-loss-model'):
             bootstrap.verify_cache(self.root)
 
-    def test_all_thirteen_runtime_patches_and_both_native_targets_are_prepared(self):
-        self.assertEqual(len(bootstrap.PATCH_NAMES), 13)
-        self.assertEqual(len(set(bootstrap.PATCH_NAMES)), 13)
-        self.assertEqual(bootstrap.PATCH_NAMES[-3:], ('mr2608-fullmesh.patch', 'mr2608-emitter-batch.patch',
-                                                    'mr2608-fixed-path-storage.patch'))
+    def test_all_fourteen_runtime_patches_and_both_native_targets_are_prepared(self):
+        self.assertEqual(len(bootstrap.PATCH_NAMES), 14)
+        self.assertEqual(len(set(bootstrap.PATCH_NAMES)), 14)
+        self.assertEqual(bootstrap.PATCH_NAMES[-4:], ('mr2608-fullmesh.patch', 'mr2608-emitter-batch.patch',
+                                                    'mr2608-fixed-path-storage.patch',
+                                                    'mr2608-promisc-qos-receive-context.patch'))
         runner = (bootstrap.ROOT / 'network/ns3/run_native_radio_five_uav.sh').read_text()
         for name in bootstrap.PATCH_NAMES + bootstrap.SCRATCH_FILES:
             self.assertTrue(name in runner, f'Runner does not include {name}')
             folder = 'patches' if name.endswith('.patch') else 'scratch'
             self.assertTrue((bootstrap.ROOT / 'network/ns3' / folder / name).is_file())
+
+    def test_wifi_duplicate_filter_compile_flags_are_also_qualified(self):
+        directory = self.native_cache()
+        rows = json.loads((directory / 'compile_commands.json').read_text())
+        wifi = next(row for row in rows if row['file'].endswith('/src/wifi/model/mac-rx-middle.cc'))
+        wifi['command'] = wifi['command'].replace('-O3', '-O0')
+        (directory / 'compile_commands.json').write_text(json.dumps(rows))
+        with self.assertRaisesRegex(ValueError, 'mac-rx-middle'):
+            bootstrap.verify_cache(self.root)
 
     def test_mutable_image_name_is_rejected_without_docker(self):
         with patch.object(bootstrap, 'command') as command:
