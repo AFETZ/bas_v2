@@ -198,6 +198,15 @@ class FixtureTransport:
             Require(first["receiver_enqueued_host_monotonic_ns"].is_none()&&
                 py::isinstance<py::int_>(second["receiver_enqueued_host_monotonic_ns"]),"Bundle receipt int/null logging changed type");
         }
+        {
+            // Failed result persistence must stop before a partially staged
+            // component can publish, and its failed Poll must retain timing.
+            Fixture f(prefix.string()+"-log-failure");f.Configure();f.pool->Poll();
+            f.pool->m_log.setstate(std::ios::badbit);f.Reply(0);
+            Reject([&]{f.pool->Poll();},"Failed result persistence was ignored");f.Empty();
+            Require(f.pool->m_resultLogWrites==1&&f.pool->m_maxPollWallNs>0,
+                "Failed consumer/log Poll was omitted from wall-time diagnostics");
+        }
         for(bool error:{false,true})
         {
             Fixture f(prefix.string()+(error ? "-queued-error" : "-partial"));f.Configure();f.pool->Poll();
