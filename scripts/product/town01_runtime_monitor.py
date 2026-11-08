@@ -19,6 +19,7 @@ MATCHES = {
     "sionna_state_adapter": ("town01_radio_state.py",),
     "ns3_packet_engine": ("ams-tap-packet-engine",),
     "native_ns3_sionna": ("ns3.48-upstream-sionna-tap-spike",),
+    "native_rt_worker": ("ns3.48-native-rt-worker",),
     "uart_adapter": ("communication_vertical.py uart-adapter",),
     "scenario": ("town01_full_stack_scenario.py run",),
     "native_product_scenario": ("native_radio_product_scenario.py run",),
@@ -27,6 +28,39 @@ MATCHES = {
     "coordination_service": ("network.coordination.service",),
     "traffic_profile": ("town01_communication_profiles.py",),
 }
+
+
+def cpu_partition(allowed=None, cpu_root=Path('/sys/devices/system/cpu')):
+    """Keep each physical core's allowed SMT threads in one BAS role.
+
+    taskset still owns enforcement. This is a per-run layout, not host-wide
+    CPU reservation; unrelated processes may continue using the same cores.
+    """
+    cpus = sorted(os.sched_getaffinity(0) if allowed is None else allowed)
+    if not cpus or len(set(cpus)) != len(cpus) or any(type(i) is not int or i < 0 for i in cpus):
+        raise ValueError('CPU affinity must contain unique nonnegative integer IDs')
+    groups = {}
+    for cpu in cpus:
+        topology = cpu_root / f'cpu{cpu}' / 'topology'
+        try:
+            package = int((topology / 'physical_package_id').read_text().strip())
+            core = int((topology / 'core_id').read_text().strip())
+        except (OSError, ValueError) as error:
+            raise ValueError(f'CPU {cpu}: physical topology unavailable: {error}') from error
+        if min(package, core) < 0:
+            raise ValueError(f'CPU {cpu}: unknown physical package/core')
+        groups.setdefault((package, core), []).append(cpu)
+    ordered = sorted(groups)
+    shared = len(ordered) == 1
+    boundary = min(8, max(1, len(ordered)//2))
+    stack_keys = ordered if shared else ordered[:boundary]
+    radio_keys = ordered if shared else ordered[boundary:]
+    members = lambda keys: sorted(cpu for key in keys for cpu in groups[key])
+    return dict(schema=1, method='shared_single_physical_core' if shared else 'whole_physical_cores',
+        allowed_cpus=cpus, stack_cpus=members(stack_keys), radio_cpus=members(radio_keys),
+        shared_physical_cores=shared, reservation='BAS process affinity only; no host-wide exclusivity',
+        topology=[dict(package_id=package,core_id=core,allowed_cpus=groups[(package,core)])
+                  for package,core in ordered])
 
 
 def host_record(proc_root=Path('/proc')):
@@ -61,6 +95,7 @@ def process_records() -> list[dict[str, Any]]:
             ).strip()
             stat = (directory / "stat").read_text(encoding="utf-8").split()
             statm = (directory / "statm").read_text(encoding="utf-8").split()
+            status = (directory / 'status').read_text(encoding='utf-8')
         except (OSError, IndexError):
             continue
         component = next(
@@ -80,6 +115,8 @@ def process_records() -> list[dict[str, Any]]:
                 "cpu_ticks": int(stat[13]) + int(stat[14]),
                 "rss_bytes": int(statm[1]) * page_size,
                 "command": command[:500],
+                "allowed_cpu_list": next((line.split(':',1)[1].strip() for line in status.splitlines()
+                                          if line.startswith('Cpus_allowed_list:')), None),
             }
         )
     return records

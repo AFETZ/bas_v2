@@ -470,17 +470,20 @@ LOCKSTEP_PID=""
 MONITOR_STOP="$RUN_DIR/logs/runtime_monitor.stop"
 ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-$((100 + $(printf '%s' "$RUN_ID" | cksum | awk '{print $1}') % 100))}"
 GZ_PARTITION="${GZ_PARTITION:-native_five_${RUN_ID//[^a-zA-Z0-9_]/_}}"
-CPU_COUNT="$(nproc)"
-if ((CPU_COUNT >= 16)); then
-  STACK_CPUSET="0-7"
-  RADIO_CPUSET="8-$((CPU_COUNT - 1))"
-elif ((CPU_COUNT >= 4)); then
-  STACK_CPUSET="0-$(((CPU_COUNT / 2) - 1))"
-  RADIO_CPUSET="$((CPU_COUNT / 2))-$((CPU_COUNT - 1))"
-else
-  STACK_CPUSET="0-$((CPU_COUNT - 1))"
-  RADIO_CPUSET="$STACK_CPUSET"
-fi
+mapfile -t CPUSET_VALUES < <(python3 - "$ROOT_DIR" <<'PYCPUPARTITION'
+import json,sys
+sys.path.insert(0,sys.argv[1])
+from scripts.product.town01_runtime_monitor import cpu_partition
+partition=cpu_partition()
+for role in ('stack_cpus','radio_cpus'):
+    print(','.join(map(str,partition[role])))
+print(json.dumps(partition,sort_keys=True,separators=(',',':')))
+PYCPUPARTITION
+)
+[[ "${#CPUSET_VALUES[@]}" == 3 ]] || { printf 'CPU topology partition failed.\n' >&2; exit 2; }
+STACK_CPUSET="${CPUSET_VALUES[0]}"
+RADIO_CPUSET="${CPUSET_VALUES[1]}"
+CPU_PARTITION_JSON="${CPUSET_VALUES[2]}"
 
 [[ -f "$SCENARIO" ]] || { printf 'Missing scenario config: %s\n' "$SCENARIO" >&2; exit 2; }
 mapfile -t SCENARIO_VALUES < <(python3 - "$ROOT_DIR" "$SCENARIO" <<'PY'
@@ -685,6 +688,7 @@ PY
 [[ -x "$PYTHON_TOOLING/bin/cmake" ]] || { printf 'Pinned CMake tooling is absent.\n' >&2; exit 2; }
 
 mkdir -p "$RUN_DIR"/{logs,metrics,pcap,screenshots,plots} "$UART_DIR" "$WORK_DIR"
+printf '%s\n' "$CPU_PARTITION_JSON" > "$RUN_DIR/logs/cpu_partition.json"
 printf '%s\n' "$NATIVE_SDK_VERIFICATION" > "$RUN_DIR/logs/native_sdk_source_verification.json"
 mkdir -p "$(dirname "$NATIVE_EVENT_CSV")" "$(dirname "$NATIVE_PCAP_PREFIX")"
 mapfile -t NATIVE_CAPTURE_MOUNT < <(python3 - "$CAPTURE_STORAGE" "$NATIVE_CAPTURE_TMPFS_LIMIT_BYTES" \
@@ -1045,6 +1049,7 @@ capture_effective_configuration() {
     --config "native_neighbors=$RUN_DIR/logs/static_neighbors.txt"
     --config "native_capture_storage=$RUN_DIR/logs/native_capture_storage.json"
     --config "async_jsonl_writer=$ROOT_DIR/network/jsonl.py"
+    --config "cpu_partition=$RUN_DIR/logs/cpu_partition.json"
     --config "sionna_solver_budget_patch=$SOLVER_BUDGET_PATCH"
     --config "sionna_baseband_phase_patch=$BASEBAND_PHASE_PATCH"
     --config "sionna_doppler_epoch_patch=$DOPPLER_EPOCH_PATCH"
