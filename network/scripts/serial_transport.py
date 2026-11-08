@@ -10,6 +10,7 @@ from __future__ import annotations
 import binascii
 import dataclasses
 import hashlib
+import math
 import struct
 import time
 try:
@@ -64,6 +65,95 @@ def sequence_is_ahead(candidate: int, reference: int) -> bool:
 
 class FramingError(ValueError):
     """A transport datagram is malformed or belongs to another path."""
+
+
+class SerialBaudBudget:
+    """One direction of a virtual UART, using integer clock/baud accounting.
+
+    No idle credit is carried into a new busy period. Call consume only after
+    the downstream writer accepts bytes; BSF1/IP headers are outside this clock.
+    A batch is released after its final virtual wire bit, not byte-by-byte.
+    """
+    def __init__(self, baud_rate: int, bits_per_byte: float, max_batch_bytes: int = 192):
+        if type(baud_rate) is not int or baud_rate <= 0:
+            raise ValueError('baud_rate must be a positive integer')
+        if (type(bits_per_byte) not in (int, float) or not math.isfinite(bits_per_byte)
+                or bits_per_byte <= 0 or not math.isfinite(bits_per_byte*1e9)
+                or not float(bits_per_byte*2).is_integer()):
+            raise ValueError('bits_per_byte must be finite, positive and in half-bit units')
+        if type(max_batch_bytes) is not int or not 1 <= max_batch_bytes <= 192:
+            raise ValueError('max_batch_bytes must be 1..192')
+        self.baud_rate, self.bits_per_byte, self.max_batch_bytes = baud_rate, bits_per_byte, max_batch_bytes
+        self._byte_units = int(bits_per_byte*1_000_000_000)
+        self._last_ns = self._active_since_ns = None
+        self._queued_bytes = None
+        self.discarded_wire_credit_units = self.credit_overrun_events = 0
+        self._credit = self.bytes = self.releases = self.maximum_release_bytes = self.idle_resets = 0
+
+    @staticmethod
+    def _time(now_ns):
+        if type(now_ns) is not int or now_ns < 0:
+            raise ValueError('UART clock requires nonnegative integer nanoseconds')
+
+    def start(self, now_ns: int, queued_bytes: int | None = None):
+        self._time(now_ns)
+        if queued_bytes is not None and (type(queued_bytes) is not int or queued_bytes <= 0):
+            raise ValueError('queued UART bytes must be a positive integer')
+        self._advance(now_ns)
+        if self._active_since_ns is None:
+            self._active_since_ns = self._last_ns = now_ns
+            self._credit = 0
+        self._queued_bytes = queued_bytes
+
+    def reset(self, now_ns: int):
+        self._advance(now_ns)
+        self.idle_resets += self._active_since_ns is not None
+        self._active_since_ns, self._last_ns, self._credit = None, now_ns, 0
+        self._queued_bytes = None
+
+    def _advance(self, now_ns: int):
+        self._time(now_ns)
+        if self._last_ns is not None and now_ns < self._last_ns:
+            raise ValueError('UART clock moved backwards')
+        if self._active_since_ns is not None:
+            capacity = min(self.max_batch_bytes, self._queued_bytes) if self._queued_bytes is not None else self.max_batch_bytes
+            earned = self._credit+(now_ns-self._last_ns)*self.baud_rate
+            limit = capacity*self._byte_units
+            if self._queued_bytes is None or self._queued_bytes > capacity:
+                limit += earned % self._byte_units  # Keep fractional service of the next already queued byte.
+            self._credit = min(limit, earned)
+            discarded = earned-self._credit
+            self.discarded_wire_credit_units += discarded
+            self.credit_overrun_events += discarded > 0
+        self._last_ns = now_ns
+
+    def available(self, now_ns: int) -> int:
+        self._advance(now_ns)
+        return min(self.max_batch_bytes, self._credit//self._byte_units)
+
+    def wait_ns(self, count: int, now_ns: int) -> int:
+        if type(count) is not int or not 0 <= count <= self.max_batch_bytes:
+            raise ValueError('UART batch is outside the frozen byte bound')
+        self._advance(now_ns)
+        needed = max(0, count*self._byte_units-self._credit)
+        return (needed+self.baud_rate-1)//self.baud_rate
+
+    def consume(self, count: int, now_ns: int):
+        if type(count) is not int or count < 0 or count > self.available(now_ns):
+            raise ValueError('UART writer accepted more than its available wire budget')
+        self._credit -= count*self._byte_units
+        if self._queued_bytes is not None:
+            self._queued_bytes -= count
+        self.bytes += count
+        self.releases += count > 0
+        self.maximum_release_bytes = max(self.maximum_release_bytes, count)
+
+    def snapshot(self):
+        return dict(charged_bytes=self.bytes, releases=self.releases, maximum_release_bytes=self.maximum_release_bytes,
+                    queued_bytes=self._queued_bytes, discarded_wire_credit_units=self.discarded_wire_credit_units,
+                    discarded_wire_time_ns=(self.discarded_wire_credit_units+self.baud_rate-1)//self.baud_rate,
+                    credit_overrun_events=self.credit_overrun_events,
+                    active_since_ns=self._active_since_ns, last_clock_ns=self._last_ns, idle_resets=self.idle_resets)
 
 
 @dataclasses.dataclass(frozen=True)

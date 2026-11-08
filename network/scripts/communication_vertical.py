@@ -23,9 +23,10 @@ from collections import deque
 
 import simulation_clock as clock
 
-from serial_transport import (Encoder, MavlinkStreamCounter, Reassembler, TransportCounters,
+from serial_transport import (HEADER, Encoder, MavlinkStreamCounter, Reassembler, TransportCounters, SerialBaudBudget,
                               BoundedQueue, radio_is_live, ready_events, decode_chunk,
                               parse_mavlink_with_provenance, mavlink_payload_lineage)
+from external_endpoint import stream_read_capacity
 
 
 DATA_HEADER = struct.Struct("!4sBBIQ")
@@ -72,6 +73,30 @@ def configure_tty_baud(descriptor: int, baud_rate: int) -> int:
     return speeds[baud_rate]
 
 
+def uart_timing(descriptor: int, baud_rate: int, batch_bytes: int) -> dict[str, Any]:
+    """Read the applied frame; only proven Linux PTY slaves need a byte clock."""
+    name = Path(os.ttyname(descriptor))
+    flags = termios.tcgetattr(descriptor)[2]
+    data_bits = {termios.CS5:5, termios.CS6:6, termios.CS7:7, termios.CS8:8}[flags & termios.CSIZE]
+    parity_bit = bool(flags & termios.PARENB)
+    parity = 'none'
+    if parity_bit:
+        parity = ('mark' if flags & termios.PARODD else 'space') if flags & getattr(termios, 'CMSPAR', 0) else (
+            'odd' if flags & termios.PARODD else 'even')
+    stop_bits = (1.5 if data_bits == 5 else 2) if flags & termios.CSTOPB else 1
+    bits = 1+data_bits+parity_bit+stop_bits
+    software = sys.platform.startswith('linux') and name.parent == Path('/dev/pts') and name.name.isdecimal()
+    batch = min(192, batch_bytes)
+    return dict(owner='software_pty' if software else 'tty_driver', tty_name=str(name), baud_rate=baud_rate,
+                data_bits=data_bits, parity=parity, stop_bits=stop_bits, bits_per_byte=bits,
+                clock_domain='simulation_ns' if clock.mode() == 'lockstep' else 'host_monotonic_ns',
+                max_batch_bytes=batch if software else None,
+                max_batch_wire_ns=(int(batch*bits*1e9)+baud_rate-1)//baud_rate if software else None,
+                delivery='batch_after_wire_budget' if software else 'driver_buffer_acceptance_not_wire_completion',
+                credit_policy='one_batch_cap_only_preexisting_queued_bytes_reset_on_deadline_drop' if software else None,
+                stop_policy='discard_pending_without_post_stop_transmission', physical_validation='not_performed')
+
+
 def run_uart_adapter(args: argparse.Namespace) -> int:
     os.environ.setdefault("MAVLINK20", "1")
     from pymavlink import mavutil
@@ -80,6 +105,10 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
     peer_address = endpoint(args.peer)
     uart = os.open(args.tty, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
     speed_constant = configure_tty_baud(uart, args.baud_rate)
+    timing = uart_timing(uart, args.baud_rate, args.chunk_payload_bytes)
+    software_pacing = timing['owner'] == 'software_pty'
+    up_budget = SerialBaudBudget(args.baud_rate, timing['bits_per_byte'], timing['max_batch_bytes']) if software_pacing else None
+    down_budget = SerialBaudBudget(args.baud_rate, timing['bits_per_byte'], timing['max_batch_bytes']) if software_pacing else None
     udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     tos_by_channel = {"control": 184, "payload": 40}
     tos = int(args.tos if args.tos is not None else tos_by_channel.get(args.channel, 0))
@@ -94,6 +123,11 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
     selector.register(uart, selectors.EVENT_READ, "uart")
     selector.register(udp, selectors.EVENT_READ, "udp")
     running = True
+    uart_registered = True
+    uart_blocked = radio_blocked = False
+    uart_backpressure_events = radio_backpressure_events = 0
+    uart_read_pauses = 0
+    shutdown_pending_uart_bytes = shutdown_pending_radio_bytes = 0
 
     def stop(_signum: int, _frame: Any) -> None:
         nonlocal running
@@ -150,6 +184,7 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
         "tty_realpath": os.path.realpath(args.tty),
         "baud_rate": args.baud_rate,
         "termios_speed_constant": speed_constant,
+        "uart_timing": timing,
         "bind": args.bind,
         "peer": args.peer,
         "tos": tos,
@@ -171,6 +206,14 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
                 "tty": args.tty,
                 "tty_realpath": os.path.realpath(args.tty),
                 "baud_rate": args.baud_rate,
+                "uart_timing": timing,
+                "baud_pacing": dict(uart_to_radio=up_budget.snapshot() if up_budget else None,
+                                    radio_to_uart=down_budget.snapshot() if down_budget else None),
+                "uart_io_backpressure_events": uart_backpressure_events,
+                "radio_io_backpressure_events": radio_backpressure_events,
+                "uart_read_backpressure_pauses": uart_read_pauses,
+                "shutdown_pending_uart_bytes": shutdown_pending_uart_bytes,
+                "shutdown_pending_radio_bytes": shutdown_pending_radio_bytes,
                 "bind": args.bind,
                 "peer": args.peer,
                 "transport_framing": ready["transport_framing"],
@@ -203,6 +246,35 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
         if force or now_ns - last_metrics_ns >= args.metrics_period_ms * 1_000_000:
             write_json(args.metrics_output, metrics_payload())
             last_metrics_ns = now_ns
+
+    def read_capacity() -> int:
+        if not software_pacing:
+            return 4096
+        if encoder:
+            return stream_read_capacity(to_radio, encoder.max_payload, timing['max_batch_bytes'])
+        return min(timing['max_batch_bytes'], to_radio.byte_limit-to_radio.bytes) if len(to_radio.items)<to_radio.limit else 0
+
+    def watch_uart(enabled: bool) -> None:
+        nonlocal uart_registered, uart_read_pauses
+        if enabled and not uart_registered:
+            selector.register(uart, selectors.EVENT_READ, 'uart')
+        elif uart_registered and not enabled:
+            selector.unregister(uart)
+            uart_read_pauses += 1
+        uart_registered = enabled
+
+    def queue_uart(record, sent_ns, sequence, now_ns):
+        if to_uart.put(record, sent_ns/1e9, (sequence,sent_ns,0)) and down_budget:
+            down_budget.start(now_ns, to_uart.bytes)
+
+    def expire_queues(now_ns):
+        for queued, budget, framed in ((to_uart,down_budget,False),(to_radio,up_budget,bool(encoder))):
+            expired = queued.expired
+            queued.expire(now_ns/1e9)
+            if budget and queued.expired != expired:
+                budget.reset(now_ns)
+                if queued.items:
+                    budget.start(now_ns, queued.bytes-(HEADER.size*len(queued.items) if framed else 0))
 
     with Path(args.event_log).open("a", encoding="utf-8") as events:
         def emit_event(value: dict[str, Any]) -> None:
@@ -266,23 +338,42 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
                         continue
                     now_ns = clock.monotonic_ns()
                     live = radio_is_live(args.radio_watchdog_file, args.watchdog_s)
-                    to_uart.expire(now_ns/1e9)
-                    to_radio.expire(now_ns/1e9)
+                    expire_queues(now_ns)
                     if not live:
                         to_uart.clear()
                         to_radio.clear()
+                    if software_pacing:
+                        if not to_uart.items: down_budget.reset(now_ns)
+                        if not to_radio.items: up_budget.reset(now_ns)
+                        watch_uart(read_capacity()>0)
                     if reassembler is not None:
                         records = reassembler.expire(now_ns)
                         for record, sent_ns, sequence in zip(records, reassembler.released_sent_ns, reassembler.released_sequences):
                             if live:
-                                to_uart.put(record, sent_ns/1e9, (sequence,sent_ns,0))
+                                queue_uart(record, sent_ns, sequence, now_ns)
                             else:
                                 stale_radio_drops += 1
                     publish_metrics(time.monotonic_ns())
-                    for key, _mask in ready_events(selector, 0 if clock.mode() == "lockstep" and live else (0.01 if to_uart.items or to_radio.items else 0.05)):
+                    timeout = 0 if clock.mode() == 'lockstep' and live else (.01 if to_uart.items or to_radio.items else .05)
+                    if software_pacing and live:
+                        for budget, queued, blocked, is_radio in ((up_budget,to_radio,radio_blocked,True),
+                                                                  (down_budget,to_uart,uart_blocked,False)):
+                            if queued.items:
+                                count = len(queued.items[0][0])-(HEADER.size if is_radio and encoder else 0)
+                                count = min(count, timing['max_batch_bytes'])
+                                wait_ns = budget.wait_ns(count, clock.monotonic_ns())
+                                if wait_ns or not blocked:
+                                    timeout = min(timeout, wait_ns/1e9)
+                    for key, _mask in ready_events(selector, timeout):
+                        if not running:
+                            break
                         if key.data == "uart":
+                            capacity = read_capacity()
+                            if not capacity:
+                                watch_uart(False)
+                                continue
                             try:
-                                data = os.read(uart, 4096)
+                                data = os.read(uart, capacity)
                             except BlockingIOError:
                                 continue
                             if not data:
@@ -302,6 +393,7 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
                                     continue
                                 if not to_radio.put(datagram, observed_ns/1e9):
                                     continue
+                                if up_budget: up_budget.start(observed_ns, to_radio.bytes-(HEADER.size*len(to_radio.items) if encoder else 0))
                                 emit_event(
                                     {
                                         "event": "serial_chunk_queued" if encoder else "serial_queued",
@@ -317,6 +409,7 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
                                         "monotonic_ns": observed_ns,
                                     },
                                 )
+                            if software_pacing: watch_uart(read_capacity()>0)
                         else:
                             try:
                                 data, source = udp.recvfrom(65535)
@@ -333,7 +426,7 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
                                 counters.ns3_output_bytes += len(data)
                             for record, sent_ns, sequence in zip(records, sent_times, sequences):
                                 if live:
-                                    to_uart.put(record, sent_ns/1e9, (sequence,sent_ns,0))
+                                    queue_uart(record, sent_ns, sequence, observed_ns)
                                 else:
                                     stale_radio_drops += 1
                             emit_event(
@@ -355,28 +448,45 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
                     # Nonblocking backpressure retains the bounded queue for the
                     # next physics cycle; it never stalls the phase barrier.
                     live = radio_is_live(args.radio_watchdog_file, args.watchdog_s)
-                    to_uart.expire(clock.monotonic())
-                    to_radio.expire(clock.monotonic())
-                    while live and to_uart.items:
+                    expire_queues(clock.monotonic_ns())
+                    while running and live and to_uart.items:
                         try:
                             data = to_uart.items[0][0]
+                            if down_budget:
+                                data = data[:timing['max_batch_bytes']]
+                                if down_budget.available(clock.monotonic_ns()) < len(data):
+                                    break
                             written = os.write(uart, data)
                             write_end_ns = clock.monotonic_ns()
-                            if written <= 0:
-                                raise OSError("UART closed during exchange")
+                            if not written:
+                                uart_blocked = True
+                                uart_backpressure_events += 1
+                                break
+                            if down_budget: down_budget.consume(written, write_end_ns)
+                            uart_blocked = False
                             counters.uart_output_bytes += written
                             output_frames.feed(data[:written])
                             tag = to_uart.metadata[0] or (None,None,0)
                             emit_mavlink_frames('ns3_to_uart', output_parser, data[:written], write_end_ns,tag)
                             to_uart.metadata[0] = (tag[0],tag[1],tag[2]+written)
                             to_uart.sent(written)
+                            if down_budget and not to_uart.items: down_budget.reset(write_end_ns)
                         except BlockingIOError:
+                            uart_blocked = True
+                            uart_backpressure_events += 1
                             break
-                    while live and to_radio.items:
+                    while running and live and to_radio.items:
                         try:
                             packet = to_radio.items[0][0]
+                            wire_bytes = len(packet)-(HEADER.size if encoder else 0)
+                            if up_budget and up_budget.available(clock.monotonic_ns()) < wire_bytes:
+                                break
                             written = udp.sendto(packet, peer_address)
                             send_end_ns = clock.monotonic_ns()
+                            if written != len(packet):
+                                raise OSError('short UDP datagram write')
+                            if up_budget: up_budget.consume(wire_bytes, send_end_ns)
+                            radio_blocked = False
                             if encoder and args.channel == 'payload':
                                 chunk=decode_chunk(packet)
                                 lineage_event('payload_record_sent',direction='uav_to_gcs',sequence=chunk.sequence,
@@ -386,9 +496,16 @@ def run_uart_adapter(args: argparse.Namespace) -> int:
                                     transmitted_host_monotonic_ns=send_end_ns)
                             counters.ns3_input_bytes += written
                             to_radio.sent(written)
+                            if up_budget and not to_radio.items: up_budget.reset(send_end_ns)
                         except BlockingIOError:
+                            radio_blocked = True
+                            radio_backpressure_events += 1
                             break
         finally:
+            shutdown_pending_uart_bytes, shutdown_pending_radio_bytes = to_uart.bytes, to_radio.bytes
+            to_uart.clear(); to_radio.clear()
+            if software_pacing:
+                up_budget.reset(clock.monotonic_ns()); down_budget.reset(clock.monotonic_ns())
             lineage_event('payload_lineage_closed',endpoint='uart_adapter',close_error=(
                 str(sys.exc_info()[1]) if sys.exc_info()[0] else None))
             clock.close_participant()

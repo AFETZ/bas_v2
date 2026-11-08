@@ -419,7 +419,6 @@ class PayloadOfferedLoadTests(unittest.TestCase):
         self.assertEqual((skipped[0]['first_sequence'], skipped[0]['count']), (0,562500000))
 
 
-
 class PayloadByteProvenanceTests(unittest.TestCase):
     def setUp(self):
         from pymavlink.dialects.v20 import ardupilotmega
@@ -500,6 +499,88 @@ class PayloadByteProvenanceTests(unittest.TestCase):
 @unittest.skipUnless(os.name == 'posix' and hasattr(os, 'openpty'),
     'production dual-PTY UART software boundary requires POSIX; physical hardware is not tested')
 class PayloadUartAdapterPosixTests(unittest.TestCase):
+    def test_sigterm_discards_wire_ready_queues_before_either_output(self):
+        """A real signal after ingress must prevent a new UART/UDP flush."""
+        from contextlib import ExitStack
+        import subprocess
+        import sys
+        import tty
+
+        root = Path(__file__).resolve().parents[1]
+        fixture = r'''
+import importlib.util,os,signal,sys,time
+path=sys.argv[1];sys.path.insert(0,os.path.dirname(path))
+spec=importlib.util.spec_from_file_location('stop_adapter',path)
+adapter=importlib.util.module_from_spec(spec);spec.loader.exec_module(adapter)
+socket_module=adapter.socket
+sockets=[]
+class LocalSocketModule:
+    def __getattr__(self,name):return getattr(socket_module,name)
+    def socket(self,*args,**kwargs):
+        result=socket_module.socket(*args,**kwargs);sockets.append(result);return result
+adapter.socket=LocalSocketModule()
+original_json=adapter.write_json
+def ready_json(path,value):
+    if value.get('status')=='ready':value['test_actual_bind']=sockets[0].getsockname()
+    original_json(path,value)
+adapter.write_json=ready_json
+original_events=adapter.ready_events
+def stop_after_ingress(*args,**kwargs):
+    for event in original_events(*args,**kwargs):
+        yield event
+        time.sleep(.02)  # Eight bytes are now wire-ready at 115200 8N1.
+        os.kill(os.getpid(),signal.SIGTERM)
+        return
+adapter.ready_events=stop_after_ingress
+args=adapter.parser().parse_args(sys.argv[2:])
+raise SystemExit(args.function(args))
+'''
+        for direction in ('uart_to_radio','radio_to_uart'):
+            with self.subTest(direction=direction), ExitStack() as resources:
+                resources.enter_context(patch.dict(os.environ,{'BAS_SIMULATION_MODE':'realtime','MAVLINK20':'1'}))
+                artifact_root=os.environ.get('BAS_EXTERNAL_TEST_ARTIFACT_DIR')
+                if artifact_root:
+                    run=Path(artifact_root).resolve()/('stop_pty_'+direction)
+                    run.mkdir(parents=True,exist_ok=False)
+                else:
+                    run=Path(resources.enter_context(tempfile.TemporaryDirectory(prefix='bas-stop-pty-')))
+                master,slave=os.openpty()
+                resources.callback(os.close,slave);resources.callback(os.close,master)
+                tty.setraw(slave);os.set_blocking(master,False)
+                peer=resources.enter_context(socket.socket(socket.AF_INET,socket.SOCK_DGRAM))
+                peer.bind(('127.0.0.1',0));peer.setblocking(False)
+                output=resources.enter_context((run/'process.log').open('xb'))
+                argv=[sys.executable,'-u','-c',fixture,str(root/'network/scripts/communication_vertical.py'),
+                      'uart-adapter','--channel','control','--tty',os.ttyname(slave),'--bind','127.0.0.1:0',
+                      '--peer',f'127.0.0.1:{peer.getsockname()[1]}','--ready-file',str(run/'ready.json'),
+                      '--metrics-output',str(run/'metrics.json'),'--event-log',str(run/'events.jsonl'),
+                      '--framed','--chunk-payload-bytes','8']
+                process=subprocess.Popen(argv,cwd=root,stdout=output,stderr=subprocess.STDOUT,env=os.environ.copy())
+                def cleanup():
+                    if process.poll() is None:
+                        process.kill();process.wait(timeout=2)
+                resources.callback(cleanup)
+                (run/'commands.json').write_text(json.dumps({'argv':argv,'pid':process.pid})+'\n')
+                deadline=time.monotonic()+5
+                while not (run/'ready.json').exists():
+                    self.assertIsNone(process.poll(),(run/'process.log').read_text())
+                    self.assertLess(time.monotonic(),deadline)
+                    time.sleep(.005)
+                if direction=='uart_to_radio':
+                    self.assertEqual(os.write(master,b'abcdefgh'),8)
+                else:
+                    address=tuple(json.loads((run/'ready.json').read_text())['test_actual_bind'])
+                    packet=Encoder(channel='control',uav_id=1,direction='gcs_to_uart',max_payload=8).encode(b'abcdefgh')[0]
+                    peer.sendto(packet,address)
+                self.assertEqual(process.wait(timeout=3),0,(run/'process.log').read_text())
+                metrics=json.loads((run/'metrics.json').read_text())
+                self.assertEqual((metrics['uart_output_bytes'],metrics['ns3_input_bytes']),(0,0))
+                self.assertGreater(metrics['shutdown_pending_radio_bytes' if direction=='uart_to_radio' else 'shutdown_pending_uart_bytes'],0)
+                self.assertEqual((metrics['uart_queue_bytes'],metrics['radio_queue_bytes']),(0,0))
+                self.assertEqual(metrics['baud_pacing'][direction]['charged_bytes'],0)
+                with self.assertRaises(BlockingIOError):peer.recvfrom(65535)
+                with self.assertRaises(BlockingIOError):os.read(master,4096)
+
     def test_production_control_and_payload_pty_trace_preserves_both_directions(self):
         """Two real adapter processes/PTYs/UDP sockets; no simulated RF or hardware SLA."""
         from contextlib import ExitStack
@@ -511,6 +592,34 @@ class PayloadUartAdapterPosixTests(unittest.TestCase):
         from network.scripts.serial_transport import decode_chunk, CHANNEL_IDS
 
         root = Path(__file__).resolve().parents[1]
+        adapter_fixture = r'''
+import importlib.util, os, sys
+path=sys.argv[1];sys.path.insert(0,os.path.dirname(path))
+spec=importlib.util.spec_from_file_location('baud_adapter',path)
+adapter=importlib.util.module_from_spec(spec);spec.loader.exec_module(adapter)
+original_write=os.write
+write_calls=0
+def partial_write(fd,data):
+    global write_calls
+    write_calls+=1
+    if write_calls==1:raise BlockingIOError('injected UART EAGAIN')
+    return original_write(fd,data[:3] if write_calls==2 else data)
+adapter.os.write=partial_write
+socket_module=adapter.socket
+class Datagram:
+    def __init__(self,wrapped):self.wrapped,self.first=wrapped,True
+    def __getattr__(self,name):return getattr(self.wrapped,name)
+    def sendto(self,*arguments):
+        if self.first:
+            self.first=False;raise BlockingIOError('injected UDP EAGAIN')
+        return self.wrapped.sendto(*arguments)
+class LocalSocketModule:
+    def __getattr__(self,name):return getattr(socket_module,name)
+    def socket(self,*arguments,**keywords):return Datagram(socket_module.socket(*arguments,**keywords))
+adapter.socket=LocalSocketModule()
+args=adapter.parser().parse_args(sys.argv[2:])
+raise SystemExit(args.function(args))
+'''
         with ExitStack() as resources:
             resources.enter_context(patch.dict(os.environ, {'BAS_SIMULATION_MODE': 'realtime', 'MAVLINK20': '1'}))
             artifacts = os.environ.get('BAS_EXTERNAL_TEST_ARTIFACT_DIR')
@@ -544,16 +653,19 @@ class PayloadUartAdapterPosixTests(unittest.TestCase):
                 metrics = logs / (channel + '.metrics.json')
                 output = logs / (channel + '.process.log')
                 stream = resources.enter_context(output.open('xb'))
-                argv = [sys.executable, str(root/'network/scripts/communication_vertical.py'), 'uart-adapter',
+                baud = 57600 if channel == 'control' else 115200
+                argv = [sys.executable, '-u', '-c', adapter_fixture,
+                    str(root/'network/scripts/communication_vertical.py'), 'uart-adapter',
                     '--channel', channel, '--tty', os.ttyname(slave), '--bind', '127.0.0.1:0',
                     '--peer', f'127.0.0.1:{radio.getsockname()[1]}', '--event-log', str(event),
                     '--ready-file', str(ready), '--metrics-output', str(metrics), '--framed',
-                    '--chunk-payload-bytes', '8', '--event-logging', 'batched_trace']
+                    '--chunk-payload-bytes', '8', '--event-logging', 'batched_trace',
+                    '--baud-rate', str(baud), '--queue-packets', '4', '--deadline-ms', '2000']
                 process = subprocess.Popen(argv, cwd=root, stdin=subprocess.DEVNULL, stdout=stream,
                                            stderr=subprocess.STDOUT, env=os.environ.copy(), close_fds=True)
                 resources.callback(stop_owned, process)
                 channels[channel] = dict(master=master, radio=radio, process=process, output=output,
-                    ready=ready, event=event, metrics=metrics, records=[], chunks=[], uplink_lineage=[],
+                    baud_rate=baud,ready=ready, event=event, metrics=metrics, records=[], chunks=[], uplink_lineage=[],
                     parser=mavlink.MAVLink(None), pending=deque(),
                     decoder=Reassembler(channel=channel, uav_id=1, direction='uart_to_gcs'))
                 channels[channel]['parser'].robust_parsing = True
@@ -574,7 +686,11 @@ class PayloadUartAdapterPosixTests(unittest.TestCase):
                 ready = json.loads(state['ready'].read_text())
                 self.assertEqual((ready['pid'], ready['channel'], ready['uav_id']),
                                  (state['process'].pid, channel, 1))
-                self.assertEqual(ready['baud_rate'], 115200)
+                self.assertEqual(ready['baud_rate'], state['baud_rate'])
+                timing = ready['uart_timing'];state['uart_timing'] = timing
+                self.assertEqual((timing['owner'],timing['bits_per_byte'],timing['max_batch_bytes']), ('software_pty',10,8))
+                self.assertEqual(timing['clock_domain'], 'host_monotonic_ns')
+                self.assertEqual(timing['max_batch_wire_ns'], (8*10*1_000_000_000+state['baud_rate']-1)//state['baud_rate'])
                 self.assertEqual(ready['tos'], 184 if channel == 'control' else 40)
                 self.assertEqual(ready['simulation_mode'], 'realtime')
 
@@ -587,8 +703,9 @@ class PayloadUartAdapterPosixTests(unittest.TestCase):
                 float(mavlink.MAVLINK_MSG_ID_AUTOPILOT_VERSION), 0, 0, 0, 0, 0, 0).pack(gcs))
             payload_down = bytes(gcs.heartbeat_encode(mavlink.MAV_TYPE_GCS,
                 mavlink.MAV_AUTOPILOT_INVALID, 0, 0, mavlink.MAV_STATE_ACTIVE).pack(gcs))
-            uplink = {'control': control_up, 'payload': payload_up*2}
-            downlink = {'control': control_down, 'payload': payload_down*2}
+            uplink = {'control': control_up*32, 'payload': payload_up*16}
+            downlink = {'control': control_down*16, 'payload': payload_down*32}
+            expected_down = []
             # Both adapters are live before either direction is exercised. Learn
             # their ephemeral bind ports from real datagrams instead of racing
             # reservation/rebind of fixed test ports.
@@ -602,9 +719,26 @@ class PayloadUartAdapterPosixTests(unittest.TestCase):
                     for key, _ in selector.select(.02):
                         channel, state = key.data, channels[key.data]
                         packet, address = state['radio'].recvfrom(65535)
+                        observed_ns = time.monotonic_ns()
+                        first = 'adapter_address' not in state
                         self.assertEqual(state.setdefault('adapter_address', address), address)
                         chunk = decode_chunk(packet); state['chunks'].append(chunk)
+                        state['last_up_received_ns'] = observed_ns
+                        state.setdefault('first_up_produced_ns', chunk.sent_monotonic_ns)
                         self.assertEqual(chunk.channel_id, CHANNEL_IDS[channel])
+                        if first:
+                            # Start the reverse stream before the rest of this
+                            # UART burst completes: both clocks must progress.
+                            produced = time.monotonic_ns()
+                            state['downlink_produced_ns'] = produced
+                            encoder = Encoder(channel=channel,uav_id=1,direction='gcs_to_uart',max_payload=8)
+                            for datagram in encoder.encode(downlink[channel],produced):
+                                self.assertEqual(state['radio'].sendto(datagram,address),len(datagram))
+                            if channel == 'payload':
+                                parser = mavlink.MAVLink(None);parser.robust_parsing = True
+                                expected_down = [mavlink_payload_lineage(message,spans,run_id=run.name,uav_id=1,
+                                    direction='gcs_to_uav') for message,spans in parse_mavlink_with_provenance(
+                                        parser,deque(),downlink[channel],(0,produced))]
                         records = state['decoder'].ingest(packet, time.monotonic_ns())
                         for record, sequence, stamp in zip(records, state['decoder'].released_sequences,
                                                           state['decoder'].released_sent_ns, strict=True):
@@ -618,20 +752,9 @@ class PayloadUartAdapterPosixTests(unittest.TestCase):
                 self.assertEqual(b''.join(state['records']), uplink[channel])
                 self.assertEqual(list(state['pending']), [])
             self.assertNotEqual(channels['control']['adapter_address'], channels['payload']['adapter_address'])
-
-            expected_down = []
             for channel, state in channels.items():
-                produced = time.monotonic_ns()
-                encoder = Encoder(channel=channel, uav_id=1, direction='gcs_to_uart', max_payload=8)
-                state['downlink_produced_ns'] = produced
-                packets = encoder.encode(downlink[channel], produced)
-                for packet in packets:
-                    self.assertEqual(state['radio'].sendto(packet, state['adapter_address']), len(packet))
-                if channel == 'payload':
-                    parser = mavlink.MAVLink(None); parser.robust_parsing = True
-                    expected_down = [mavlink_payload_lineage(message, spans, run_id=run.name, uav_id=1,
-                        direction='gcs_to_uav') for message, spans in parse_mavlink_with_provenance(
-                            parser, deque(), downlink[channel], (0,produced))]
+                minimum_wire_ns = (len(uplink[channel])*10*1_000_000_000+state['baud_rate']-1)//state['baud_rate']
+                self.assertGreaterEqual(state['last_up_received_ns']-state['first_up_produced_ns'],minimum_wire_ns)
             received = {channel: bytearray() for channel in channels}
             with selectors.DefaultSelector() as selector:
                 for channel, state in channels.items(): selector.register(state['master'], selectors.EVENT_READ, channel)
@@ -640,6 +763,7 @@ class PayloadUartAdapterPosixTests(unittest.TestCase):
                     ensure_running(); self.assertLess(time.monotonic(), deadline, 'BSF1 downlinks did not reach actual PTYs')
                     for key, _ in selector.select(.02):
                         received[key.data].extend(os.read(key.fileobj, 4096))
+                        channels[key.data]['last_down_received_ns'] = time.monotonic_ns()
             for channel in channels: self.assertEqual(bytes(received[channel]), downlink[channel])
 
             # Graceful shutdown flushes the real buffered trace. Kill is only an
@@ -654,6 +778,16 @@ class PayloadUartAdapterPosixTests(unittest.TestCase):
                 metrics = json.loads(state['metrics'].read_text())
                 self.assertEqual(metrics['uart_input_bytes'], len(uplink[channel]))
                 self.assertEqual(metrics['uart_output_bytes'], len(downlink[channel]))
+                self.assertEqual(metrics['uart_timing'],state['uart_timing'])
+                self.assertEqual(metrics['baud_pacing']['uart_to_radio']['charged_bytes'],len(uplink[channel]))
+                self.assertEqual(metrics['baud_pacing']['radio_to_uart']['charged_bytes'],len(downlink[channel]))
+                self.assertEqual(metrics['queue_drops'],0)
+                self.assertGreater(metrics['uart_read_backpressure_pauses'],0)
+                self.assertGreater(metrics['uart_io_backpressure_events'],0)
+                self.assertGreater(metrics['radio_io_backpressure_events'],0)
+                self.assertEqual((metrics['shutdown_pending_uart_bytes'],metrics['shutdown_pending_radio_bytes']),(0,0))
+                minimum_wire_ns = (len(downlink[channel])*10*1_000_000_000+state['baud_rate']-1)//state['baud_rate']
+                self.assertGreaterEqual(state['last_down_received_ns']-state['downlink_produced_ns'],minimum_wire_ns)
                 rows = [json.loads(line) for line in state['event'].read_text().splitlines()]
                 result['channels'][channel] = dict(pid=state['process'].pid, bytes_up=len(uplink[channel]),
                     bytes_down=len(downlink[channel]), metrics=metrics)
@@ -663,8 +797,8 @@ class PayloadUartAdapterPosixTests(unittest.TestCase):
             accepts = [r for r in payload_rows if r.get('payload_lineage_stage')=='accepted']
             self.assertEqual([r['frame_uid'] for r in offers], [r['frame_uid'] for r in channels['payload']['uplink_lineage']])
             self.assertEqual([r['frame_uid'] for r in accepts], [r['frame_uid'] for r in expected_down])
-            self.assertEqual(len({r['frame_uid'] for r in offers}), 2)
-            self.assertEqual(len({r['frame_uid'] for r in accepts}), 2)
+            self.assertEqual(len({r['frame_uid'] for r in offers}), 16)
+            self.assertEqual(len({r['frame_uid'] for r in accepts}), 32)
             for row in offers + accepts:
                 self.assertEqual(row['run_id'], run.name)
                 self.assertTrue(row['provenance_valid'])
