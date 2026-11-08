@@ -170,6 +170,20 @@ class FixtureTransport:
     static size_t Run(const std::filesystem::path& prefix)
     {
         {
+            // A decoded candidate is ready between two old 5ms poll ticks.
+            // The independent pose deadline was registered before the pool's
+            // recurring tick, so a same-time drain is too late. Use ns-3's real
+            // event queue, without sleeps or claiming a wall-clock SLA.
+            Fixture f(prefix.string()+"-poll-deadline",0);f.Configure(1);
+            Simulator::Schedule(MicroSeconds(98500),[&]{f.Reply(0);});
+            Simulator::Schedule(MilliSeconds(100),[&]{
+                Require(f.pool->m_committedPoseFrames==1,
+                    "Ready full-mesh candidate waited across the independent pose deadline");
+            });
+            Simulator::ScheduleNow(&NativeRtPool::Poll,f.pool.get());
+            Simulator::Stop(MicroSeconds(100001));Simulator::Run();
+        }
+        {
             // Exercise both old Collect and new CollectBundle log paths with
             // actual int receipts and an absent receipt (JSON null). A py::none
             // ternary would attempt to cast the int to none at runtime.
