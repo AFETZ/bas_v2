@@ -297,6 +297,23 @@ class NativeBootstrapTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'mac-rx-middle'):
             bootstrap.verify_cache(self.root)
 
+    def test_receive_patch_is_declared_by_actual_shell_for_every_scene(self):
+        bash = (Path('C:/Program Files/Git/bin/bash.exe') if sys.platform == 'win32'
+                else Path(shutil.which('bash') or '/missing/bash'))
+        if not bash.is_file():
+            self.skipTest('Bash is required to execute the launcher declarations')
+        runner = (bootstrap.ROOT / 'network/ns3/run_native_radio_five_uav.sh').read_text()
+        declarations = 'PATCH_FILE=' + runner.split('PATCH_FILE=', 1)[1].split('GAZEBO_RTF=', 1)[0]
+        import subprocess
+        for scene in ('urban', 'customer', 'rock_demo', 'town01'):
+            with self.subTest(scene=scene):
+                script = ('ROOT_DIR=/workspace/bas\nURBAN_OUTPUT=/tmp/generated\nUAV_COUNT=5\n'
+                          f'SCENARIO_KEY={scene}\n' + declarations +
+                          'test "$PROMISC_QOS_RECEIVE_PATCH" = '
+                          '"$ROOT_DIR/network/ns3/patches/mr2608-promisc-qos-receive-context.patch"\n')
+                result = subprocess.run([str(bash), '-ceu', script], text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_mutable_image_name_is_rejected_without_docker(self):
         with patch.object(bootstrap, 'command') as command:
             with self.assertRaisesRegex(ValueError, 'exact sha256'):
