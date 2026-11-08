@@ -346,7 +346,7 @@ def execute(config, output, *, root=ROOT, variant='cuda_ad_mono_polarized', plot
             'tr38901 TX: unnormalized OUTDOOR pattern, 65deg HPBW/30dB attenuation/8dBi peak, matching ns-3.48 element power pattern; feed gain is additional once.',
             'Fixed horizontal ENU Z plane, not terrain-following AGL. Explicit TX positions are snapshot inputs; no trajectory interpolation.',
             'Point checks are diagnostic: cell averages and point values need not agree; no physical calibration or acceptance error threshold is claimed.'],
-        service_classes='not_evaluated_missing_modem_MAC_and_customer_SLA', variant=variant)
+        service_classes='not_evaluated_requires_qualified_packet_load_series', variant=variant)
     metadata['assumptions'].extend([
         'point_grid uses actual iso V polarized PathSolver receivers at cell centers, not a cell area average; all devices are stationary at the snapshot.',
         'point_grid/CFR uses baseband offset zero, the physical TX center. A single center-frequency gain approximates the overlapping band; native multiband equivalence is unqualified.',
