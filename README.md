@@ -304,7 +304,7 @@ docker image inspect "$IMAGE" --format '{{.Id}}'
 пользователь в отдельной чистой рабочей копии. Новый
 `scripts/product/bootstrap_native_runtime.py` использует canonical mount
 `/workspace/multiagent_simulation`, общий lock стенда и собирает ROS-пакет,
-ns-3.48 `d2add90b452d600cfb4859baed8e9ea633519447`, одиннадцать patches и оба native targets.
+ns-3.48 `d2add90b452d600cfb4859baed8e9ea633519447`, двенадцать patches и оба native targets.
 Симуляторы при этом не запускаются, GPU не требуется.
 
 ```sh

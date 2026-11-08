@@ -226,10 +226,10 @@ class NativeBootstrapTests(unittest.TestCase):
         cache.write_text(f'CMAKE_HOME_DIRECTORY:INTERNAL={bootstrap.MOUNT}/{bootstrap.SDK_PATH}\n')
         bootstrap.verify_cache(self.root)
 
-    def test_all_eleven_runtime_patches_and_both_native_targets_are_prepared(self):
-        self.assertEqual(len(bootstrap.PATCH_NAMES), 11)
-        self.assertEqual(len(set(bootstrap.PATCH_NAMES)), 11)
-        self.assertEqual(bootstrap.PATCH_NAMES[-1], 'mr2608-fullmesh.patch')
+    def test_all_twelve_runtime_patches_and_both_native_targets_are_prepared(self):
+        self.assertEqual(len(bootstrap.PATCH_NAMES), 12)
+        self.assertEqual(len(set(bootstrap.PATCH_NAMES)), 12)
+        self.assertEqual(bootstrap.PATCH_NAMES[-2:], ('mr2608-fullmesh.patch', 'mr2608-emitter-batch.patch'))
         runner = (bootstrap.ROOT / 'network/ns3/run_native_radio_five_uav.sh').read_text()
         for name in bootstrap.PATCH_NAMES + bootstrap.SCRATCH_FILES:
             self.assertTrue(name in runner, f'Runner does not include {name}')
