@@ -211,8 +211,7 @@ class NativeRtPool
         m_summaryPath = (std::filesystem::path(artifacts) / "summary.json").string();
         Require(!std::filesystem::exists(m_logPath) && !std::filesystem::exists(m_summaryPath),
             "Preserve the previous producer artifacts");
-        m_log.open(m_logPath, std::ios::out);
-        Require(static_cast<bool>(m_log), "Cannot open producer result log");
+        m_resultLog=module.attr("NativeResultLog")(m_logPath);
         m_pool = module.attr("NativeRtWorkerPool")(py::cast(std::vector<std::string>{binary}),
             configPath, (std::filesystem::path(artifacts) / "processes").string(), "workers"_a=workers);
         m_pool.attr("start")();
@@ -327,26 +326,42 @@ class NativeRtPool
         m_next.Cancel();
         py::dict final;
         if (m_started) final = SnapshotValue(); // Ages measured before cleanup delays.
+        std::string cleanupError;
         try { if (m_pool) m_pool.attr("close")(); }
         catch (const std::exception& error)
         {
-            m_failed = true; m_error = std::string("RT pool cleanup: ") + error.what();
-            if (m_log) m_log.flush();
-            throw;
+            cleanupError=std::string("RT pool cleanup: ")+error.what();
+        }
+        // No producer/collector can enqueue after cancellation and worker close.
+        // A closed result requires the actual writer to drain, not queue entry.
+        try { if (m_resultLog) m_resultLog.attr("close")("timeout_s"_a=5.); }
+        catch (const std::exception& error)
+        {
+            if(!cleanupError.empty())cleanupError+="; ";
+            cleanupError+=std::string("RT result journal cleanup: ")+error.what();
+        }
+        if(!cleanupError.empty())
+        {
+            m_failed=true;
+            if(!m_error.empty())m_error+="; ";
+            m_error+=cleanupError;
         }
         m_closed = true;
         if (m_started)
         {
             final["closed"] = true;
+            final["failed"] = m_failed;
+            if(m_error.empty())final["error"]=py::none();else final["error"]=m_error;
             final["cache_snapshot_stage"] = "before_close";
             final["pool"] = m_pool.attr("snapshot")();
+            final["result_log_writer"] = m_resultLog.attr("snapshot")();
             m_finalJson = Encode(final);
             std::ofstream summary(m_summaryPath, std::ios::out);
             summary << m_finalJson << '\n'; summary.close();
             Require(static_cast<bool>(summary), "Cannot save final RT pool summary");
         }
-        m_pool = py::object(); m_json = py::object();
-        if (m_log) m_log.close();
+        m_pool = py::object();m_resultLog=py::object();m_json=py::object();
+        if(!cleanupError.empty())throw std::runtime_error(cleanupError);
     }
 
   private:
@@ -407,10 +422,9 @@ class NativeRtPool
     Snapshot m_snapshot;
     EventSink m_event;
     CommitSnapshot m_commit;
-    py::object m_pool, m_json;
+    py::object m_pool, m_json, m_resultLog;
     std::vector<std::optional<Job>> m_inflight;
     EventId m_next;
-    std::ofstream m_log;
     std::string m_logPath, m_summaryPath, m_error, m_finalJson;
     bool m_started{false}, m_closed{false}, m_failed{false};
     uint64_t m_request{0}, m_completed{0}, m_cold{0}, m_publishedResults{0}, m_publishedPairs{0}, m_discarded{0};
@@ -515,7 +529,8 @@ class NativeRtPool
         const auto begin=ConsumerTick();
         const auto encoded=Encode(value);
         const auto encodedEnd=ConsumerTick();
-        m_log<<encoded<<'\n';m_log.flush();
+        Require(static_cast<bool>(m_resultLog),"RT result journal is not initialized");
+        m_resultLog.attr("write")(encoded);
         const auto end=ConsumerTick();
         ++m_resultLogWrites;m_resultLogWallNs+=end.first-begin.first;
         if(end.first-begin.first>m_slowestLogEndNs-m_slowestLogBeginNs)
@@ -524,7 +539,6 @@ class NativeRtPool
             m_slowestLogBeginNs=begin.first;m_slowestLogEncodedNs=encodedEnd.first;m_slowestLogEndNs=end.first;
             m_slowestLogCpuNs=end.second-begin.second;
         }
-        Require(static_cast<bool>(m_log),"Producer result log write failed");
     }
 
     void Submit(size_t worker, size_t anchor, bool cold, const NativeRtPrefetch::Choice* choice = nullptr)
@@ -928,6 +942,8 @@ class NativeRtPool
 
     void Collect()
     {
+        Require(static_cast<bool>(m_resultLog),"RT result journal is not initialized");
+        m_resultLog.attr("check")();
         if(!m_sources.empty()){CollectBundle();return;}
         const auto replies=m_pool.attr("poll")().cast<py::list>();
         for(auto item:replies)
@@ -1155,7 +1171,7 @@ class NativeRtPool
             "discarded_pairs"_a=m_discarded,"discard_reasons"_a=m_discardReasons,
             "poll_calls"_a=m_pollCalls,"poll_period_ns"_a=kPollPeriodNs,
             "result_log_timing"_a=py::dict("writes"_a=m_resultLogWrites,"total_wall_ns"_a=m_resultLogWallNs,
-                "scope"_a="synchronous_json_encode_and_stream_flush_main_thread",
+                "scope"_a="json_encode_and_bounded_enqueue_main_thread",
                 "slowest_request_id"_a=m_slowestLogRequest,"slowest_stage"_a=m_slowestLogStage,
                 "slowest_begin_host_ns"_a=m_slowestLogBeginNs,"slowest_encoded_host_ns"_a=m_slowestLogEncodedNs,
                 "slowest_end_host_ns"_a=m_slowestLogEndNs,"slowest_thread_cpu_ns"_a=m_slowestLogCpuNs),
@@ -1168,6 +1184,8 @@ class NativeRtPool
             "max_poll_wall_ns"_a=m_maxPollWallNs,"cache"_a=cache,
             "cache_snapshot_native_ns"_a=Simulator::Now().GetNanoSeconds(),
             "cache_snapshot_host_monotonic_ns"_a=NativeRtCache::HostNowNs(),
+            "result_log_mode"_a="bounded_async_jsonl_v1",
+            "result_log_writer"_a=(m_resultLog ? m_resultLog.attr("snapshot")() : py::none()),
             "pool"_a=(m_pool ? m_pool.attr("snapshot")() : py::none()),"log_path"_a=m_logPath);
     }
 };

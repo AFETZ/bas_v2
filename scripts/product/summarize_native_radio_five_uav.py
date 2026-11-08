@@ -15,7 +15,7 @@ import struct
 import sys
 from bisect import bisect_right
 from collections import Counter, defaultdict
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 import yaml
@@ -776,6 +776,77 @@ def _native_rt_path_storage_contract(workers, capacity):
     return checks, result
 
 
+def _native_rt_result_log_contract(snapshot, run_dir):
+    """Queue acceptance is not persistence; inspect the closed JSONL as well."""
+    if 'result_log_mode' not in snapshot and 'result_log_writer' not in snapshot:
+        return {}, dict(status='not_requested_legacy')
+    mapping, integer = _contract_mapping, _contract_integer
+    writer = mapping(snapshot.get('result_log_writer'))
+    timing = mapping(snapshot.get('result_log_timing'))
+    bundle = mapping(snapshot.get('bundle'))
+    completed = snapshot.get('total_completed_jobs')
+    committed = bundle.get('committed') if bundle.get('enabled') is True else 0
+    expected = completed + committed if integer(completed) and integer(committed) else None
+    producer, consumer = mapping(writer.get('producer')), mapping(writer.get('writer'))
+    checks = dict(
+        worker_result_journal_backend=snapshot.get('result_log_mode') == 'bounded_async_jsonl_v1',
+        worker_result_journal_closed=(writer.get('closed') is True and writer.get('drained') is True
+            and writer.get('listener_alive') is False and type(writer.get('queue_depth')) is int and writer['queue_depth'] == 0
+            and all(type(writer.get(key)) is int and writer[key] == 0 for key in ('failed','rejected','error_count'))
+            and writer.get('first_exception') is None and writer.get('last_exception') is None
+            and writer.get('unwritten_records') == [] and writer.get('in_progress_record') is None
+            and writer.get('rejected_record') is None),
+        worker_result_journal_counts=(integer(expected, 1) and type(writer.get('capacity')) is int
+            and writer['capacity'] == 512 and type(writer.get('max_record_bytes')) is int
+            and writer['max_record_bytes'] == 65536 and integer(writer.get('max_queue'))
+            and writer['max_queue'] <= writer['capacity']
+            and type(writer.get('accepted')) is int and type(writer.get('written')) is int
+            and type(timing.get('writes')) is int
+            and writer['accepted'] == writer['written'] == timing['writes'] == expected
+            and timing.get('scope') == 'json_encode_and_bounded_enqueue_main_thread'
+            and integer(writer.get('accepted_bytes'), 1)
+            and integer(writer.get('written_bytes'), 1)
+            and writer.get('written_bytes') == writer['accepted_bytes']),
+        worker_result_journal_identity=(all(integer(item.get(key), 1)
+            for item in (producer, consumer) for key in ('pid','thread_id','native_thread_id'))
+            and producer.get('pid') == consumer.get('pid')
+            and producer.get('native_thread_id') != consumer.get('native_thread_id')
+            and type(writer.get('path')) is str and writer['path'] == snapshot.get('log_path')),
+        worker_result_journal_file=False)
+    result = dict(status='unverified', expected_rows=expected)
+    try:
+        if run_dir is None:
+            raise ValueError('run_dir is required for result journal evidence')
+        base = Path(run_dir).resolve()
+        path = base / 'logs/native_rt_workers/results.jsonl'
+        reported = writer.get('path')
+        parts = PurePosixPath(reported.replace('\\','/')).parts if isinstance(reported, str) else ()
+        checks['worker_result_journal_identity'] &= ('..' not in parts and
+            parts[-4:] == (base.name,'logs','native_rt_workers','results.jsonl'))
+        if not path.resolve().is_relative_to(base) or not path.is_file():
+            raise ValueError('closed result journal is missing or outside its run')
+        digest, count, size = hashlib.sha256(), 0, 0
+        with path.open('rb') as stream:
+            while raw := stream.readline(65537):
+                if len(raw) > 65536 or not raw.endswith(b'\n'):
+                    raise ValueError('result journal record is oversized or incomplete')
+                record = json.loads(raw.decode('utf-8'))
+                if not isinstance(record, dict) or type(record.get('schema')) is not int or record['schema'] != 1:
+                    raise ValueError('result journal record has an invalid schema')
+                json.dumps(record, allow_nan=False)  # Reject nonfinite values in any field.
+                digest.update(raw); count += 1; size += len(raw)
+        actual_hash = digest.hexdigest()
+        checks['worker_result_journal_file'] = (count == expected == writer.get('written')
+            and size == writer.get('written_bytes') and writer.get('sha256') == actual_hash)
+        result.update(rows=count, bytes=size, sha256=actual_hash,
+                      path='logs/native_rt_workers/results.jsonl')
+    except (OSError, ValueError, TypeError) as error:
+        result['error'] = str(error)
+    if all(checks.values()):
+        result['status'] = 'verified_closed_result_journal'
+    return checks, result
+
+
 def native_rt_worker_contract(stats: dict[str, Any], scenario_config: dict[str, Any], *,
                               run_dir: Path | None = None) -> dict[str, Any]:
     """Validate observed worker/cache participation for the configured 1..5 UAVs."""
@@ -1035,11 +1106,14 @@ def native_rt_worker_contract(stats: dict[str, Any], scenario_config: dict[str, 
     storage_checks, storage_proof = _native_rt_path_storage_contract(workers if isinstance(workers, list) else [],
                                                                    rt.get("max_number_of_paths"))
     checks.update(storage_checks)
+    journal_checks, journal_proof = _native_rt_result_log_contract(snapshot, run_dir)
+    checks.update(journal_checks)
     return {"passed": all(checks.values()), "checks": checks,
             "rejection_reasons": [name for name, passed in checks.items() if not passed],
             "expected_worker_count": count, "expected_cohort": cohort, "scene_sha256": scene_hash,
             "expected_desired_mode": desired_mode, "full_mesh_sampling_equivalence": "not_evaluated" if full_mesh else None,
             "path_storage": storage_proof,
+            "result_journal": journal_proof,
             "source_bundle": {key: value for key, value in source_proof.items() if key not in ("roles", "expected_source_profiles")}
                              if source_proof is not None else None}
 

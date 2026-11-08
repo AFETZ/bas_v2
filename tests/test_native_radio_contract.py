@@ -422,6 +422,148 @@ class NativeRadioContractTests(unittest.TestCase):
             with self.subTest(change=change):
                 self.assertFalse(native_rt_worker_contract(stats,scenario)['passed'])
 
+    def result_journal_evidence(self, stats, run_dir=None):
+        """Real JSONL files and manufactured parser metadata; no async/RF claim."""
+        run_dir=self.root if run_dir is None else run_dir
+        snapshot=stats['sionna_rt_workers']
+        snapshot.setdefault('total_completed_jobs',snapshot['completed_jobs'])
+        bundle=snapshot.get('bundle',{})
+        expected=snapshot['total_completed_jobs']+(bundle['committed'] if bundle.get('enabled') is True else 0)
+        raw=b''.join((json.dumps(dict(schema=1,stage='parser_fixture',record=i,value='a'),
+            separators=(',',':'))+'\n').encode('utf-8') for i in range(expected))
+        path=run_dir/'logs/native_rt_workers/results.jsonl'
+        path.parent.mkdir(parents=True,exist_ok=True)
+        path.write_bytes(raw)
+        snapshot.update(result_log_mode='bounded_async_jsonl_v1',log_path=str(path.resolve()),
+            result_log_timing=dict(writes=expected,total_wall_ns=1000,max_wall_ns=100,
+                scope='json_encode_and_bounded_enqueue_main_thread'),
+            result_log_writer=dict(path=str(path.resolve()),capacity=512,max_record_bytes=65536,
+                accepted=expected,written=expected,failed=0,rejected=0,accepted_bytes=len(raw),written_bytes=len(raw),
+                max_queue=4,queue_depth=0,closed=True,drained=True,listener_alive=False,error_count=0,
+                first_exception=None,last_exception=None,unwritten_records=[],in_progress_record=None,rejected_record=None,
+                producer=dict(pid=123,thread_id=100,native_thread_id=200),
+                writer=dict(pid=123,thread_id=101,native_thread_id=201),
+                maximum_write_wall_ns=1000,maximum_write_thread_cpu_ns=500,
+                scope='owned QueueHandler/QueueListener/FileHandler; write+flush is not fsync',
+                sha256=hashlib.sha256(raw).hexdigest()))
+        return path,raw
+
+    def test_legacy_result_journal_is_explicitly_unrequested_without_retroactive_proof(self):
+        stats,scenario=self.evidence(pool=True,full_mesh=True)
+        stats['sionna_rt_workers']['result_log_timing']=dict(writes=36,total_wall_ns=999999)
+        original=copy.deepcopy(stats)
+        report=native_rt_worker_contract(stats,scenario)
+        self.assertTrue(report['passed'],report)
+        self.assertEqual(report['result_journal']['status'],'not_requested_legacy')
+        self.assertNotIn('worker_result_journal_file',report['checks'])
+        self.assertEqual(stats,original)
+
+    def test_actual_closed_result_journal_accepts_relocated_container_and_windows_prefixes(self):
+        stats,scenario=self.evidence(pool=True,full_mesh=True)
+        path,raw=self.result_journal_evidence(stats)
+        for reported in [str(path.resolve()),
+            f'/workspace/multiagent_simulation/runs/native-radio-realtime/{self.root.name}/logs/native_rt_workers/results.jsonl',
+            f'C:\\relocated\\{self.root.name}\\logs\\native_rt_workers\\results.jsonl']:
+            snapshot=stats['sionna_rt_workers']
+            snapshot['log_path']=snapshot['result_log_writer']['path']=reported
+            with self.subTest(path=reported):
+                report=native_rt_worker_contract(stats,scenario,run_dir=self.root)
+                self.assertTrue(report['passed'],report)
+                self.assertEqual(report['result_journal']['status'],'verified_closed_result_journal')
+                self.assertEqual(report['result_journal']['sha256'],hashlib.sha256(raw).hexdigest())
+                self.assertEqual(report['result_journal']['bytes'],len(raw))
+
+    def test_source_bundle_journal_includes_all_actual_jobs_and_committed_bundle_rows(self):
+        stats,scenario,run=self.source_evidence(2)
+        path,raw=self.result_journal_evidence(stats,run)
+        snapshot=stats['sionna_rt_workers']
+        expected=snapshot['total_completed_jobs']+snapshot['bundle']['committed']
+        report=native_rt_worker_contract(stats,scenario,run_dir=run)
+        self.assertTrue(report['passed'],report)
+        self.assertEqual(report['result_journal']['rows'],expected)
+        self.assertEqual(len(path.read_bytes().splitlines()),expected)
+        snapshot['result_log_writer']['accepted']=snapshot['completed_jobs']+snapshot['bundle']['committed']
+        self.assertIn('worker_result_journal_counts',
+            native_rt_worker_contract(stats,scenario,run_dir=run)['rejection_reasons'])
+
+    def test_advertised_result_journal_without_complete_proof_or_file_is_rejected(self):
+        original,scenario=self.evidence(pool=True,full_mesh=True)
+        path,raw=self.result_journal_evidence(original)
+        self.assertIn('worker_result_journal_file',native_rt_worker_contract(original,scenario)['rejection_reasons'])
+        for field in ('result_log_mode','result_log_writer'):
+            stats=copy.deepcopy(original);del stats['sionna_rt_workers'][field]
+            with self.subTest(missing=field):
+                self.assertFalse(native_rt_worker_contract(stats,scenario,run_dir=self.root)['passed'])
+        path.unlink()
+        self.assertIn('worker_result_journal_file',
+            native_rt_worker_contract(original,scenario,run_dir=self.root)['rejection_reasons'])
+
+    def test_queue_acceptance_or_live_failed_writer_does_not_prove_closed_persistence(self):
+        original,scenario=self.evidence(pool=True,full_mesh=True)
+        self.result_journal_evidence(original)
+        changes=[dict(written=35),dict(accepted=37),dict(written=True),dict(accepted_bytes=1),dict(written_bytes=0),
+            dict(closed=False),dict(drained=False),dict(listener_alive=True),dict(queue_depth=1),
+            dict(failed=1),dict(rejected=1),dict(error_count=1),dict(first_exception={'message':'write failed'}),
+            dict(last_exception={'message':'flush failed'}),dict(unwritten_records=[2]),
+            dict(in_progress_record=2),dict(rejected_record=2),dict(capacity=513),dict(max_record_bytes=65535),dict(max_queue=513)]
+        for change in changes:
+            stats=copy.deepcopy(original);stats['sionna_rt_workers']['result_log_writer'].update(change)
+            with self.subTest(change=change):
+                self.assertFalse(native_rt_worker_contract(stats,scenario,run_dir=self.root)['passed'])
+        for change in [dict(writes=35),dict(writes=True),dict(scope='main_thread_sync_write')]:
+            stats=copy.deepcopy(original);stats['sionna_rt_workers']['result_log_timing'].update(change)
+            with self.subTest(timing=change):
+                self.assertIn('worker_result_journal_counts',
+                    native_rt_worker_contract(stats,scenario,run_dir=self.root)['rejection_reasons'])
+
+    def test_journal_identity_requires_same_pid_distinct_native_tid_and_actual_run_tail(self):
+        original,scenario=self.evidence(pool=True,full_mesh=True)
+        self.result_journal_evidence(original)
+        for identity in [dict(pid=124,thread_id=101,native_thread_id=201),
+                         dict(pid=123,thread_id=101,native_thread_id=200),
+                         dict(pid=123,thread_id=0,native_thread_id=201),
+                         dict(pid=True,thread_id=101,native_thread_id=201)]:
+            stats=copy.deepcopy(original);stats['sionna_rt_workers']['result_log_writer']['writer']=identity
+            with self.subTest(identity=identity):
+                self.assertIn('worker_result_journal_identity',
+                    native_rt_worker_contract(stats,scenario,run_dir=self.root)['rejection_reasons'])
+        for path in ['/different/run/logs/native_rt_workers/results.jsonl',
+                     f'/prefix/../{self.root.name}/logs/native_rt_workers/results.jsonl',
+                     f'/prefix/{self.root.name}/logs/wrong/results.jsonl']:
+            stats=copy.deepcopy(original)
+            stats['sionna_rt_workers']['log_path']=stats['sionna_rt_workers']['result_log_writer']['path']=path
+            with self.subTest(path=path):
+                self.assertIn('worker_result_journal_identity',
+                    native_rt_worker_contract(stats,scenario,run_dir=self.root)['rejection_reasons'])
+
+    def test_result_journal_same_length_tamper_cannot_reuse_old_writer_sha256(self):
+        stats,scenario=self.evidence(pool=True,full_mesh=True)
+        path,raw=self.result_journal_evidence(stats)
+        altered=raw.replace(b'"value":"a"',b'"value":"b"',1)
+        self.assertEqual(len(altered),len(raw))
+        path.write_bytes(altered)
+        report=native_rt_worker_contract(stats,scenario,run_dir=self.root)
+        self.assertIn('worker_result_journal_file',report['rejection_reasons'])
+        self.assertNotEqual(report['result_journal']['sha256'],stats['sionna_rt_workers']['result_log_writer']['sha256'])
+
+    def test_result_journal_rejects_missing_extra_truncated_nonfinite_or_oversized_records(self):
+        original,scenario=self.evidence(pool=True,full_mesh=True)
+        path,raw=self.result_journal_evidence(original)
+        lines=raw.splitlines(keepends=True)
+        malformed=[b'[]\n',b'{"schema":true}\n',b'{"schema":2}\n',b'{"schema":1,"nested":[NaN]}\n',
+            b'{"schema":1,"nested":{"value":Infinity}}\n',b'{"schema":1,"value":1e9999}\n',
+            b'{"schema":1,"value":"\xff"}\n',b'\n',b'{"schema":1,\n',
+            b'{"schema":1,"padding":"'+b'x'*65536+b'"}\n']
+        cases=[b''.join(lines[:-1]),raw+lines[-1],raw[:-1],*(bad+b''.join(lines[1:]) for bad in malformed)]
+        for candidate in cases:
+            path.write_bytes(candidate)
+            stats=copy.deepcopy(original)
+            stats['sionna_rt_workers']['result_log_writer'].update(accepted_bytes=len(candidate),written_bytes=len(candidate),
+                sha256=hashlib.sha256(candidate).hexdigest())
+            with self.subTest(prefix=candidate[:60],length=len(candidate)):
+                self.assertIn('worker_result_journal_file',
+                    native_rt_worker_contract(stats,scenario,run_dir=self.root)['rejection_reasons'])
+
     def test_full_mesh_requires_observed_coherent_pose_proof(self):
         stats, scenario = self.evidence(pool=True, full_mesh=True)
         del stats['pose_application']

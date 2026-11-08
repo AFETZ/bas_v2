@@ -98,8 +98,8 @@ class FixtureTransport:
             pool->m_pool=scope["FixtureTransport"]();
             pool->m_logPath=base.string()+".jsonl";pool->m_summaryPath=base.string()+"-summary.json";
             Require(!std::filesystem::exists(pool->m_logPath)&&!std::filesystem::exists(pool->m_summaryPath),"Preserve earlier CPU attempts");
-            pool->m_log.open(pool->m_logPath);
-            Require(static_cast<bool>(pool->m_log),"Cannot open CPU result log");pool->m_started=true;
+            pool->m_resultLog=py::module_::import("scripts.product.native_rt_workers").attr("NativeResultLog")(pool->m_logPath);
+            pool->m_started=true;
         }
         void Observe(Ptr<const MobilityModel>)
         {
@@ -189,6 +189,7 @@ class FixtureTransport:
             // ternary would attempt to cast the int to none at runtime.
             Fixture f(prefix.string()+"-desired-only",0);f.Configure(1);f.pool->Poll();
             f.Reply(0,false,false,false);f.pool->Poll();f.Reply(0);f.pool->Poll();
+            f.pool->m_resultLog.attr("close")(); // Inspect only drained, closed JSONL.
             std::ifstream input(f.pool->m_logPath);std::string line;
             std::getline(input,line);auto first=f.pool->m_json.attr("loads")(line).cast<py::dict>();
             std::getline(input,line);auto second=f.pool->m_json.attr("loads")(line).cast<py::dict>();
@@ -206,6 +207,7 @@ class FixtureTransport:
             const auto epochs=committed["pose_sample_host_ns"].cast<std::vector<int64_t>>();
             for(size_t i=0;i<6;++i)Require(epochs[i]==f.frame[i].sampleNs,"Bundle retimestamped an original UAV observation");
             Require(f.pool->m_completed==1&&f.pool->m_sources[0].completed==1&&f.pool->m_bundlesCommitted==1,"Desired/source counters lost scope");
+            f.pool->m_resultLog.attr("close")();
             std::ifstream input(f.pool->m_logPath);std::string line;
             std::getline(input,line);auto first=f.pool->m_json.attr("loads")(line).cast<py::dict>();
             std::getline(input,line);auto second=f.pool->m_json.attr("loads")(line).cast<py::dict>();
@@ -213,12 +215,13 @@ class FixtureTransport:
                 py::isinstance<py::int_>(second["receiver_enqueued_host_monotonic_ns"]),"Bundle receipt int/null logging changed type");
         }
         {
-            // Failed result persistence must stop before a partially staged
-            // component can publish, and its failed Poll must retain timing.
+            // A refused enqueue must stop before a partially staged component
+            // can publish, and its failed Poll must retain timing. File failure
+            // after acceptance is detected by check/drain and invalidates the run.
             Fixture f(prefix.string()+"-log-failure");f.Configure();f.pool->Poll();
-            f.pool->m_log.setstate(std::ios::badbit);f.Reply(0);
-            Reject([&]{f.pool->Poll();},"Failed result persistence was ignored");f.Empty();
-            Require(f.pool->m_resultLogWrites==1&&f.pool->m_maxPollWallNs>0,
+            f.pool->m_resultLog.attr("close")();f.Reply(0);
+            Reject([&]{f.pool->Poll();},"Failed result enqueue was ignored");f.Empty();
+            Require(f.pool->m_resultLogWrites==0&&f.pool->m_maxPollWallNs>0,
                 "Failed consumer/log Poll was omitted from wall-time diagnostics");
         }
         for(bool error:{false,true})

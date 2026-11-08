@@ -5,6 +5,7 @@ No Sionna, GPU, radio model, serial hardware, or real-time acceptance is claimed
 import json
 import hashlib
 import gc
+import logging
 import os
 from pathlib import Path
 import subprocess
@@ -14,11 +15,12 @@ import threading
 import time
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 import queue
 import copy
 
 from scripts.product.native_rt_workers import (NativeRtWorkerPool, validate_config, validate_job,
-    validate_path_storage_stats, PATH_STORAGE_SOURCE_HASHES, _GcObserver)
+    validate_path_storage_stats, PATH_STORAGE_SOURCE_HASHES, _GcObserver, NativeResultLog)
 
 
 STUB = r'''
@@ -438,6 +440,177 @@ class JobValidationTests(unittest.TestCase):
         self.assertEqual(pool._last_request_id, 3)
         self.assertEqual([row['request_id'] for row in connection.sent], [2, 3])
         self.assertFalse(hasattr(pool, '_request_ids'))
+
+
+class NativeResultLogTests(unittest.TestCase):
+    class StreamProbe:
+        """Real temporary file behind deterministic event-controlled I/O faults."""
+        def __init__(self, stream, failure=None):
+            self.stream, self.failure = stream, failure
+            self.entered, self.release = threading.Event(), threading.Event()
+
+        def write(self, value):
+            self.entered.set()
+            if not self.release.wait(3):
+                raise OSError('test writer gate was not released')
+            if self.failure == 'write':
+                raise OSError('injected file write failure')
+            return self.stream.write(value)
+
+        def flush(self):
+            if self.failure == 'flush':
+                raise OSError('injected file flush failure')
+            return self.stream.flush()
+
+        def close(self):
+            self.stream.close()
+
+        def __getattr__(self, name):
+            return getattr(self.stream, name)
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.logs, self.probes = [], []
+        self.addCleanup(self.close_logs)
+
+    def close_logs(self):
+        for probe in self.probes:
+            probe.release.set()
+        for log in self.logs:
+            try:
+                log.close()
+            except RuntimeError:
+                pass  # Failure is asserted by each causal test, never a passing close.
+            self.assertFalse(log.snapshot()['listener_alive'], 'Owned listener leaked from a test')
+
+    def log(self, **options):
+        log = NativeResultLog(self.root/f'results-{len(self.logs)}.jsonl', **options)
+        self.logs.append(log)
+        return log
+
+    def gate(self, log, failure=None):
+        probe = self.StreamProbe(log._file_handler.stream, failure)
+        log._file_handler.stream = probe
+        self.probes.append(probe)
+        return probe
+
+    def test_slow_file_io_does_not_block_enqueue_and_all_original_bytes_drain(self):
+        before_handlers, before_names = list(logging.root.handlers), set(logging.Logger.manager.loggerDict)
+        log = self.log(capacity=8)
+        probe = self.gate(log)
+        records = ['{"id":0,"text":"я"}', '{"id":1}', '{"id":2}']
+        log.write(records[0]); self.assertTrue(probe.entered.wait(1))
+        # The writer is still blocked. These calls must enqueue without entering it.
+        for record in records[1:]:
+            log.write(record)
+        self.assertEqual(log.snapshot()['accepted'], 3)
+        self.assertEqual(log.snapshot()['written'], 0)
+        self.assertFalse(probe.release.is_set())
+        probe.release.set(); log.close(); log.close(); log.check()
+        self.assertEqual(Path(log.path).read_bytes(), ''.join(row+'\n' for row in records).encode('utf-8'))
+        state = log.snapshot()
+        self.assertEqual(state['sha256'], hashlib.sha256(Path(log.path).read_bytes()).hexdigest())
+        self.assertEqual((state['accepted'], state['written'], state['failed'], state['error_count']), (3,3,0,0))
+        self.assertTrue(state['closed'] and state['drained'])
+        self.assertFalse(state['listener_alive'])
+        self.assertEqual(state['producer']['pid'], os.getpid())
+        self.assertEqual(state['writer']['pid'], os.getpid())
+        self.assertNotEqual(state['producer']['native_thread_id'], state['writer']['native_thread_id'])
+        self.assertGreaterEqual(state['maximum_write_wall_ns'], 0)
+        self.assertGreaterEqual(state['maximum_write_thread_cpu_ns'], 0)
+        self.assertEqual(logging.root.handlers, before_handlers)
+        self.assertEqual(set(logging.Logger.manager.loggerDict), before_names)
+        # Expected digest comes from the producer's completed writes, not a later
+        # re-read that would silently bless a same-length external modification.
+        original = Path(log.path).read_bytes()
+        Path(log.path).write_bytes(original.replace(b'"id":1', b'"id":9', 1))
+        self.assertEqual(log.snapshot()['sha256'], state['sha256'])
+        self.assertNotEqual(log.snapshot()['sha256'], hashlib.sha256(Path(log.path).read_bytes()).hexdigest())
+
+    def test_full_queue_is_explicit_even_if_logging_normally_hides_errors(self):
+        log = self.log(capacity=2); probe = self.gate(log)
+        records = ['{"id":%d}' % value for value in range(4)]
+        with patch.object(logging, 'raiseExceptions', False):
+            log.write(records[0]); self.assertTrue(probe.entered.wait(1))
+            log.write(records[1]); log.write(records[2])
+            with self.assertRaisesRegex(RuntimeError, 'not accepted'):
+                log.write(records[3])
+        state = log.snapshot()
+        self.assertEqual((state['accepted'],state['rejected'],state['max_queue']), (3,1,2))
+        self.assertEqual(state['first_exception']['stage'], 'queue_full')
+        probe.release.set()
+        with self.assertRaises(RuntimeError):log.close()
+        self.assertEqual(Path(log.path).read_bytes(), ''.join(row+'\n' for row in records[:3]).encode())
+        state = log.snapshot()
+        self.assertEqual((state['accepted'],state['written']), (3,3))
+        self.assertEqual(state['rejected_record'], records[3])
+        self.assertFalse(state['listener_alive'])
+        with self.assertRaises(RuntimeError):log.check()
+
+    def test_write_and_flush_failures_retain_unwritten_records_and_never_claim_success(self):
+        for failure in ('write','flush'):
+            with self.subTest(failure=failure), patch.object(logging, 'raiseExceptions', False):
+                log = self.log(capacity=4); probe = self.gate(log, failure)
+                records = ['{"id":%d}' % value for value in range(3)]
+                log.write(records[0]); self.assertTrue(probe.entered.wait(1))
+                log.write(records[1]); log.write(records[2]); probe.release.set()
+                with self.assertRaises(RuntimeError):log.close()
+                with self.assertRaises(RuntimeError):log.check()
+                state = log.snapshot()
+                self.assertEqual((state['accepted'],state['written'],state['failed']), (3,0,3))
+                self.assertEqual(state['unwritten_records'], records)
+                self.assertEqual(state['sha256'], hashlib.sha256(b'').hexdigest())
+                self.assertEqual(state['first_exception']['stage'], 'file_write_or_flush')
+                self.assertIn('injected file', state['first_exception']['message'])
+                self.assertTrue(state['closed'] and state['drained'])
+                self.assertFalse(state['listener_alive'])
+                self.assertEqual(Path(log.path).read_bytes(), b'' if failure == 'write' else (records[0]+'\n').encode())
+
+    def test_finite_close_handles_full_sentinel_and_join_timeouts_without_false_success(self):
+        for fill in (0,2):
+            with self.subTest(queued=fill):
+                log = self.log(capacity=2); probe = self.gate(log)
+                records = ['{"id":%d}' % value for value in range(fill+1)]
+                log.write(records[0]); self.assertTrue(probe.entered.wait(1))
+                for record in records[1:]:log.write(record)
+                with self.assertRaisesRegex(RuntimeError, 'did not close'):log.close(timeout_s=.01)
+                state = log.snapshot()
+                self.assertFalse(state['closed'] or state['drained'])
+                self.assertTrue(state['listener_alive'])
+                with self.assertRaises(RuntimeError):log.write('{"late":true}')
+                probe.release.set()
+                with self.assertRaises(RuntimeError):log.close()
+                state = log.snapshot()
+                self.assertFalse(state['listener_alive'])
+                self.assertTrue(state['closed'] and state['drained'])
+                self.assertEqual((state['accepted'],state['written']), (fill+1,fill+1))
+                self.assertEqual(log._queue.unfinished_tasks, 0)
+                self.assertEqual(Path(log.path).read_bytes(), ''.join(row+'\n' for row in records).encode())
+                self.assertGreater(state['error_count'], 0)  # Retry cleanup cannot erase a timeout failure.
+
+    def test_encoded_utf8_limit_includes_the_single_unchanged_line_terminator(self):
+        record = '{"text":"я"}'
+        limit = len(record.encode('utf-8'))+1
+        log = self.log(max_record_bytes=limit)
+        log.write(record); log.close()
+        self.assertEqual(Path(log.path).read_bytes(), (record+'\n').encode('utf-8'))
+        self.assertEqual(log.snapshot()['written_bytes'], limit)
+        self.assertEqual(log.snapshot()['sha256'], hashlib.sha256((record+'\n').encode('utf-8')).hexdigest())
+        small = self.log(max_record_bytes=limit-1)
+        with self.assertRaisesRegex(RuntimeError, 'byte limit'):small.write(record)
+        with self.assertRaises(RuntimeError):small.close()
+        self.assertEqual((small.snapshot()['accepted'],small.snapshot()['written']), (0,0))
+
+    def test_existing_file_is_never_overwritten_and_invalid_limits_create_no_artifact(self):
+        path = self.root/'existing.jsonl'; path.write_bytes(b'original\n')
+        with self.assertRaises(FileExistsError):NativeResultLog(path)
+        self.assertEqual(path.read_bytes(), b'original\n')
+        for options in ({'capacity':True},{'capacity':0},{'capacity':513},
+                        {'max_record_bytes':0},{'max_record_bytes':65537}):
+            with self.subTest(options=options), self.assertRaises(ValueError):NativeResultLog(self.root/'absent', **options)
+        self.assertFalse((self.root/'absent').exists())
 
 
 class GcObservationTests(unittest.TestCase):
