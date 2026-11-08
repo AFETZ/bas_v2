@@ -88,6 +88,9 @@ double g_updateDistanceThresholdM{0.5};
 uint64_t g_poseSnapshots{0};
 uint32_t g_posePollPeriodMs{20};
 uint64_t g_poseReaderCalls{0}, g_poseReaderWallNs{0}, g_poseReaderMaxWallNs{0};
+uint64_t g_spectrumCalls{0}, g_spectrumWallNs{0}, g_spectrumMaxWallNs{0};
+int64_t g_spectrumMaxWallNativeNs{0};
+size_t g_spectrumMaximumBins{0};
 uint64_t g_stalePoseSamples{0};
 uint64_t g_pathObservations{0};
 uint64_t g_realtimeLagSamples{0};
@@ -167,6 +170,38 @@ bool g_liveStateValid{false};
 int64_t g_radioEpochNs{0};
 double g_stateMaxAgeS{0.5};
 double g_runtimeLagMaxMs{250.0};
+
+// Time the existing public propagation boundary, including CFR/PSD work after
+// GetChannel. This measures wall time (including preemption), not CPU cycles.
+// The upstream implementation still owns every RF calculation and result.
+class MeasuredSpectrumPropagation : public SionnaRtSpectrumPropagationLossModel
+{
+  public:
+    Ptr<SpectrumSignalParameters> DoCalcRxPowerSpectralDensity(
+        Ptr<const SpectrumSignalParameters> params, Ptr<const MobilityModel> a,
+        Ptr<const MobilityModel> b, Ptr<const PhasedArrayModel> aa,
+        Ptr<const PhasedArrayModel> ba) const override
+    {
+        struct Timing
+        {
+            std::chrono::steady_clock::time_point start{std::chrono::steady_clock::now()};
+            ~Timing()
+            {
+                const uint64_t elapsed=std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now()-start).count();
+                ++g_spectrumCalls; g_spectrumWallNs+=elapsed;
+                if (elapsed>g_spectrumMaxWallNs)
+                {
+                    g_spectrumMaxWallNs=elapsed;
+                    g_spectrumMaxWallNativeNs=Simulator::Now().GetNanoSeconds();
+                }
+            }
+        } timing;
+        if (params->psd) g_spectrumMaximumBins=std::max(g_spectrumMaximumBins,static_cast<size_t>(params->psd->GetValuesN()));
+        return SionnaRtSpectrumPropagationLossModel::DoCalcRxPowerSpectralDensity(params,a,b,aa,ba);
+    }
+};
+
 void ObserveWifiPath(uint32_t receiver, Mac48Address sender, Ptr<const Packet> packet);
 
 void ObserveReceivedPath(uint32_t nodeIndex, Ptr<const Packet> packet);
@@ -1429,6 +1464,11 @@ WriteStats(const std::string& path)
            << "  \"successful_pose_reader_calls\": " << g_poseReaderCalls << ",\n"
            << "  \"successful_pose_reader_wall_ns\": " << g_poseReaderWallNs << ",\n"
            << "  \"successful_pose_reader_max_wall_ns\": " << g_poseReaderMaxWallNs << ",\n"
+           << "  \"desired_spectrum_boundary\": {\"calls\":" << g_spectrumCalls
+           << ",\"wall_ns\":" << g_spectrumWallNs << ",\"max_wall_ns\":" << g_spectrumMaxWallNs
+           << ",\"max_wall_native_ns\":" << g_spectrumMaxWallNativeNs
+           << ",\"maximum_bins\":" << g_spectrumMaximumBins
+           << ",\"scope\":\"upstream_CIR_to_RX_PSD_including_cache_lookup;wall_not_cpu_cycles\"},\n"
            << "  \"pose_updates\": " << g_poseSnapshots << ",\n"
            << "  \"stale_pose_samples\": " << g_stalePoseSamples << ",\n"
            << "  \"path_observations\": " << g_pathObservations << ",\n"
@@ -1906,7 +1946,7 @@ main(int argc, char* argv[])
     SionnaRtChannelModel::RtPathSolverConfig solver;
     if (requiresRt)
     {
-        sionna = CreateObject<SionnaRtSpectrumPropagationLossModel>();
+        sionna = CreateObject<MeasuredSpectrumPropagation>();
         sionna->SetChannelModelAttribute("Frequency", DoubleValue(carrierHz));
         sionna->SetChannelModelAttribute("SamplesPerSource", UintegerValue(sionnaSamplesPerSource));
         sionna->SetChannelModelAttribute("MaxNumPathsPerSource", UintegerValue(sionnaMaxNumPathsPerSource));
