@@ -42,6 +42,7 @@ from network.scripts.serial_transport import (  # noqa: E402
 
 CONTROL_TOS = 184
 PAYLOAD_TOS = 40
+CHANNEL_PORTS = {'control': 14600, 'payload': 14700, 'additional_data': 14800}
 GCS_IP = "10.71.0.10"
 MULTICAST_GROUP = "239.71.0.1"
 MULTICAST_PORT = 14900
@@ -252,9 +253,9 @@ class FlightHarness:
         self.additional_received: list[tuple[Any, tuple[str, int], int]] = []
         self.additional_malformed = 0
         for channel, port, tos in (
-            ("control", 14600, CONTROL_TOS),
-            ("payload", 14700, PAYLOAD_TOS),
-            ("additional_data", 14800, 0),
+            ("control", CHANNEL_PORTS['control'], CONTROL_TOS),
+            ("payload", CHANNEL_PORTS['payload'], PAYLOAD_TOS),
+            ("additional_data", CHANNEL_PORTS['additional_data'], 0),
         ):
             if channel not in self.channels:
                 continue
@@ -439,7 +440,7 @@ class FlightHarness:
                         channel,
                         system_id,
                         records,
-                        (endpoint_ip(system_id), (14600 if channel == "control" else 14700) + system_id),
+                        (endpoint_ip(system_id), CHANNEL_PORTS[channel] + system_id),
                         now_ns,
                     )
         ready = self.selector.select(0 if clock.mode() == "lockstep" else timeout_s)
@@ -468,7 +469,7 @@ class FlightHarness:
                     self.transport_malformed_datagrams += 1
                     continue
                 system_id = int(chunk.uav_id)
-                if system_id not in self.uav_ids or source != (endpoint_ip(system_id), (14600 if channel == "control" else 14700)+system_id):
+                if system_id not in self.uav_ids or source != (endpoint_ip(system_id), CHANNEL_PORTS[channel]+system_id):
                     self.transport_malformed_datagrams += 1
                     continue
                 records = self.transport_receivers[(channel, system_id)].ingest(data, now_ns)
@@ -498,7 +499,7 @@ class FlightHarness:
             # Model time can stay fixed across commands; only a newly received
             # ACK may complete this send, including each diagnostic retry.
             self.acks.pop((channel, system_id, int(message.command)), None)
-        port = (14600 if channel == "control" else 14700) + system_id
+        port = CHANNEL_PORTS[channel] + system_id
         counters = self.transport_counters[key]
         counters.uart_input_bytes += len(frame)
         self.transport_input_frames[key].feed(frame)

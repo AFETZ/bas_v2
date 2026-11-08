@@ -21,7 +21,7 @@ SHAPE = {
     'propagation': {'model'}, 'network': {'engine', 'topology'},
     'experiment': {'policy', 'duration_s', 'seed', 'run'},
     'runtime': {'clock', 'image', 'land_timeout_s', 'sionna_log_level', 'event_logging', 'capture_storage'},
-    'flows': {'channels', 'payload_attitude_interval_s'},
+    'flows': {'channels', 'payload_attitude_interval_s', 'payload_load'},
     'interference': {'sources'},
 }
 PROPAGATION_FIELDS = {
@@ -163,6 +163,8 @@ def load_config(path, root=ROOT):
         config['runtime'].setdefault('sionna_log_level', 'info')
         config['runtime'].setdefault('event_logging', 'metrics_only')
         config['runtime'].setdefault('capture_storage', 'tmpfs')
+    if isinstance(config['flows'], dict):
+        config['flows'].setdefault('payload_load', None)
     for section, keys in SHAPE.items():
         if section == 'propagation' and isinstance(config[section], dict):
             model = config[section].get('model')
@@ -187,6 +189,11 @@ def load_config(path, root=ROOT):
     channels = config['flows']['channels']
     if channels not in (['control'], ['control', 'payload']):
         raise ValueError('flows.channels must be [control] or [control, payload] in that order')
+    from network.coordination.payload import normalize_payload_load
+    config['flows']['payload_load'] = normalize_payload_load(config['flows']['payload_load'], tuple(range(1, count + 1)))
+    if config['flows']['payload_load'] is not None:
+        if 'payload' not in channels or config['runtime']['event_logging'] != 'batched_trace':
+            raise ValueError('flows.payload_load requires payload channel and runtime.event_logging=batched_trace')
     interval = config['flows']['payload_attitude_interval_s']
     try:
         valid_interval = type(interval) in (int, float) and math.isfinite(interval) and .02 <= interval <= 60
@@ -293,6 +300,7 @@ def environment(config, run_id, inherited=None):
         'NATIVE_WIFI_TOPOLOGY': 'adhoc', 'NATIVE_WIFI_AGGREGATION': 0,
         'NATIVE_WIFI_EXPLICIT_BAR': 0, 'NATIVE_UART_CHANNELS': ','.join(config['flows']['channels']),
         'NATIVE_PAYLOAD_INTERVAL_S': config['flows']['payload_attitude_interval_s'],
+        'NATIVE_PAYLOAD_LOAD_JSON': json.dumps(config['flows'].get('payload_load'), separators=(',', ':'), allow_nan=False),
         'NATIVE_FAULT_PROFILE': 'none', 'NATIVE_EXPERIMENT_PROFILE': 'urban',
         'NATIVE_EXPERIMENT_PILOT': 1, 'NATIVE_PARAMETER_SNAPSHOTS': 0,
         'NATIVE_COMMAND_PERIOD_S': 1, 'NATIVE_TASK_PERIOD_S': 20,

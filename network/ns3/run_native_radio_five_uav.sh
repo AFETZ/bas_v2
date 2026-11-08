@@ -305,6 +305,7 @@ run_in_container() {
     -e BAS_NATIVE_UAV_COUNT="$UAV_COUNT" \
     -e BAS_NATIVE_UART_CHANNELS="${BAS_NATIVE_UART_CHANNELS:-control,payload}" \
     -e BAS_NATIVE_PAYLOAD_INTERVAL_S="${BAS_NATIVE_PAYLOAD_INTERVAL_S:-0.2}" \
+    -e BAS_NATIVE_PAYLOAD_LOAD_JSON="${BAS_NATIVE_PAYLOAD_LOAD_JSON:-null}" \
     -e BAS_NATIVE_RADIO_BACKEND="${BAS_NATIVE_RADIO_BACKEND:-}" \
     -e BAS_NATIVE_WIFI_DATA_MODE="${BAS_NATIVE_WIFI_DATA_MODE:-}" \
     -e BAS_NATIVE_WIFI_CHANNEL_NUMBER="${BAS_NATIVE_WIFI_CHANNEL_NUMBER:-}" \
@@ -876,6 +877,7 @@ PY
     "$SCENARIO_KEY" "$SCENARIO" "$MAP_ID" "$WORLD" "$SCENE"
   printf 'gui=%s\n' "$GUI"
   printf 'capture_images=%s\nstate_transport=gazebo\nposition_journal_mode=bounded_async_jsonl_v1\n' "$CAPTURE_IMAGES"
+  printf 'payload_load_json=%s\n' "${BAS_NATIVE_PAYLOAD_LOAD_JSON:-null}"
   printf 'launch_world=%s\ngazebo_requested_rtf=%s\nscenario_timeout_scale=%s\n' \
     "$LAUNCH_WORLD" "$GAZEBO_RTF" "$SCENARIO_TIMEOUT_SCALE"
   printf 'stack_cpuset=%s\nradio_cpuset=%s\n' "$STACK_CPUSET" "$RADIO_CPUSET"
@@ -1635,6 +1637,7 @@ set +e
 if [[ "$COORDINATION_POLICY" != off ]]; then
   experiment_args=(
     --channels "$ACTIVE_UART_CHANNELS" --payload-interval-s "${BAS_NATIVE_PAYLOAD_INTERVAL_S:-0.2}"
+    --payload-load-json "${BAS_NATIVE_PAYLOAD_LOAD_JSON:-null}"
     --run-dir "$RUN_DIR" --node-state "$NODE_STATE" --phase-file "$PHASE_FILE"
     --uav-count "$UAV_COUNT"
     --stop-file "$ROOT_DIR/runs/control/$RUN_ID/stop.request"

@@ -70,6 +70,10 @@ def outcome_fields(summary, *, window_complete, stopped, runtime_errors=()):
     if started and summary.get("measurement_errors"):
         validity = "invalid"
         reasons = list(summary["measurement_errors"])
+    load = summary.get('payload_channel', {}).get('offered_load', {})
+    if load.get('configured') and load.get('generator_eligible') is not True:
+        validity = 'invalid'
+        reasons.append('payload_load_generator_incomplete')
     return dict(runtime_status="failed" if runtime_errors else "completed",
                 runtime_errors=list(runtime_errors), mission_outcome=mission,
                 mission_unmet_criteria=unmet, measurement_validity=validity,
@@ -318,6 +322,11 @@ class RelayExperiment:
     def __init__(self, args):
         self.args = args
         self._uav_ids = tuple(range(1, getattr(args, "uav_count", 5) + 1))
+        from network.coordination.payload import normalize_payload_load
+        self.payload_load = normalize_payload_load(getattr(args, 'payload_load', None), self.uav_ids)
+        if self.payload_load is not None and (getattr(args, 'channels', 'control') != 'control,payload'
+                or os.environ.get('BAS_NATIVE_EVENT_LOGGING', 'metrics_only') != 'batched_trace'):
+            raise ValueError('payload_load requires both channels and BAS_NATIVE_EVENT_LOGGING=batched_trace')
         self.urban = UrbanScenario.load(args.urban_scenario) if getattr(args, "urban_scenario", None) else None
         if self.urban and tuple(sorted(self.urban.spawns)) != self.uav_ids:
             raise ScenarioError("urban scene roster differs from configured UAV count")
@@ -384,6 +393,7 @@ class RelayExperiment:
                 "physical_completion_dwell_clock": "source_sim_time",
             }
         frozen["effective_service_args"] = {k: str(v) if isinstance(v, Path) else v for k, v in vars(service_args).items()}
+        frozen['payload_load'] = self.payload_load
         (metrics / "relay_experiment_config.json").write_text(json.dumps(frozen, indent=2) + "\n")
         (args.run_dir / "logs/coordination_gcs.ready").write_text(json.dumps(dict(pid=os.getpid())) + "\n")
         self.payload_channel = None
@@ -391,7 +401,7 @@ class RelayExperiment:
         if "payload" in getattr(args, "channels", "control").split(","):
             from network.coordination.payload import PayloadChannel
             self.payload_channel = PayloadChannel(args.run_dir, args.node_state, self.uav_ids,
-                interval_s=args.payload_interval_s)
+                interval_s=args.payload_interval_s, load=self.payload_load)
 
     def phase(self, name: str):
         if name == self.phase_name:
@@ -1070,6 +1080,7 @@ def main(argv=None):
     parser.add_argument("--uav-count", type=int, choices=range(1, 6), default=5)
     parser.add_argument("--channels", choices=("control", "control,payload"), default="control")
     parser.add_argument("--payload-interval-s", type=float, default=.2)
+    parser.add_argument('--payload-load-json', default='null', help='optional normalized downlink TUNNEL offered-load profile')
     parser.add_argument("--initial-master", type=int, choices=UAV_IDS, default=1)
     parser.add_argument("--radio-watchdog-file", type=Path)
     parser.add_argument("--watchdog-s", type=float, default=.3)
@@ -1105,6 +1116,14 @@ def main(argv=None):
         parser.error("initial-master is outside the configured UAV roster")
     if not math.isfinite(args.payload_interval_s) or not .02 <= args.payload_interval_s <= 60:
         parser.error("payload-interval-s must be .02..60 seconds")
+    from network.coordination.payload import payload_load_from_json
+    try:
+        args.payload_load = payload_load_from_json(args.payload_load_json, tuple(range(1, args.uav_count + 1)))
+        if args.payload_load is not None and (args.channels != 'control,payload'
+                or os.environ.get('BAS_NATIVE_EVENT_LOGGING', 'metrics_only') != 'batched_trace'):
+            raise ValueError('payload_load requires both channels and BAS_NATIVE_EVENT_LOGGING=batched_trace')
+    except (ValueError, TypeError) as exc:
+        parser.error(str(exc))
     if args.experiment_profile != "urban" and not 0 < args.fault_start_s < args.fault_end_s < args.duration_s:
         parser.error("require 0 < fault-start < fault-end < duration")
     try:

@@ -374,6 +374,122 @@ def group_goal_decomposition(completions: list[dict[str, Any]], commands: list[d
     return result
 
 
+def analyze_payload_load(run_dir, rows, records, start_ns, end_ns):
+    """Audit planned slots separately from generated frames and RF delivery."""
+    from network.coordination.payload import normalize_payload_load, payload_load_slots, payload_load_slot_ns
+    config_path = run_dir / 'metrics/relay_experiment_config.json'
+    config = read_json(config_path)
+    starts = [row for row in rows if row.get('event') == 'payload_load_started']
+    selected = [row for row in records if row.get('load_id') is not None]
+    result = dict(status='not_requested', generator_eligible=None, service_classes='not_evaluated_requires_qualified_load_and_series')
+    if config.get('payload_load') is None and not starts and not selected:
+        return result
+    result.update(status='unverifiable', generator_eligible=False, audit_errors=[])
+    try:
+        count = config.get('uav_count')
+        if type(count) is not int or not 1 <= count <= 5 or config.get('payload_load') is None:
+            raise ValueError('frozen payload_load and UAV roster are required')
+        profile = normalize_payload_load(config['payload_load'], tuple(range(1, count + 1)))
+        if profile != config['payload_load'] or len(starts) != 1:
+            raise ValueError('one normalized frozen load and one start are required')
+        begin = starts[0]
+        epoch = begin.get('process_epoch')
+        ground = 'payload/logs/scenario_events.jsonl'
+        load_events = [row for row in rows if row.get('event') in
+                       ('payload_load_started', 'payload_load_closed', 'payload_load_slots_skipped')]
+        if (not isinstance(epoch, str) or not epoch or any(row.get('_path') != ground
+                or row.get('run_id') != run_dir.name or type(row.get('schema')) is not int or row['schema'] != 1
+                or row.get('clock_domain') != 'host_monotonic' or row.get('process_epoch') != epoch
+                or type(row.get('observed_host_monotonic_ns')) is not int for row in load_events)):
+            raise ValueError('load lifecycle provenance is missing or belongs to another run/epoch')
+        closes = [row for row in rows if row.get('event') == 'payload_load_closed' and row.get('process_epoch') == epoch]
+        if (len(closes) != 1 or begin.get('_path') != ground or closes[0].get('_path') != ground
+                or begin.get('profile') != profile or begin.get('load_id') != 'payload_load'
+                or begin.get('start_host_monotonic_ns') != start_ns or begin.get('end_host_monotonic_ns') != end_ns
+                or type(start_ns) is not int or type(end_ns) is not int or not start_ns < end_ns):
+            raise ValueError('load start/close/profile/window evidence disagrees')
+        planned = payload_load_slots(profile, end_ns - start_ns)
+        closed = closes[0].get('offered_load', {})
+        if not isinstance(closed, dict) or not isinstance(closed.get('per_uav'), dict):
+            raise ValueError('closed generator ledger is missing')
+        if (type(begin.get('planned_slots_per_uav')) is not int or begin['planned_slots_per_uav'] != planned or closed.get('status') != 'closed'
+                or closed.get('configured') is not True or closed.get('profile') != profile
+                or type(closed.get('planned_slots_per_uav')) is not int or closed['planned_slots_per_uav'] != planned
+                or begin['observed_host_monotonic_ns'] > closes[0]['observed_host_monotonic_ns']
+                or closes[0]['observed_host_monotonic_ns'] < end_ns
+                or closed != read_json(run_dir / 'metrics/payload_channel.json').get('offered_load')):
+            raise ValueError('closed generator ledger does not match the observed trace')
+        ranges = []
+        for row in rows:
+            if row.get('event') != 'payload_load_slots_skipped':
+                continue
+            first, size = row.get('first_sequence'), row.get('count')
+            if (row.get('_path') != ground or row.get('process_epoch') != epoch
+                    or row.get('load_id') != 'payload_load' or row.get('uav_ids') != profile['uav_ids']
+                    or row.get('reason') not in ('publisher_missed_slots', 'window_ended_before_generation', 'producer_closed_before_generation')
+                    or type(first) is not int or type(size) is not int or not 0 <= first < first + size <= planned):
+                raise ValueError('invalid skipped-slot interval')
+            ranges.append((first, first + size))
+        per_uav = {}
+        duration = (end_ns - start_ns) / 1e9
+        for i in profile['uav_ids']:
+            offers = [row for row in selected if row['uav_id'] == i]
+            intervals = list(ranges)
+            late = 0
+            for row in offers:
+                sequence = row['load_sequence']
+                scheduled = payload_load_slot_ns(profile, start_ns, sequence)
+                if (row['process_epoch'] != epoch or row['direction'] != 'gcs_to_uav'
+                        or type(sequence) is not int or not 0 <= sequence < planned
+                        or row['application_useful_bytes'] != profile['useful_bytes']
+                        or row['scheduled_host_monotonic_ns'] != scheduled):
+                    raise ValueError('application offer disagrees with its frozen load slot')
+                intervals.append((sequence, sequence + 1))
+                late += not scheduled <= row['created_host_monotonic_ns'] < min(end_ns,
+                    payload_load_slot_ns(profile, start_ns, sequence + 1))
+            cursor = 0
+            for first, last in sorted(intervals):
+                if first != cursor:
+                    raise ValueError('planned load slots contain a gap or overlap')
+                cursor = last
+            if cursor != planned:
+                raise ValueError('planned load slots are not fully accounted for')
+            skipped = sum(last - first for first, last in ranges)
+            sent = sum(row['transmitted_host_monotonic_ns'] is not None for row in offers)
+            failed = len(offers) - sent
+            ledger = closed.get('per_uav', {}).get(str(i), {})
+            if (not isinstance(ledger, dict) or any(type(ledger.get(k)) is not int or ledger[k] < 0
+                    for k in ('created','skipped','outside_slot','sent','send_failed'))
+                    or ledger.get('created') != len(offers) or ledger.get('skipped') != skipped
+                    or ledger.get('outside_slot') != late or ledger.get('sent') != sent or ledger.get('send_failed') != failed):
+                raise ValueError('generator slot counters disagree with frame evidence')
+            accepted = [row for row in offers if row['outcome'] in ('timely', 'late')
+                        and start_ns <= row['accepted_host_monotonic_ns'] < end_ns]
+            timely = sum(row['outcome'] == 'timely' for row in offers)
+            per_uav[str(i)] = dict(planned=planned, created=len(offers), generator_skipped=skipped,
+                outside_slot=late, requested_useful_bps=profile['useful_bitrate_bps'],
+                source_not_fully_transmitted=failed, planned_useful_bps=planned * profile['useful_bytes'] * 8 / duration,
+                created_useful_bps=len(offers) * profile['useful_bytes'] * 8 / duration,
+                outcomes=dict(Counter(row['outcome'] for row in offers), generator_skipped=skipped),
+                timely_per_planned=timely / planned, timely_per_created=timely / len(offers) if offers else None,
+                latency_ms=distribution([row['latency_ms'] for row in offers if row['latency_ms'] is not None]),
+                delivered_unique_inside_window=len(accepted),
+                application_useful_goodput_bps=sum(row['application_useful_bytes'] for row in accepted) * 8 / duration)
+        if len(selected) != sum(row['created'] for row in per_uav.values()):
+            raise ValueError('application offers have an unknown UAV')
+        eligible = all(row['generator_skipped'] == row['outside_slot'] == row['source_not_fully_transmitted'] == 0
+                       for row in per_uav.values())
+        if closed.get('generator_eligible') is not eligible:
+            raise ValueError('claimed generator eligibility disagrees with actual slot coverage')
+        result.update(status='recorded', generator_eligible=eligible, profile=profile, per_uav=per_uav,
+            byte_definition='TUNNEL payload[:payload_length], excluding all protocol headers; synthetic test bytes',
+            receipt_boundary='UART OS-write end; not flight-controller application acceptance',
+            config_sha256=hashlib.sha256(config_path.read_bytes()).hexdigest())
+    except (ValueError, TypeError, KeyError, OSError) as error:
+        result['audit_errors'].append(str(error))
+    return result
+
+
 def analyze_payload_lineage(run_dir: Path, start_ns=None, end_ns=None, *, complete=False):
     """Audit existing BSF1/MAVLink observations; never substitute ACKs or RF power."""
     run_dir = Path(run_dir)
@@ -431,6 +547,17 @@ def analyze_payload_lineage(run_dir: Path, start_ns=None, end_ns=None, *, comple
                     'record_references','source_first_host_monotonic_ns','source_last_host_monotonic_ns',
                     'message_type','msgid','sysid','compid'))):
             raise ValueError('frame identity, bytes or original BSF1 references disagree')
+        if 'application_load' in row:
+            app = row['application_load']
+            message = messages[0]
+            if (not isinstance(app, dict) or set(app) != {'load_id','sequence','scheduled_host_monotonic_ns','useful_bytes','useful_sha256'}
+                    or app['load_id'] != 'payload_load' or direction != 'gcs_to_uav'
+                    or any(type(app[k]) is not int or app[k] < 0 for k in ('sequence','scheduled_host_monotonic_ns','useful_bytes'))
+                    or not 1 <= app['useful_bytes'] <= 128 or message.get_type() != 'TUNNEL'
+                    or message.target_system != row['uav_id'] or message.target_component != 1 or message.payload_type != 0
+                    or message.payload_length != app['useful_bytes']
+                    or hashlib.sha256(bytes(message.payload[:message.payload_length])).hexdigest() != app['useful_sha256']):
+                raise ValueError('application useful bytes disagree with the actual TUNNEL frame')
         return expected
 
     for row in rows:
@@ -524,7 +651,11 @@ def analyze_payload_lineage(run_dir: Path, start_ns=None, end_ns=None, *, comple
             'not_fully_transmitted' if tx_end is None else 'missing' if arrival is None else
             'unverifiable' if arrival < max(offer['created_host_monotonic_ns'],offer['source_last_host_monotonic_ns']) else
             'timely' if arrival <= offer['deadline_host_monotonic_ns'] else 'late')
+        app = offer.get('application_load', {})
         result['records'].append(dict(frame_uid=uid,uav_id=offer['uav_id'],direction=offer['direction'],
+            load_id=app.get('load_id'), load_sequence=app.get('sequence'),
+            application_useful_bytes=app.get('useful_bytes'), application_useful_sha256=app.get('useful_sha256'),
+            scheduled_host_monotonic_ns=app.get('scheduled_host_monotonic_ns'),
             process_epoch=offer['process_epoch'],message_type=offer['message_type'],mavlink_body_bytes=offer['mavlink_body_bytes'],
             target_process_epoch=target_epoch,
             target_observation_start_host_monotonic_ns=target_interval[0] if target_interval else None,
@@ -546,6 +677,8 @@ def analyze_payload_lineage(run_dir: Path, start_ns=None, end_ns=None, *, comple
             mavlink_body_goodput_bps=sum(row['mavlink_body_bytes'] for row in delivered
                 if start_ns<=row['accepted_host_monotonic_ns']<end_ns)*8/duration if duration else None,
             offered_mavlink_body_bps=sum(row['mavlink_body_bytes'] for row in members)*8/duration if duration else None,
+            application_useful_goodput_bps=sum(row['application_useful_bytes'] or 0 for row in delivered
+                if start_ns<=row['accepted_host_monotonic_ns']<end_ns)*8/duration if duration else None,
             latency_ms=distribution([row['latency_ms'] for row in delivered]))
     result.update(status='recorded' if window_valid and chosen else 'not_evaluated_measurement_window_or_offers',
         measurement_eligible=bool(window_valid and complete and chosen and not invalid and not errors
@@ -566,6 +699,9 @@ def analyze_payload_lineage(run_dir: Path, start_ns=None, end_ns=None, *, comple
         result['trace_files'].append(dict(path=path.relative_to(run_dir).as_posix(),sha256=digest.hexdigest(),
             bytes=after.st_size,status='observed' if stable else 'changing'))
         result['measurement_eligible'] &= stable
+    result['offered_load'] = analyze_payload_load(run_dir, rows, result['records'], start_ns, end_ns)
+    if result['offered_load']['generator_eligible'] is False:
+        result['measurement_eligible'] = False
     return result
 
 
@@ -934,6 +1070,7 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
         complete=bool(full_window and meta.get('measurement_validity')=='valid' and timing['eligible']))
     write_csv(output / 'metrics/payload_records.csv',payload['records'],
         ['frame_uid','uav_id','direction','process_epoch','message_type','mavlink_body_bytes',
+         'load_id','load_sequence','application_useful_bytes','application_useful_sha256','scheduled_host_monotonic_ns',
          'target_process_epoch','target_observation_start_host_monotonic_ns','target_observation_end_host_monotonic_ns',
          'created_host_monotonic_ns','transmitted_host_monotonic_ns','accepted_host_monotonic_ns',
          'deadline_host_monotonic_ns','outcome','duplicate_receipts','latency_ms'])

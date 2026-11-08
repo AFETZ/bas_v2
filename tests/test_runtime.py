@@ -81,6 +81,61 @@ class RuntimeTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'event_logging'):
                 self.load()
 
+    def test_payload_load_is_normalized_frozen_and_forwarded_from_one_public_profile(self):
+        self.assertIsNone(self.load()['flows']['payload_load'])
+        self.config['runtime']['event_logging'] = 'batched_trace'
+        self.config['flows']['payload_load'] = {'class': '10kbps', 'uav_ids': [1]}
+        resolved = self.load()
+        profile = resolved['flows']['payload_load']
+        self.assertEqual(profile, {'class': '10kbps', 'uav_ids': [1], 'direction': 'gcs_to_uav',
+                                  'useful_bytes': 64, 'useful_bitrate_bps': 10000})
+        env = bas.environment(resolved, 'load-profile')
+        self.assertEqual(json.loads(env['BAS_NATIVE_PAYLOAD_LOAD_JSON']), profile)
+        folder = self.root / 'snapshot'; folder.mkdir()
+        with patch.object(bas, 'ROOT', self.root):
+            bas.snapshot_inputs(resolved, folder, env)
+        self.assertEqual(json.loads((folder / 'config.json').read_text())['flows']['payload_load'], profile)
+        from scripts.product.operator_ui import UIState
+        self.assertEqual(UIState(self.root).validate({'config': self.config})['flows']['payload_load'], profile)
+        cli = copy.deepcopy(resolved)
+        cli['environment']['scene'] = 'network/config/urban_low.json'
+        path = self.root / 'cli-load.json'; path.write_text(json.dumps(cli))
+        inspected = subprocess.run([sys.executable, str(bas.ROOT/'bas.py'), 'inspect', '--config', str(path)],
+                                   text=True, capture_output=True)
+        self.assertEqual(inspected.returncode, 0, inspected.stderr)
+        view = json.loads(inspected.stdout)
+        self.assertEqual(view['config']['flows']['payload_load'], profile)
+        self.assertEqual(json.loads(view['environment']['BAS_NATIVE_PAYLOAD_LOAD_JSON']), profile)
+
+    def test_payload_load_rejects_incompatible_roster_direction_types_and_untraced_runs(self):
+        self.config['runtime']['event_logging'] = 'batched_trace'
+        for value in ({}, [], True, {'class': []}, {'class': '10kbps', 'extra': 1},
+                      {'class': '10kbps', 'uav_ids': [True]}, {'class': '10kbps', 'uav_ids': [6]},
+                      {'class': '10kbps', 'uav_ids': [1, 1]}, {'class': '10kbps', 'direction': 'uav_to_gcs'},
+                      {'class': '10kbps', 'useful_bytes': True}, {'class': '10kbps', 'useful_bytes': 129},
+                      {'class': '10kbps', 'useful_bitrate_bps': 10001}, {'class': '20mbps_plus', 'useful_bitrate_bps': '20000000'}):
+            self.config['flows']['payload_load'] = value
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.load()
+        self.config['flows']['payload_load'] = {'class': '1kbps'}
+        self.config['runtime']['event_logging'] = 'metrics_only'
+        with self.assertRaisesRegex(ValueError, 'batched_trace'):
+            self.load()
+        self.config['runtime']['event_logging'] = 'batched_trace'
+        self.config['flows']['channels'] = ['control']
+        with self.assertRaisesRegex(ValueError, 'payload channel'):
+            self.load()
+
+    def test_underproduced_payload_load_invalidates_measurement_without_inventing_a_flight_failure(self):
+        from scripts.product.relay_experiment import outcome_fields
+        summary = dict(experiment_profile='urban', measurement_start_source_sim_time_s=1.,
+            criteria=dict(all_uav_lifecycle=True, urban_routes_telemetry_completed=True, live_integral_rtf_target=True),
+            payload_channel=dict(offered_load=dict(configured=True, generator_eligible=False)))
+        result = outcome_fields(summary, window_complete=True, stopped=False)
+        self.assertEqual((result['runtime_status'], result['mission_outcome'], result['measurement_validity']),
+                         ('completed', 'succeeded', 'invalid'))
+        self.assertIn('payload_load_generator_incomplete', result['measurement_validity_reasons'])
+
     def test_duration_bounds_and_explicit_long_trace_storage_profile(self):
         self.config['runtime']['capture_storage'] = 'disk'
         for duration in (1e-9, 28800, 86400):

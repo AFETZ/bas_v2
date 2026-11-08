@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 from collections import deque
 
-from network.coordination.payload import PayloadChannel
+from network.coordination.payload import PayloadChannel, normalize_payload_load, payload_load_slots
 from network.scripts.serial_transport import (Encoder, Reassembler, BoundedQueue,
     parse_mavlink_with_provenance, mavlink_payload_lineage)
 from scripts.product import town01_full_stack_scenario as town
@@ -246,6 +246,178 @@ class PayloadChannelTests(unittest.TestCase):
             self.assertEqual(len({row['frame_uid'] for row in uplink}),3)
             self.assertEqual(helper.snapshot()['uavs']['1']['attitudes_received'],1)
             self.assertEqual(result['service_class_availability'],'not_evaluated_requires_qualified_load_and_series')
+
+
+class PayloadOfferedLoadTests(unittest.TestCase):
+    """Real ephemeral UDP/BSF1/OS pipe writes, not RF, physical UART or an FC application."""
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
+        self.run = Path(temporary.name)
+        for _ in range(100):
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as reserve:
+                reserve.bind(('127.0.0.1', 0)); base = reserve.getsockname()[1]
+                peer = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                try:
+                    peer.bind(('127.0.0.1', base + 1))
+                    break
+                except (OSError, OverflowError):
+                    peer.close()
+        else:
+            self.fail('no free ephemeral UDP port pair')
+        self.peer = peer; self.peer.setblocking(False); self.addCleanup(peer.close)
+        self.addCleanup(patch.stopall)
+        patch.object(town, 'GCS_IP', '127.0.0.1').start()
+        patch.object(town, 'endpoint_ip', lambda _: '127.0.0.1').start()
+        patch.dict(town.CHANNEL_PORTS, payload=base).start()
+
+    def exercise(self, name='10kbps', *, delayed=False, duration_ns=240_000_000):
+        from scripts.product.town01_full_stack_scenario import append_jsonl
+        from scripts.product.analyze_relay_experiment import analyze_payload_lineage
+        profile = normalize_payload_load({'class': name}, (1,))
+        helper = PayloadChannel(self.run, self.run/'node_state.json', (1,),
+                                event_logging='batched_trace', load=profile)
+        self.addCleanup(helper.close)
+        (self.run/'metrics').mkdir(exist_ok=True)
+        (self.run/'metrics/relay_experiment_config.json').write_text(json.dumps(dict(uav_count=1, payload_load=profile)))
+        log = self.run/'logs/payload_uart_uav1.jsonl'
+        def emit(event, **fields):
+            append_jsonl(log, dict(schema=1, event=event, run_id=self.run.name, process_epoch='pipe:1',
+                channel='payload', uav_id=1, clock_domain='host_monotonic',
+                observed_host_monotonic_ns=time.monotonic_ns(), **fields))
+        emit('payload_lineage_started')
+        start = time.monotonic_ns(); end = start + duration_ns
+        helper.start_measurement(start, end)
+        decoder = Reassembler(channel='payload', uav_id=1, direction='gcs_to_uart')
+        parser = helper.mav.MAVLink(None); parser.robust_parsing=True
+        pending = deque(); received = []
+        read_fd, write_fd = os.pipe()
+        try:
+            if delayed:
+                time.sleep(.15)
+            while time.monotonic_ns() < end:
+                helper.pump()
+                while True:
+                    try:
+                        data, _ = self.peer.recvfrom(65535)
+                    except BlockingIOError:
+                        break
+                    records = decoder.ingest(data, time.monotonic_ns())
+                    for record, sent_ns, sequence in zip(records, decoder.released_sent_ns, decoder.released_sequences):
+                        written = os.write(write_fd, record)
+                        write_end = time.monotonic_ns()
+                        delivered = os.read(read_fd, written)
+                        self.assertEqual(delivered, record)
+                        for message, spans in parse_mavlink_with_provenance(parser, pending, delivered, (sequence, sent_ns, 0)):
+                            meta = mavlink_payload_lineage(message, spans, run_id=self.run.name, uav_id=1, direction='gcs_to_uav')
+                            emit('mavlink_frame', payload_lineage_stage='accepted', payload_direction='gcs_to_uav',
+                                 endpoint='development_pipe_os_write_end', accepted_host_monotonic_ns=write_end, **meta)
+                            if message.get_type() == 'TUNNEL':
+                                received.append(message)
+                time.sleep(.001)
+            helper.pump()  # Account for any ungenerated tail without a post-window burst.
+        finally:
+            os.close(read_fd); os.close(write_fd)
+        emit('payload_lineage_closed', close_error=None)
+        metrics = helper.close()
+        result = analyze_payload_lineage(self.run, start, end, complete=True)
+        return profile, metrics, result, received
+
+    def test_real_downlink_10kbps_bytes_have_distinct_useful_and_wire_metrics(self):
+        # Each invocation uses fresh per-run files and endpoints.
+        profile, metrics, result, received = self.exercise('10kbps')
+        planned = metrics['offered_load']['planned_slots_per_uav']
+        self.assertEqual(len(received), planned)
+        self.assertTrue(metrics['offered_load']['generator_eligible'], metrics)
+        self.assertTrue(result['measurement_eligible'], result)
+        load = result['offered_load']
+        self.assertTrue(load['generator_eligible'], load)
+        selected = [row for row in result['records'] if row['load_id']]
+        self.assertEqual([row['load_sequence'] for row in selected], list(range(planned)))
+        self.assertTrue(all(row['outcome'] == 'timely' for row in selected))
+        self.assertEqual(sum(row['application_useful_bytes'] for row in selected), planned * 64)
+        self.assertEqual(sum(row['mavlink_body_bytes'] for row in selected), sum(message.get_msgbuf()[1] for message in received))
+        self.assertGreater(sum(row['mavlink_body_bytes'] for row in selected), planned * 64)
+        self.assertEqual(load['profile']['useful_bitrate_bps'], 10000)
+        self.assertEqual(result['service_class_availability'], 'not_evaluated_requires_qualified_load_and_series')
+
+    def test_real_downlink_1kbps_profile(self):
+        _, metrics, result, received = self.exercise('1kbps', duration_ns=450_000_000)
+        self.assertEqual(len(received), 4)
+        self.assertTrue(metrics['offered_load']['generator_eligible'], metrics)
+        self.assertTrue(result['offered_load']['generator_eligible'], result)
+        self.assertTrue(all(message.payload_length == 16 for message in received))
+
+    def test_missed_generator_slots_are_retained_and_do_not_become_radio_loss(self):
+        _, metrics, result, _ = self.exercise('1kbps', delayed=True, duration_ns=450_000_000)
+        self.assertFalse(metrics['offered_load']['generator_eligible'])
+        load = result['offered_load']
+        self.assertEqual(load['status'], 'recorded', load)
+        self.assertFalse(load['generator_eligible'])
+        row = load['per_uav']['1']
+        self.assertEqual(row['planned'], row['created'] + row['generator_skipped'])
+        self.assertGreater(row['generator_skipped'], 0)
+        self.assertLess(row['timely_per_planned'], 1.)
+        self.assertEqual(row['timely_per_created'], 1.)
+        self.assertTrue(all(row['outcome'] == 'timely' for row in result['records'] if row['load_id']))
+        self.assertFalse(result['measurement_eligible'])
+
+    def test_high_requested_rate_is_not_capped_and_underproduction_is_invalid(self):
+        _, metrics, result, _ = self.exercise('20mbps_plus', duration_ns=20_000_000)
+        self.assertEqual(metrics['offered_load']['profile']['useful_bitrate_bps'], 20000000)
+        self.assertGreater(metrics['offered_load']['per_uav']['1']['skipped'], 0)
+        self.assertFalse(metrics['offered_load']['generator_eligible'])
+        self.assertFalse(result['measurement_eligible'])
+
+    def test_all_decimal_classes_and_periods_are_explicit_without_hidden_cap(self):
+        for name, rate in [('1kbps',1000),('10kbps',10000),('100kbps',100000),
+                           ('500kbps',500000),('2mbps',2000000),('20mbps_plus',20000000)]:
+            profile = normalize_payload_load({'class':name}, (1,))
+            self.assertEqual(profile['useful_bitrate_bps'], rate)
+            self.assertEqual(payload_load_slots(profile, 1_000_000_000),
+                             (rate + profile['useful_bytes']*8 - 1) // (profile['useful_bytes']*8))
+        self.assertEqual(normalize_payload_load({'class':'20mbps_plus','useful_bitrate_bps':25000000},(1,))['useful_bitrate_bps'],25000000)
+
+    def test_modified_useful_byte_claims_or_missing_slot_evidence_are_rejected(self):
+        from scripts.product.analyze_relay_experiment import analyze_payload_lineage
+        _, metrics, _, _ = self.exercise()
+        path = self.run/'payload/logs/scenario_events.jsonl'
+        raw = path.read_text(encoding='utf-8')
+        rows = [json.loads(line) for line in raw.splitlines()]
+        window = metrics['measurement_window']
+        start, end = window['start_host_monotonic_ns'], window['end_host_monotonic_ns']
+        for field, value in [('useful_bytes',65), ('useful_sha256','0'*64),
+                             ('scheduled_host_monotonic_ns',start+1), ('sequence',999)]:
+            altered = [dict(row) for row in rows]
+            index = next(i for i,row in enumerate(altered) if row.get('event') == 'payload_frame_offered' and row.get('application_load'))
+            altered[index] = dict(altered[index], application_load=dict(altered[index]['application_load'], **{field:value}))
+            path.write_text(''.join(json.dumps(row)+'\n' for row in altered), encoding='utf-8')
+            with self.subTest(field=field):
+                self.assertFalse(analyze_payload_lineage(self.run,start,end,complete=True)['measurement_eligible'])
+        path.write_text(''.join(json.dumps(row)+'\n' for row in rows if row.get('event')!='payload_load_closed'),encoding='utf-8')
+        self.assertFalse(analyze_payload_lineage(self.run,start,end,complete=True)['measurement_eligible'])
+
+    def test_profile_json_rejects_duplicate_fields_and_untraced_loads_before_binding(self):
+        from network.coordination.payload import payload_load_from_json
+        with self.assertRaises(ValueError):
+            payload_load_from_json('{"class":"1kbps","class":"10kbps"}', (1,))
+        with self.assertRaisesRegex(ValueError,'batched_trace'):
+            PayloadChannel(self.run, self.run/'state.json', (1,), event_logging='metrics_only', load={'class':'1kbps'})
+
+    def test_eight_hour_high_rate_skips_one_bounded_range_without_enumerating_slots(self):
+        profile = normalize_payload_load({'class':'20mbps_plus'}, (1,))
+        helper = PayloadChannel(self.run, self.run/'node_state.json', (1,), event_logging='batched_trace', load=profile)
+        self.addCleanup(helper.close)
+        start = time.monotonic_ns(); end = start + 28800 * 1_000_000_000
+        helper.start_measurement(start, end)
+        helper._pump_load(end)  # Controlled scheduling boundary only, not an elapsed eight-hour test.
+        self.assertEqual(helper.load_next, 562500000)
+        self.assertEqual(helper.load_counters[1]['skipped'], 562500000)
+        self.assertEqual(helper.load_counters[1]['created'], 0)
+        rows = [json.loads(line) for line in helper.harness.events_path.read_text(encoding='utf-8').splitlines()]
+        skipped = [row for row in rows if row['event']=='payload_load_slots_skipped']
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual((skipped[0]['first_sequence'], skipped[0]['count']), (0,562500000))
+
 
 
 class PayloadByteProvenanceTests(unittest.TestCase):
