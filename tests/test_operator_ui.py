@@ -219,11 +219,17 @@ class OperatorUITests(unittest.TestCase):
         raw = self.root / 'runs/native-radio-realtime/ui-test'
         (raw / 'metrics').mkdir(parents=True)
         bas.write_json(raw / 'metrics/relay_experiment_summary.json', {'status': 'failed', 'fixture': True})
+        bas.write_json(raw / 'metrics/native_radio_stats.json', dict(stop_reason='runtime_error', channel_state_max_age_s=.05,
+            pose_application=dict(state_max_age_ns=100_000_000),
+            sionna_rt_workers=dict(error=None, cache=dict(miss_reasons=dict(host_sample_expired=1)),
+                source_bindings=[dict(cache=dict(miss_reasons=dict(endpoint_displaced=2)))])))
         self.child.returncode = 1
         code, result, _ = self.request('/api/status?run_id=ui-test')
         self.assertEqual(code, 200)
         self.assertEqual(result['controller'], record)
         self.assertEqual(result['launcher_returncode'], 1)
+        self.assertEqual(result['native_diagnostics'], dict(status='observed', stop_reason='runtime_error',
+            rt_error=None, cache_miss_reasons=dict(host_sample_expired=1, endpoint_displaced=2), state_max_age_ms=100., channel_max_age_ms=50.))
         self.assertEqual(len(result['log_tail']), 65536)
         self.assertTrue(result['log_tail'].endswith('latest line'))
         artifact = next(row for row in result['artifacts'] if row['path'].endswith('/run.json'))
@@ -232,6 +238,19 @@ class OperatorUITests(unittest.TestCase):
         self.assertEqual(json.loads(content), record)
         self.assertIn('attachment;', headers['Content-Disposition'])
         self.assertEqual(headers['X-Content-Type-Options'], 'nosniff')
+
+    def test_native_diagnostics_missing_or_incomplete_is_unavailable_without_invented_values(self):
+        self.request('/api/start', self.payload())
+        self.assertIsNone(self.request('/api/status?run_id=ui-test')[1]['native_diagnostics'])
+        path = self.root / 'runs/native-radio-realtime/ui-test/metrics/native_radio_stats.json'
+        path.parent.mkdir(parents=True)
+        for content in ('{', '[]', json.dumps(dict(sionna_rt_workers=dict(cache=dict(miss_reasons=dict(host_sample_expired=True)))))):
+            with self.subTest(content=content):
+                path.write_text(content)
+                code, result, _ = self.request('/api/status?run_id=ui-test')
+                self.assertEqual(code, 200)
+                self.assertEqual(result['native_diagnostics']['status'], 'unavailable')
+                self.assertNotIn('state_max_age_ms', result['native_diagnostics'])
 
     def test_stop_uses_controller_request_and_rejects_invalid_identifier(self):
         self.assertEqual(self.request('/api/stop', {'run_id': 'ui-test'})[0], 202)

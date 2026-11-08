@@ -7,6 +7,7 @@ import copy
 import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import math
 from pathlib import Path
 import secrets
 import subprocess
@@ -103,6 +104,39 @@ class UIState:
             self.children[run_id] = child
         return dict(run_id=run_id, launcher_pid=child.pid, config_path=(folder / 'config.json').relative_to(self.root).as_posix())
 
+    def native_diagnostics(self, raw):
+        path = self.path((raw / 'metrics/native_radio_stats.json').relative_to(self.root).as_posix(), artifacts=True)
+        if not path.exists():
+            return None
+        try:
+            if path.stat().st_size > BODY_LIMIT:
+                raise ValueError('Файл диагностики превышает допустимый размер.')
+            stats = json.loads(path.read_text(encoding='utf-8'))
+            if not isinstance(stats, dict):
+                raise ValueError('Некорректная структура диагностики.')
+            pool = stats.get('sionna_rt_workers') or {}
+            caches = [pool.get('cache') or {}] if isinstance(pool, dict) else []
+            if isinstance(pool, dict):
+                caches.extend(binding.get('cache') or {} for binding in pool.get('source_bindings', []) if isinstance(binding, dict))
+            misses = {}
+            for cache in caches:
+                for reason, count in cache.get('miss_reasons', {}).items():
+                    if type(count) is not int or count < 0:
+                        raise ValueError('Некорректный счётчик отказов радиоканала.')
+                    if count:
+                        misses[reason] = misses.get(reason, 0) + count
+            pose = stats.get('pose_application') or {}
+            age_ns = pose.get('state_max_age_ns') if isinstance(pose, dict) else None
+            channel_age_s = stats.get('channel_state_max_age_s')
+            return dict(status='observed', stop_reason=stats.get('stop_reason'),
+                        rt_error=pool.get('error') if isinstance(pool, dict) else None,
+                        cache_miss_reasons=misses,
+                        state_max_age_ms=age_ns / 1e6 if type(age_ns) is int and age_ns > 0 else None,
+                        channel_max_age_ms=channel_age_s * 1000 if type(channel_age_s) in (int, float)
+                            and math.isfinite(channel_age_s) and channel_age_s > 0 else None)
+        except (OSError, ValueError, TypeError, AttributeError) as error:
+            return dict(status='unavailable', error=str(error))
+
     def status(self, run_id):
         bas.identifier(run_id)
         control = self.root / 'runs/control' / run_id
@@ -135,6 +169,7 @@ class UIState:
         return dict(run_id=run_id, controller=json.loads(record.read_text()) if record.exists() else None,
                     mission=json.loads(mission.read_text()) if mission.exists() else None,
                     phase=phase.read_text().strip() if phase.exists() else None, log_tail=tail, artifacts=artifacts,
+                    native_diagnostics=self.native_diagnostics(raw),
                     launcher_returncode=returncode,
                     launcher_state=('running' if returncode is None else 'exited') if child else 'not_observed')
 
