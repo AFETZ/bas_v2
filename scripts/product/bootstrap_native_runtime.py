@@ -37,6 +37,7 @@ PATCH_NAMES = (
     'mr2608-baseband-spectrum-phase.patch', 'mr2608-doppler-epoch.patch',
     'mr2608-receiver-batch.patch',
     'mr2608-dynamic-rt-inputs.patch',
+    'mr2608-fullmesh.patch',
 )
 SCRATCH_FILES = (
     'upstream-sionna-tap-spike.cc', 'native-geometry-loss.h', 'native-spectrum-sources.h',

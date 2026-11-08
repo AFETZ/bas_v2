@@ -125,6 +125,31 @@ class SourceStarValidationTests(unittest.TestCase):
             value['poses'][-1]['orientation_rad']=[0,float('nan'),0]
             with self.subTest(uavs=count-1),self.assertRaises(ValueError):validate_job(value,count,validate_config(config))
 
+    def test_full_mesh_is_explicit_and_cannot_be_served_as_an_anchor_batch(self):
+        config=copy.deepcopy(self.config);config['desired_mode']='full_mesh'
+        for count in range(2,7):
+            config['cohort']=self.config['cohort'][:count]
+            applied=validate_config(config)
+            value=job();value['poses']=[copy.deepcopy(value['poses'][0]) for _ in range(count)]
+            value['channel_mode']='full_mesh'
+            validate_job(value,count,applied)
+            missing=copy.deepcopy(value);del missing['channel_mode']
+            with self.assertRaises(ValueError):validate_job(missing,count,applied)
+            wrong=copy.deepcopy(value);wrong['anchor_index']=1
+            with self.assertRaises(ValueError):validate_job(wrong,count,applied)
+            legacy=copy.deepcopy(applied);del legacy['desired_mode']
+            with self.assertRaises(ValueError):validate_job(value,count,legacy)
+        validate_job(source_job(),6,validate_config(self.config | {'desired_mode':'full_mesh'}))
+
+    def test_full_mesh_rejects_unknown_modes_and_total_native_buffer_overflow(self):
+        for mode in (True,None,{},'all','FullMesh'):
+            with self.subTest(mode=mode),self.assertRaises(ValueError):
+                validate_config(self.config | {'desired_mode':mode})
+        for field,value in [('samples_per_source',2**31),('max_paths_per_source',200_000_000)]:
+            config=copy.deepcopy(self.config);config['desired_mode']='full_mesh';config['radio'][field]=value
+            with self.subTest(field=field),self.assertRaisesRegex(ValueError,'full.mesh|capacity|rays'):
+                validate_config(config)
+
 
 class JobValidationTests(unittest.TestCase):
     def test_config_hash_normalization_and_solver_options_are_explicit(self):
@@ -188,6 +213,24 @@ class JobValidationTests(unittest.TestCase):
         pool._workers, pool._messages, pool.job_timeout_ns = {0:worker}, queue.Queue(2), 1
         self.assertIn('timeout', pool.poll()[0]['error'])
         self.assertEqual(pool.poll(), [])
+
+    def test_full_mesh_reply_proof_is_correlated_and_frozen_per_producer(self):
+        pool=object.__new__(NativeRtWorkerPool)
+        pending=job();pending['channel_mode']='full_mesh'
+        worker=SimpleNamespace(failed=None,pending=pending,submitted_ns=time.monotonic_ns(),completed=0,
+                               full_mesh_completed_jobs=0,last_full_mesh_stats=None)
+        pool._workers,pool._messages,pool.job_timeout_ns={0:worker},queue.Queue(2),10**9
+        stats=dict(source_mode='full_mesh',completed_calls=1)
+        pool._messages.put((0,dict(schema=1,kind='result',worker_id=0,request_id=1,
+                                  channel_mode='full_mesh',new_full_mesh_calls=1,full_mesh_stats=stats)))
+        result=pool.poll()
+        self.assertEqual((worker.completed,worker.full_mesh_completed_jobs),(1,1))
+        result[0]['full_mesh_stats']['completed_calls']=999
+        self.assertEqual(worker.last_full_mesh_stats['completed_calls'],1)
+        worker.pending=job(2);worker.pending['channel_mode']='full_mesh'
+        pool._messages.put((0,dict(schema=1,kind='result',worker_id=0,request_id=2,new_batch_calls=1)))
+        self.assertEqual(pool.poll()[0]['kind'],'error')
+        self.assertEqual((worker.completed,worker.full_mesh_completed_jobs),(1,1))
 
     def test_scalar_request_watermark_rejects_duplicate_and_out_of_order_ids(self):
         class Connection:

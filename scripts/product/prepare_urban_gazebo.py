@@ -70,10 +70,12 @@ def read_rt_radio_profile(path: Path, scene: dict):
         raise ValueError("worker_count must be an integer in 1..3")
     if rt["execution_mode"] == "in_process" and rt["worker_count"] != 3:
         raise ValueError("worker_count is configurable only with execution_mode=worker_pool; in_process requires default 3")
-    if rt["receiver_batch_mode"] not in ("pairwise", "receiver_batch"):
-        raise ValueError("receiver_batch_mode must be pairwise or receiver_batch")
-    if rt["receiver_batch_mode"] == "receiver_batch" and rt["synthetic_array"] is not True:
-        raise ValueError("receiver_batch requires the configured iso 1x1 synthetic arrays")
+    if rt["receiver_batch_mode"] not in ("pairwise", "receiver_batch", "full_mesh"):
+        raise ValueError("receiver_batch_mode must be pairwise, receiver_batch or full_mesh")
+    if rt["receiver_batch_mode"] in ("receiver_batch", "full_mesh") and rt["synthetic_array"] is not True:
+        raise ValueError("receiver_batch/full_mesh requires the configured iso 1x1 synthetic arrays")
+    if rt["receiver_batch_mode"] == "full_mesh" and rt["execution_mode"] != "worker_pool":
+        raise ValueError("full_mesh requires execution_mode=worker_pool")
     if (radio["backend"] != "wifi" or radio["standard"] != "802.11n"
             or type(radio["technology_specific_modem"]) is not bool or radio["technology_specific_modem"]
             or type(radio["shared_spectrum_channels"]) is not int or radio["shared_spectrum_channels"] != 1):
@@ -116,8 +118,8 @@ def read_rt_radio_profile(path: Path, scene: dict):
     if type(jitter) not in (int, float) or not 0 <= jitter <= .9:
         raise ValueError("cache_expiry_jitter_fraction must be finite in 0..0.9")
     if rt["execution_mode"] == "worker_pool":
-        if rt["receiver_batch_mode"] != "receiver_batch":
-            raise ValueError("worker_pool requires receiver_batch_mode=receiver_batch")
+        if rt["receiver_batch_mode"] not in ("receiver_batch", "full_mesh"):
+            raise ValueError("worker_pool requires receiver_batch_mode=receiver_batch or full_mesh")
         if rt["max_number_of_paths"] > 90:
             raise ValueError("worker_pool supports max_number_of_paths <=90 in the verified native cache")
         if jitter != 0:

@@ -1,0 +1,309 @@
+--- a/src/spectrum/model/sionna-rt-channel-model.h
++++ b/src/spectrum/model/sionna-rt-channel-model.h
+@@ -128,6 +128,39 @@
+      */
+     static TypeId GetTypeId();
+ 
++    /** Explicit multi-TX engineering mode. It uses the same public PathSolver
++     * but a different multi-source sampling stream, not a numerically identical
++     * replacement for the default receiver batch. Refresh is always explicit.
++     */
++    struct FullMeshStats
++    {
++        std::string sourceMode{"full_mesh"};
++        uint32_t registeredEndpoints{0}, configuredMaxPathsPerSource{0}, configuredSamplesPerSource{0};
++        double configuredMaxNumberOfPaths{0};
++        uint64_t attemptedCalls{0}, completedCalls{0}, generatedLinks{0}, candidateCapacityReachedCalls{0};
++        uint32_t lastTransmitterCount{0}, lastReceiverCount{0}, lastPerTxCandidateCap{0};
++        uint32_t lastCandidateCount{0}, lastCandidateBufferSize{0};
++        std::vector<uint32_t> lastCandidateCountsPerTx, lastSelfCandidateCountsPerTx;
++        std::vector<uint32_t> lastRetainedPathsPerPair, lastRetainedDiagonalPaths;
++        int64_t lastGeneratedNs{0};
++        uint64_t lastScenePrepareWallNs{0}, lastSolverWallNs{0}, lastExtractionWallNs{0};
++        uint64_t lastCachePublishWallNs{0}, lastBatchWallNs{0}, maxBatchWallNs{0};
++    };
++    void RefreshFullMesh();
++    FullMeshStats GetFullMeshStats() const;
++
++  protected:
++    void ValidateFullMeshCandidates(uint32_t count, uint32_t capacity,
++        const std::vector<uint32_t>& perTx, const std::vector<uint32_t>& selfPerTx);
++    void PublishFullMeshArrays(const py::object& coefficients,
++        const std::vector<py::object>& scalars, const py::object& valid);
++
++  private:
++    FullMeshStats m_fullMeshStats;
++
++  public:
++
++
+     /**
+      * @brief Enable or disable shape merging when loading scenes from sionna.rt.
+      *
+--- a/src/spectrum/model/sionna-rt-channel-model.cc
++++ b/src/spectrum/model/sionna-rt-channel-model.cc
+@@ -1378,4 +1378,264 @@
+     return (numPaths > static_cast<size_t>(m_maxNumberOfPaths));
+ }
+ 
++SionnaRtChannelModel::FullMeshStats
++SionnaRtChannelModel::GetFullMeshStats() const
++{
++    auto stats = m_fullMeshStats;
++    stats.registeredEndpoints = m_receiverBatchMobility.size();
++    stats.configuredMaxPathsPerSource = m_maxNumPathsPerSource;
++    stats.configuredSamplesPerSource = m_samplesPerSource;
++    stats.configuredMaxNumberOfPaths = m_maxNumberOfPaths;
++    return stats;
++}
++
++void
++SionnaRtChannelModel::ValidateFullMeshCandidates(uint32_t count, uint32_t capacity,
++    const std::vector<uint32_t>& perTx, const std::vector<uint32_t>& selfPerTx)
++{
++    const auto n = m_receiverBatchMobility.size();
++    const auto perTxCap = GetReceiverBatchAllocation(n - 1);
++    const uint64_t totalCap = uint64_t(perTxCap) * n;
++    if (totalCap > std::numeric_limits<uint32_t>::max() || capacity != totalCap ||
++        perTx.size() != n || selfPerTx.size() != n)
++        throw std::invalid_argument("Full mesh candidate shape/allocation mismatch");
++    uint64_t sum = 0;
++    bool saturated = count >= capacity;
++    for (size_t i = 0; i < n; ++i)
++    {
++        sum += perTx[i];
++        if (selfPerTx[i] > perTx[i])
++            throw std::invalid_argument("Full mesh self candidates exceed source candidates");
++        saturated |= perTx[i] >= perTxCap;
++    }
++    if (sum != count)
++        throw std::invalid_argument("Full mesh source candidate counts disagree with total");
++    auto& stats = m_fullMeshStats;
++    stats.lastCandidateCount = count;
++    stats.lastCandidateBufferSize = capacity;
++    stats.lastPerTxCandidateCap = perTxCap;
++    stats.lastCandidateCountsPerTx = perTx;
++    stats.lastSelfCandidateCountsPerTx = selfPerTx;
++    if (saturated)
++    {
++        ++stats.candidateCapacityReachedCalls;
++        throw std::runtime_error("Full mesh per-source candidate capacity reached; no clipped result admitted");
++    }
++}
++
++void
++SionnaRtChannelModel::PublishFullMeshArrays(const py::object& coefficients,
++    const std::vector<py::object>& scalars, const py::object& valid)
++{
++    // Scalar order is unchanged: normalized delays, Hz Doppler, AOA/ZOA/AOD/ZOD.
++    ValidateReceiverBatchEndpoints();
++    const auto n = m_receiverBatchMobility.size();
++    const auto info = py::buffer(coefficients).request();
++    if (info.ndim != 6 || info.shape[0] != static_cast<ssize_t>(n) || info.shape[1] != 1 ||
++        info.shape[2] != static_cast<ssize_t>(n) || info.shape[3] != 1 || info.shape[5] != 1 ||
++        info.format != py::format_descriptor<std::complex<double>>::format() || scalars.size() != 6)
++        throw std::invalid_argument("Full mesh requires complex128 CIR[N,1,N,1,P,1] and six scalar tensors");
++    const auto pathCount = info.shape[4];
++    if (DoesNumberOfPathsExceedMaximum(pathCount))
++        throw std::runtime_error("Full mesh retained-path limit exceeded; no automatic reduction");
++    const auto scalarShape = [n, pathCount](const py::buffer_info& value) {
++        return value.ndim == 3 && value.shape[0] == static_cast<ssize_t>(n) &&
++               value.shape[1] == static_cast<ssize_t>(n) && value.shape[2] == pathCount;
++    };
++    const auto contiguous = [](const py::buffer_info& value) {
++        if (value.size == 0) return true;
++        auto stride = value.itemsize;
++        for (ssize_t axis = value.ndim; axis-- > 0;)
++        {
++            if (value.strides[axis] != stride) return false;
++            stride *= value.shape[axis];
++        }
++        return true;
++    };
++    const auto mask = py::buffer(valid).request();
++    if (!scalarShape(mask) || mask.format != py::format_descriptor<bool>::format() ||
++        !contiguous(info) || !contiguous(mask))
++        throw std::invalid_argument("Full mesh requires contiguous boolean valid[N,N,P] and CIR tensors");
++    std::vector<py::buffer_info> scalarInfo;
++    for (const auto& value : scalars)
++    {
++        scalarInfo.push_back(py::buffer(value).request());
++        const auto& field = scalarInfo.back();
++        if (!scalarShape(field) || field.format != py::format_descriptor<double>::format() || !contiguous(field))
++            throw std::invalid_argument("Full mesh scalar tensor must be contiguous float64[N,N,P]");
++        const auto* data = static_cast<const double*>(field.ptr);
++        for (ssize_t i = 0; i < field.size; ++i)
++            if (!std::isfinite(data[i])) throw std::invalid_argument("Nonfinite full mesh scalar path value");
++    }
++    const auto* amplitude = static_cast<const std::complex<double>*>(info.ptr);
++    const auto* delays = static_cast<const double*>(scalarInfo[0].ptr);
++    const auto* flags = static_cast<const bool*>(mask.ptr);
++    std::vector<uint32_t> retained(n*n,0), diagonal(n,0);
++    for (size_t rx = 0; rx < n; ++rx)
++        for (size_t tx = 0; tx < n; ++tx)
++            for (ssize_t p = 0; p < pathCount; ++p)
++            {
++                const auto i = (rx*n + tx)*pathCount + p;
++                const auto value = amplitude[i]; // Both antenna dimensions and time are singleton.
++                if (!std::isfinite(value.real()) || !std::isfinite(value.imag()) ||
++                    ((flags[i] || value != std::complex<double>{}) && delays[i] < 0))
++                    throw std::invalid_argument("Invalid full mesh CIR coefficient or active path delay");
++                retained[rx*n + tx] += flags[i];
++            }
++    for (size_t i = 0; i < n; ++i) diagonal[i] = retained[i*n+i];
++
++    auto np = py::module_::import("numpy");
++    std::vector<std::pair<size_t,size_t>> pairs;
++    std::vector<Ptr<ChannelMatrix>> matrices;
++    std::vector<Ptr<SionnaRtChannelParams>> parameters;
++    for (size_t tx = 0; tx < n; ++tx)
++    {
++        // Keep a singleton TX axis so the established converters apply verbatim.
++        const auto indices = py::cast(std::vector<size_t>{tx});
++        const auto oneTx = np.attr("ascontiguousarray")(np.attr("take")(coefficients, indices, py::arg("axis")=2));
++        std::vector<py::object> values;
++        for (const auto& field : scalars)
++            values.push_back(np.attr("ascontiguousarray")(np.attr("take")(field, indices, py::arg("axis")=1)));
++        for (size_t rx = tx+1; rx < n; ++rx)
++        {
++            const auto a = m_receiverBatchMobility[tx], b = m_receiverBatchMobility[rx];
++            const auto aa = m_receiverBatchAntennas[tx], ba = m_receiverBatchAntennas[rx];
++            auto matrix = CreateNewMatrixChannel(ConvertCirArray(oneTx,rx),a,b,aa,ba);
++            matrix->m_antennaPair = {aa->GetId(),ba->GetId()};
++            Double2DVector angles;
++            for (size_t i = 2; i < values.size(); ++i) angles.push_back(ConvertScalarPathArray(values[i],rx));
++            parameters.push_back(CreateChannelParams(a,b,ConvertScalarPathArray(values[0],rx),
++                ConvertScalarPathArray(values[1],rx),std::move(angles)));
++            matrices.push_back(matrix); pairs.emplace_back(tx,rx);
++        }
++    }
++    // No channel is published before every direction/scalar passes validation.
++    for (size_t i = 0; i < pairs.size(); ++i)
++    {
++        const auto [tx,rx] = pairs[i];
++        const auto a = m_receiverBatchMobility[tx], b = m_receiverBatchMobility[rx];
++        const auto aa = m_receiverBatchAntennas[tx], ba = m_receiverBatchAntennas[rx];
++        const auto aId = a->GetObject<Node>()->GetId(), bId = b->GetObject<Node>()->GetId();
++        m_channelMatrixMap[GetKey(aa->GetId(),ba->GetId())] = matrices[i];
++        m_channelParamsMap[GetKey(aId,bId)] = parameters[i];
++        m_pairPositionSnapshots[GetKey(aId,bId)] = {aId,a->GetPosition(),bId,b->GetPosition(),
++            a->GetVelocity(),b->GetVelocity(),BodyOrientation(a),BodyOrientation(b)};
++        (void)aa->IsChannelOutOfDate(ba);
++    }
++    m_fullMeshStats.lastRetainedPathsPerPair = std::move(retained);
++    m_fullMeshStats.lastRetainedDiagonalPaths = std::move(diagonal);
++    m_fullMeshStats.lastGeneratedNs = Simulator::Now().GetNanoSeconds();
++}
++
++void
++SionnaRtChannelModel::RefreshFullMesh()
++{
++    py::gil_scoped_acquire gil;
++    if (!m_receiverBatchEnabled)
++        throw std::logic_error("Explicit registered batching must be enabled before full mesh refresh");
++    ValidateReceiverBatchEndpoints();
++    const auto n = m_receiverBatchMobility.size();
++    const auto perTxCap = GetReceiverBatchAllocation(n-1);
++    if (uint64_t(perTxCap)*n > std::numeric_limits<uint32_t>::max())
++        throw std::invalid_argument("Full mesh total candidate allocation exceeds uint32");
++    using Clock = std::chrono::steady_clock;
++    const auto started = Clock::now();
++    auto& stats = m_fullMeshStats;
++    ++stats.attemptedCalls;
++    stats.lastTransmitterCount = stats.lastReceiverCount = n;
++    stats.lastPerTxCandidateCap = perTxCap;
++    auto rt = py::module_::import("sionna.rt");
++    if (py::str(rt.attr("__version__")).cast<std::string>() != "1.2.0")
++        throw std::runtime_error("Full mesh is verified only against pinned Sionna RT 1.2.0");
++    const auto fingerprint = "full_mesh|" + m_sceneConfigs.sceneName + "|" +
++        std::to_string(m_sceneConfigs.mergeShapes) + "|" + AntennaSceneFingerprint(m_receiverBatchAntennas[0]);
++    if (!m_cachedScene || m_cachedScene.is_none() || m_cachedSceneFingerprint != fingerprint)
++    {
++        m_cachedScene = LoadScene(rt);
++        m_cachedSceneFingerprint = fingerprint;
++        m_cachedScene.attr("tx_array") = MakePlannarArray(rt,m_receiverBatchAntennas[0]);
++        m_cachedScene.attr("rx_array") = MakePlannarArray(rt,m_receiverBatchAntennas[0]);
++        for (size_t i = 0; i < n; ++i)
++            for (const auto* kind : {"Transmitter","Receiver"})
++                m_cachedScene.attr("add")(rt.attr(kind)(py::arg("name")=
++                    std::string(kind)+"_fullmesh_"+std::to_string(i),
++                    py::arg("position")=py::make_tuple(0.,0.,0.)));
++    }
++    for (size_t i = 0; i < n; ++i)
++    {
++        const auto pose = m_receiverBatchMobility[i];
++        const auto array = DynamicCast<const UniformPlanarArray>(m_receiverBatchAntennas[i]);
++        const auto position = pose->GetPosition(), velocity = pose->GetVelocity();
++        VectorValue orientation;
++        const auto angles = pose->GetAttributeFailSafe("Orientation",orientation)
++            ? orientation.Get() : Vector(array->GetAlpha(),array->GetBeta(),0.);
++        for (const auto* kind : {"Transmitter","Receiver"})
++        {
++            auto device = m_cachedScene.attr("get")(std::string(kind)+"_fullmesh_"+std::to_string(i));
++            device.attr("position")=py::make_tuple(position.x,position.y,position.z);
++            device.attr("velocity")=py::make_tuple(velocity.x,velocity.y,velocity.z);
++            device.attr("orientation")=py::make_tuple(angles.x,angles.y,angles.z);
++        }
++    }
++    if (py::len(m_cachedScene.attr("transmitters")) != n || py::len(m_cachedScene.attr("receivers")) != n)
++        throw std::runtime_error("Full mesh scene contains unexpected endpoints");
++    m_cachedScene.attr("frequency")=m_sceneConfigs.frequency;
++    MakeDynamicDeviceInputsOpaque(m_cachedScene);
++    const auto prepared = Clock::now();
++    auto solver = rt.attr("PathSolver")();
++    py::object candidateGenerator = solver.attr("_candidate_generator");
++    solver.attr("_candidate_generator") = py::cpp_function([this,candidateGenerator,n](py::args args,py::kwargs kwargs) {
++        auto buffer = candidateGenerator(*args,**kwargs);
++        auto np = py::module_::import("numpy");
++        const auto count = np.attr("asarray")(buffer.attr("paths_counter")).attr("reshape")(-1)
++            .attr("__getitem__")(0).cast<uint32_t>();
++        const auto capacity = buffer.attr("buffer_size").cast<uint32_t>();
++        auto source = np.attr("ascontiguousarray")(buffer.attr("source_indices"),py::arg("dtype")=np.attr("uint32"));
++        auto target = np.attr("ascontiguousarray")(buffer.attr("target_indices"),py::arg("dtype")=np.attr("uint32"));
++        const auto sources = py::buffer(source).request(), targets = py::buffer(target).request();
++        if (sources.ndim != 1 || targets.ndim != 1 || sources.size < count || targets.size < count)
++            throw std::runtime_error("Full mesh candidate index buffer is malformed");
++        std::vector<uint32_t> counts(n,0), self(n,0);
++        const auto* s = static_cast<const uint32_t*>(sources.ptr);
++        const auto* t = static_cast<const uint32_t*>(targets.ptr);
++        for (size_t i = 0; i < count; ++i)
++        {
++            if (s[i] >= n || t[i] >= n) throw std::runtime_error("Full mesh candidate index outside cohort");
++            ++counts[s[i]];
++            if (s[i] == t[i]) ++self[s[i]];
++        }
++        ValidateFullMeshCandidates(count,capacity,counts,self);
++        return buffer;
++    });
++    auto paths = solver(py::arg("scene")=m_cachedScene,py::arg("samples_per_src")=m_samplesPerSource,
++        py::arg("max_num_paths_per_src")=perTxCap,py::arg("max_depth")=m_RtPathSolverConfig.maxDepth,
++        py::arg("los")=m_RtPathSolverConfig.los,py::arg("specular_reflection")=m_RtPathSolverConfig.specularReflection,
++        py::arg("diffuse_reflection")=m_RtPathSolverConfig.diffuseReflection,py::arg("refraction")=m_RtPathSolverConfig.refraction,
++        py::arg("diffraction")=m_RtPathSolverConfig.diffraction,py::arg("edge_diffraction")=m_RtPathSolverConfig.edgeDiffraction,
++        py::arg("synthetic_array")=m_RtPathSolverConfig.syntheticArray,py::arg("seed")=m_RtPathSolverConfig.seed);
++    const auto solved = Clock::now();
++    auto np = py::module_::import("numpy");
++    py::tuple cir = paths.attr("cir")(py::arg("normalize_delays")=m_normalizeDelays,py::arg("out_type")="numpy");
++    auto coefficients = np.attr("ascontiguousarray")(cir[0],py::arg("dtype")=np.attr("complex128"));
++    std::vector<py::object> scalars{np.attr("ascontiguousarray")(cir[1],py::arg("dtype")=np.attr("float64"))};
++    for (const auto* name : {"doppler","phi_r","theta_r","phi_t","theta_t"})
++        scalars.push_back(np.attr("ascontiguousarray")(paths.attr(name),py::arg("dtype")=np.attr("float64")));
++    auto valid = np.attr("ascontiguousarray")(paths.attr("valid"),py::arg("dtype")=np.attr("bool_"));
++    const auto extracted = Clock::now();
++    PublishFullMeshArrays(coefficients,scalars,valid);
++    ++stats.completedCalls;
++    stats.generatedLinks += n*(n-1)/2;
++    const auto published = Clock::now();
++    const auto elapsed = [](Clock::time_point a,Clock::time_point b) -> uint64_t {
++        return std::chrono::duration_cast<std::chrono::nanoseconds>(b-a).count();
++    };
++    stats.lastScenePrepareWallNs=elapsed(started,prepared);
++    stats.lastSolverWallNs=elapsed(prepared,solved);
++    stats.lastExtractionWallNs=elapsed(solved,extracted);
++    stats.lastCachePublishWallNs=elapsed(extracted,published);
++    stats.lastBatchWallNs=elapsed(started,published);
++    stats.maxBatchWallNs=std::max(stats.maxBatchWallNs,stats.lastBatchWallNs);
++}
++
++
+ } // namespace ns3

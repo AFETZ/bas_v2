@@ -351,6 +351,151 @@ void RejectInputs()
     complete->Dispose(); Simulator::Destroy();
 }
 
+void SourceStar()
+{
+    for (bool directional : {false, true})
+    {
+        Cohort cohort(7); // CP, five UAVs, then one external waveform emitter.
+        constexpr size_t source = 6;
+        Ptr<AntennaModel> element;
+        if (directional) element = CreateObject<ThreeGppAntennaModel>();
+        else element = CreateObject<IsotropicAntennaModel>();
+        cohort.antennas[source]->SetAntennaElement(element);
+        PhasedArrayModel::ComplexVector weights(1); weights[0] = {1, 0};
+        cohort.antennas[source]->SetBeamformingVector(weights);
+        std::vector<Cache::Endpoint> receivers(cohort.endpoints.begin(), cohort.endpoints.begin() + source);
+        auto cache = CreateObject<Cache>(kCarrier, receivers, cohort.endpoints[source], Cache::Limits{});
+        const auto missing = cache->Priorities();
+        Require(missing.size() == 6 && std::all_of(missing.begin(), missing.end(), [](const auto& state) {
+            return state.second == source && !state.valid;
+        }), "Source STAR invented receiver-receiver links or omitted CP");
+        Throws([&] { CreateObject<Cache>(kCarrier, cohort.endpoints, Cache::Limits{}); },
+               "The default mesh constructor accepted seven endpoints");
+        std::vector<Cache::Record> records;
+        for (size_t receiver = 0; receiver < source; ++receiver)
+        {
+            records.push_back(cohort.Sample(receiver + 1, source, receiver));
+            Require(cache->Publish(records.back()).accepted, "Source-to-CP/UAV CIR was rejected");
+        }
+        Advance(MilliSeconds(10));
+        auto spectrum = CreateObject<SionnaRtSpectrumPropagationLossModel>();
+        spectrum->SetChannelModel(cache);
+        for (size_t receiver = 0; receiver < source; ++receiver)
+        {
+            const auto matrix = cache->GetChannel(cohort.mobility[source], cohort.mobility[receiver],
+                                                  cohort.antennas[source], cohort.antennas[receiver]);
+            const auto params = cache->GetParams(cohort.mobility[source], cohort.mobility[receiver]);
+            Require(matrix->m_nodeIds == std::make_pair(cohort.mobility[source]->GetObject<Node>()->GetId(),
+                        cohort.mobility[receiver]->GetObject<Node>()->GetId()) && params->m_nodeIds == matrix->m_nodeIds,
+                    "Source worker-local node IDs leaked into native spectrum metadata");
+            Require(matrix->m_generatedTime.GetNanoSeconds() == records[receiver].sampleNativeNs &&
+                    params->m_generatedTime == matrix->m_generatedTime,
+                    "Source publication replaced the original measurement epoch");
+            Require(cache->GetChannel(cohort.mobility[receiver], cohort.mobility[source],
+                        cohort.antennas[receiver], cohort.antennas[source]) == matrix &&
+                    matrix->IsReverse(cohort.antennas[receiver]->GetId(), cohort.antennas[source]->GetId()),
+                    "Source reverse lookup lost original TX/RX array identity");
+            Require(cache->GetParams(cohort.mobility[receiver], cohort.mobility[source]) == params,
+                    "Source reverse metadata differs from its accepted CIR");
+            CompareDirect(records[receiver], CachedPsd(spectrum, cohort, source, receiver), cohort);
+            CompareDirect(records[receiver], CachedPsd(spectrum, cohort, receiver, source), cohort);
+        }
+        // The TR element's peak is already included by the producer in its CIR.
+        // This known CIR must acquire no extra antenna/feed gain in the cache.
+        Require(std::abs((*CachedPsd(spectrum, cohort, source, 0)->psd)[1] - 2.25) < 1e-10,
+                "Source cache applied additional pattern or feed gain to a native CIR");
+        auto mutableCir = ConstCast<Cache::ChannelMatrix>(records[0].matrix);
+        mutableCir->m_channel(0, 0, 0) = {77, 0};
+        Require(std::abs((*CachedPsd(spectrum, cohort, source, 0)->psd)[1] - 2.25) < 1e-10,
+                "Source publication did not freeze the supplied CIR");
+        Require(!cache->Publish(cohort.Sample(100, 0, 1)).accepted,
+                "Source STAR accepted a receiver-receiver publication");
+        Throws([&] { cache->PairState(0, 1); }, "Source STAR reported a receiver-receiver state");
+        Throws([&] { cache->GetChannel(cohort.mobility[0], cohort.mobility[1], cohort.antennas[0], cohort.antennas[1]); },
+               "Source STAR admitted a receiver-receiver packet path");
+        Require(!cache->GetParams(cohort.mobility[0], cohort.mobility[1]),
+                "Source STAR exposed receiver-receiver parameters");
+        Require(cache->Priorities().size() == 6, "Source STAR priorities grew into a seven-node mesh");
+        auto unknown = CreateObject<ConstantPositionMobilityModel>();
+        Throws([&] { cache->GetChannel(unknown, cohort.mobility[0], cohort.antennas[source], cohort.antennas[0]); },
+               "Source STAR accepted unknown mobility");
+        Require(!cache->GetParams(unknown, cohort.mobility[0]), "Source STAR exposed unknown-node metadata");
+        auto wrong = CreateObject<UniformPlanarArray>();
+        Throws([&] { cache->GetChannel(cohort.mobility[source], cohort.mobility[0], wrong, cohort.antennas[0]); },
+               "Source STAR accepted a different TX array identity");
+        weights[0] = {2, 0}; cohort.antennas[source]->SetBeamformingVector(weights);
+        Throws([&] { CachedPsd(spectrum, cohort, source, 0); }, "Source STAR admitted changed emitter weights");
+        Require(!cache->Publish(cohort.Sample(101, source, 0)).accepted,
+                "Source STAR published a CIR after unsupported weight changes");
+        weights[0] = {1, 0}; cohort.antennas[source]->SetBeamformingVector(weights);
+        auto indoor = CreateObject<ThreeGppAntennaModel>();
+        indoor->SetRadiationPattern(ThreeGppAntennaModel::RadiationPattern::INDOOR);
+        cohort.antennas[source]->SetAntennaElement(indoor);
+        Throws([&] { CachedPsd(spectrum, cohort, source, 0); }, "Source STAR admitted an INDOOR emitter pattern");
+        if (directional) cohort.antennas[source]->SetAntennaElement(CreateObject<IsotropicAntennaModel>());
+        else cohort.antennas[source]->SetAntennaElement(CreateObject<ThreeGppAntennaModel>());
+        Throws([&] { CachedPsd(spectrum, cohort, source, 0); }, "Source STAR silently changed its frozen emitter pattern");
+        cohort.antennas[source]->SetAntennaElement(element);
+        cohort.antennas[0]->SetAntennaElement(CreateObject<ThreeGppAntennaModel>());
+        Throws([&] { CachedPsd(spectrum, cohort, source, 0); }, "Emitter exception also relaxed receiver antenna restrictions");
+        cohort.antennas[0]->SetAntennaElement(CreateObject<IsotropicAntennaModel>());
+        cohort.mobility[source]->orientation.x = .09;
+        Throws([&] { CachedPsd(spectrum, cohort, source, 0); }, "Source orientation freshness guard was relaxed");
+        cohort.mobility[source]->orientation.x = 0;
+        cohort.mobility[source]->SetVelocity(Vector(.5, 0, 0));
+        Throws([&] { CachedPsd(spectrum, cohort, source, 0); }, "Source velocity freshness guard was relaxed");
+        cohort.mobility[source]->SetVelocity(Vector());
+        cohort.mobility[0]->SetPosition(cohort.mobility[0]->GetPosition() + Vector(.500001, 0, 0));
+        Throws([&] { CachedPsd(spectrum, cohort, source, 0); }, "Source receiver displacement guard was relaxed");
+        cohort.mobility[0]->SetPosition(Vector(0, 0, 20));
+        Advance(MilliSeconds(490));
+        Require(cache->PairState(source, 0).valid, "Source exact allowed age was rejected");
+        Advance(NanoSeconds(1));
+        Throws([&] { CachedPsd(spectrum, cohort, source, 0); }, "Source cache served an expired native sample");
+        const auto stats = cache->GetStats();
+        Require(stats.getChannelCalls == stats.hits + stats.misses && stats.misses > 0 &&
+                    stats.getChannelWallNs >= stats.maxGetChannelWallNs,
+                "Source cache lost lookup/exception timing statistics");
+        spectrum->Dispose(); cache->Dispose(); Simulator::Destroy();
+    }
+}
+
+void SourceOrientationFallback()
+{
+    Cohort cohort;
+    auto node = CreateObject<Node>(); auto emitter = CreateObject<ConstantPositionMobilityModel>();
+    emitter->SetPosition(Vector(20, 0, 20)); node->AggregateObject(emitter);
+    cohort.endpoints[2].mobility = emitter;
+    cohort.antennas[2]->SetAttribute("BearingAngle", DoubleValue(.2));
+    cohort.antennas[2]->SetAttribute("DowntiltAngle", DoubleValue(.1));
+    std::vector<Cache::Endpoint> receivers(cohort.endpoints.begin(), cohort.endpoints.begin() + 2);
+    auto cache = CreateObject<Cache>(kCarrier, receivers, cohort.endpoints[2], Cache::Limits{});
+    auto record = cohort.Sample(1, 2, 0);
+    record.poses[0] = {emitter->GetPosition(), emitter->GetVelocity(), Vector(.2, .1, 0), record.sampleHostMonotonicNs};
+    Require(cache->Publish(record).accepted, "Static source UPA orientation fallback was not used");
+    cache->GetChannel(emitter, cohort.mobility[0], cohort.antennas[2], cohort.antennas[0]);
+    cohort.antennas[2]->SetAttribute("BearingAngle", DoubleValue(.29));
+    Throws([&] { cache->GetChannel(emitter, cohort.mobility[0], cohort.antennas[2], cohort.antennas[0]); },
+           "Static source bearing change did not invalidate its CIR");
+    cohort.antennas[2]->SetAttribute("BearingAngle", DoubleValue(.2));
+    cohort.antennas[2]->SetAttribute("DowntiltAngle", DoubleValue(.19));
+    Throws([&] { cache->GetChannel(emitter, cohort.mobility[0], cohort.antennas[2], cohort.antennas[0]); },
+           "Static source downtilt change did not invalidate its CIR");
+    cohort.antennas[2]->SetAttribute("DowntiltAngle", DoubleValue(.1));
+    auto oldHost = cohort.Sample(2, 2, 0);
+    oldHost.poses[0] = record.poses[0];
+    oldHost.poses[0].sampleHostNs -= 600000000;
+    Require(!cache->Publish(oldHost).accepted, "Source STAR reset the original pose age on publication");
+    Throws([&] { CreateObject<Cache>(kCarrier, std::vector<Cache::Endpoint>{receivers[0]},
+                                   cohort.endpoints[2], Cache::Limits{}); },
+           "Source STAR accepted fewer than CP plus one UAV receiver");
+    Throws([&] { CreateObject<Cache>(kCarrier, receivers, receivers[0], Cache::Limits{}); },
+           "Source STAR accepted an emitter aliased to a receiver");
+    cohort.antennas[2]->SetAntennaElement(CreateObject<ThreeGppAntennaModel>());
+    Throws([&] { cohort.New(); }, "Default mesh antenna restrictions changed with the source overload");
+    cache->Dispose(); Simulator::Destroy();
+}
+
 std::string Quote(const std::string& value)
 {
     std::string result = "\"";
@@ -368,7 +513,7 @@ int main(int argc, char** argv)
     if (argc != 2 || std::filesystem::exists(argv[1]))
         throw std::runtime_error("Expected a new result.json path; preserve every attempt");
     std::string error;
-    try { RfAndIdentity(); Guards(); RejectInputs(); }
+    try { RfAndIdentity(); Guards(); RejectInputs(); SourceStar(); SourceOrientationFallback(); }
     catch (const std::exception& failure) { error = failure.what(); Simulator::Destroy(); }
     std::ofstream report(argv[1]);
     report << "{\"schema\":1,\"passed\":" << (error.empty() ? "true" : "false")

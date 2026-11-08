@@ -161,6 +161,8 @@ class NativeRtPool
         const auto path = py::module_::import("pathlib").attr("Path");
         const auto input = m_json.attr("loads")(path(configPath).attr("read_text")("encoding"_a="utf-8"));
         const auto config = module.attr("validate_config")(input).cast<py::dict>();
+        m_fullMesh = config.contains("desired_mode") && config["desired_mode"].cast<std::string>() == "full_mesh";
+        m_candidateCap = config["radio"]["max_paths_per_source"].cast<uint32_t>();
         Require(config["root"].cast<std::string>() == path(root).attr("resolve")().attr("__str__")().cast<std::string>(),
                 "Frozen worker root does not match the run root");
         Require(config["cohort"].cast<py::list>().size() == m_endpoints.size(), "Frozen worker cohort size mismatch");
@@ -177,6 +179,7 @@ class NativeRtPool
             configPath, (std::filesystem::path(artifacts) / "processes").string(), "workers"_a=workers);
         m_pool.attr("start")();
         m_inflight.resize(workers);
+        m_fullMeshCallsByWorker.resize(workers,0);
         m_started = true;
         Emit("rt_pool_started", workers, "one_inflight_per_worker;native_public_sdk;no_packet_path_python");
     }
@@ -193,7 +196,7 @@ class NativeRtPool
         const auto deadline = NativeRtCache::HostNowNs() + static_cast<int64_t>(timeoutSeconds * 1e9);
         refresh();
         for (size_t worker = 0; worker < m_inflight.size(); ++worker)
-            Submit(worker, worker % m_endpoints.size(), true);
+            Submit(worker, m_fullMesh ? 0 : worker % m_endpoints.size(), true);
         while (Busy())
         {
             Require(NativeRtCache::HostNowNs() <= deadline, "Cold RT warmup timeout");
@@ -314,6 +317,11 @@ class NativeRtPool
     std::map<std::string, uint64_t> m_discardReasons;
     NativeRtPrefetch m_prefetch;
     uint64_t m_forecastDispatches{0};
+    bool m_fullMesh{false};
+    uint32_t m_candidateCap{0};
+    uint64_t m_fullMeshCompleted{0};
+    std::vector<uint64_t> m_fullMeshCallsByWorker;
+    std::string m_lastFullMeshStatsJson;
 
     static void Require(bool condition, const std::string& message)
     { if (!condition) throw std::runtime_error("native RT pool: " + message); }
@@ -357,6 +365,7 @@ class NativeRtPool
         const auto request = py::dict("kind"_a="solve", "request_id"_a=job.id,
             "sample_native_ns"_a=job.nativeNs, "sample_host_monotonic_ns"_a=job.hostNs,
             "anchor_index"_a=anchor, "poses"_a=poses);
+        if (m_fullMesh) request["channel_mode"] = "full_mesh";
         Require(m_pool.attr("submit")(worker, request).cast<bool>(), "Python pool unexpectedly reported busy");
         if (job.forecastBeforeHalf) ++m_forecastDispatches;
         m_inflight[worker] = std::move(job);
@@ -367,6 +376,17 @@ class NativeRtPool
     void Dispatch()
     {
         const auto states = NativeRtPrefetch::Rank(m_cache->Priorities(), m_cache->GetLimits(), m_prefetch.LeadNs());
+        if (m_fullMesh)
+        {
+            // One full-cohort solve covers every unordered pair. Overlapping
+            // full jobs duplicate RT work and can only publish older poses.
+            if (Busy()) return;
+            const auto urgent = std::find_if(states.begin(),states.end(),[](const auto& state){return state.eligible;});
+            if (urgent == states.end()) return;
+            const NativeRtPrefetch::Choice choice{0,m_endpoints.size()*(m_endpoints.size()-1)/2,*urgent};
+            Submit(0,0,false,&choice);
+            return;
+        }
         std::set<Pair> covered;
         for (const auto& job : m_inflight)
             if (job) for (size_t peer=0;peer<m_endpoints.size();++peer)
@@ -388,12 +408,13 @@ class NativeRtPool
         return reason=="out_of_order" || reason=="native_sample_expired" || reason=="host_sample_expired" ||
             reason=="endpoint_displaced" || reason=="endpoint_velocity_changed" || reason=="endpoint_orientation_changed";
     }
-    NativeRtCache::Record Decode(py::dict value, const Job& job, std::set<size_t>& peers)
+    NativeRtCache::Record Decode(py::dict value, const Job& job, std::set<Pair>& peers)
     {
         const auto requested=value["pair"].cast<std::vector<size_t>>();
         const auto direction=value["direction"].cast<std::vector<size_t>>();
-        Require(requested.size()==2 && requested[0]==job.anchor && requested[1]<m_endpoints.size() &&
-            requested[1]!=job.anchor && peers.insert(requested[1]).second && direction.size()==2 &&
+        Require(requested.size()==2 && requested[0]<m_endpoints.size() && requested[1]<m_endpoints.size() &&
+            (m_fullMesh ? requested[0]<requested[1] : requested[0]==job.anchor && requested[1]!=job.anchor) &&
+            peers.insert(Key(requested[0],requested[1])).second && direction.size()==2 &&
             Key(direction[0],direction[1])==Key(requested[0],requested[1]), "Malformed anchor pair/direction");
         Require(value["fresh_for_request"].cast<bool>() && value["source_request_id"].cast<uint64_t>()==job.id &&
             value["sample_native_ns"].cast<int64_t>()==job.nativeNs &&
@@ -447,11 +468,41 @@ class NativeRtPool
                 "Uncorrelated worker completion");
             Require(value["kind"].cast<std::string>()=="result", "Worker failure: "+
                 (value.contains("error") ? value["error"].cast<std::string>() : "unknown"));
-            Require(value["new_batch_calls"].cast<uint64_t>()==1, "Producer did not force exactly one fresh batch");
+            if (m_fullMesh)
+            {
+                Require(value["channel_mode"].cast<std::string>()=="full_mesh" &&
+                    value["new_full_mesh_calls"].cast<uint64_t>()==1,
+                    "Producer did not perform one explicit full-mesh solve");
+                const auto stats=value["full_mesh_stats"].cast<py::dict>();
+                const uint64_t n=m_endpoints.size(), cap=m_candidateCap*(n-1);
+                const auto counts=stats["last_candidate_counts_per_tx"].cast<std::vector<uint32_t>>();
+                const auto self=stats["last_self_candidate_counts_per_tx"].cast<std::vector<uint32_t>>();
+                Require(stats["source_mode"].cast<std::string>()=="full_mesh" &&
+                    stats["registered_endpoints"].cast<uint64_t>()==n &&
+                    stats["last_transmitter_count"].cast<uint64_t>()==n && stats["last_receiver_count"].cast<uint64_t>()==n &&
+                    stats["last_generated_ns"].cast<int64_t>()==job.nativeNs &&
+                    stats["completed_calls"].cast<uint64_t>()==m_fullMeshCallsByWorker.at(worker)+1 &&
+                    stats["attempted_calls"].cast<uint64_t>()==stats["completed_calls"].cast<uint64_t>() &&
+                    stats["generated_links"].cast<uint64_t>()==stats["completed_calls"].cast<uint64_t>()*n*(n-1)/2 &&
+                    stats["candidate_capacity_reached_calls"].cast<uint64_t>()==0 &&
+                    stats["last_per_tx_candidate_cap"].cast<uint64_t>()==cap &&
+                    stats["last_candidate_buffer_size"].cast<uint64_t>()==n*cap &&
+                    counts.size()==n && self.size()==n,
+                    "Full-mesh SDK mode, cohort, budget, freshness or capacity proof disagrees");
+                uint64_t total=0;
+                for(size_t i=0;i<n;++i)
+                {
+                    Require(counts[i]<cap && self[i]<=counts[i],"Full-mesh source buffer saturated or malformed");
+                    total+=counts[i];
+                }
+                Require(total==stats["last_candidate_count"].cast<uint64_t>(),"Full-mesh candidate accounting disagrees");
+            }
+            else Require(value["new_batch_calls"].cast<uint64_t>()==1, "Producer did not force exactly one fresh batch");
             const auto pairs=value["pairs"].cast<py::list>();
-            Require(pairs.size()+1==m_endpoints.size(), "Producer returned incomplete anchor coverage");
+            Require(pairs.size()==(m_fullMesh ? m_endpoints.size()*(m_endpoints.size()-1)/2 : m_endpoints.size()-1),
+                    "Producer returned incomplete cohort coverage");
             std::vector<NativeRtCache::Record> records;
-            std::set<size_t> peers;
+            std::set<Pair> peers;
             for(auto pair:pairs) records.push_back(Decode(py::reinterpret_borrow<py::dict>(pair),job,peers));
             // Decode/validate the complete response before publishing any pair.
             uint64_t accepted=0,discarded=0;
@@ -470,6 +521,11 @@ class NativeRtPool
                     "accepted"_a=result.accepted,"reason"_a=result.reason));
             }
             ++m_completed; if(job.cold) ++m_cold;
+            if(m_fullMesh)
+            {
+                ++m_fullMeshCompleted; ++m_fullMeshCallsByWorker.at(worker);
+                m_lastFullMeshStatsJson=Encode(value["full_mesh_stats"]);
+            }
             if(accepted) ++m_publishedResults;
             const auto receivedNs = NativeRtCache::HostNowNs();
             const auto oldestPose = std::min_element(job.poses.begin(), job.poses.end(),
@@ -479,8 +535,11 @@ class NativeRtPool
                 "cold_warmup"_a=job.cold,"sample_native_ns"_a=job.nativeNs,
                 "sample_host_monotonic_ns"_a=job.hostNs,"received_host_monotonic_ns"_a=receivedNs,
                 "producer_wall_ns"_a=value["producer_wall_ns"],"sample_to_completion_ns"_a=value["sample_to_completion_ns"],
-                "batch_stats"_a=value["batch_stats"],"published_pairs"_a=accepted,"discarded_pairs"_a=discarded,
+                "published_pairs"_a=accepted,"discarded_pairs"_a=discarded,
                 "outcomes"_a=outcomes);
+            log["channel_mode"]=m_fullMesh ? "full_mesh" : "receiver_batch";
+            if(m_fullMesh) log["full_mesh_stats"]=value["full_mesh_stats"];
+            else log["batch_stats"]=value["batch_stats"];
             log["prefetch"] = py::dict("method"_a=NativeRtPrefetch::kMethod,"lead_ns"_a=job.leadNs,
                 "remaining_ns"_a=job.remainingNs,"urgent_pair"_a=job.urgentPair,
                 "limiting_guard"_a=job.limitingGuard,"before_cache_half_threshold"_a=job.forecastBeforeHalf,
@@ -531,6 +590,10 @@ class NativeRtPool
             "maximum_hit_host_age_ns"_a=stats.maximumHitHostAgeNs,"rejection_reasons"_a=stats.rejectionReasons,
             "miss_reasons"_a=stats.missReasons,"pairs"_a=pairs);
         return py::dict("schema"_a=1,"execution_mode"_a="worker_pool","started"_a=m_started,"closed"_a=m_closed,
+            "desired_mode"_a=(m_fullMesh ? "full_mesh" : "receiver_batch"),
+            "full_mesh_completed_jobs"_a=m_fullMeshCompleted,
+            "last_full_mesh_stats"_a=(m_lastFullMeshStatsJson.empty() ? py::dict() :
+                m_json.attr("loads")(m_lastFullMeshStatsJson).cast<py::dict>()),
             "failed"_a=m_failed,"error"_a=(m_error.empty() ? py::none() : py::cast(m_error)),"worker_count"_a=m_inflight.size(),
             "submitted_jobs"_a=m_request,"completed_jobs"_a=m_completed,"cold_warmup_jobs"_a=m_cold,
             "published_results"_a=m_publishedResults,"published_pairs"_a=m_publishedPairs,

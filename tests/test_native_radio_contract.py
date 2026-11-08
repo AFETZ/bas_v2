@@ -21,14 +21,14 @@ class NativeRadioContractTests(unittest.TestCase):
         self.scene.write_text('<scene version="3.0.0"/>', encoding='utf-8')
         self.profile = yaml.safe_load((ROOT / 'network/config/native_wifi_80211n_spectrum_product.yaml').read_text())
 
-    def evidence(self, count=5, pool=False):
+    def evidence(self, count=5, pool=False, full_mesh=False):
         scenario = copy.deepcopy(self.profile)
         scenario.update(path=str(self.root / 'scenario.yaml'), map={'scene_xml': str(self.scene)},
                         ground_positions={f'uav{i}': [i, 0, 1] for i in range(1, count + 1)})
         radio, rt = scenario['radio'], scenario['sionna']
         rt.update(execution_mode='worker_pool' if pool else 'in_process', worker_count=3)
         if pool:
-            rt.update(receiver_batch_mode='receiver_batch', cache_expiry_jitter_fraction=0)
+            rt.update(receiver_batch_mode='full_mesh' if full_mesh else 'receiver_batch', cache_expiry_jitter_fraction=0)
         stats = dict(uav_count=count, radio_node_count=count + 1, shared_spectrum_channel_count=1,
             native_ns3_phy=True, native_ns3_mac=True, custom_packet_error_model=False, custom_scheduler=False,
             radio_backend='wifi', profile=radio['profile'], technology_specific_modem=False,
@@ -40,6 +40,7 @@ class NativeRadioContractTests(unittest.TestCase):
             sionna_drives_rx_psd=True, packet_outcome_affected=True, pose_snapshots=10, stale_pose_samples=0,
             solver_profile=rt['solver_profile'], selected_propagation_profile='sionna', tx_power_w=radio['tx_power_w'],
             carrier_hz=radio['carrier_hz'], wifi_actual_center_frequency_hz=radio['carrier_hz'],
+            sionna_receiver_batch_mode=rt.get('receiver_batch_mode', 'pairwise'),
             wifi_channel_width_mhz=radio['channel_width_mhz'], sionna_rt_execution_mode=rt['execution_mode'])
         for key in ('channel_state_max_age_s', 'endpoint_displacement_threshold_m', 'readiness_lag_max_ms'):
             stats[key] = rt[key]
@@ -57,6 +58,8 @@ class NativeRadioContractTests(unittest.TestCase):
             solver={key: rt[key] for key in ('max_depth', 'los', 'specular_reflection', 'diffuse_reflection',
                 'diffraction', 'edge_diffraction', 'refraction', 'synthetic_array', 'seed')}))
         workers = []
+        if full_mesh:
+            applied['desired_mode'] = 'full_mesh'
         for identity in range(3):
             ready = dict(schema=1, kind='ready', worker_id=identity, pid=100 + identity,
                 versions=dict(VERSIONS), mitsuba_variant='cuda_ad_mono_polarized', gpu_solve_verified=False,
@@ -80,7 +83,121 @@ class NativeRadioContractTests(unittest.TestCase):
             cache_snapshot_host_monotonic_ns=host_ns, cache=cache,
             pool=dict(schema=1, scope='native_rt_worker_pool', closed=True, workers=workers),
             log_path='/owned-run/logs/native_rt_workers/results.jsonl')
+        if full_mesh:
+            n = len(cohort)
+            matrix = [3 if tx == rx else 2 for rx in range(n) for tx in range(n)]
+            for identity, worker in enumerate(workers):
+                worker['full_mesh_completed_jobs'] = worker['completed']
+                worker['last_full_mesh_stats'] = dict(source_mode='full_mesh', registered_endpoints=n,
+                    configured_max_paths_per_source=rt['max_num_paths_per_src'],
+                    configured_samples_per_source=rt['samples_per_src'],
+                    configured_max_number_of_paths=rt['max_number_of_paths'],
+                    attempted_calls=12, completed_calls=12, generated_links=12*n*(n-1)//2,
+                    candidate_capacity_reached_calls=0, last_transmitter_count=n, last_receiver_count=n,
+                    last_per_tx_candidate_cap=(n-1)*rt['max_num_paths_per_src'],
+                    last_candidate_count=20*n, last_candidate_buffer_size=n*(n-1)*rt['max_num_paths_per_src'],
+                    last_candidate_counts_per_tx=[20]*n, last_self_candidate_counts_per_tx=[10]*n,
+                    last_retained_paths_per_pair=list(matrix), last_retained_diagonal_paths=[3]*n,
+                    last_generated_ns=40_000_000+identity*20_000_000, scene_prepare_ns=100, solver_ns=5000,
+                    extraction_ns=1000, cache_publish_ns=100, batch_ns=10000, max_batch_ns=12000)
+            stats['sionna_rt_workers'].update(desired_mode='full_mesh', full_mesh_completed_jobs=36,
+                last_full_mesh_stats=copy.deepcopy(workers[-1]['last_full_mesh_stats']))
         return stats, scenario
+
+    def test_full_mesh_actual_producer_stats_support_one_to_five_with_monostatic_paths(self):
+        for count in range(1, 6):
+            stats, scenario = self.evidence(count, pool=True, full_mesh=True)
+            report = native_rt_worker_contract(stats, scenario)
+            with self.subTest(count=count):
+                self.assertTrue(report['passed'], report['rejection_reasons'])
+                self.assertEqual(report['expected_desired_mode'], 'full_mesh')
+                self.assertEqual(report['full_mesh_sampling_equivalence'], 'not_evaluated')
+                self.assertEqual(native_product_runtime_contract(stats, scenario)['passed'], count == 5)
+
+    def test_full_mesh_cannot_be_inferred_from_frozen_field_or_zero_counts(self):
+        for field in ('desired_mode', 'full_mesh_completed_jobs', 'last_full_mesh_stats'):
+            stats, scenario = self.evidence(pool=True, full_mesh=True)
+            del stats['sionna_rt_workers'][field]
+            with self.subTest(field=field):
+                self.assertFalse(native_rt_worker_contract(stats, scenario)['passed'])
+        for field in ('full_mesh_completed_jobs', 'last_full_mesh_stats'):
+            stats, scenario = self.evidence(pool=True, full_mesh=True)
+            del stats['sionna_rt_workers']['pool']['workers'][0][field]
+            with self.subTest(producer_field=field):
+                self.assertIn('worker_full_mesh_producers', native_rt_worker_contract(stats, scenario)['rejection_reasons'])
+
+    def test_full_mesh_requires_consistent_actual_and_frozen_modes(self):
+        changes = [lambda s: s.pop('sionna_receiver_batch_mode'),
+                   lambda s: s.update(sionna_receiver_batch_mode='receiver_batch'),
+                   lambda s: s['sionna_rt_workers'].update(desired_mode='receiver_batch'),
+                   lambda s: s['sionna_rt_workers']['pool']['workers'][0]['ready']['applied_config'].pop('desired_mode')]
+        for change in changes:
+            stats, scenario = self.evidence(pool=True, full_mesh=True)
+            change(stats)
+            self.assertFalse(native_rt_worker_contract(stats, scenario)['passed'])
+        stats, scenario = self.evidence(pool=True, full_mesh=True)
+        scenario['sionna']['execution_mode'] = 'in_process'
+        stats.update(sionna_rt_execution_mode='in_process', sionna_in_process=True)
+        self.assertFalse(native_product_runtime_contract(stats, scenario)['passed'])
+
+    def test_full_mesh_counts_are_actual_per_producer_and_match_aggregate(self):
+        changes = [lambda s: s.update(full_mesh_completed_jobs=35),
+                   lambda s: s.update(full_mesh_completed_jobs=True),
+                   lambda s: s['pool']['workers'][0].update(full_mesh_completed_jobs=0),
+                   lambda s: s['pool']['workers'][0].update(full_mesh_completed_jobs=13)]
+        for change in changes:
+            stats, scenario = self.evidence(pool=True, full_mesh=True)
+            change(stats['sionna_rt_workers'])
+            self.assertFalse(native_rt_worker_contract(stats, scenario)['passed'])
+
+    def test_full_mesh_rejects_malformed_roster_capacity_epochs_and_retained_stats(self):
+        def full_candidate_capacity_with_consistent_total(value):
+            value['last_candidate_count'] += value['last_per_tx_candidate_cap'] - value['last_candidate_counts_per_tx'][0]
+            value['last_candidate_counts_per_tx'][0] = value['last_per_tx_candidate_cap']
+        changes = [lambda x: x.update(source_mode='receiver_batch'), lambda x: x.update(registered_endpoints=5),
+                   lambda x: x.update(configured_samples_per_source=1),
+                   lambda x: x.update(configured_max_number_of_paths=91),
+                   lambda x: x.update(attempted_calls=13), lambda x: x.update(completed_calls=True),
+                   lambda x: x.update(generated_links=1), lambda x: x.update(candidate_capacity_reached_calls=1),
+                   lambda x: x.update(last_receiver_count=5), lambda x: x.update(last_per_tx_candidate_cap=1),
+                   lambda x: x.update(last_candidate_buffer_size=1),
+                   full_candidate_capacity_with_consistent_total,
+                   lambda x: x['last_self_candidate_counts_per_tx'].__setitem__(0, 21),
+                   lambda x: x.update(last_candidate_count=0), lambda x: x.update(last_generated_ns=100_000_001),
+                   lambda x: x.update(last_generated_ns=-1), lambda x: x['last_retained_paths_per_pair'].pop(),
+                   lambda x: x['last_retained_paths_per_pair'].__setitem__(1, 91),
+                   lambda x: x['last_retained_diagonal_paths'].__setitem__(0, 0),
+                   lambda x: x.update(solver_ns=-1), lambda x: x.update(max_batch_ns=9999)]
+        for change in changes:
+            stats, scenario = self.evidence(pool=True, full_mesh=True)
+            change(stats['sionna_rt_workers']['pool']['workers'][0]['last_full_mesh_stats'])
+            with self.subTest(change=change):
+                self.assertIn('worker_full_mesh_producers', native_rt_worker_contract(stats, scenario)['rejection_reasons'])
+        stats, scenario = self.evidence(pool=True, full_mesh=True)
+        for worker in stats['sionna_rt_workers']['pool']['workers']:
+            worker['last_full_mesh_stats']['last_generated_ns'] = 0
+        stats['sionna_rt_workers']['cache']['pairs'][0].update(sample_native_ns=1, native_age_ns=99_999_999)
+        self.assertIn('worker_full_mesh_epoch_coverage', native_rt_worker_contract(stats, scenario)['rejection_reasons'])
+
+    def test_full_mesh_top_level_stats_must_be_an_actual_producer_response(self):
+        stats, scenario = self.evidence(pool=True, full_mesh=True)
+        stats['sionna_rt_workers']['last_full_mesh_stats']['last_generated_ns'] = 50_000_000
+        self.assertIn('worker_full_mesh_snapshot_stats', native_rt_worker_contract(stats, scenario)['rejection_reasons'])
+
+    def test_full_mesh_original_cache_age_and_canonical_pair_guards_remain(self):
+        stats, scenario = self.evidence(pool=True, full_mesh=True)
+        stats['sionna_rt_workers']['cache']['maximum_hit_host_age_ns'] = 500_000_001
+        self.assertIn('worker_cache_hit_ages_within_budget', native_rt_worker_contract(stats, scenario)['rejection_reasons'])
+        stats, scenario = self.evidence(pool=True, full_mesh=True)
+        stats['sionna_rt_workers']['cache']['pairs'][0].update(first=0, second=0)
+        self.assertIn('worker_cache_pair_provenance', native_rt_worker_contract(stats, scenario)['rejection_reasons'])
+        stats, scenario = self.evidence(1, pool=True, full_mesh=True)
+        snapshot = stats['sionna_rt_workers']
+        snapshot['cache_snapshot_native_ns'] = 2_000_000_000
+        snapshot['cache']['pairs'][0].update(valid=False, due=True, reason='native_sample_expired',
+            native_age_ns=2_000_000_000, host_age_ns=1_000_000_000,
+            sample_host_monotonic_ns=snapshot['cache_snapshot_host_monotonic_ns']-1_000_000_000)
+        self.assertTrue(native_rt_worker_contract(stats, scenario)['passed'])
 
     def test_in_process_and_legacy_flags_still_require_consistent_actual_mode(self):
         stats, scenario = self.evidence()

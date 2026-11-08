@@ -29,8 +29,12 @@ VERSIONS = {'sionna_rt': '1.2.0', 'mitsuba': '3.7.1', 'drjit': '1.2.0'}
 def validate_config(value):
     """Explicit frozen input for the public native SDK worker; no defaults."""
     keys = {'schema', 'root', 'scene', 'normalize_delays', 'cohort', 'radio'}
-    if type(value) is not dict or set(value) not in (keys, keys | {'source_profiles'}) or type(value['schema']) is not int or value['schema'] != 1:
+    if (type(value) is not dict or not keys <= set(value) <= keys | {'source_profiles', 'desired_mode'}
+            or type(value['schema']) is not int or value['schema'] != 1):
         raise ValueError('invalid native worker config schema/fields')
+    mode = value.get('desired_mode', 'receiver_batch')
+    if type(mode) is not str or mode not in ('receiver_batch', 'full_mesh'):
+        raise ValueError('desired_mode must be receiver_batch or full_mesh')
     root = Path(value['root']).resolve(strict=True)
     if not Path(value['root']).is_absolute() or not root.is_dir():
         raise ValueError('config root must be an existing absolute directory')
@@ -54,6 +58,9 @@ def validate_config(value):
             raise ValueError(f'{key} exceeds native uint32')
     if radio['max_paths_per_source'] * (len(cohort)-1) >= 2**32:
         raise ValueError('allocated candidate capacity exceeds native uint32')
+    if mode == 'full_mesh' and (radio['max_paths_per_source'] * (len(cohort)-1) * len(cohort) >= 2**32
+            or radio['samples_per_source'] * len(cohort) >= 2**32):
+        raise ValueError('full-mesh total candidate capacity or rays exceed native uint32')
     for key in ('frequency_hz', 'max_number_of_paths'):
         if type(radio[key]) not in (int, float) or not math.isfinite(radio[key]) or radio[key] <= 0:
             raise ValueError(f'{key} must be finite and positive')
@@ -104,8 +111,11 @@ def integer(value, name, minimum=0):
 def validate_job(job, count, config=None):
     expected = {'kind', 'request_id', 'sample_native_ns', 'sample_host_monotonic_ns', 'anchor_index', 'poses'}
     source = type(job) is dict and ('profile_id' in job or 'peer_index' in job)
+    full_mesh = not source and type(config) is dict and config.get('desired_mode') == 'full_mesh'
     if source:
         expected |= {'profile_id', 'peer_index'}
+    elif full_mesh:
+        expected.add('channel_mode')
     if type(job) is not dict or set(job) != expected or job['kind'] != 'solve':
         raise ValueError('invalid solve message fields')
     integer(job['request_id'], 'request_id', 1)
@@ -120,6 +130,9 @@ def validate_job(job, count, config=None):
             raise ValueError('source STAR anchor must follow the complete desired cohort')
         if not 0 <= integer(job['peer_index'], 'peer_index') < count:
             raise ValueError('source STAR peer must be one of CP/UAV receivers')
+    elif full_mesh:
+        if job['channel_mode'] != 'full_mesh' or integer(job['anchor_index'], 'anchor_index') != 0:
+            raise ValueError('full-mesh job requires explicit channel_mode and canonical anchor0')
     elif not 0 <= integer(job['anchor_index'], 'anchor_index') < count:
         raise ValueError('anchor_index outside the cohort')
     if type(job['poses']) is not list or len(job['poses']) != count + source:
@@ -149,6 +162,8 @@ class _Worker:
     submitted_ns: int = 0
     failed: str | None = None
     completed: int = 0
+    full_mesh_completed_jobs: int = 0
+    last_full_mesh_stats: dict | None = None
 
 
 class NativeRtWorkerPool:
@@ -295,7 +310,19 @@ class NativeRtWorkerPool:
             elif message['kind'] == 'error':
                 worker.failed = str(message.get('error', 'native worker error'))
             else:
-                worker.completed += 1
+                full_mesh = pending.get('channel_mode') == 'full_mesh'
+                stats = message.get('full_mesh_stats')
+                if full_mesh and (message.get('channel_mode') != 'full_mesh'
+                        or type(message.get('new_full_mesh_calls')) is not int or message['new_full_mesh_calls'] != 1
+                        or type(stats) is not dict or stats.get('source_mode') != 'full_mesh'):
+                    worker.failed = 'full-mesh producer proof missing or incompatible with the submitted job'
+                    message = dict(schema=1,kind='error',worker_id=identity,
+                                   request_id=pending['request_id'],error=worker.failed)
+                else:
+                    worker.completed += 1
+                    if full_mesh:
+                        worker.full_mesh_completed_jobs += 1
+                        worker.last_full_mesh_stats = copy.deepcopy(stats)
             worker.pending = None
             message = dict(message, received_host_monotonic_ns=time.monotonic_ns())
             completed.append(message)
@@ -315,7 +342,9 @@ class NativeRtWorkerPool:
             'last_request_id': self._last_request_id,
             'workers': [{'worker_id': w.identity, 'pid': w.process.pid, 'ready': w.ready,
                 'busy': w.pending is not None, 'request_id': w.pending['request_id'] if w.pending else None,
-                'failed': w.failed, 'completed': w.completed} for w in self._workers.values()]}
+                'failed': w.failed, 'completed': w.completed,
+                'full_mesh_completed_jobs': w.full_mesh_completed_jobs,
+                'last_full_mesh_stats': copy.deepcopy(w.last_full_mesh_stats)} for w in self._workers.values()]}
 
     def close(self):
         if self._closing.is_set():

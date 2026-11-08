@@ -8,6 +8,7 @@
 #include "ns3/node.h"
 #include "ns3/simulator.h"
 #include "ns3/sionna-rt-channel-model.h"
+#include "ns3/three-gpp-antenna-model.h"
 #include "ns3/uniform-planar-array.h"
 #include <algorithm>
 #include <array>
@@ -85,27 +86,18 @@ class NativeRtCache : public MatrixBasedChannelModel
     }
 
     NativeRtCache(double frequencyHz, std::vector<Endpoint> endpoints, Limits limits)
-        : m_frequencyHz(frequencyHz), m_endpoints(std::move(endpoints)), m_limits(limits)
+        : m_frequencyHz(frequencyHz), m_endpoints(std::move(endpoints)), m_limits(limits), m_sourceStar(false)
     {
-        if (!std::isfinite(frequencyHz) || frequencyHz <= 0 || Time::GetResolution() != Time::NS)
-            throw std::invalid_argument("RT cache requires a positive carrier and native nanosecond time");
-        if (m_endpoints.size() < 2 || m_endpoints.size() > 6 || limits.maximumAge <= Time(0) ||
-            !Positive(limits.displacementM) || !Positive(limits.velocityDeltaMps) ||
-            !Positive(limits.orientationDeltaRad))
-            throw std::invalid_argument("RT cache requires 2..6 endpoints and positive finite freshness limits");
-        std::map<uint32_t, bool> nodeIds, antennaIds;
-        for (size_t i = 0; i < m_endpoints.size(); ++i)
-        {
-            const auto& endpoint = m_endpoints[i];
-            const auto node = endpoint.mobility ? endpoint.mobility->GetObject<Node>() : nullptr;
-            if (!node || ArrayError(endpoint.antenna) != "" ||
-                !m_indices.emplace(PeekPointer(endpoint.mobility), i).second ||
-                !nodeIds.emplace(node->GetId(), true).second ||
-                !antennaIds.emplace(endpoint.antenna->GetId(), true).second)
-                throw std::invalid_argument("RT cache requires unique attached iso 1x1 V 0dBi endpoints");
-            if (!Finite(CurrentPose(i))) throw std::invalid_argument("RT cache endpoint has a nonfinite pose");
-            m_nodeIds.push_back(node->GetId());
-        }
+        ValidateEndpoints();
+    }
+
+    // Receiver indices retain their CP/UAV order. The external emitter is last;
+    // only emitter/receiver pairs exist, never an implicit seven-node mesh.
+    NativeRtCache(double frequencyHz, std::vector<Endpoint> receivers, Endpoint emitter, Limits limits)
+        : m_frequencyHz(frequencyHz), m_endpoints(AppendEmitter(std::move(receivers), std::move(emitter))),
+          m_limits(limits), m_sourceStar(true)
+    {
+        ValidateEndpoints();
     }
 
     double GetFrequency() const { return m_frequencyHz; }
@@ -129,6 +121,7 @@ class NativeRtCache : public MatrixBasedChannelModel
         const auto a = record.direction[0], b = record.direction[1];
         if (a >= m_endpoints.size() || b >= m_endpoints.size() || a == b)
             return reject("unknown_pair");
+        if (!AllowedPair(a, b)) return reject("unsupported_pair");
         if (record.sourceRequestId == 0 || record.sampleNativeNs < 0 || record.sampleHostMonotonicNs <= 0)
             return reject("invalid_sample_identity");
         for (const auto& pose : record.poses)
@@ -187,7 +180,8 @@ class NativeRtCache : public MatrixBasedChannelModel
     {
         std::vector<PairStatus> states;
         for (size_t a = 0; a < m_endpoints.size(); ++a)
-            for (size_t b = a + 1; b < m_endpoints.size(); ++b) states.push_back(PairState(a, b));
+            for (size_t b = a + 1; b < m_endpoints.size(); ++b)
+                if (AllowedPair(a, b)) states.push_back(PairState(a, b));
         std::stable_sort(states.begin(), states.end(), [](const auto& a, const auto& b) {
             if (a.valid != b.valid) return !a.valid;
             return a.normalizedRisk > b.normalizedRisk;
@@ -208,6 +202,7 @@ class NativeRtCache : public MatrixBasedChannelModel
         if (m_disposed) error = "disposed";
         else if (ai == m_indices.end() || bi == m_indices.end() || ai->second == bi->second)
             error = "unknown_pair";
+        else if (!AllowedPair(ai->second, bi->second)) error = "unsupported_pair";
         else if (aa != m_endpoints[ai->second].antenna || ba != m_endpoints[bi->second].antenna)
             error = "unknown_array";
         else
@@ -235,6 +230,7 @@ class NativeRtCache : public MatrixBasedChannelModel
         if (m_disposed) return nullptr;
         const auto ai = m_indices.find(PeekPointer(a)), bi = m_indices.find(PeekPointer(b));
         if (ai == m_indices.end() || bi == m_indices.end() || ai->second == bi->second) return nullptr;
+        if (!AllowedPair(ai->second, bi->second)) return nullptr;
         auto found = m_entries.find(Key(ai->second, bi->second));
         return found == m_entries.end() ? nullptr : found->second.record.parameters;
     }
@@ -264,6 +260,8 @@ class NativeRtCache : public MatrixBasedChannelModel
     const double m_frequencyHz;
     std::vector<Endpoint> m_endpoints;
     const Limits m_limits;
+    const bool m_sourceStar;
+    bool m_emitterDirectional{false};
     bool m_disposed{false};
     std::map<const MobilityModel*, size_t> m_indices;
     std::vector<uint32_t> m_nodeIds;
@@ -275,10 +273,47 @@ class NativeRtCache : public MatrixBasedChannelModel
     static bool Finite(const Pose& p) { return Finite(p.position) && Finite(p.velocity) && Finite(p.orientation); }
     static uint64_t Key(size_t a, size_t b) { return MatrixBasedChannelModel::GetKey(a, b); }
     uint32_t NodeId(size_t index) const { return m_nodeIds[index]; }
+    static std::vector<Endpoint> AppendEmitter(std::vector<Endpoint> receivers, Endpoint emitter)
+    {
+        receivers.push_back(std::move(emitter));
+        return receivers;
+    }
+    bool IsEmitter(size_t index) const { return m_sourceStar && index + 1 == m_endpoints.size(); }
+    bool AllowedPair(size_t a, size_t b) const { return !m_sourceStar || IsEmitter(a) || IsEmitter(b); }
+    void ValidateEndpoints()
+    {
+        if (!std::isfinite(m_frequencyHz) || m_frequencyHz <= 0 || Time::GetResolution() != Time::NS)
+            throw std::invalid_argument("RT cache requires a positive carrier and native nanosecond time");
+        const size_t minimum = m_sourceStar ? 3 : 2, maximum = m_sourceStar ? 7 : 6;
+        if (m_endpoints.size() < minimum || m_endpoints.size() > maximum || m_limits.maximumAge <= Time(0) ||
+            !Positive(m_limits.displacementM) || !Positive(m_limits.velocityDeltaMps) ||
+            !Positive(m_limits.orientationDeltaRad))
+            throw std::invalid_argument(m_sourceStar
+                ? "RT source STAR requires 2..6 receivers and positive finite freshness limits"
+                : "RT cache requires 2..6 endpoints and positive finite freshness limits");
+        std::map<uint32_t, bool> nodeIds, antennaIds;
+        for (size_t i = 0; i < m_endpoints.size(); ++i)
+        {
+            const auto& endpoint = m_endpoints[i];
+            const auto node = endpoint.mobility ? endpoint.mobility->GetObject<Node>() : nullptr;
+            if (!node || ArrayError(endpoint.antenna, IsEmitter(i)) != "" ||
+                !m_indices.emplace(PeekPointer(endpoint.mobility), i).second ||
+                !nodeIds.emplace(node->GetId(), true).second ||
+                !antennaIds.emplace(endpoint.antenna->GetId(), true).second)
+                throw std::invalid_argument(m_sourceStar
+                    ? "RT cache requires unique iso V1x1 receivers and an iso/TR38901 OUTDOOR emitter"
+                    : "RT cache requires unique attached iso 1x1 V 0dBi endpoints");
+            if (!Finite(CurrentPose(i))) throw std::invalid_argument("RT cache endpoint has a nonfinite pose");
+            m_nodeIds.push_back(node->GetId());
+        }
+        if (m_sourceStar) m_emitterDirectional =
+            static_cast<bool>(DynamicCast<const ThreeGppAntennaModel>(m_endpoints.back().antenna->GetAntennaElement()));
+    }
     void CheckPair(size_t a, size_t b) const
     {
         if (a >= m_endpoints.size() || b >= m_endpoints.size() || a == b)
             throw std::invalid_argument("RT cache pair is outside its fixed cohort");
+        if (!AllowedPair(a, b)) throw std::invalid_argument("Receiver pairs are outside the source STAR");
     }
     static PairStatus Missing(size_t a, size_t b, const std::string& reason)
     {
@@ -286,16 +321,29 @@ class NativeRtCache : public MatrixBasedChannelModel
         result.first = a; result.second = b; result.reason = reason;
         return result;
     }
-    static std::string ArrayError(Ptr<const PhasedArrayModel> value)
+    static std::string ArrayError(Ptr<const PhasedArrayModel> value, bool emitter = false)
     {
         auto array = DynamicCast<const UniformPlanarArray>(value);
         if (!array || array->GetNumRows() != 1 || array->GetNumColumns() != 1 ||
             array->GetNumElems() != 1 || array->GetNumPorts() != 1 || array->GetNumPols() != 1 ||
-            array->GetPolSlant() != 0 || !DynamicCast<const IsotropicAntennaModel>(array->GetAntennaElement()))
+            array->GetPolSlant() != 0)
             return "unsupported_array";
-        DoubleValue gain;
-        array->GetAntennaElement()->GetAttribute("Gain", gain);
-        if (gain.Get() != 0) return "unsupported_array_gain";
+        if (DynamicCast<const IsotropicAntennaModel>(array->GetAntennaElement()))
+        {
+            DoubleValue gain;
+            array->GetAntennaElement()->GetAttribute("Gain", gain);
+            if (gain.Get() != 0) return "unsupported_array_gain";
+        }
+        else
+        {
+            const auto directional = DynamicCast<const ThreeGppAntennaModel>(array->GetAntennaElement());
+            if (!emitter || !directional) return "unsupported_array";
+            if (directional->GetRadiationPattern() != ThreeGppAntennaModel::RadiationPattern::OUTDOOR ||
+                directional->GetVerticalBeamwidth() != 65 || directional->GetHorizontalBeamwidth() != 65 ||
+                directional->GetMaxAttenuation() != 30 || directional->GetSlaV() != 30 ||
+                directional->GetAntennaElementGain() != 8)
+                return "unsupported_emitter_pattern";
+        }
         // As in the native spectrum model, the run must initialize its beam
         // vector before handing the array to a channel provider.
         const auto& weights = array->GetBeamformingVectorRef();
@@ -362,8 +410,11 @@ class NativeRtCache : public MatrixBasedChannelModel
             const auto node = m_endpoints[index].mobility->GetObject<Node>();
             if (!node || node->GetId() != m_nodeIds[index])
             { result.reason = "endpoint_identity_changed"; return result; }
-            const auto arrayError = ArrayError(m_endpoints[index].antenna);
+            const auto arrayError = ArrayError(m_endpoints[index].antenna, IsEmitter(index));
             if (!arrayError.empty()) { result.reason = arrayError; return result; }
+            if (IsEmitter(index) && m_emitterDirectional !=
+                static_cast<bool>(DynamicCast<const ThreeGppAntennaModel>(m_endpoints[index].antenna->GetAntennaElement())))
+            { result.reason = "emitter_pattern_changed"; return result; }
             const auto current = CurrentPose(index);
             if (!Finite(current)) { result.reason = "nonfinite_current_pose"; return result; }
             const auto& sample = record.poses[side];

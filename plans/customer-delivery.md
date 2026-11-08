@@ -132,6 +132,24 @@ WaveformGenerator под released GIL, пять Python lifetimes освобож�
 Это проверки реализации, не успешный N=5. Следующий исполнимый шаг — измерить штатный
 multi-TX/RX RT solve всей когорты вместо отдельных TX-заданий, затем повторить полный N=5;
 отдельно завершить чистый bootstrap и интеграцию source producer без пакетного Python/RT.
+Свежий checkout `8a63100` в `/home/bas/bas_v2-bootstrap-probe-20261108` прошёл реальный
+resolve 75 wheels (889 670 785 байт), обе offline hash-checked установки, официальный
+SDK + 10 патчей, colcon/два native targets и check-only `ready=true`, `gaps=[]`.
+Proof: `control/delivery-bootstrap-probe-20261108/probe.json`, этапы 04–06;
+этап 03 с дефектом выбора vendored METADATA сохранён. Это чистый каталог на том же
+хосте с имеющимся pinned image; отдельная чистая машина и запуск другим инженером открыты.
+Standalone SOURCE producer `8a63100` прошёл 38 заданий: CP + 5 UAV, iso/TR, 2412/2422 МГц,
+исходные CIR/epochs и повтор при native0. `control/delivery-source-star-probe-20261108/gpu-01/`.
+Совместный тракт ещё не проверен: переключение профилей вызвало повторные 0,42–0,66 с
+solver stalls, pairwise candidate occupancy не раскрыта публичным API.
+Штатный multi-TX/RX PathSolver в `control/delivery-fullmesh-rt-probe-20261108/gpu-02/`
+дал hot median 21,107 мс против 122,449 мс для шести отдельных TX; те же 20K/5K на TX.
+Однако coherent gain отличается до 11,846 дБ (p95 3,217), path counts тоже различаются;
+эквивалентность stock и fullmesh не подтверждена. Подготовлен отдельный явный `full_mesh`
+режим и SDK11, stock default сохранён. Профили сходимости 100K/500K на двух сохранённых
+кадрах реально выполнены, разбор результатов продолжается. Следующий исполнимый шаг —
+проверить/применить SDK11, собрать native CPU/GPU contracts и полный N=5 с явным режимом;
+затем emitter batch + affinity в общем пуле вместо повторных холодных переключений.
 Worker_pool с направленными источниками пока явно отклоняется; обязательная совместная
 приёмка остаётся открыта. Успех unit/GPU-контрактов не считается успехом полного тракта.
 Зависимости solver: Sionna RT 1.2.0, Mitsuba 3.7.1, DrJit 1.2.0; фактические бюджеты

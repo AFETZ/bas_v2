@@ -1595,7 +1595,7 @@ main(int argc, char* argv[])
     command.AddValue("sionnaSeed", "Sionna solver random seed", sionnaSeed);
     command.AddValue("sionnaSamplesPerSource", "Actual PathSolver samples_per_src budget", sionnaSamplesPerSource);
     command.AddValue("sionnaMaxNumPathsPerSource", "Actual PathSolver max_num_paths_per_src budget", sionnaMaxNumPathsPerSource);
-    command.AddValue("sionnaReceiverBatchMode", "pairwise or explicit iso 1x1 receiver_batch", sionnaReceiverBatchMode);
+    command.AddValue("sionnaReceiverBatchMode", "pairwise, receiver_batch or explicit worker full_mesh", sionnaReceiverBatchMode);
     command.AddValue("sionnaRtExecutionMode", "in_process or explicit worker_pool", sionnaRtExecutionMode);
     command.AddValue("sionnaWorkerCount", "1..3 bounded native RT producer processes", sionnaWorkerCount);
     command.AddValue("projectRoot", "Absolute project root for the native RT worker", projectRoot);
@@ -1654,23 +1654,26 @@ main(int argc, char* argv[])
                     "invalid explicit propagation profile");
     const bool requiresRt = g_propagationProfile == "sionna" || g_propagationProfile == "hybrid";
     const bool geometryProfile = g_propagationProfile == "geometry_logdistance";
-    NS_ABORT_MSG_IF(sionnaReceiverBatchMode != "pairwise" && sionnaReceiverBatchMode != "receiver_batch",
-                    "sionnaReceiverBatchMode must be pairwise or receiver_batch");
-    NS_ABORT_MSG_IF(sionnaReceiverBatchMode == "receiver_batch" &&
+    NS_ABORT_MSG_IF(sionnaReceiverBatchMode != "pairwise" && sionnaReceiverBatchMode != "receiver_batch" &&
+                    sionnaReceiverBatchMode != "full_mesh",
+                    "sionnaReceiverBatchMode must be pairwise, receiver_batch or explicit full_mesh");
+    NS_ABORT_MSG_IF(sionnaReceiverBatchMode != "pairwise" &&
                     (g_propagationProfile != "sionna" || radioBackend != "wifi" ||
                      g_executionMode != "realtime" || !sionnaSyntheticArray),
-                    "receiver_batch requires the native Wi-Fi/Sionna realtime iso 1x1 reference");
+                    "RT batching requires the native Wi-Fi/Sionna realtime iso 1x1 reference");
     NS_ABORT_MSG_IF(sionnaRtExecutionMode != "in_process" && sionnaRtExecutionMode != "worker_pool",
                     "sionnaRtExecutionMode must be in_process or worker_pool");
     const bool useRtWorkers = sionnaRtExecutionMode == "worker_pool";
+    NS_ABORT_MSG_IF(sionnaReceiverBatchMode == "full_mesh" && !useRtWorkers,
+                    "full_mesh requires the explicit worker_pool execution mode");
     NS_ABORT_MSG_IF(sionnaWorkerCount < 1 || sionnaWorkerCount > 3 ||
                     (!useRtWorkers && sionnaWorkerCount != 3), "invalid or unused RT worker count");
-    NS_ABORT_MSG_IF(useRtWorkers && (sionnaReceiverBatchMode != "receiver_batch" ||
+    NS_ABORT_MSG_IF(useRtWorkers && ((sionnaReceiverBatchMode != "receiver_batch" && sionnaReceiverBatchMode != "full_mesh") ||
                     !sourceConfig.empty() || projectRoot.empty() || sionnaWorkerBinary.empty() ||
                     sionnaWorkerConfig.empty() || sionnaMaxNumberOfPaths > 90 ||
                     sionnaCacheJitterFraction != 0 || channelStateMaxAgeS > 0.5 ||
                     updateDistanceThresholdM > 0.5),
-                    "worker_pool requires explicit receiver_batch, zero expiry jitter, <=90 paths, "
+                    "worker_pool requires receiver_batch or explicit full_mesh, zero expiry jitter, <=90 paths, "
                     "run-owned paths and a source-free scene; directed source worker integration is not yet qualified");
     NS_ABORT_MSG_IF(geometryProfile && (geometryConfig.empty() || geometryCsv.empty() ||
                     !sourceConfig.empty() || g_faultProfile != "none"),
@@ -1837,7 +1840,7 @@ main(int argc, char* argv[])
             solver, sionnaMaxNumberOfPaths, g_propagationProfile,
             [](const std::string& event, const std::string& id, double value,
                const std::string& details) { LogEvent(event, id, "", 0, value, details); },
-            sionnaReceiverBatchMode == "receiver_batch", []() { return ReadPhase(); });
+            sionnaReceiverBatchMode != "pairwise", []() { return ReadPhase(); });
         router->profile=g_propagationProfile;
         channel->AddPhasedArraySpectrumPropagationLossModel(router);
         LogEvent("source_propagation_dispatch", "ns3", "", 0, router->sources.size(),
@@ -2127,13 +2130,13 @@ main(int argc, char* argv[])
             arrays.push_back(phy->GetAntenna()->GetObject<PhasedArrayModel>());
         }
         auto model = DynamicCast<SionnaRtChannelModel>(sionna->GetChannelModel());
-        if (sionnaReceiverBatchMode == "receiver_batch")
+        if (sionnaReceiverBatchMode != "pairwise")
         {
             model->SetReceiverBatchEndpoints(cohort, arrays);
             model->SetAttribute("ReceiverBatchEnabled", BooleanValue(true));
             NS_ABORT_MSG_IF(!model->GetReceiverBatchEnabled(), "receiver_batch mode was not applied");
             LogEvent("sionna_receiver_batch_config", "ns3", "", 0, cohort.size(),
-                     "mode=receiver_batch;path_capacity=receiver_count_times_per_link_cap;samples_per_src_unchanged=true");
+                     "mode=" + sionnaReceiverBatchMode + ";path_capacity=nonself_receiver_count_times_per_link_cap;samples_per_src_unchanged=true");
         }
         // Readiness must not precede cold PathSolver/JIT work. Populate the
         // actual production cache before the realtime epoch; cache age and
@@ -2168,6 +2171,7 @@ main(int argc, char* argv[])
                         "diffuse_reflection"_a=solver.diffuseReflection, "refraction"_a=solver.refraction,
                         "diffraction"_a=solver.diffraction, "edge_diffraction"_a=solver.edgeDiffraction,
                         "synthetic_array"_a=solver.syntheticArray)));
+            if (sionnaReceiverBatchMode == "full_mesh") config["desired_mode"] = "full_mesh";
             auto contract = py::module_::import("scripts.product.native_rt_workers");
             config = contract.attr("validate_config")(config).cast<py::dict>();
             configPath.attr("write_text")(json.attr("dumps")(config, "indent"_a=2, "allow_nan"_a=false), "encoding"_a="utf-8");
@@ -2345,7 +2349,7 @@ main(int argc, char* argv[])
         }
         g_sionnaRtWorkersJson = rtPool->SnapshotJson();
     }
-    if (sionna && sionnaReceiverBatchMode == "receiver_batch")
+    if (sionna && sionnaReceiverBatchMode != "pairwise")
     {
         const auto batch = originalRtModel->GetReceiverBatchStats();
         std::ostringstream observed;

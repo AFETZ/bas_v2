@@ -43,6 +43,27 @@ py::dict BatchStats(const SionnaRtChannelModel::ReceiverBatchStats& stats)
         "extraction_ns"_a=stats.lastExtractionWallNs, "cache_publish_ns"_a=stats.lastCachePublishWallNs,
         "batch_ns"_a=stats.lastBatchWallNs);
 }
+
+py::dict FullMeshStats(const SionnaRtChannelModel::FullMeshStats& stats)
+{
+    return py::dict("source_mode"_a=stats.sourceMode,"registered_endpoints"_a=stats.registeredEndpoints,
+        "configured_samples_per_source"_a=stats.configuredSamplesPerSource,
+        "configured_max_paths_per_source"_a=stats.configuredMaxPathsPerSource,
+        "configured_max_number_of_paths"_a=stats.configuredMaxNumberOfPaths,
+        "attempted_calls"_a=stats.attemptedCalls,"completed_calls"_a=stats.completedCalls,
+        "generated_links"_a=stats.generatedLinks,"candidate_capacity_reached_calls"_a=stats.candidateCapacityReachedCalls,
+        "last_transmitter_count"_a=stats.lastTransmitterCount,"last_receiver_count"_a=stats.lastReceiverCount,
+        "last_per_tx_candidate_cap"_a=stats.lastPerTxCandidateCap,"last_candidate_count"_a=stats.lastCandidateCount,
+        "last_candidate_buffer_size"_a=stats.lastCandidateBufferSize,
+        "last_candidate_counts_per_tx"_a=stats.lastCandidateCountsPerTx,
+        "last_self_candidate_counts_per_tx"_a=stats.lastSelfCandidateCountsPerTx,
+        "last_retained_paths_per_pair"_a=stats.lastRetainedPathsPerPair,
+        "last_retained_diagonal_paths"_a=stats.lastRetainedDiagonalPaths,
+        "last_generated_ns"_a=stats.lastGeneratedNs,"scene_prepare_ns"_a=stats.lastScenePrepareWallNs,
+        "solver_ns"_a=stats.lastSolverWallNs,"extraction_ns"_a=stats.lastExtractionWallNs,
+        "cache_publish_ns"_a=stats.lastCachePublishWallNs,"batch_ns"_a=stats.lastBatchWallNs,
+        "max_batch_ns"_a=stats.maxBatchWallNs);
+}
 }
 
 int main(int argc, char** argv)
@@ -224,6 +245,7 @@ int main(int argc, char** argv)
                 }
                 const auto anchor = job["anchor_index"].cast<size_t>();
                 const bool sourceJob=job.contains("profile_id");
+                const bool fullMeshJob=job.contains("channel_mode"); // Validated against the frozen config.
                 const auto profileId=sourceJob ? job["profile_id"].cast<std::string>() : std::string();
                 auto activeModel=sourceJob ? sourceModels.at(sourceProfiles.at(profileId).frequency) : model;
                 Ptr<const PhasedArrayModel> anchorArray;
@@ -231,18 +253,24 @@ int main(int argc, char** argv)
                 else anchorArray=antennas[anchor];
                 py::list pairs;
                 const auto callsBefore = model->GetReceiverBatchStats().completedCalls;
+                const auto fullCallsBefore = model->GetFullMeshStats().completedCalls;
                 // Our minimal SDK extension forces prefetch even at the same
                 // simulation timestamp or before ordinary cache expiry.
                 if(sourceJob) sourceProfiles.at(profileId).array->ForceFresh();
+                else if(fullMeshJob) model->RefreshFullMesh();
                 else model->RefreshReceiverBatch(mobility[anchor], antennas[anchor]);
-                std::vector<size_t> peers;
-                if(sourceJob) peers.push_back(job["peer_index"].cast<size_t>());
-                else for(size_t peer=0;peer<baseCount;++peer) if(peer!=anchor) peers.push_back(peer);
-                for (const auto peer : peers)
+                std::vector<std::pair<size_t,size_t>> requested;
+                if(sourceJob) requested.emplace_back(anchor,job["peer_index"].cast<size_t>());
+                else if(fullMeshJob)
+                    for(size_t tx=0;tx<baseCount;++tx)
+                        for(size_t rx=tx+1;rx<baseCount;++rx) requested.emplace_back(tx,rx);
+                else for(size_t peer=0;peer<baseCount;++peer) if(peer!=anchor) requested.emplace_back(anchor,peer);
+                for (const auto& [txIndex,peer] : requested)
                 {
-                    auto matrix = activeModel->GetChannel(mobility[anchor], mobility[peer], anchorArray, antennas[peer]);
+                    const auto txArray=fullMeshJob ? antennas[txIndex] : anchorArray;
+                    auto matrix = activeModel->GetChannel(mobility[txIndex], mobility[peer], txArray, antennas[peer]);
                     auto params = DynamicCast<const SionnaRtChannelModel::SionnaRtChannelParams>(
-                        activeModel->GetParams(mobility[anchor], mobility[peer]));
+                        activeModel->GetParams(mobility[txIndex], mobility[peer]));
                     Require(matrix && params, "Public SDK returned missing channel/parameters");
                     Require(matrix->m_generatedTime.GetNanoSeconds() == sampleNs,
                         "Refresh did not publish the sampled channel epoch");
@@ -286,12 +314,17 @@ int main(int argc, char** argv)
                         "generated_ns"_a=matrix->m_generatedTime.GetNanoSeconds(),
                         "source_request_id"_a=requestId, "sample_native_ns"_a=sampleNs,
                         "sample_host_monotonic_ns"_a=job["sample_host_monotonic_ns"], "poses"_a=poses);
-                    pair["pair"] = py::cast(std::vector<size_t>{anchor, peer});
+                    pair["pair"] = py::cast(std::vector<size_t>{txIndex, peer});
                     pair["fresh_for_request"] = true;
                     pairs.append(pair);
                 }
-                if(!sourceJob) Require(model->GetReceiverBatchStats().completedCalls - callsBefore == 1,
-                    "Solve job must perform exactly one explicit fresh batch");
+                if(fullMeshJob)
+                    Require(model->GetFullMeshStats().completedCalls-fullCallsBefore==1 &&
+                            model->GetFullMeshStats().lastGeneratedNs==sampleNs &&
+                            model->GetReceiverBatchStats().completedCalls==callsBefore,
+                            "Full-mesh job must perform one fresh solve without anchor fallback");
+                else if(!sourceJob) Require(model->GetReceiverBatchStats().completedCalls - callsBefore == 1,
+                        "Solve job must perform exactly one explicit fresh batch");
                 result = py::dict("schema"_a=1, "kind"_a="result", "worker_id"_a=workerId,
                     "request_id"_a=requestId, "pairs"_a=pairs);
                 if(sourceJob)
@@ -303,6 +336,12 @@ int main(int argc, char** argv)
                     result["allocated_candidate_cap"]=radio["max_paths_per_source"];
                     result["candidate_count"]=py::none();
                     result["candidate_count_scope"]="not_exposed_by_public_pairwise_api";
+                }
+                else if(fullMeshJob)
+                {
+                    result["channel_mode"]="full_mesh";
+                    result["new_full_mesh_calls"]=model->GetFullMeshStats().completedCalls-fullCallsBefore;
+                    result["full_mesh_stats"]=FullMeshStats(model->GetFullMeshStats());
                 }
                 else
                 {

@@ -2,8 +2,10 @@
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -129,6 +131,45 @@ class RadioProfileTests(unittest.TestCase):
         self.radio_file.write_text(yaml.safe_dump(self.radio | {
             'sionna': self.radio['sionna'] | {'max_number_of_paths': 91}}))
         self.assertEqual(generator.read_rt_radio_profile(self.radio_file, self.scene)['sionna']['max_number_of_paths'], 91)
+
+    def test_full_mesh_is_explicit_worker_pool_only_and_preserves_existing_limits(self):
+        selected = self.radio['sionna'] | dict(execution_mode='worker_pool', receiver_batch_mode='full_mesh',
+                                               cache_expiry_jitter_fraction=0, max_number_of_paths=90)
+        for count in (1, 2, 3):
+            self.radio_file.write_text(yaml.safe_dump(self.radio | {'sionna': selected | {'worker_count': count}}))
+            parsed = generator.read_rt_radio_profile(self.radio_file, self.scene)
+            self.assertEqual(parsed['sionna']['receiver_batch_mode'], 'full_mesh')
+        incompatible = [('execution_mode', 'in_process'), ('synthetic_array', False),
+                        ('max_number_of_paths', 91), ('cache_expiry_jitter_fraction', .1),
+                        ('channel_state_max_age_s', .50001), ('endpoint_displacement_threshold_m', .50001)]
+        for field, value in incompatible:
+            self.radio_file.write_text(yaml.safe_dump(self.radio | {'sionna': selected | {field: value}}))
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                generator.read_rt_radio_profile(self.radio_file, self.scene)
+        self.radio_file.write_text(yaml.safe_dump(self.radio | {
+            'sionna': selected, 'radio': self.radio['radio'] | {'antenna': 'directional'}}))
+        with self.assertRaisesRegex(ValueError, 'antenna'):
+            generator.read_rt_radio_profile(self.radio_file, self.scene)
+
+    def test_full_mesh_shell_preflight_rejects_fallback_without_starting_the_stack(self):
+        bash = (str(Path('C:/Program Files/Git/bin/bash.exe')) if os.name == 'nt'
+                and Path('C:/Program Files/Git/bin/bash.exe').is_file() else shutil.which('bash'))
+        if not bash:
+            self.skipTest('Bash is needed for the real preflight fragment')
+        text = (bas.ROOT / 'network/ns3/run_native_radio_five_uav.sh').read_text()
+        first = text.index('[[ "$SIONNA_RECEIVER_BATCH_MODE" == pairwise')
+        fragment = text[first:text.index('[[ "$SIONNA_SAMPLES_PER_SOURCE"', first)]
+        cases = [('full_mesh', 'worker_pool', 'true', 0), ('full_mesh', 'in_process', 'true', 2),
+                 ('full_mesh', 'worker_pool', 'false', 2), ('full_mesh', 'worker_pool', 'TRUE', 2),
+                 ('receiver_batch', 'worker_pool', 'true', 0), ('receiver_batch', 'in_process', 'true', 0),
+                 ('pairwise', 'in_process', 'true', 0), ('pairwise', 'worker_pool', 'true', 2),
+                 ('unknown', 'worker_pool', 'true', 2)]
+        for mode, execution, synthetic, expected in cases:
+            result = subprocess.run([bash, '-euc', fragment], env=dict(os.environ,
+                SIONNA_RECEIVER_BATCH_MODE=mode, SIONNA_RT_EXECUTION_MODE=execution,
+                SIONNA_SYNTHETIC_ARRAY=synthetic), text=True, capture_output=True)
+            with self.subTest(mode=mode, execution=execution, synthetic=synthetic):
+                self.assertEqual(result.returncode, expected, result.stderr)
 
     def test_worker_pool_preparation_freezes_the_resolved_radio_selection(self):
         self.radio['sionna'].update(execution_mode='worker_pool', worker_count=2,

@@ -396,6 +396,8 @@ def native_rt_worker_contract(stats: dict[str, Any], scenario_config: dict[str, 
     cohort = ["cp", *names]
     roster_valid = 1 <= len(names) <= 5 and names == [f"uav{i}" for i in range(1, len(names) + 1)]
     count, workers = rt.get("worker_count", 3), pool.get("workers")
+    full_mesh = rt.get("receiver_batch_mode") == "full_mesh"
+    desired_mode = "full_mesh" if full_mesh else "receiver_batch"
 
     scene_hash = None
     reference = mapping(scenario_config.get("map")).get("scene_xml")
@@ -418,7 +420,7 @@ def native_rt_worker_contract(stats: dict[str, Any], scenario_config: dict[str, 
             and stats.get("sionna_rt_execution_mode") == "worker_pool"
             and stats.get("sionna_in_process") is False,
         "worker_profile_supported": integer(count, 1) and count <= 3
-            and rt.get("receiver_batch_mode") == "receiver_batch" and rt.get("synthetic_array") is True
+            and rt.get("receiver_batch_mode") in ("receiver_batch", "full_mesh") and rt.get("synthetic_array") is True
             and integer(rt.get("max_number_of_paths"), 1) and rt["max_number_of_paths"] <= 90
             and number(rt.get("cache_expiry_jitter_fraction")) and rt["cache_expiry_jitter_fraction"] == 0
             and maximum_age_ns is not None and number(rt.get("endpoint_displacement_threshold_m"))
@@ -454,7 +456,59 @@ def native_rt_worker_contract(stats: dict[str, Any], scenario_config: dict[str, 
                 ("maximum_hit_native_age_ns", "maximum_hit_host_age_ns")),
         "worker_profiles_match": False,
         "worker_cache_pair_provenance": False,
+        "worker_desired_mode": snapshot.get("desired_mode", "receiver_batch") == desired_mode
+            and stats.get("sionna_receiver_batch_mode", "receiver_batch") == desired_mode,
     }
+    if full_mesh:
+        checks.update(worker_full_mesh_counters=False, worker_full_mesh_producers=False,
+                      worker_full_mesh_snapshot_stats=False, worker_full_mesh_epoch_coverage=False)
+
+    def full_mesh_stats_valid(value):
+        """SDK11 counters prove the selected operation, not MC/physical accuracy."""
+        value = mapping(value)
+        n = len(cohort)
+        base = rt.get("max_num_paths_per_src")
+        if not roster_valid or not integer(base, 1):
+            return False
+        cap, capacity = (n - 1) * base, n * (n - 1) * base
+        u64 = lambda item: integer(item) and item < 2**64
+        u32 = lambda item: integer(item) and item < 2**32
+        calls = value.get("completed_calls")
+        if not (capacity < 2**32 and value.get("source_mode") == "full_mesh"
+                and u32(value.get("registered_endpoints")) and value["registered_endpoints"] == n
+                and u32(value.get("configured_max_paths_per_source")) and value["configured_max_paths_per_source"] == base
+                and u32(value.get("configured_samples_per_source"))
+                and value["configured_samples_per_source"] == rt.get("samples_per_src")
+                and same(value.get("configured_max_number_of_paths"), rt.get("max_number_of_paths"))
+                and u64(calls) and calls >= 1 and value.get("attempted_calls") == calls
+                and u64(value.get("attempted_calls")) and u64(value.get("generated_links"))
+                and value["generated_links"] == calls * n * (n - 1) // 2
+                and type(value.get("candidate_capacity_reached_calls")) is int
+                and value["candidate_capacity_reached_calls"] == 0
+                and all(u32(value.get(key)) and value[key] == expected for key, expected in (
+                    ("last_transmitter_count", n), ("last_receiver_count", n),
+                    ("last_per_tx_candidate_cap", cap), ("last_candidate_buffer_size", capacity)))
+                and integer(value.get("last_generated_ns")) and value["last_generated_ns"] < 2**63
+                and integer(snapshot.get("cache_snapshot_native_ns"))
+                and value["last_generated_ns"] <= snapshot["cache_snapshot_native_ns"]):
+            return False
+        candidates = value.get("last_candidate_counts_per_tx")
+        self_candidates = value.get("last_self_candidate_counts_per_tx")
+        retained, diagonal = value.get("last_retained_paths_per_pair"), value.get("last_retained_diagonal_paths")
+        if not (isinstance(candidates, list) and len(candidates) == n
+                and all(u32(item) and item < cap for item in candidates)
+                and u32(value.get("last_candidate_count")) and value["last_candidate_count"] == sum(candidates)
+                and isinstance(self_candidates, list) and len(self_candidates) == n
+                and all(u32(item) and item <= candidates[i] for i, item in enumerate(self_candidates))
+                and isinstance(retained, list) and len(retained) == n * n
+                and all(u32(item) and item <= rt["max_number_of_paths"] for item in retained)
+                and isinstance(diagonal, list) and len(diagonal) == n
+                and all(u32(item) and item == retained[i * n + i] for i, item in enumerate(diagonal))):
+            return False
+        timings = ("scene_prepare_ns", "solver_ns", "extraction_ns", "cache_publish_ns", "batch_ns", "max_batch_ns")
+        return (all(u64(value.get(key)) for key in timings) and value["batch_ns"] > 0
+                and value["max_batch_ns"] >= value["batch_ns"]
+                and all(value[key] <= value["batch_ns"] for key in timings[:4]))
     solver_fields = ("max_depth", "los", "specular_reflection", "diffuse_reflection", "diffraction",
                      "edge_diffraction", "refraction", "synthetic_array", "seed")
     expected_radio = {"frequency_hz": radio.get("carrier_hz"), "samples_per_source": rt.get("samples_per_src"),
@@ -462,6 +516,7 @@ def native_rt_worker_contract(stats: dict[str, Any], scenario_config: dict[str, 
         "merge_shapes": True}
     if isinstance(workers, list) and integer(count, 1) and len(workers) == count:
         profiles_valid, identities, pids, configurations = True, set(), set(), []
+        full_mesh_producers, full_mesh_count, producer_stats = True, 0, []
         for item in workers:
             item = mapping(item)
             ready = mapping(item.get("ready"))
@@ -477,6 +532,7 @@ def native_rt_worker_contract(stats: dict[str, Any], scenario_config: dict[str, 
                 and ready.get("versions") == VERSIONS and str(ready.get("mitsuba_variant", "")).startswith("cuda")
                 and ready.get("development_stub") is not True and ready.get("render_images") is False
                 and type(config.get("schema")) is int and config["schema"] == 1 and type(config.get("normalize_delays")) is bool
+                and config.get("desired_mode", "receiver_batch") == desired_mode
                 and config.get("cohort") == [{"id": name} for name in cohort]
                 and scene_hash is not None and mapping(config.get("scene")).get("sha256") == scene_hash
                 and all(same(applied_radio.get(key), value) for key, value in expected_radio.items())
@@ -485,7 +541,27 @@ def native_rt_worker_contract(stats: dict[str, Any], scenario_config: dict[str, 
             if integer(identity): identities.add(identity)
             if integer(pid, 1): pids.add(pid)
             configurations.append(config)
+            if full_mesh:
+                completed = item.get("full_mesh_completed_jobs")
+                observed_stats = mapping(item.get("last_full_mesh_stats"))
+                full_mesh_producers &= (integer(completed, 1) and completed == item.get("completed")
+                                        and full_mesh_stats_valid(observed_stats))
+                if integer(completed):
+                    full_mesh_count += completed
+                producer_stats.append(observed_stats)
         checks["worker_profiles_match"] = profiles_valid and all(item == configurations[0] for item in configurations)
+        if full_mesh:
+            checks["worker_full_mesh_producers"] = full_mesh_producers
+            checks["worker_full_mesh_counters"] = (integer(snapshot.get("full_mesh_completed_jobs"), 1)
+                and snapshot["full_mesh_completed_jobs"] == snapshot.get("completed_jobs") == full_mesh_count)
+            checks["worker_full_mesh_snapshot_stats"] = (full_mesh_stats_valid(snapshot.get("last_full_mesh_stats"))
+                and snapshot["last_full_mesh_stats"] in producer_stats)
+            if all(full_mesh_stats_valid(item) for item in producer_stats):
+                latest_epoch = max(item["last_generated_ns"] for item in producer_stats)
+                cached_pairs = cache.get("pairs")
+                checks["worker_full_mesh_epoch_coverage"] = (isinstance(cached_pairs, list)
+                    and all(integer(mapping(item).get("sample_native_ns"))
+                            and item["sample_native_ns"] <= latest_epoch for item in cached_pairs))
 
     pairs = cache.get("pairs")
     native_ns, host_ns = snapshot.get("cache_snapshot_native_ns"), snapshot.get("cache_snapshot_host_monotonic_ns")
@@ -507,7 +583,8 @@ def native_rt_worker_contract(stats: dict[str, Any], scenario_config: dict[str, 
         checks["worker_cache_pair_provenance"] = valid and observed == expected
     return {"passed": all(checks.values()), "checks": checks,
             "rejection_reasons": [name for name, passed in checks.items() if not passed],
-            "expected_worker_count": count, "expected_cohort": cohort, "scene_sha256": scene_hash}
+            "expected_worker_count": count, "expected_cohort": cohort, "scene_sha256": scene_hash,
+            "expected_desired_mode": desired_mode, "full_mesh_sampling_equivalence": "not_evaluated" if full_mesh else None}
 
 
 def native_product_runtime_contract(
@@ -646,6 +723,10 @@ def native_product_runtime_contract(
     workers = None
     if not geometry:
         exact["sionna_execution_mode"] = requested_mode in ("in_process", "worker_pool") and observed_mode == requested_mode
+        if sionna.get("receiver_batch_mode") == "full_mesh" or stats.get("sionna_receiver_batch_mode") == "full_mesh":
+            exact["sionna_full_mesh_requires_worker_pool"] = (requested_mode == "worker_pool"
+                and sionna.get("receiver_batch_mode") == "full_mesh"
+                and stats.get("sionna_receiver_batch_mode") == "full_mesh")
         if requested_mode == "worker_pool" or observed_mode == "worker_pool":
             exact.pop("sionna_in_process")
             exact["sionna_out_of_process"] = stats.get("sionna_in_process") is False
