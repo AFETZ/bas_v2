@@ -198,7 +198,7 @@ void StorageGpu(const std::string& scene,py::dict& report)
             stats.exportCalls==1&&stats.verifiedTrimCalls==1&&stats.originalAxis==1&&stats.storageAxis==90&&stats.exportedAxis==1&&
             stats.verifiedTrim&&!stats.officialEmpty&&stats.sionnaVersion=="1.2.0"&&stats.drjitVersion=="1.2.0",
             "Actual fixed storage solve/export/trim proof missing");
-        Require(pathClass.attr("_build_from_buffer").is(build)&&pathClass.attr("_build_empty_paths").is(empty),"Class hooks leaked after successful solve");
+        Require(pathClass.attr("_build_from_buffer").ptr()==build.ptr()&&pathClass.attr("_build_empty_paths").ptr()==empty.ptr(),"Class hooks leaked after successful solve");
         // Pairwise uses the same wrapper and inspects an angle before cir().
         auto pairwise=cohort.Model(false,normalize,scene);pairwise->SetAttribute("FixedPathStorageEnabled",BooleanValue(true));
         auto matrix=pairwise->GetChannel(cohort.poses[0],cohort.poses[1],cohort.arrays[0],cohort.arrays[1]);
@@ -220,7 +220,7 @@ void StorageGpu(const std::string& scene,py::dict& report)
         limited->SetAttribute("MaxNumberOfPaths",DoubleValue(1));auto reflected=limited->GetRtPathSolverConfig();
         reflected.maxDepth=1;reflected.specularReflection=true;limited->SetRtPathSolverConfig(reflected);
         Reject([&]{limited->RefreshFullMesh();},"Actual path count above capacity was silently clipped");
-        Require(pathClass.attr("_build_from_buffer").is(build)&&pathClass.attr("_build_empty_paths").is(empty),"Class hooks leaked after failed solver construction");
+        Require(pathClass.attr("_build_from_buffer").ptr()==build.ptr()&&pathClass.attr("_build_empty_paths").ptr()==empty.ptr(),"Class hooks leaked after failed solver construction");
         py::dict lifetime;
         py::exec(R"(
 import gc, weakref
@@ -242,7 +242,7 @@ def _storage_helpers():
         Require(references[0]().is_none(),"Dispose with released GIL detached/leaked the live storage helper");
         Require(disposable->GetPathStorageStats().completedCalls==1&&disposable->GetPathStorageStats().verifiedTrim,
             "Released-GIL cleanup lost the final actual storage statistics");
-        Require(pathClass.attr("_build_from_buffer").is(build)&&pathClass.attr("_build_empty_paths").is(empty),
+        Require(pathClass.attr("_build_from_buffer").ptr()==build.ptr()&&pathClass.attr("_build_empty_paths").ptr()==empty.ptr(),
             "Storage class hooks survived released-GIL disposal");
         checks.append(py::dict("normalize_delays"_a=normalize,"original_axis"_a=stats.originalAxis,"storage_axis"_a=stats.storageAxis,
             "exported_axis"_a=stats.exportedAxis,"official_empty"_a=zero.officialEmpty,"paths_source_sha256"_a=stats.pathsSourceSha256));
