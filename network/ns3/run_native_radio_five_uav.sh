@@ -618,8 +618,8 @@ POSE_PUBLICATION_RATE_HZ=50
 [[ "$SIONNA_RT_EXECUTION_MODE" == in_process || "$SIONNA_RT_EXECUTION_MODE" == worker_pool ]] || {
   printf 'execution_mode must be in_process or worker_pool.\n' >&2; exit 2;
 }
-if [[ "$SIONNA_RT_EXECUTION_MODE" == worker_pool && ( "$BAS_SIMULATION_MODE" != realtime || -n "${BAS_NATIVE_SOURCES:-}" ) ]]; then
-  printf 'worker_pool requires realtime; directed source worker integration is not yet qualified.\n' >&2; exit 2;
+if [[ "$SIONNA_RT_EXECUTION_MODE" == worker_pool && ( "$BAS_SIMULATION_MODE" != realtime || ( -n "${BAS_NATIVE_SOURCES:-}" && "$SIONNA_RECEIVER_BATCH_MODE" != full_mesh ) ) ]]; then
+  printf 'worker_pool requires realtime and full_mesh for directed sources.\n' >&2; exit 2;
 fi
 [[ "$SIONNA_RECEIVER_BATCH_MODE" == pairwise || "$SIONNA_RECEIVER_BATCH_MODE" == receiver_batch || "$SIONNA_RECEIVER_BATCH_MODE" == full_mesh ]] || {
   printf 'receiver_batch_mode must be pairwise, receiver_batch or full_mesh.\n' >&2; exit 2;

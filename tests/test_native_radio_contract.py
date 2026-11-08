@@ -1,6 +1,7 @@
 """Observed native execution evidence; these fixtures are not RF acceptance runs."""
 import copy
 import hashlib
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -8,6 +9,8 @@ import unittest
 import yaml
 
 from scripts.product.native_rt_workers import VERSIONS
+from scripts.product.capture_effective_config import capture_snapshot
+from scripts.product.prepare_native_sources import prepare, materialize
 from scripts.product.summarize_native_radio_five_uav import (
     ROOT, native_product_runtime_contract, native_rt_worker_contract)
 
@@ -107,6 +110,235 @@ class NativeRadioContractTests(unittest.TestCase):
                 applied_snapshots=accepted, maximum_applied_pose_age_ns=50_000_000,
                 state_max_age_ns=round(scenario['coupling']['state_max_age_s']*1e9))
         return stats, scenario
+
+    def source_evidence(self, aliases=1):
+        """Transport/metadata fixture only; no RT solve or RF effect is synthesized."""
+        stats, scenario = self.evidence(2, pool=True, full_mesh=True)
+        run = self.root / f'source-run-{aliases}'
+        (run / 'logs').mkdir(parents=True)
+        sources = [dict(id='interferer'+str(i), mode='continuous', spectral_shape='rectangular',
+            position_m=[5.+i, 0., 5.], orientation_rad=[.3, .1], pattern='tr38901', gain_dbi=0.,
+            power_w=.01, bandwidth_hz=20000000., center_hz=scenario['radio']['carrier_hz'],
+            start_s=0., stop_s=.1, period_s=.01, duty_cycle=1.) for i in range(aliases)]
+        configured = prepare(dict(time_reference='measurement_start', sources=sources))
+        actual = materialize(configured, 10_000_000, 123456789, 'experiment_normal')
+        for name, value in [('native_sources.json', configured), ('native_sources_actual.json', actual)]:
+            (run / 'logs' / name).write_text(json.dumps(value), encoding='utf-8')
+        capture_snapshot(run, stage='final', repo_root=ROOT, configs=[], observed=[])
+        snapshot = stats['sionna_rt_workers']
+        n, native_ns, host_ns = 3, 100_000_000, snapshot['cache_snapshot_host_monotonic_ns']
+        sample_ns, sample_host = 80_000_000, host_ns-40_000_000
+        profiles = [dict(id=f'source_segment_{i}', frequency_hz=source['center_hz'], pattern=source['pattern'])
+                    for i, source in enumerate(sources)]
+        source_ids = [f"{source['id']}:{i}" for i, source in enumerate(sources)]
+        for worker in snapshot['pool']['workers']:
+            worker.update(completed=11 if worker['worker_id']==0 else 11*aliases if worker['worker_id']==1 else 0,
+                full_mesh_completed_jobs=11 if worker['worker_id']==0 else 0,
+                emitter_batch_completed_jobs=11*aliases if worker['worker_id']==1 else 0)
+            if worker['worker_id']==0:
+                worker['last_full_mesh_stats'].update(attempted_calls=11, completed_calls=11,
+                    generated_links=11*n*(n-1)//2, last_generated_ns=sample_ns)
+            else:
+                worker['last_full_mesh_stats']=None
+            worker['ready']['applied_config']['source_profiles']=copy.deepcopy(profiles)
+            worker['ready'].update(source_profile_count=aliases,
+                source_model_frequencies_hz=[sources[0]['center_hz']], source_profile_contexts=[dict(
+                    frequency_hz=sources[0]['center_hz'], pattern='tr38901', profile_ids=[p['id'] for p in profiles],
+                    source_node_id=99, source_antenna_id=99, source_modes=['pairwise','emitter_batch'])])
+        snapshot.update(submitted_jobs=11, completed_jobs=11, cold_warmup_jobs=1, full_mesh_completed_jobs=11,
+            total_submitted_jobs=11*(aliases+1), total_completed_jobs=11*(aliases+1),
+            published_results=10, published_pairs=10*n*(n-1)//2, committed_pose_frames=10,
+            pose_commit_policy='with_full_mesh_and_required_emitters',
+            last_full_mesh_stats=copy.deepcopy(snapshot['pool']['workers'][0]['last_full_mesh_stats']))
+        snapshot['prefetch']=dict(method='coherent_pose_and_source_bundles',lead_ns=100_000_000)
+        stats['pose_application']['applied_snapshots']=10
+        snapshot['cache']['accepted']=snapshot['published_pairs']
+        for pair in snapshot['cache']['pairs']:
+            pair.update(source_request_id=80, sample_native_ns=sample_ns, sample_host_monotonic_ns=sample_host,
+                        native_age_ns=native_ns-sample_ns)
+        snapshot['source_bindings']=[]
+        for i, source in enumerate(sources):
+            counts=11*aliases
+            emitter=dict(source_mode='emitter_batch', pattern=source['pattern'], bound=True,
+                has_published_batch=True, frequency_hz=source['center_hz'], source_node_id=99, source_antenna_id=99,
+                receiver_node_ids=list(range(n)), receiver_antenna_ids=list(range(n)), registered_receivers=n,
+                configured_samples_per_source=scenario['sionna']['samples_per_src'],
+                configured_max_paths_per_source=scenario['sionna']['max_num_paths_per_src'],
+                configured_max_number_of_paths=float(scenario['sionna']['max_number_of_paths']),
+                candidate_allocation_valid=True, configured_candidate_cap=n*scenario['sionna']['max_num_paths_per_src'],
+                attempted_calls=counts, completed_calls=counts, generated_links=counts*n,
+                candidate_capacity_reached_calls=0, cache_read_calls=counts*n, cache_read_hits=counts*n, cache_read_misses=0,
+                last_transmitter_count=1, last_receiver_count=n,
+                last_allocated_candidate_cap=n*scenario['sionna']['max_num_paths_per_src'], last_candidate_count=n,
+                last_candidate_buffer_size=n*scenario['sionna']['max_num_paths_per_src'],
+                last_retained_paths_per_receiver=[2]*n, last_generated_ns=sample_ns,
+                last_source_position_m=source['position_m'], last_source_velocity_m_s=[0.,0.,0.],
+                last_source_orientation_rad=[*source['orientation_rad'],0.],
+                scene_prepare_ns=100, solver_ns=5000, extraction_ns=1000, cache_publish_ns=100, batch_ns=10000, max_batch_ns=12000)
+            pairs=[dict(first=peer, second=n, valid=True, due=False, reason='valid', source_request_id=100+i,
+                sample_native_ns=sample_ns, sample_host_monotonic_ns=sample_host, native_age_ns=native_ns-sample_ns,
+                host_age_ns=50_000_000, displacement_m=0., velocity_delta_m_s=0., orientation_delta_rad=0.) for peer in range(n)]
+            snapshot['source_bindings'].append(dict(id=source_ids[i], profile_id=profiles[i]['id'],
+                frequency_hz=source['center_hz'], pattern=source['pattern'], worker_id=1, required_now=True,
+                configured_pose=dict(position_m=source['position_m'], velocity_m_s=[0.,0.,0.],
+                    orientation_rad=[*source['orientation_rad'],0.], scope='configuration_static'),
+                completed_jobs=11, cold_warmup_jobs=1, published_results=10, published_pairs=10*n, live_published_results=9,
+                last_emitter_batch_stats=copy.deepcopy(emitter), last_published_emitter_batch_stats=copy.deepcopy(emitter),
+                last_published_bundle_id=11, last_published_request_id=100+i, last_published_desired_request_id=80,
+                last_published_sample_native_ns=sample_ns, last_published_sample_host_monotonic_ns=sample_host,
+                cache_snapshot_native_ns=native_ns, cache_snapshot_host_monotonic_ns=host_ns+100000,
+                cache=dict(hits=10, misses=0, accepted=10*n, rejected=0, maximum_hit_native_age_ns=20_000_000,
+                    maximum_hit_host_age_ns=50_000_000, rejection_reasons={}, miss_reasons={}, pairs=pairs)))
+        snapshot['worker_roles']=[dict(worker_id=0,role='desired_full_mesh',source_ids=[]),
+            dict(worker_id=1,role='emitter_batch',frequency_hz=sources[0]['center_hz'],pattern='tr38901',source_ids=source_ids),
+            dict(worker_id=2,role='idle',source_ids=[])]
+        snapshot['bundle']=dict(enabled=True, policy='desired_and_required_emitters_before_pose_notify',
+            atomicity='observable_without_internal_rollback_on_failure', submitted=11, committed=10,
+            failed_before_notify=0, pending={}, last_committed_required_source_ids=source_ids,
+            last_committed=dict(id=11, sample_native_ns=sample_ns, sample_host_monotonic_ns=sample_host,
+                pose_sample_host_ns=[host_ns-50_000_000]*n, desired_request_id=80, required_source_ids=source_ids,
+                source_requests=[dict(id=sid,request_id=100+i) for i,sid in enumerate(source_ids)],
+                required_lookahead_ns=10_000_000,
+                required_observations=[dict(id=sid,required=True,reason='schedule_callback') for sid in source_ids],bootstrap=False))
+        return stats, scenario, run
+
+    def test_source_bundle_uses_frozen_inputs_and_shared_rf_aliases(self):
+        for aliases in (1,2):
+            with self.subTest(aliases=aliases):
+                stats, scenario, run = self.source_evidence(aliases)
+                report=native_rt_worker_contract(stats,scenario,run_dir=run)
+                self.assertTrue(report['passed'],report)
+                self.assertIsNone(report['source_bundle']['error'])
+                self.assertIn('not WFG activation',report['source_bundle']['live_evidence_scope'])
+
+    def test_source_bundle_rejects_missing_run_input_schedule_or_frozen_copy(self):
+        stats, scenario, run = self.source_evidence()
+        self.assertIn('worker_source_inputs',native_rt_worker_contract(stats,scenario)['rejection_reasons'])
+        for path in [run/'logs/native_sources.json',run/'logs/native_sources_actual.json',
+                     run/'configuration/final/inputs/native_sources/value.json']:
+            original=path.read_bytes()
+            path.unlink()
+            self.assertIn('worker_source_inputs',native_rt_worker_contract(stats,scenario,run_dir=run)['rejection_reasons'])
+            path.write_bytes(original)
+        path=run/'logs/native_sources.json'
+        path.write_text(path.read_text()+' ',encoding='utf-8')
+        self.assertIn('worker_source_inputs',native_rt_worker_contract(stats,scenario,run_dir=run)['rejection_reasons'])
+
+    def test_source_bundle_rejects_identity_rf_poses_worker_or_missing_binding(self):
+        original, scenario, run = self.source_evidence()
+        changes=[lambda s:s['source_bindings'].clear(),
+            lambda s:s['source_bindings'][0].update(id='other:0'),
+            lambda s:s['source_bindings'][0].update(profile_id='other'),
+            lambda s:s['source_bindings'][0].update(frequency_hz=2.5e9),
+            lambda s:s['source_bindings'][0].update(pattern='iso'),
+            lambda s:s['source_bindings'][0]['configured_pose'].update(position_m=[0,0,0]),
+            lambda s:s['source_bindings'][0]['configured_pose'].update(orientation_rad=[0,0,0]),
+            lambda s:s['source_bindings'][0].update(worker_id=2),
+            lambda s:s['worker_roles'][1].update(frequency_hz=2.5e9),
+            lambda s:s['pool']['workers'][1]['ready']['applied_config']['source_profiles'][0].update(frequency_hz=2.5e9)]
+        for change in changes:
+            stats=copy.deepcopy(original);change(stats['sionna_rt_workers'])
+            with self.subTest(change=change):
+                self.assertFalse(native_rt_worker_contract(stats,scenario,run_dir=run)['passed'])
+
+    def test_source_bundle_rejects_epochs_shape_capacity_and_false_freshness(self):
+        original, scenario, run = self.source_evidence()
+        changes=[lambda b:b['last_published_emitter_batch_stats'].update(last_generated_ns=0),
+            lambda b:b['last_emitter_batch_stats'].update(last_receiver_count=2),
+            lambda b:b['last_emitter_batch_stats'].update(candidate_capacity_reached_calls=1),
+            lambda b:b['last_emitter_batch_stats'].update(last_candidate_count=b['last_emitter_batch_stats']['last_candidate_buffer_size']),
+            lambda b:b['last_emitter_batch_stats'].update(last_retained_paths_per_receiver=[91]*3),
+            lambda b:b['cache'].update(misses=1),
+            lambda b:b['cache'].update(maximum_hit_host_age_ns=500_000_001),
+            lambda b:b['cache']['pairs'][0].update(first=0,second=1),
+            lambda b:b['cache']['pairs'][0].update(sample_native_ns=0),
+            lambda b:b['cache']['pairs'][0].update(source_request_id=999),
+            lambda b:b.update(last_published_sample_host_monotonic_ns=10**20),
+            lambda b:b['cache']['pairs'].pop()]
+        for change in changes:
+            stats=copy.deepcopy(original);change(stats['sionna_rt_workers']['source_bindings'][0])
+            with self.subTest(change=change):
+                self.assertFalse(native_rt_worker_contract(stats,scenario,run_dir=run)['passed'])
+
+    def test_source_bundle_rejects_partial_commit_wrong_required_window_and_warm_only(self):
+        original, scenario, run = self.source_evidence()
+        changes=[lambda s:s['bundle'].update(failed_before_notify=1),
+            lambda s:s['bundle'].update(committed=9),
+            lambda s:s['bundle']['last_committed'].update(required_source_ids=[]),
+            lambda s:s['bundle']['last_committed']['required_observations'][0].update(required=False),
+            lambda s:s['source_bindings'][0].update(last_published_desired_request_id=79),
+            lambda s:s['source_bindings'][0].update(last_published_sample_native_ns=0),
+            lambda s:s['bundle']['last_committed'].update(pose_sample_host_ns=[10**20]*3),
+            lambda s:s['source_bindings'][0].update(live_published_results=0),
+            lambda s:s['source_bindings'][0]['cache'].update(hits=0),
+            lambda s:s['pool']['workers'][1].update(full_mesh_completed_jobs=1),
+            lambda s:s['source_bindings'][0].update(required_now=False),
+            lambda s:s.update(total_completed_jobs=11)]
+        for change in changes:
+            stats=copy.deepcopy(original);change(stats['sionna_rt_workers'])
+            with self.subTest(change=change):
+                self.assertFalse(native_rt_worker_contract(stats,scenario,run_dir=run)['passed'])
+
+    def test_source_bundle_requires_its_actual_commit_and_prefetch_modes(self):
+        original,scenario,run=self.source_evidence()
+        for policy in ('with_full_mesh_result','independent',None):
+            stats=copy.deepcopy(original)
+            stats['sionna_rt_workers']['pose_commit_policy']=policy
+            with self.subTest(policy=policy):
+                self.assertIn('worker_full_mesh_pose_commit',
+                    native_rt_worker_contract(stats,scenario,run_dir=run)['rejection_reasons'])
+        for method in ('coherent_pose_frames','',None):
+            stats=copy.deepcopy(original)
+            stats['sionna_rt_workers']['prefetch']['method']=method
+            with self.subTest(method=method):
+                self.assertIn('worker_source_prefetch_method',
+                    native_rt_worker_contract(stats,scenario,run_dir=run)['rejection_reasons'])
+
+    def test_pending_source_bundle_is_not_a_partial_commit_or_fabricated_window(self):
+        original, scenario, run = self.source_evidence()
+        snapshot=original['sionna_rt_workers']
+        host=snapshot['cache_snapshot_host_monotonic_ns']
+        snapshot.update(submitted_jobs=12,total_submitted_jobs=24)
+        snapshot['bundle'].update(submitted=12,pending=dict(id=12,sample_native_ns=90_000_000,
+            sample_host_monotonic_ns=host-20_000_000,pose_sample_host_ns=[host-30_000_000]*3,
+            required_source_ids=['interferer0:0'],required_lookahead_ns=10_000_000,
+            desired_ready=False,source_ready_ids=[],cold_warmup=False,bootstrap=False))
+        self.assertTrue(native_rt_worker_contract(original,scenario,run_dir=run)['passed'])
+        for change in [lambda p:p.update(source_ready_ids=['unknown:0']),
+                       lambda p:p.update(required_source_ids=[]),
+                       lambda p:p.pop('required_lookahead_ns'),
+                       lambda p:p.update(sample_native_ns=70_000_000),
+                       lambda p:p.update(pose_sample_host_ns=[host+1]*3),
+                       lambda p:p.update(desired_ready=1)]:
+            stats=copy.deepcopy(original);change(stats['sionna_rt_workers']['bundle']['pending'])
+            with self.subTest(change=change):
+                self.assertFalse(native_rt_worker_contract(stats,scenario,run_dir=run)['passed'])
+
+    def test_source_contract_malformed_metadata_fails_closed_without_raising(self):
+        original, scenario, run = self.source_evidence()
+        changes=[lambda s:s['source_bindings'][0].update(worker_id=True),
+            lambda s:s['source_bindings'][0].update(frequency_hz=float('nan')),
+            lambda s:s['source_bindings'][0]['configured_pose'].update(position_m=[True,0,5]),
+            lambda s:s['source_bindings'][0]['last_emitter_batch_stats'].update(attempted_calls=True),
+            lambda s:s['source_bindings'][0]['last_emitter_batch_stats'].update(cache_read_misses=True),
+            lambda s:s['source_bindings'][0]['last_emitter_batch_stats'].update(receiver_node_ids=[1,1,1]),
+            lambda s:s['source_bindings'][0]['cache'].update(pairs=[None]),
+            lambda s:s['bundle'].update(pending=[]),
+            lambda s:s['worker_roles'][1].update(source_ids=[[]]),
+            lambda s:s['pool']['workers'][1]['ready']['source_profile_contexts'][0].update(frequency_hz=[]),
+            lambda s:s['bundle']['last_committed'].update(source_requests=[None]),
+            lambda s:s['bundle']['last_committed'].update(required_observations=[None])]
+        for change in changes:
+            stats=copy.deepcopy(original);change(stats['sionna_rt_workers'])
+            with self.subTest(change=change):
+                self.assertFalse(native_rt_worker_contract(stats,scenario,run_dir=run)['passed'])
+
+    def test_desired_only_empty_source_export_keeps_legacy_contract(self):
+        stats,scenario=self.evidence(pool=True,full_mesh=True)
+        stats['sionna_rt_workers'].update(source_bindings=[],worker_roles=[],bundle=dict(enabled=False))
+        report=native_rt_worker_contract(stats,scenario,run_dir=self.root)
+        self.assertTrue(report['passed'],report)
+        self.assertIsNone(report['source_bundle'])
 
     def test_full_mesh_requires_observed_coherent_pose_proof(self):
         stats, scenario = self.evidence(pool=True, full_mesh=True)

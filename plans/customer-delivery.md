@@ -179,13 +179,34 @@ emitter GPU — 1442, fullmesh CPU — 219. Доказательства:
 занял 599,98 мс / 12504 вызова, GetChannel — 18,29 мс, reader — 182,68 мс.
 Это wall timing, включая preemption. Сначала проверяется штатная O3-сборка с
 сохранёнными assertions/logs, затем необходимость собственной оптимизации.
+На `e1ded2e` O3-сборка прошла за 251,17 с: 367 программных тестов (366 pass, 1 skip),
+CPU cohort/cache/schedule/fullmesh/emitter — 101/340/89/219/406 проверок, GPU fullmesh/emitter
+также passed. `control/delivery-native-o3-runtime-20261108/build-02-command.json`;
+actual compile commands всех четырёх целевых TU подтверждают O3, assert/log ON, native optimizations OFF.
+Failed build-01 — ошибка quoting скрипта фиксации, не компилятора; сохранён.
+N=5 `...-03` остановился на прогреве из-за конверсии Python int→none в новом диагностическом
+логе. `e430570` исправляет ветвление; регрессия обоих путей лога добавляется в native bundle contract.
+Повтор `delivery-rt-coherent-n5-20261108-04` дошёл до ARM UAV1, но failed / invalid:
+на 44,08 с host cache expiry. Средний CIR→PSD wall cost 48 → 19,3 мкс/вызов,
+1994 согласованных кадра, 248407 hits / 1 miss. Новое RT-задание 1998 ещё не было
+получено через 47,56 мс после отправки; обычные соседние занимали около 22 мс.
+Следующий шаг — установить причину RT-tail на этих исходных позах, не увеличивая 100 мс.
+На `e430570` CPU source-waveform contract — 189 проверок: фактические SpectrumChannel
+TxSigParams подтверждают PSD, feed gain, полосу, длительность и отдельные physical/sweep bindings.
+Это TX readback до распространения, не приём, PHY/MAC-эффект или аппаратная приёмка.
 На `26cb01a` source producer собран и прошёл 22 Linux tests и GPU 38 jobs,
 12 batch / 72 STAR links включая CP, реальный cap 6000; hot median 21,567 мс.
 `control/delivery-source-emitter-batch-probe-20261108/{build-and-probe-01-command,derived-verification}.json`.
 Fixed RF aliases и receipt/poll timestamps проверены; совместные desired/emitter
 frames с affinity ещё интегрируются. SDK12-контракт не закрывает live source integration.
-Worker_pool с направленными источниками пока явно отклоняется; обязательная совместная
-приёмка остаётся открыта. Успех unit/GPU-контрактов не считается успехом полного тракта.
+Live-интеграция worker_pool с источниками реализована: только full_mesh, отдельный STAR-кэш
+на физический источник, fixed RF roles, общий кадр desired/source перед CourseChange.
+Настройка отклоняет нехватку roles; источник не попадает в пакетный Python/RT путь.
+CPU-контракт реального decoder/cache/notify, проверка frozen input/epochs/полного bundle
+и первый полный источник-сценарий ожидают целевого запуска. Локальные 19 profile tests
+и 79 contract/source/runtime tests прошли; это не native CPU/GPU или аппаратная приёмка.
+Обязательная совместная приёмка остаётся открыта. Успех отдельных контрактов не считается
+успехом полного тракта.
 Зависимости solver: Sionna RT 1.2.0, Mitsuba 3.7.1, DrJit 1.2.0; фактические бюджеты
 и конфигурации сохраняются. Неудачные попытки не удаляются. Публикационные результаты не изменяются.
 

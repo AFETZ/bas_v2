@@ -1819,12 +1819,12 @@ main(int argc, char* argv[])
     NS_ABORT_MSG_IF(sionnaWorkerCount < 1 || sionnaWorkerCount > 3 ||
                     (!useRtWorkers && sionnaWorkerCount != 3), "invalid or unused RT worker count");
     NS_ABORT_MSG_IF(useRtWorkers && ((sionnaReceiverBatchMode != "receiver_batch" && sionnaReceiverBatchMode != "full_mesh") ||
-                    !sourceConfig.empty() || projectRoot.empty() || sionnaWorkerBinary.empty() ||
+                    (!sourceConfig.empty() && sionnaReceiverBatchMode != "full_mesh") || projectRoot.empty() || sionnaWorkerBinary.empty() ||
                     sionnaWorkerConfig.empty() || sionnaMaxNumberOfPaths > 90 ||
                     sionnaCacheJitterFraction != 0 || channelStateMaxAgeS > 0.5 ||
                     updateDistanceThresholdM > 0.5),
                     "worker_pool requires receiver_batch or explicit full_mesh, zero expiry jitter, <=90 paths, "
-                    "run-owned paths and a source-free scene; directed source worker integration is not yet qualified");
+                    "run-owned paths; directed sources require full_mesh coherent bundles");
     NS_ABORT_MSG_IF(geometryProfile && (geometryConfig.empty() || geometryCsv.empty() ||
                     !sourceConfig.empty() || g_faultProfile != "none"),
                     "geometry profile requires explicit geometryConfig/geometryCsv and no injected losses/sources");
@@ -2324,6 +2324,16 @@ main(int argc, char* argv[])
                         "diffraction"_a=solver.diffraction, "edge_diffraction"_a=solver.edgeDiffraction,
                         "synthetic_array"_a=solver.syntheticArray)));
             if (sionnaReceiverBatchMode == "full_mesh") config["desired_mode"] = "full_mesh";
+            const auto sourceBindings = sourceRouter ? sourceRouter->GetSourceBindings()
+                : std::vector<bas::SourceBinding>{};
+            if (!sourceBindings.empty())
+            {
+                py::list profiles;
+                for (const auto& binding : sourceBindings)
+                    profiles.append(py::dict("id"_a="source_segment_"+std::to_string(binding.segmentIndex),
+                        "frequency_hz"_a=binding.centerHz,"pattern"_a=binding.pattern));
+                config["source_profiles"] = profiles;
+            }
             auto contract = py::module_::import("scripts.product.native_rt_workers");
             config = contract.attr("validate_config")(config).cast<py::dict>();
             configPath.attr("write_text")(json.attr("dumps")(config, "indent"_a=2, "allow_nan"_a=false), "encoding"_a="utf-8");
@@ -2340,6 +2350,36 @@ main(int argc, char* argv[])
                         positions.Commit(state,publish);
                     })
                     : bas::NativeRtPool::CommitSnapshot{});
+            for (const auto& binding : sourceBindings)
+            {
+                // One physical emitter owns one STAR cache and one spectrum
+                // wrapper. Sharing wrappers by carrier would overwrite other
+                // emitters' cache providers when these bindings are installed.
+                const bas::NativeRtCache::Endpoint emitter{binding.phy->GetMobility(),binding.array};
+                auto cache=CreateObject<bas::NativeRtCache>(binding.centerHz,endpoints,emitter,limits);
+                auto propagation=CreateObject<SionnaRtSpectrumPropagationLossModel>();
+                propagation->SetChannelModel(cache);
+                sourceRouter->sources.at(binding.phy)=propagation;
+                bas::NativeRtPool::SourceBinding source;
+                source.id=binding.id+":"+std::to_string(binding.segmentIndex);
+                source.profileId="source_segment_"+std::to_string(binding.segmentIndex);
+                source.cache=cache;
+                source.endpoints=endpoints;
+                source.endpoints.push_back(emitter);
+                source.emitterStatic.position=binding.positionM;
+                source.emitterStatic.velocity=binding.velocityMps;
+                source.emitterStatic.orientation=binding.orientationRad;
+                source.required=[router=sourceRouter,index=binding.segmentIndex,phy=binding.phy](int64_t lookaheadNs) {
+                    const auto current=router->GetSourceBindings();
+                    if (index>=current.size() || current[index].phy!=phy)
+                        throw std::runtime_error("Native RT source binding disappeared before pool shutdown");
+                    // Before a measurement-relative anchor, an interval may
+                    // start immediately. Keep every possible source primed.
+                    return !current[index].scheduleCommitted ||
+                        current[index].RequiredAt(Simulator::Now(),NanoSeconds(lookaheadNs));
+                };
+                rtPool->AddSourceBinding(std::move(source));
+            }
             try
             {
                 rtPool->Start(projectRoot, sionnaWorkerBinary, sionnaWorkerConfig,

@@ -194,12 +194,50 @@ class RadioProfileTests(unittest.TestCase):
         self.assertEqual(resolved['sionna']['endpoint_displacement_threshold_m'], self.radio['sionna']['endpoint_displacement_threshold_m'])
         self.assertEqual(self.radio_file.read_bytes(), source)
 
-    def test_worker_pool_with_sources_is_explicitly_unqualified_before_source_loading(self):
+    def test_worker_pool_sources_require_coherent_full_mesh_before_source_loading(self):
         self.radio['sionna'].update(execution_mode='worker_pool', receiver_batch_mode='receiver_batch',
                                     cache_expiry_jitter_fraction=0)
         self.write_radio()
         self.config['interference'] = {'sources': 'not-opened-unqualified-sources.yaml'}
-        with self.assertRaisesRegex(ValueError, 'worker_pool with directed sources is not yet qualified'):
+        with self.assertRaisesRegex(ValueError, 'worker_pool with directed sources requires receiver_batch_mode=full_mesh'):
+            self.load()
+
+    def source_schedule(self, profiles):
+        sources = [dict(id=f'source{i}', position_m=[0, -40, 10], orientation_rad=[0, 0],
+            pattern=pattern, gain_dbi=0, power_w=.01, center_hz=frequency, bandwidth_hz=20e6,
+            start_s=5, stop_s=10, period_s=.01, duty_cycle=1, mode='continuous',
+            spectral_shape='rectangular') for i, (frequency, pattern) in enumerate(profiles)]
+        (self.root / 'sources.yaml').write_text(yaml.safe_dump(dict(time_reference='measurement_start', sources=sources)))
+        self.config['interference'] = {'sources': 'sources.yaml'}
+        self.radio['sionna'].update(execution_mode='worker_pool', receiver_batch_mode='full_mesh',
+                                    cache_expiry_jitter_fraction=0)
+
+    def test_full_mesh_sources_share_a_fixed_rf_role_for_same_frequency_and_pattern(self):
+        self.source_schedule([(2412e6, 'tr38901'), (2412e6, 'tr38901')])
+        self.radio['sionna']['worker_count'] = 2
+        self.write_radio()
+        resolved = self.load()
+        self.assertEqual(resolved['interference']['sources'], 'sources.yaml')
+        self.assertEqual(json.loads((self.root / 'runtime.json').read_text()), self.config)
+
+    def test_source_frequency_and_pattern_each_require_a_separate_fixed_worker_role(self):
+        for profiles in ([(2412e6, 'iso'), (2412e6, 'tr38901')],
+                         [(2412e6, 'tr38901'), (2422e6, 'tr38901')]):
+            with self.subTest(profiles=profiles):
+                self.source_schedule(profiles)
+                self.radio['sionna']['worker_count'] = 2
+                self.write_radio()
+                with self.assertRaisesRegex(ValueError, 'needs 3 fixed RF roles.*worker_count=2'):
+                    self.load()
+                self.radio['sionna']['worker_count'] = 3
+                self.write_radio()
+                self.assertEqual(self.load()['interference']['sources'], 'sources.yaml')
+
+    def test_worker_pool_rejects_source_roles_beyond_current_capacity(self):
+        self.source_schedule([(2412e6, 'iso'), (2412e6, 'tr38901'), (2422e6, 'tr38901')])
+        self.radio['sionna']['worker_count'] = 3
+        self.write_radio()
+        with self.assertRaisesRegex(ValueError, 'needs 4 fixed RF roles.*worker_count=3'):
             self.load()
 
     def test_snapshot_and_generator_consume_the_frozen_radio_and_geometry(self):

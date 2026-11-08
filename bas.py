@@ -111,7 +111,7 @@ def runtime_duration_limits(duration, land_timeout_s, uav_count, channels, *, mo
         basis='max(legacy cap, declared wall watchdog + unchanged bounded lifecycle budgets)')
 
 
-def _interference_input(config, root):
+def _interference_input(config, root, radio_profile=None):
     """Validate exact source bytes with the existing native schedule producer."""
     name = config.get('interference', {}).get('sources')
     if name is None:
@@ -143,6 +143,12 @@ def _interference_input(config, root):
             if material not in ITU_FREQUENCIES_GHZ or not any(
                     low <= frequency_ghz <= high for low, high in ITU_FREQUENCIES_GHZ[material]):
                 raise ValueError(f'interference source {segment["id"]} frequency is outside {material} ITU validity')
+    if radio_profile is not None and radio_profile['sionna']['execution_mode'] == 'worker_pool':
+        signatures = {(segment['center_hz'], segment['pattern']) for segment in schedule['segments']}
+        needed = 1 + len(signatures)  # Desired full mesh plus fixed emitter RF roles.
+        available = radio_profile['sionna']['worker_count']
+        if needed > available:
+            raise ValueError(f'worker_pool needs {needed} fixed RF roles for these sources; worker_count={available}')
     return path, raw
 
 
@@ -241,8 +247,9 @@ def load_config(path, root=ROOT):
         raw_scene = scenario.raw
         radio_profile = read_rt_radio_profile(radio_file, raw_scene)
         if (radio_profile['sionna']['execution_mode'] == 'worker_pool'
-                and config.get('interference', {}).get('sources') is not None):
-            raise ValueError('worker_pool with directed sources is not yet qualified; use in_process for source scenarios')
+                and config.get('interference', {}).get('sources') is not None
+                and radio_profile['sionna']['receiver_batch_mode'] != 'full_mesh'):
+            raise ValueError('worker_pool with directed sources requires receiver_batch_mode=full_mesh')
         thickness = propagation['thickness_m']
         if type(thickness) not in (int, float) or not 0 < thickness <= sys.float_info.max:
             raise ValueError('propagation.thickness_m must be finite and positive')
@@ -257,7 +264,8 @@ def load_config(path, root=ROOT):
                 for field in ('ground_material', 'building_material', 'thickness_m')):
             raise ValueError('RT profile materials/thickness must match the shared terrain bundle')
         propagation['radio_config'] = radio_file.relative_to(root).as_posix()
-    source_path, _ = _interference_input(config, root)
+    source_path, _ = _interference_input(config, root,
+        radio_profile if config['propagation']['model'] == 'sionna' else None)
     if source_path is not None:
         config['interference']['sources'] = source_path.relative_to(root).as_posix()
     return config
@@ -371,7 +379,7 @@ def recorded_outcome(raw, code, summary, *, source_configured=False):
             try:
                 from scripts.product.summarize_native_radio_five_uav import load_scenario_config, native_rt_worker_contract
                 scenario = load_scenario_config(control_dir(raw.name) / 'generated/scenario.yaml')
-                proof = native_rt_worker_contract(stats, scenario)
+                proof = native_rt_worker_contract(stats, scenario, run_dir=raw)
                 result['native_rt_worker_verification'] = proof
                 frozen = json.loads((raw / 'logs/native_rt_workers/summary.json').read_text(encoding='utf-8'),
                                     object_pairs_hook=unique_json_fields, parse_constant=reject_json_constant)

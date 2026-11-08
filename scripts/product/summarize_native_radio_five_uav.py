@@ -365,27 +365,351 @@ def native_events(
     return result
 
 
-def native_rt_worker_contract(stats: dict[str, Any], scenario_config: dict[str, Any]) -> dict[str, Any]:
+def _contract_mapping(value):
+    return value if isinstance(value, dict) else {}
+
+
+def _contract_integer(value, minimum=0):
+    return type(value) is int and value >= minimum
+
+
+def _contract_number(value):
+    try:
+        return type(value) in (int, float) and math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _contract_same(observed, expected):
+    if type(expected) is bool:
+        return observed is expected
+    return (_contract_number(observed) and _contract_number(expected)
+            and math.isclose(observed, expected, rel_tol=1e-12, abs_tol=1e-12))
+
+
+def _native_rt_source_evidence(run_dir: Path | None) -> dict[str, Any]:
+    """Read the run's frozen input and native schedule, never a checkout profile."""
+    result = dict(passed=False, error=None, segments=[], sha256={})
+    try:
+        if run_dir is None:
+            raise ValueError("source worker evidence requires the explicit run directory")
+        run_dir = Path(run_dir).resolve()
+        schedule = _native_source_schedule(run_dir)
+        if schedule["actual_schedule_status"] != "observed":
+            raise ValueError(schedule["actual_schedule_error"] or "native source schedule is not observed")
+        stage = run_dir / "configuration/final"
+        manifest = read_json(stage / "manifest.json")
+        if not isinstance(manifest, dict) or manifest.get("stage") != "final" or not isinstance(manifest.get("files"), list):
+            raise ValueError("source worker evidence requires the final configuration snapshot")
+        for label, name, kind in (("native_sources", "native_sources.json", "configured_input"),
+                                  ("native_sources_actual", "native_sources_actual.json", "observed_runtime_schedule")):
+            records = [item for item in manifest["files"] if isinstance(item, dict) and item.get("label") == label]
+            if len(records) != 1:
+                raise ValueError(f"missing or duplicate frozen source record: {label}")
+            record = records[0]
+            reference = record.get("copied_path")
+            if (record.get("status") != "observed" or record.get("kind") != kind
+                    or not isinstance(reference, str) or not reference):
+                raise ValueError(f"source snapshot is not observed: {label}")
+            frozen = (stage / reference).resolve()
+            if not frozen.is_relative_to(stage.resolve()):
+                raise ValueError(f"source snapshot escapes its configuration directory: {label}")
+            content = (run_dir / "logs" / name).read_bytes()
+            if type(record.get("bytes")) is not int or record["bytes"] != len(content) or frozen.read_bytes() != content:
+                raise ValueError(f"source input differs from its frozen snapshot: {label}")
+            result["sha256"][label] = hashlib.sha256(content).hexdigest()
+        result.update(passed=True, segments=schedule["configured_sources"]["segments"],
+                      actual_segments=schedule["actual_sources"]["segments"], anchor=schedule["time_anchor"])
+    except (OSError, ValueError, TypeError, KeyError, OverflowError) as error:
+        result["error"] = str(error)
+    return result
+
+
+def _native_rt_source_contract(stats, rt, cohort, run_dir):
+    """CIR bundle evidence only; WFG activation/packet effect use native capture."""
+    mapping, integer, number = _contract_mapping, _contract_integer, _contract_number
+    snapshot = mapping(stats.get("sionna_rt_workers"))
+    evidence = _native_rt_source_evidence(run_dir)
+    checks = {name: False for name in (
+        "worker_source_inputs", "worker_source_bindings", "worker_source_roles", "worker_source_producers",
+        "worker_source_cache_provenance", "worker_source_hit_ages", "worker_source_live_path",
+        "worker_source_required_windows", "worker_source_bundle", "worker_source_pending",
+        "worker_source_original_epochs", "worker_source_totals")}
+    result = dict(checks=checks, expected_source_profiles=[], roles={},
+                  source_input_sha256=evidence["sha256"], error=evidence["error"],
+                  live_evidence_scope="Live CIR publications/cache reads are not WFG activation, RF effect or packet SLA; native source capture remains required")
+    if not evidence["passed"]:
+        return result
+    n, count = len(cohort), snapshot.get("worker_count")
+    u64 = lambda value: integer(value) and value < 2**64
+    epoch = lambda value: integer(value) and value < 2**63
+    vector = lambda value, size: isinstance(value, list) and len(value) == size and all(number(x) for x in value)
+    unique_ids = lambda values: (isinstance(values, list) and all(isinstance(x, str) and x for x in values)
+                                 and len(set(values)) == len(values))
+    try:
+        expected = {}
+        for i, (source, interval) in enumerate(zip(evidence["segments"], evidence["actual_segments"], strict=True)):
+            if (not isinstance(source.get("id"), str) or not source["id"] or not vector(source.get("position_m"), 3)
+                    or not vector(source.get("orientation_rad"), 2) or source.get("pattern") not in ("iso", "tr38901")
+                    or not all(number(source.get(key)) for key in ("center_hz", "bandwidth_hz", "power_w", "gain_dbi"))
+                    or source["bandwidth_hz"] <= 0 or source["center_hz"] <= source["bandwidth_hz"] / 2
+                    or source["power_w"] <= 0):
+                raise ValueError("invalid frozen source identity, pose or RF fields")
+            identity = f"{source['id']}:{i}"
+            expected[identity] = dict(profile_id=f"source_segment_{i}", frequency_hz=source["center_hz"],
+                pattern=source["pattern"], position_m=source["position_m"], velocity_m_s=[0., 0., 0.],
+                orientation_rad=[*source["orientation_rad"], 0.], begin=interval["start_ns"], end=interval["stop_ns"])
+        if not expected:
+            raise ValueError("source bundle has no configured physical source segments")
+        checks["worker_source_inputs"] = True
+        profiles = [dict(id=value["profile_id"], frequency_hz=value["frequency_hz"], pattern=value["pattern"])
+                    for value in expected.values()]
+        result["expected_source_profiles"] = profiles
+        bindings = snapshot.get("source_bindings")
+        if not isinstance(bindings, list) or len(bindings) != len(expected):
+            raise ValueError("source binding count differs from the frozen source segments")
+        actual = {}
+        for binding in bindings:
+            if not isinstance(binding, dict) or binding.get("id") not in expected or binding["id"] in actual:
+                raise ValueError("unknown or duplicate physical source binding")
+            actual[binding["id"]] = binding
+        checks["worker_source_bindings"] = all(
+            all(binding.get(key) == expected[identity][key] for key in ("profile_id", "frequency_hz", "pattern"))
+            and number(binding.get("frequency_hz")) and mapping(binding.get("configured_pose")).get("scope") == "configuration_static"
+            and all(vector(mapping(binding.get("configured_pose")).get(key), 3)
+                    and binding["configured_pose"][key] == expected[identity][key]
+                    for key in ("position_m", "velocity_m_s", "orientation_rad"))
+            and type(binding.get("required_now")) is bool and integer(binding.get("worker_id"), 1)
+                for identity, binding in actual.items())
+        roles = snapshot.get("worker_roles")
+        if not isinstance(roles, list) or not integer(count, 1) or len(roles) != count:
+            raise ValueError("source worker roles do not cover the configured workers")
+        by_role, assigned, signatures = {}, set(), set()
+        for role in roles:
+            identity = role.get("worker_id") if isinstance(role, dict) else None
+            if not integer(identity) or identity >= count or identity in by_role or not unique_ids(role.get("source_ids")):
+                raise ValueError("invalid or duplicate source worker role")
+            by_role[identity] = role
+            if role.get("role") == "desired_full_mesh":
+                if identity != 0 or role["source_ids"]:
+                    raise ValueError("desired full-mesh worker has an emitter assignment")
+            elif role.get("role") == "emitter_batch":
+                signature = (role.get("frequency_hz"), role.get("pattern"))
+                if identity == 0 or not role["source_ids"] or signature in signatures:
+                    raise ValueError("source RF role is empty or shared across workers")
+                signatures.add(signature)
+                for source_id in role["source_ids"]:
+                    if source_id not in actual or source_id in assigned or actual[source_id].get("worker_id") != identity:
+                        raise ValueError("physical source does not match its assigned worker")
+                    if signature != (expected[source_id]["frequency_hz"], expected[source_id]["pattern"]):
+                        raise ValueError("source affinity differs from its frozen carrier/pattern")
+                    assigned.add(source_id)
+            elif role.get("role") != "idle" or identity == 0 or role["source_ids"]:
+                raise ValueError("invalid idle/source worker role")
+        checks["worker_source_roles"] = assigned == set(expected) and by_role[0].get("role") == "desired_full_mesh"
+        result["roles"] = by_role
+        max_age_ns = round(rt["channel_state_max_age_s"] * 1e9)
+        native_ns, host_ns = snapshot["cache_snapshot_native_ns"], snapshot["cache_snapshot_host_monotonic_ns"]
+
+        def emitter_valid(value, source, published_epoch=None):
+            value = mapping(value)
+            cap = n * rt["max_num_paths_per_src"]
+            calls = value.get("completed_calls")
+            ids, arrays = value.get("receiver_node_ids"), value.get("receiver_antenna_ids")
+            retained = value.get("last_retained_paths_per_receiver")
+            times = ("scene_prepare_ns", "solver_ns", "extraction_ns", "cache_publish_ns", "batch_ns", "max_batch_ns")
+            return (value.get("source_mode") == "emitter_batch" and value.get("bound") is True
+                and value.get("has_published_batch") is True and value.get("candidate_allocation_valid") is True
+                and value.get("pattern") == source["pattern"] and number(value.get("frequency_hz"))
+                and value["frequency_hz"] == source["frequency_hz"]
+                and type(value.get("configured_max_number_of_paths")) in (int, float)
+                and value["configured_max_number_of_paths"] == rt["max_number_of_paths"]
+                and all(integer(value.get(key)) and value[key] == wanted for key, wanted in (
+                    ("registered_receivers", n), ("configured_samples_per_source", rt["samples_per_src"]),
+                    ("configured_max_paths_per_source", rt["max_num_paths_per_src"]), ("configured_candidate_cap", cap),
+                    ("last_transmitter_count", 1), ("last_receiver_count", n), ("last_allocated_candidate_cap", cap),
+                    ("last_candidate_buffer_size", cap)))
+                and integer(calls, 1) and integer(value.get("attempted_calls"), 1) and value["attempted_calls"] == calls
+                and integer(value.get("generated_links")) and value["generated_links"] == calls * n
+                and type(value.get("candidate_capacity_reached_calls")) is int and value["candidate_capacity_reached_calls"] == 0
+                and integer(value.get("last_candidate_count")) and value["last_candidate_count"] < cap
+                and epoch(value.get("last_generated_ns")) and value["last_generated_ns"] <= native_ns
+                and (published_epoch is None or value["last_generated_ns"] == published_epoch)
+                and all(isinstance(items, list) and len(items) == n and all(integer(x) and x < 2**32 for x in items)
+                        and len(set(items)) == n for items in (ids, arrays))
+                and integer(value.get("source_node_id")) and value["source_node_id"] < 2**32 and value["source_node_id"] not in ids
+                and integer(value.get("source_antenna_id")) and value["source_antenna_id"] < 2**32 and value["source_antenna_id"] not in arrays
+                and integer(value.get("cache_read_calls")) and integer(value.get("cache_read_hits"), n)
+                and type(value.get("cache_read_misses")) is int and value["cache_read_misses"] == 0
+                and value["cache_read_calls"] == value["cache_read_hits"] + value["cache_read_misses"]
+                and isinstance(retained, list) and len(retained) == n
+                and all(integer(x) and x <= rt["max_number_of_paths"] for x in retained)
+                and all(vector(value.get("last_source_" + key), 3) and value["last_source_" + key] == source[key]
+                        for key in ("position_m", "velocity_m_s", "orientation_rad"))
+                and all(u64(value.get(key)) for key in times) and value["batch_ns"] > 0
+                and value["max_batch_ns"] >= value["batch_ns"]
+                and all(value[key] <= value["batch_ns"] for key in times[:4]))
+
+        caches_valid = ages_valid = producers_valid = live_valid = True
+        source_completed = 0
+        live_counts = {}
+        for identity, binding in actual.items():
+            source = expected[identity]
+            completed, cold, published, pairs_count, live = (binding.get(key) for key in (
+                "completed_jobs", "cold_warmup_jobs", "published_results", "published_pairs", "live_published_results"))
+            if not (integer(completed, 1) and integer(cold, 1) and integer(published, 1)
+                    and integer(pairs_count, 1) and integer(live) and cold + published <= completed
+                    and live <= published and pairs_count == published * n):
+                raise ValueError("invalid source completed/cold/published/live counters")
+            source_completed += completed
+            live_counts[identity] = live
+            published_ns, published_host = binding.get("last_published_sample_native_ns"), binding.get("last_published_sample_host_monotonic_ns")
+            if not (epoch(published_ns) and published_ns <= native_ns and integer(published_host, 1) and published_host <= host_ns
+                    and all(integer(binding.get(key), 1) for key in ("last_published_bundle_id", "last_published_request_id", "last_published_desired_request_id"))):
+                raise ValueError("source publication has missing/future original epochs")
+            producers_valid &= (emitter_valid(binding.get("last_emitter_batch_stats"), source)
+                and emitter_valid(binding.get("last_published_emitter_batch_stats"), source, published_ns))
+            cache = mapping(binding.get("cache"))
+            sample_now, host_now = binding.get("cache_snapshot_native_ns"), binding.get("cache_snapshot_host_monotonic_ns")
+            pair_list = cache.get("pairs")
+            valid = (epoch(sample_now) and sample_now == native_ns and integer(host_now, 1)
+                and integer(cache.get("accepted"), 1) and cache["accepted"] == pairs_count
+                and integer(cache.get("rejected"))
+                and isinstance(pair_list, list) and len(pair_list) == n)
+            seen = set()
+            for pair in pair_list if isinstance(pair_list, list) else []:
+                pair = mapping(pair); a, b = pair.get("first"), pair.get("second")
+                key = (a, b) if integer(a) and integer(b) else None
+                valid &= (key in {(peer, n) for peer in range(n)} and key not in seen
+                    and pair.get("source_request_id") == binding["last_published_request_id"]
+                    and type(pair.get("source_request_id")) is int and pair.get("sample_native_ns") == published_ns
+                    and type(pair.get("sample_native_ns")) is int and pair.get("sample_host_monotonic_ns") == published_host
+                    and type(pair.get("sample_host_monotonic_ns")) is int and epoch(pair.get("native_age_ns"))
+                    and pair["native_age_ns"] == sample_now - published_ns and epoch(pair.get("host_age_ns"))
+                    and published_host <= host_now and type(pair.get("valid")) is bool and type(pair.get("due")) is bool
+                    and isinstance(pair.get("reason"), str) and bool(pair["reason"]))
+                seen.add(key)
+            caches_valid &= valid and seen == {(peer, n) for peer in range(n)}
+            ages_valid &= (type(cache.get("misses")) is int and cache["misses"] == 0 and integer(cache.get("hits"))
+                and all(epoch(cache.get(key)) and cache[key] <= max_age_ns for key in (
+                    "maximum_hit_native_age_ns", "maximum_hit_host_age_ns")))
+            active_during_run = source["begin"] < native_ns and source["end"] > 0
+            live_valid &= not active_during_run or live > 0 and integer(cache.get("hits"), 1)
+        checks.update(worker_source_cache_provenance=caches_valid, worker_source_hit_ages=ages_valid,
+                      worker_source_live_path=live_valid)
+        result["live_published_results"] = live_counts
+        workers = mapping(snapshot.get("pool")).get("workers")
+        if not isinstance(workers, list) or len(workers) != count:
+            raise ValueError("missing actual source worker snapshots")
+        worker_total = 0
+        for worker in workers:
+            role = by_role[worker["worker_id"]]
+            emitted = sum(actual[sid]["completed_jobs"] for sid in role["source_ids"])
+            expected_completed = snapshot["completed_jobs"] if role["role"] == "desired_full_mesh" else emitted
+            producers_valid &= (integer(worker.get("completed")) and worker["completed"] == expected_completed
+                and type(worker.get("emitter_batch_completed_jobs")) is int and worker["emitter_batch_completed_jobs"] == emitted)
+            contexts = mapping(worker.get("ready")).get("source_profile_contexts")
+            for source_id in role["source_ids"]:
+                source = expected[source_id]
+                matching = [row for row in contexts if isinstance(row, dict)
+                    and row.get("frequency_hz") == source["frequency_hz"] and row.get("pattern") == source["pattern"]] if isinstance(contexts, list) else []
+                for key in ("last_emitter_batch_stats", "last_published_emitter_batch_stats"):
+                    stats_record = mapping(actual[source_id].get(key))
+                    producers_valid &= (len(matching) == 1 and all(stats_record.get(field) == matching[0].get(field)
+                        for field in ("source_node_id", "source_antenna_id")))
+            worker_total += worker["completed"]
+        checks["worker_source_producers"] = producers_valid
+        checks["worker_source_totals"] = (integer(snapshot.get("total_completed_jobs"), 1)
+            and snapshot["total_completed_jobs"] == snapshot["completed_jobs"] + source_completed == worker_total
+            and integer(snapshot.get("total_submitted_jobs"), 1)
+            and snapshot["total_submitted_jobs"] >= snapshot["total_completed_jobs"])
+        bundle = mapping(snapshot.get("bundle")); last = mapping(bundle.get("last_committed"))
+        if not isinstance(bundle.get("pending"), dict):
+            raise ValueError("pending source bundle must be an explicit mapping")
+        pending = bundle["pending"]
+        wanted = set(expected)
+
+        def required_sets(frame, lookahead):
+            # Before the observed native anchor, main conservatively requires
+            # all bindings. At its exact tick either event order is possible.
+            anchor_ns = evidence["anchor"]["simulation_ns"]
+            if frame < anchor_ns:
+                return [wanted]
+            selected = {sid for sid, source in expected.items()
+                        if source["begin"] <= frame + lookahead and frame < source["end"]}
+            return [wanted, selected] if frame == anchor_ns else [selected]
+
+        def original_epochs(frame):
+            values = frame.get("pose_sample_host_ns")
+            return (isinstance(values, list) and len(values) == n and all(integer(value, 1)
+                and value <= frame["sample_host_monotonic_ns"] for value in values))
+
+        if not (integer(last.get("id"), 1) and epoch(last.get("sample_native_ns")) and last["sample_native_ns"] <= native_ns
+                and integer(last.get("sample_host_monotonic_ns"), 1) and last["sample_host_monotonic_ns"] <= host_ns
+                and integer(last.get("desired_request_id"), 1) and epoch(last.get("required_lookahead_ns"))
+                and type(last.get("bootstrap")) is bool and unique_ids(last.get("required_source_ids"))):
+            raise ValueError("missing/malformed last committed bundle epochs or identities")
+        required = set(last["required_source_ids"])
+        expected_required = [wanted] if last["bootstrap"] else required_sets(last["sample_native_ns"], last["required_lookahead_ns"])
+        observations = last.get("required_observations")
+        observation_ids = [row.get("id") for row in observations] if isinstance(observations, list) else []
+        observations_valid = (unique_ids(observation_ids) and set(observation_ids) == wanted
+            and all(type(row.get("required")) is bool and row["required"] == (row["id"] in required)
+                    and row.get("reason") == ("bootstrap_force_all" if last["bootstrap"] else "schedule_callback") for row in observations))
+        requests = last.get("source_requests")
+        request_ids = [row.get("id") for row in requests] if isinstance(requests, list) else []
+        joint_request_ids = [row.get("request_id") for row in requests] if isinstance(requests, list) else []
+        joint_epochs = (unique_ids(request_ids) and set(request_ids) == required
+            and all(integer(value, 1) for value in joint_request_ids)
+            and len(set(joint_request_ids + [last["desired_request_id"]])) == len(joint_request_ids) + 1
+            and all(integer(row.get("request_id"), 1) and actual[row["id"]]["last_published_request_id"] == row["request_id"]
+                    for row in requests)
+            and all(actual[sid]["last_published_bundle_id"] == last["id"]
+                and actual[sid]["last_published_desired_request_id"] == last["desired_request_id"]
+                and actual[sid]["last_published_sample_native_ns"] == last["sample_native_ns"]
+                and actual[sid]["last_published_sample_host_monotonic_ns"] == last["sample_host_monotonic_ns"] for sid in required)
+            and all(pair.get("source_request_id") == last["desired_request_id"]
+                and pair.get("sample_native_ns") == last["sample_native_ns"]
+                and pair.get("sample_host_monotonic_ns") == last["sample_host_monotonic_ns"]
+                    for pair in mapping(snapshot.get("cache")).get("pairs", [])))
+        checks["worker_source_bundle"] = (bundle.get("enabled") is True
+            and bundle.get("policy") == "desired_and_required_emitters_before_pose_notify"
+            and bundle.get("atomicity") == "observable_without_internal_rollback_on_failure"
+            and integer(bundle.get("submitted"), 1) and integer(bundle.get("committed"), 1)
+            and bundle["committed"] == snapshot.get("committed_pose_frames") == snapshot.get("published_results")
+            and snapshot.get("published_pairs") == bundle["committed"] * n * (n - 1) // 2
+            and type(bundle.get("failed_before_notify")) is int and bundle["failed_before_notify"] == 0
+            and unique_ids(bundle.get("last_committed_required_source_ids"))
+            and set(bundle["last_committed_required_source_ids"]) == required and required in expected_required
+            and required <= wanted and observations_valid and joint_epochs)
+        pending_valid = not pending
+        if pending:
+            pending_valid = (integer(pending.get("id"), 1) and pending["id"] > last["id"]
+                and epoch(pending.get("sample_native_ns")) and last["sample_native_ns"] <= pending["sample_native_ns"] <= native_ns
+                and integer(pending.get("sample_host_monotonic_ns"), 1) and last["sample_host_monotonic_ns"] <= pending["sample_host_monotonic_ns"] <= host_ns
+                and epoch(pending.get("required_lookahead_ns"))
+                and unique_ids(pending.get("required_source_ids"))
+                and set(pending["required_source_ids"]) in required_sets(pending["sample_native_ns"], pending["required_lookahead_ns"])
+                and unique_ids(pending.get("source_ready_ids")) and set(pending["source_ready_ids"]) <= set(pending["required_source_ids"])
+                and type(pending.get("desired_ready")) is bool and pending.get("cold_warmup") is False and pending.get("bootstrap") is False)
+        checks["worker_source_pending"] = (pending_valid and bundle.get("submitted") == last["id"] + bool(pending)
+            and bundle.get("submitted") == bundle.get("committed", 0) + snapshot.get("cold_warmup_jobs", 0) + bool(pending))
+        checks["worker_source_original_epochs"] = original_epochs(last) and (not pending or original_epochs(pending))
+        lookahead = mapping(snapshot.get("prefetch")).get("lead_ns")
+        checks["worker_source_required_windows"] = (epoch(lookahead)
+            and {sid for sid, binding in actual.items() if binding.get("required_now") is True}
+                in required_sets(native_ns, lookahead))
+    except (ValueError, TypeError, KeyError, OverflowError, AttributeError) as error:
+        result["error"] = str(error)
+    return result
+
+
+def native_rt_worker_contract(stats: dict[str, Any], scenario_config: dict[str, Any], *,
+                              run_dir: Path | None = None) -> dict[str, Any]:
     """Validate observed worker/cache participation for the configured 1..5 UAVs."""
     from scripts.product.native_rt_workers import VERSIONS
 
-    def mapping(value):
-        return value if isinstance(value, dict) else {}
-
-    def integer(value, minimum=0):
-        return type(value) is int and value >= minimum
-
-    def number(value):
-        try:
-            return type(value) in (int, float) and math.isfinite(value)
-        except OverflowError:
-            return False
-
-    def same(observed, expected):
-        if type(expected) is bool:
-            return observed is expected
-        return (number(observed) and number(expected)
-                and math.isclose(observed, expected, rel_tol=1e-12, abs_tol=1e-12))
+    mapping, integer, number, same = _contract_mapping, _contract_integer, _contract_number, _contract_same
 
     radio, rt = mapping(scenario_config.get("radio")), mapping(scenario_config.get("sionna"))
     snapshot = mapping(stats.get("sionna_rt_workers"))
@@ -398,6 +722,13 @@ def native_rt_worker_contract(stats: dict[str, Any], scenario_config: dict[str, 
     count, workers = rt.get("worker_count", 3), pool.get("workers")
     full_mesh = rt.get("receiver_batch_mode") == "full_mesh"
     desired_mode = "full_mesh" if full_mesh else "receiver_batch"
+    source_requested = (snapshot.get("source_bindings") not in (None, [])
+        or mapping(snapshot.get("bundle")).get("enabled", False) is not False)
+    if isinstance(workers, list):
+        source_requested |= any("source_profiles" in mapping(mapping(item.get("ready")).get("applied_config"))
+                                for item in workers if isinstance(item, dict))
+    source_requested |= run_dir is not None and (Path(run_dir) / "logs/native_sources.json").exists()
+    source_proof = _native_rt_source_contract(stats, rt, cohort, run_dir) if source_requested else None
 
     scene_hash = None
     reference = mapping(scenario_config.get("map")).get("scene_xml")
@@ -467,8 +798,10 @@ def native_rt_worker_contract(stats: dict[str, Any], scenario_config: dict[str, 
         state_age_ns = (round(state_age_s * 1e9)
                         if number(state_age_s) and 0 < state_age_s <= .5 else None)
         committed, applied = snapshot.get("committed_pose_frames"), pose_application.get("applied_snapshots")
+        expected_pose_policy = ("with_full_mesh_and_required_emitters" if source_proof is not None
+                                else "with_full_mesh_result")
         checks["worker_full_mesh_pose_commit"] = (
-            snapshot.get("pose_commit_policy") == "with_full_mesh_result"
+            snapshot.get("pose_commit_policy") == expected_pose_policy
             and pose_application.get("mode") == "coherent_rt"
             and integer(committed, 1) and integer(applied, 1)
             and integer(snapshot.get("published_results"), 1)
@@ -479,6 +812,11 @@ def native_rt_worker_contract(stats: dict[str, Any], scenario_config: dict[str, 
             and pose_application["state_max_age_ns"] == state_age_ns
             and integer(pose_application.get("maximum_applied_pose_age_ns"))
             and pose_application["maximum_applied_pose_age_ns"] <= state_age_ns)
+    if source_proof is not None:
+        checks.update(source_proof["checks"])
+        checks["worker_source_bundle_mode"] = full_mesh
+        checks["worker_source_prefetch_method"] = (
+            mapping(snapshot.get("prefetch")).get("method") == "coherent_pose_and_source_bundles")
 
     def full_mesh_stats_valid(value):
         """SDK11 counters prove the selected operation, not MC/physical accuracy."""
@@ -541,9 +879,11 @@ def native_rt_worker_contract(stats: dict[str, Any], scenario_config: dict[str, 
             applied_radio = mapping(config.get("radio"))
             applied_solver = mapping(applied_radio.get("solver"))
             identity, pid = item.get("worker_id"), item.get("pid")
+            role = mapping(source_proof["roles"].get(identity)) if source_proof is not None and integer(identity) else {}
+            idle = role.get("role") == "idle"
             valid = (integer(identity) and identity < count and identity not in identities
                 and integer(pid, 1) and pid not in pids and item.get("failed") is None
-                and integer(item.get("completed"), 1) and type(ready.get("schema")) is int
+                and integer(item.get("completed"), 0 if idle else 1) and type(ready.get("schema")) is int
                 and ready["schema"] == 1 and ready.get("kind") == "ready"
                 and ready.get("worker_id") == identity and ready.get("pid") == pid
                 and ready.get("versions") == VERSIONS and str(ready.get("mitsuba_variant", "")).startswith("cuda")
@@ -554,6 +894,25 @@ def native_rt_worker_contract(stats: dict[str, Any], scenario_config: dict[str, 
                 and scene_hash is not None and mapping(config.get("scene")).get("sha256") == scene_hash
                 and all(same(applied_radio.get(key), value) for key, value in expected_radio.items())
                 and all(same(applied_solver.get(key), rt.get(key)) for key in solver_fields))
+            if source_proof is not None:
+                profiles = source_proof["expected_source_profiles"]
+                groups = {}
+                for profile in profiles:
+                    groups.setdefault((profile["frequency_hz"], profile["pattern"]), []).append(profile["id"])
+                contexts = ready.get("source_profile_contexts")
+                seen_contexts, contexts_valid = set(), isinstance(contexts, list)
+                for context in contexts if isinstance(contexts, list) else []:
+                    context = mapping(context)
+                    key = ((context.get("frequency_hz"), context.get("pattern"))
+                           if number(context.get("frequency_hz")) and context.get("pattern") in ("iso", "tr38901") else None)
+                    contexts_valid &= (key in groups and key not in seen_contexts
+                        and number(context.get("frequency_hz")) and context.get("profile_ids") == groups.get(key)
+                        and integer(context.get("source_node_id")) and integer(context.get("source_antenna_id"))
+                        and context.get("source_modes") == ["pairwise", "emitter_batch"])
+                    seen_contexts.add(key)
+                valid &= (config.get("source_profiles") == profiles and type(ready.get("source_profile_count")) is int
+                    and ready["source_profile_count"] == len(profiles) and contexts_valid and seen_contexts == set(groups)
+                    and ready.get("source_model_frequencies_hz") == sorted({key[0] for key in groups}))
             profiles_valid &= valid
             if integer(identity): identities.add(identity)
             if integer(pid, 1): pids.add(pid)
@@ -561,6 +920,9 @@ def native_rt_worker_contract(stats: dict[str, Any], scenario_config: dict[str, 
             if full_mesh:
                 completed = item.get("full_mesh_completed_jobs")
                 observed_stats = mapping(item.get("last_full_mesh_stats"))
+                if source_proof is not None and role.get("role") != "desired_full_mesh":
+                    full_mesh_producers &= type(completed) is int and completed == 0 and not observed_stats
+                    continue
                 full_mesh_producers &= (integer(completed, 1) and completed == item.get("completed")
                                         and full_mesh_stats_valid(observed_stats))
                 if integer(completed):
@@ -573,7 +935,7 @@ def native_rt_worker_contract(stats: dict[str, Any], scenario_config: dict[str, 
                 and snapshot["full_mesh_completed_jobs"] == snapshot.get("completed_jobs") == full_mesh_count)
             checks["worker_full_mesh_snapshot_stats"] = (full_mesh_stats_valid(snapshot.get("last_full_mesh_stats"))
                 and snapshot["last_full_mesh_stats"] in producer_stats)
-            if all(full_mesh_stats_valid(item) for item in producer_stats):
+            if producer_stats and all(full_mesh_stats_valid(item) for item in producer_stats):
                 latest_epoch = max(item["last_generated_ns"] for item in producer_stats)
                 cached_pairs = cache.get("pairs")
                 checks["worker_full_mesh_epoch_coverage"] = (isinstance(cached_pairs, list)
@@ -601,11 +963,13 @@ def native_rt_worker_contract(stats: dict[str, Any], scenario_config: dict[str, 
     return {"passed": all(checks.values()), "checks": checks,
             "rejection_reasons": [name for name, passed in checks.items() if not passed],
             "expected_worker_count": count, "expected_cohort": cohort, "scene_sha256": scene_hash,
-            "expected_desired_mode": desired_mode, "full_mesh_sampling_equivalence": "not_evaluated" if full_mesh else None}
+            "expected_desired_mode": desired_mode, "full_mesh_sampling_equivalence": "not_evaluated" if full_mesh else None,
+            "source_bundle": {key: value for key, value in source_proof.items() if key not in ("roles", "expected_source_profiles")}
+                             if source_proof is not None else None}
 
 
 def native_product_runtime_contract(
-    stats: dict[str, Any], scenario_config: dict[str, Any]
+    stats: dict[str, Any], scenario_config: dict[str, Any], *, run_dir: Path | None = None
 ) -> dict[str, Any]:
     """Validate the selected native Wi-Fi runtime, including explicit geometry mode."""
 
@@ -747,7 +1111,7 @@ def native_product_runtime_contract(
         if requested_mode == "worker_pool" or observed_mode == "worker_pool":
             exact.pop("sionna_in_process")
             exact["sionna_out_of_process"] = stats.get("sionna_in_process") is False
-            workers = native_rt_worker_contract(stats, scenario_config)
+            workers = native_rt_worker_contract(stats, scenario_config, run_dir=run_dir)
             exact["worker_pool_runtime_contract"] = workers["passed"]
     return {"passed": all(exact.values()), "checks": exact,
             "propagation_profile": stats.get("selected_propagation_profile", "sionna"),
@@ -3982,7 +4346,7 @@ def main() -> int:
     agents = agent_records(run_dir)
 
     topology = build_topology(run_dir, stats)
-    native_contract = native_product_runtime_contract(stats, scenario_config)
+    native_contract = native_product_runtime_contract(stats, scenario_config, run_dir=run_dir)
     mobility = build_mobility(run_dir, events)
     mavlink = build_mavlink(scenario)
     p2p = build_p2p(scenario, agents)
