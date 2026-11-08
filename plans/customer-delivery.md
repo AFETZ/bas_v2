@@ -289,6 +289,28 @@ max 0,684 мс, CIR→PSD total 450 мс, reader total 341 мс (включая 
 Добавлены ограниченные aggregate wall/thread-CPU замеры LogEvent/ReadPhase/flush;
 следующий шаг — целевая сборка и повтор того же trace-контроля, затем исправление
 измеренной причины. Исторический metrics_only успех не заменяет эту проверку.
+Нагрузочный downlink `flows.payload_load` реализован штатным MAVLink TUNNEL через
+существующий BSF1/общий канал, без нового транспорта. `5be6c3f`: 451 tests (450 pass,
+1 skip), полный N=1 `delivery-payload-n1-1kbps-20261108-01` completed / succeeded / valid.
+Измерено 157/157 уникальных полезных сообщений, 1004,8 полезных бит/с за точное окно
+20 с; малое превышение requested 1000 связано с целым числом сообщений.
+Это прежний PTY без software baud pacing, не аппаратная задержка или SLA класса.
+Первый анализ отклонил несовпадение planned 20,000 с и фактической фазы 20,002 с.
+`57ac639` проверяет точный frozen load schedule внутри наблюдаемого окна;
+real UDP/BSF1/OS pipe regression RED→GREEN, 29 target tests и отдельный analysis-02
+подтвердили generator/lineage eligibility. Оба анализа сохранены в
+`control/delivery-fixed-path-storage-runtime-20261108/payload-n1-1kbps-analysis-{01,02}/`.
+N=1 10kbps `…-01` остановлен до нагрузки по host_sample_expired; класс не проверен.
+`50c780b` применяет baud budget только к доказанному Linux PTY в uart-adapter;
+реальный TTY paced драйвером. Общий SerialBaudBudget не считает BSF1/IP, сохраняет
+timestamps, отдельные duplex clocks, bounded batch/credit и partial/EAGAIN/stop.
+На ПК4 10 tests прошли, включая два одновременных production PTY 57600/115200,
+wire-time floor, partial writes и SIGTERM перед выдачей обеих очередей:
+`checks-13-command.json`, `development-paced-01/`. Это software boundary без RF/hardware.
+Тот же budget подключён к владельцу control UART в coordination service, с сохранением
+UARTAdmission/lease/deadline, FIFO HOLD→LAND и явным invalid при потере frame continuity.
+106 локальных tests прошли, один Linux control-PTY тест ожидает целевого запуска.
+Следующий шаг этого среза — Linux control-PTY, общий regression и новый полный N=1/5.
 `0e8910a` добавил per-offer payload lineage через существующий BSF1, оба направления,
 исходные byte refs и actual OS write-end; loss/duplicate/censor сохраняются в анализе.
 Linux dual-PTY на `38bb2aa` проверил оба production adapter одновременно:

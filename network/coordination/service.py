@@ -25,7 +25,7 @@ from typing import Any
 from .policy import (AdmissionGate, Authority, Command, Grant, MAX_DATAGRAM_BYTES,
                      ProtocolError, UARTAdmission, decode, encode, make_command)
 from network.scripts.serial_transport import (Encoder, Reassembler, decode_chunk, radio_is_live,
-                                             parse_mavlink_with_provenance)
+                                             parse_mavlink_with_provenance, SerialBaudBudget)
 
 
 UAV_IDS = tuple(range(1, 6))
@@ -109,6 +109,8 @@ class Network:
             raise ProtocolError("destination is outside the configured UAV roster")
         self.guard_radio()
         raw = encode(kind, self.index, body)
+        if not self.running:
+            return False
         try:
             self.udp.sendto(raw, (endpoint_ip(destination), self.args.port))
         except BlockingIOError:
@@ -188,15 +190,28 @@ class UAVService(Network):
     def __init__(self, args, emit):
         super().__init__(args, args.uav_id, emit)
         self.uart = configure_uart(args.tty)
+        from communication_vertical import uart_timing  # configure_uart adds the existing scripts path.
+        self.uart_timing = uart_timing(self.uart, 115200, 192)
+        paced = self.uart_timing['owner'] == 'software_pty'
+        self.uart_up_budget = SerialBaudBudget(115200, self.uart_timing['bits_per_byte']) if paced else None
+        self.uart_down_budget = SerialBaudBudget(115200, self.uart_timing['bits_per_byte']) if paced else None
+        self.uart_registered = True
+        self.telemetry_pending = None  # One raw <=192-byte read with its original epoch, never a transport queue.
+        self.uart_stream_provenance = deque()
+        self.uart_input_bytes = self.uart_output_bytes = self.uart_telemetry_age_drops = 0
+        self.uart_io_blocked, self.uart_backpressure_events = False, 0
+        self.uart_continuity_valid = True
         self.selector.register(self.uart, selectors.EVENT_READ, "uart")
         self.mavutil = mavlink_api()
         self.mav = self.mavutil.mavlink.MAVLink(None, srcSystem=255, srcComponent=190)
         self.gate = AdmissionGate(args.run_id, self.index, now_ns=time.monotonic_ns,
                                   hold=self.request_hold, emit=emit,
                                   max_command_age_ns=int(args.command_max_age_ms * 1e6))
-        self.admission = UARTAdmission(self.gate, self.write_uart, emit=emit)
+        self.admission = UARTAdmission(self.gate, self.write_uart, emit=self.admission_event)
         self.encoder = Encoder(channel="control", uav_id=self.index, direction="uart_to_gcs")
         self.hold_pending: bytes | None = None
+        self.hold_offset = 0
+        self.hold_created_ns = 0
         self.last_hold_ns = 0
         self.hold_confirmed = True
         self.latest_autopilot_mode: dict | None = None
@@ -206,18 +221,75 @@ class UAVService(Network):
 
     def write_uart(self, data: bytes) -> int:
         self.guard_radio()
-        return os.write(self.uart, data)
+        if not getattr(self, 'running', True):
+            raise BlockingIOError('control UART stopped')
+        budget = getattr(self, 'uart_down_budget', None)
+        if budget:
+            self.sync_uart_down(time.monotonic_ns())
+            data = data[:budget.max_batch_bytes]
+            if budget.available(time.monotonic_ns()) < len(data):
+                raise BlockingIOError('control UART is waiting for its wire budget')
+        try:
+            written = os.write(self.uart, data)
+        except BlockingIOError:
+            self.uart_io_blocked = True
+            self.uart_backpressure_events = getattr(self, 'uart_backpressure_events', 0) + 1
+            raise
+        ended = time.monotonic_ns()
+        if not written:
+            self.uart_io_blocked = True
+            self.uart_backpressure_events = getattr(self, 'uart_backpressure_events', 0) + 1
+            raise BlockingIOError('control UART accepted no bytes')
+        self.uart_io_blocked = False
+        if budget:
+            budget.consume(written, ended)
+        self.uart_output_bytes = getattr(self, 'uart_output_bytes', 0) + written
+        return written
+
+    def pending_uart_bytes(self):
+        commands = sum(len(row[0].payload) - row[2] for row in self.admission.queue)
+        return commands + (len(self.hold_pending) - getattr(self, 'hold_offset', 0) if self.hold_pending else 0)
+
+    def sync_uart_down(self, now, *, reset=False):
+        budget = getattr(self, 'uart_down_budget', None)
+        if budget:
+            if reset:
+                budget.reset(now)
+            count = self.pending_uart_bytes()
+            if count:
+                budget.start(now, queued_bytes=count)
+            else:
+                budget.reset(now)
+                self.uart_io_blocked = False
+
+    def admission_event(self, event, **fields):
+        if event == 'uart_write_invalidated':
+            self.uart_continuity_valid = False
+        if event in ('command_rejected', 'uart_write_invalidated'):
+            self.sync_uart_down(time.monotonic_ns(), reset=True)
+        self.emit(event, **fields)
+
+    def invalidate_hold(self, reason):
+        self.uart_continuity_valid = False
+        self.emit('hold_write_invalidated', reason=reason, bytes=getattr(self, 'hold_offset', 0),
+                  remaining_bytes=len(self.hold_pending or b'') - getattr(self, 'hold_offset', 0))
+        raise RuntimeError('control UART HOLD continuity invalid: ' + reason)
 
     def request_hold(self):
         if self.preserve_autonomous_landing():
             self.last_hold_ns = time.monotonic_ns()
             return
+        if self.hold_pending is not None and getattr(self, 'hold_offset', 0):
+            return  # Finish the already started frame; a retry may not replace its suffix.
         modes = {name: number for number, name in self.mavutil.mode_mapping_acm.items()}
         if "BRAKE" not in modes:
             raise RuntimeError("pinned ArduCopter dialect has no BRAKE mode mapping")
         message = self.mav.set_mode_encode(self.index,
                     self.mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, modes["BRAKE"])
         self.hold_pending = message.pack(self.mav)
+        self.hold_offset = 0
+        self.hold_created_ns = time.monotonic_ns()
+        self.sync_uart_down(self.hold_created_ns, reset=True)
         self.mav.seq = (self.mav.seq + 1) % 256
         self.hold_confirmed = False
         self.last_hold_ns = time.monotonic_ns()
@@ -229,7 +301,11 @@ class UAVService(Network):
         preserve = (observed is not None and observed["mode"] == "LAND"
                     and 0 <= now - observed["received_host_monotonic_ns"] <= AUTOPILOT_MODE_MAX_AGE_NS)
         if preserve:
+            if self.hold_pending is not None and getattr(self, 'hold_offset', 0):
+                self.invalidate_hold('observed_LAND_after_HOLD_prefix')
             self.hold_pending = None
+            self.hold_offset = 0
+            self.sync_uart_down(now, reset=True)
             if not self.hold_suppressed_for_land:
                 self.emit("hold_suppressed", reason="observed_autonomous_landing", **observed)
             self.hold_suppressed_for_land = True
@@ -238,20 +314,43 @@ class UAVService(Network):
         return preserve
 
     def write_hold(self):
-        if self.hold_pending is None:
-            return
+        if self.hold_pending is None or not getattr(self, 'running', True):
+            return False
         if self.preserve_autonomous_landing():
-            return
+            return True
         if self.admission.queue and self.admission.queue[0][2]:
-            raise RuntimeError("cannot insert HOLD into a partially written command")
+            return False  # The existing UARTAdmission owns completion/fencing of its prefix.
+        offset = getattr(self, 'hold_offset', 0)
+        now = time.monotonic_ns()
+        deadline = int(getattr(self.args, 'command_max_age_ms', 250) * 1e6) if hasattr(self, 'args') else 250_000_000
+        created = getattr(self, 'hold_created_ns', now)
+        if now - created > deadline:
+            if offset:
+                self.invalidate_hold('HOLD_deadline_after_partial_write')
+            self.emit('hold_expired_before_write', requested_host_monotonic_ns=created)
+            self.hold_pending = None
+            self.request_hold()
+            return True
         try:
-            size = self.write_uart(self.hold_pending)
+            size = self.write_uart(self.hold_pending[offset:])
         except BlockingIOError:
-            return
-        if size != len(self.hold_pending):
-            raise RuntimeError("partial native HOLD write")
-        self.emit("hold_uart_written", bytes=size, requested_mode="BRAKE")
+            return False
+        if type(size) is not int or not 0 < size <= len(self.hold_pending) - offset:
+            self.invalidate_hold('invalid_HOLD_write_result')
+        self.hold_offset = offset + size
+        if time.monotonic_ns() - created > deadline:
+            self.invalidate_hold('HOLD_deadline_crossed_during_write')
+        if self.hold_offset < len(self.hold_pending):
+            self.emit('hold_uart_write_progress', bytes=self.hold_offset,
+                      remaining_bytes=len(self.hold_pending) - self.hold_offset,
+                      requested_host_monotonic_ns=created)
+            return True
+        self.emit("hold_uart_written", bytes=self.hold_offset, requested_mode="BRAKE",
+                  requested_host_monotonic_ns=created)
         self.hold_pending = None
+        self.hold_offset = 0
+        self.sync_uart_down(time.monotonic_ns())
+        return True
 
     def command(self, sender: int, command: Command):
         if command.destination_id not in self.uav_ids:
@@ -270,29 +369,35 @@ class UAVService(Network):
             sender = self.index
         self.emit("follower_receive", command=command)
         self.admission.enqueue(command, sender_id=sender)
+        self.sync_uart_down(time.monotonic_ns())
 
-    def telemetry(self, raw: bytes):
+    def telemetry(self, raw: bytes, *, provenance=None):
         now = time.monotonic_ns()
-        self.emit("uart_observed", bytes=len(raw), payload_sha256=hashlib.sha256(raw).hexdigest())
-        for message in self.uart_parser.parse_buffer(raw) or []:
+        producer, active = (now, self.gate.active_grant()) if provenance is None else provenance
+        self.emit("uart_observed", bytes=len(raw), producer_ns=producer,
+                  payload_sha256=hashlib.sha256(raw).hexdigest())
+        if not hasattr(self, 'uart_stream_provenance'):
+            self.uart_stream_provenance = deque()
+        for message, spans in parse_mavlink_with_provenance(self.uart_parser, self.uart_stream_provenance, raw, producer):
             if (message.get_type() == "HEARTBEAT" and message.get_srcSystem() == self.index
                     and message.get_srcComponent() == 1):  # MAV_COMP_ID_AUTOPILOT1
                 mode = self.mavutil.mode_string_v10(message)
                 self.latest_autopilot_mode = dict(mode=mode, custom_mode=int(message.custom_mode),
                     base_mode=int(message.base_mode),
                     armed=bool(message.base_mode & self.mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED),
-                    received_host_monotonic_ns=now)
+                    received_host_monotonic_ns=min(tag for tag, _, _ in spans),
+                    uart_release_host_monotonic_ns=now)
                 self.emit("autopilot_mode_observed", **self.latest_autopilot_mode)
-                if mode == "BRAKE" and not self.hold_confirmed:
+                if (mode == "BRAKE" and not self.hold_confirmed
+                        and self.latest_autopilot_mode['received_host_monotonic_ns'] >= getattr(self, 'hold_created_ns', 0)):
                     self.hold_confirmed = True
                     self.emit("hold_mode_observed", mode=mode)
-        active = self.gate.active_grant()
-        if active is None:
+        if active is None or not active.valid_from_ns <= producer <= now < active.valid_until_ns:
             return
-        for datagram in self.encoder.encode(raw, sent_monotonic_ns=now):
+        for datagram in self.encoder.encode(raw, sent_monotonic_ns=producer):
             body = dict(run_id=self.args.run_id, origin_id=self.index,
                         leader_id=active.leader_id, epoch=active.epoch,
-                        grant_sequence=active.grant_sequence, producer_ns=now, payload=datagram)
+                        grant_sequence=active.grant_sequence, producer_ns=producer, payload=datagram)
             self.send("telemetry", body, 0 if active.leader_id == self.index else active.leader_id)
 
     def handle(self, packet):
@@ -328,7 +433,80 @@ class UAVService(Network):
                 self.emit("relay_return", uav_id=sender, origin_id=sender,
                           leader_id=self.index, epoch=active.epoch)
 
+    def watch_uart(self, enabled):
+        if enabled and not self.uart_registered:
+            self.selector.register(self.uart, selectors.EVENT_READ, 'uart')
+        elif self.uart_registered and not enabled:
+            self.selector.unregister(self.uart)
+        self.uart_registered = enabled
+
+    def read_uart(self):
+        if not self.running or self.telemetry_pending is not None:
+            return
+        budget = self.uart_up_budget
+        try:
+            raw = os.read(self.uart, budget.max_batch_bytes if budget else 4096)
+        except BlockingIOError:
+            return
+        if not raw:
+            raise RuntimeError('UART closed')
+        producer = time.monotonic_ns()
+        self.uart_input_bytes += len(raw)
+        if budget:
+            self.telemetry_pending = (raw, producer, self.gate.active_grant())
+            budget.start(producer, queued_bytes=len(raw))
+            self.watch_uart(False)
+        else:
+            self.telemetry(raw)
+
+    def drain_telemetry(self):
+        if not self.running or self.telemetry_pending is None:
+            return
+        raw, producer, grant = self.telemetry_pending
+        now = time.monotonic_ns()
+        if now - producer > self.args.telemetry_max_age_ms * 1e6:
+            self.uart_telemetry_age_drops += len(raw)
+            self.emit('uart_telemetry_pacing_drop', bytes=len(raw), producer_ns=producer,
+                      reason='original_telemetry_age_deadline')
+        elif self.uart_up_budget.available(now) < len(raw):
+            return
+        else:
+            self.uart_up_budget.consume(len(raw), now)
+            self.telemetry(raw, provenance=(producer, grant))
+        self.telemetry_pending = None
+        self.uart_up_budget.reset(time.monotonic_ns())
+        self.watch_uart(True)
+
+    def drain_uart(self):
+        for _ in range(64):
+            if not self.running:
+                return
+            partial_command = self.admission.queue and self.admission.queue[0][2]
+            progress = (self.write_hold() if self.hold_pending is not None and not partial_command
+                        else self.admission.drain_one())
+            self.sync_uart_down(time.monotonic_ns())
+            if not progress:
+                return
+
+    def uart_wait(self, now):
+        timeout = .01
+        if self.uart_up_budget and self.telemetry_pending:
+            timeout = min(timeout, self.uart_up_budget.wait_ns(len(self.telemetry_pending[0]), now) / 1e9)
+        if self.uart_down_budget:
+            queue = self.admission.queue
+            if self.hold_pending and not (queue and queue[0][2]):
+                size = len(self.hold_pending) - self.hold_offset
+            else:
+                size = len(queue[0][0].payload) - queue[0][2] if queue else 0
+            if size:
+                wait_ns = self.uart_down_budget.wait_ns(min(size, self.uart_down_budget.max_batch_bytes), now)
+                if wait_ns or not getattr(self, 'uart_io_blocked', False):
+                    timeout = min(timeout, wait_ns / 1e9)
+        return timeout
+
     def step(self):
+        if not self.running:
+            return
         self.guard_radio()
         now = time.monotonic_ns()
         self.periodic(now)
@@ -336,23 +514,46 @@ class UAVService(Network):
         if (not self.hold_confirmed and self.gate.active_grant() is None
                 and now - self.last_hold_ns >= 500_000_000):
             self.request_hold()  # retry native request until observed mode; no fake success
-        self.write_hold()
-        for _ in range(64):
-            if not self.admission.drain_one():
+        self.drain_uart()
+        self.drain_telemetry()
+        for key, _ in self.selector.select(self.uart_wait(time.monotonic_ns())):
+            if not self.running:
                 break
-        for key, _ in self.selector.select(.01):
             if key.data == "radio":
                 try:
                     self.handle(self.receive())
                 except ProtocolError as exc:
                     self.emit("packet_rejected", reason=str(exc))
             else:
-                raw = os.read(self.uart, 4096)
-                if not raw:
-                    raise RuntimeError("UART closed")
-                self.telemetry(raw)
+                self.read_uart()
 
     def close(self):
+        self.running = False
+        partial = sum(row[2] for row in self.admission.queue)
+        if partial or self.hold_offset:
+            self.uart_continuity_valid = False
+        if partial:
+            command, _, offset, checked = self.admission.queue[0]
+            self.emit('uart_write_invalidated', command=command, bytes=offset,
+                      uart_write_started_host_monotonic_ns=checked, reason='service_stopped_with_partial_UART_frame')
+        if self.hold_offset:
+            self.emit('hold_write_invalidated', bytes=self.hold_offset,
+                      remaining_bytes=len(self.hold_pending) - self.hold_offset,
+                      reason='service_stopped_with_partial_UART_frame')
+        self.emit('uart_pacing_summary', uart_timing=self.uart_timing,
+                  uart_to_radio=self.uart_up_budget.snapshot() if self.uart_up_budget else None,
+                  radio_to_uart=self.uart_down_budget.snapshot() if self.uart_down_budget else None,
+                  uart_input_bytes=self.uart_input_bytes, uart_output_bytes=self.uart_output_bytes,
+                  uart_io_backpressure_events=self.uart_backpressure_events,
+                  telemetry_age_drop_bytes=self.uart_telemetry_age_drops,
+                  shutdown_pending_uart_bytes=self.pending_uart_bytes(),
+                  shutdown_pending_telemetry_bytes=len(self.telemetry_pending[0]) if self.telemetry_pending else 0,
+                  continuity_valid=getattr(self, 'uart_continuity_valid', True))
+        self.admission.queue.clear(); self.admission.pending_ids.clear()
+        self.hold_pending, self.hold_offset, self.telemetry_pending = None, 0, None
+        now = time.monotonic_ns()
+        if self.uart_up_budget: self.uart_up_budget.reset(now)
+        if self.uart_down_budget: self.uart_down_budget.reset(now)
         os.close(self.uart)
         super().close()
 
@@ -696,8 +897,11 @@ def main(argv=None):
         service = GCSService(args, emit) if args.role == "gcs" else UAVService(args, emit)
         if args.ready_file:
             args.ready_file.parent.mkdir(parents=True, exist_ok=True)
-            args.ready_file.write_text(json.dumps(dict(pid=os.getpid(), clock_domain="host_monotonic")) + "\n")
-        emit("service_started", role=args.role)
+            ready = dict(pid=os.getpid(), clock_domain='host_monotonic')
+            if hasattr(service, 'uart_timing'):
+                ready['uart_timing'] = service.uart_timing
+            args.ready_file.write_text(json.dumps(ready) + "\n")
+        emit("service_started", role=args.role, uart_timing=getattr(service, 'uart_timing', None))
         deadline = time.monotonic() + args.duration_s
         while service.running and time.monotonic() < deadline:
             service.guard_radio()
