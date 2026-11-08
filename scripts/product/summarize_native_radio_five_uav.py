@@ -136,6 +136,7 @@ def load_scenario_config(path: Path) -> dict[str, Any]:
         str(key): item for key, item in scenario_radio.items() if key != "config"
     }
     sionna_product: dict[str, Any] = {}
+    coupling_product: dict[str, Any] = {}
     radio_reference = scenario_radio.get("config")
     radio_config_path: Path | None = None
     if radio_reference:
@@ -155,6 +156,10 @@ def load_scenario_config(path: Path) -> dict[str, Any]:
         if not isinstance(radio_config.get("sionna"), dict):
             raise ValueError(f"radio product config must contain sionna mapping: {radio_config_path}")
         sionna_product.update(radio_config["sionna"])
+        coupling = radio_config.get("coupling", {})
+        if not isinstance(coupling, dict):
+            raise ValueError(f"radio product coupling must be a mapping: {radio_config_path}")
+        coupling_product.update(coupling)
     traffic = value.get("traffic") or {}
     simultaneous = traffic.get("simultaneous_uplink") if isinstance(traffic, dict) else None
     delivery_gates = traffic.get("delivery_gates") if isinstance(traffic, dict) else None
@@ -191,6 +196,7 @@ def load_scenario_config(path: Path) -> dict[str, Any]:
             **radio_product,
         },
         "sionna": sionna_product,
+        "coupling": coupling_product,
         "traffic": {
             "diagnostic_retry_interval_s": float(traffic["diagnostic_retry_interval_s"]),
             "forced_mavlink_stream_intervals": traffic["forced_mavlink_stream_intervals"],

@@ -14,6 +14,7 @@ import yaml
 
 import bas
 from scripts.product import prepare_urban_gazebo as generator
+from scripts.product import summarize_native_radio_five_uav as summary
 
 
 class RadioProfileTests(unittest.TestCase):
@@ -201,6 +202,29 @@ class RadioProfileTests(unittest.TestCase):
         self.config['interference'] = {'sources': 'not-opened-unqualified-sources.yaml'}
         with self.assertRaisesRegex(ValueError, 'worker_pool with directed sources requires receiver_batch_mode=full_mesh'):
             self.load()
+
+    def test_report_loader_retains_the_prepared_coupling_limits(self):
+        self.radio['coupling']['state_max_age_s'] = .1
+        self.radio['sionna'].update(execution_mode='worker_pool', receiver_batch_mode='full_mesh',
+                                    worker_count=3, cache_expiry_jitter_fraction=0)
+        self.write_radio()
+        output = self.root / 'report-loader'
+        with patch.object(generator, 'ROOT', self.root):
+            generator.prepare(self.scene_file, output, 1, propagation_profile='sionna', radio_config=self.radio_file,
+                              ground_material='medium_dry_ground', building_material='concrete', thickness_m=.1)
+        scenario_file = output / 'scenario.yaml'
+        with patch.object(summary, 'ROOT', self.root):
+            observed = summary.load_scenario_config(scenario_file)
+        self.assertEqual(observed['coupling'], self.radio['coupling'])
+        frozen = output / 'radio-resolved.yaml'
+        original = frozen.read_bytes()
+        observed['coupling']['state_max_age_s'] = .5
+        self.assertEqual(frozen.read_bytes(), original)
+        malformed = yaml.safe_load(original)
+        malformed['coupling'] = 'invalid'
+        frozen.write_text(yaml.safe_dump(malformed))
+        with patch.object(summary, 'ROOT', self.root), self.assertRaisesRegex(ValueError, 'coupling'):
+            summary.load_scenario_config(scenario_file)
 
     def source_schedule(self, profiles):
         sources = [dict(id=f'source{i}', position_m=[0, -40, 10], orientation_rad=[0, 0],
