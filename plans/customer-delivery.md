@@ -154,9 +154,13 @@ SDK job занял 20,395 мс, новый кадр был готов. Receiver 
 1,026 мс, decode — 88,826 мкс; held-поза достигла 100,194 мс до замены новым кадром.
 Межкадровые паузы Gazebo <2,048 мс; SDK-tail и physics-freeze здесь не подтверждены.
 Простое снятие pre-commit guard отклонено: прежний verifier требует maximum_applied_pose_age≤100 мс.
-Проверяется более частый pickup готовых результатов (500 вместо 1000 мкс) с теми же
-guards и max/hist. Компонентный native RED/GREEN прошёл; прежний 1-мс prefetch margin
-должен сохраниться отдельно. Production integration / новый совместный запуск ещё нужны.
+Внесён более частый pickup готовых результатов: 500 вместо 1000 мкс. Те же guards,
+строгий verifier и max/hist сохранены; прежний 1-мс response forecast margin выделен
+отдельно, не уменьшен. Native RED старой cadence провалил новую independent-deadline
+проверку, GREEN прошёл: bundle887/cache340/live354/prefetch45. Дополнительно 187 Python
+native-interface tests PASS. Все девять компонентных CPU samples сохранены; медианная
+добавка 1,524 мс CPU на model-second (~0,1524% одного CPU этого компонента), без claim
+о полной real-time производительности. Production rebuild / новый совместный запуск ещё нужны.
 
 Наблюдатель C1 дал 170,7 МБ ожидаемых ENOENT от delete отсутствующих BPF map keys.
 Это зарегистрированное вмешательство диагностического инструмента, не пустой хост.
