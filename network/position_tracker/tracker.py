@@ -298,15 +298,29 @@ class LiveState:
             reason = 'clock_stale'
         elif history and stamp <= history[-1]['source_sim_time_s']:
             reason = 'out_of_order'
+        if reason is None:
+            # In realtime the observed clock receipt, not each odometry receipt,
+            # anchors source time to host time. Delivery delay must remain in the
+            # sample age. A sample ahead of the last clock uses that conservative
+            # observed anchor; it never extrapolates a future host timestamp.
+            anchor_ns = self.clock_rx_ns if self.simulation_mode == 'realtime' else now_ns
+            sample_ns = anchor_ns - round(max(0., self.clock_s-stamp)*1e9)
+            if self.simulation_mode == 'realtime':
+                if sample_ns < 0 or sample_ns > now_ns:
+                    reason = 'sample_time_invalid'
+                elif now_ns-sample_ns > self.stale_ns:
+                    reason = 'sample_stale'
+                elif history and sample_ns < history[-1]['sample_monotonic_ns']:
+                    # Clock transport jitter can move the mapping backwards.
+                    # Reject it without moving a measured timestamp forward or
+                    # replacing the previously accepted coherent history.
+                    reason = 'sample_time_regression'
         if reason:
             self.rejected += 1
             self.rejection_reasons[reason] += 1
             return False
         norm = math.sqrt(sum(x*x for x in q))
         q = [x/norm for x in q]
-        # Age also includes source-clock lag at reception. Never label old samples
-        # with the publication time, or extrapolate physical state in this adapter.
-        sample_ns = now_ns - int(max(0., self.clock_s-stamp)*1e9)
         history.append(dict(id=name, role='uav', position_m=p, orientation_quat_xyzw=q,
             velocity_enu_mps=rotate_vector(q,v), angular_velocity_enu_radps=rotate_vector(q,omega) if all(math.isfinite(x) for x in omega) else None,
             source_sim_time_s=stamp, received_monotonic_ns=now_ns, sample_monotonic_ns=sample_ns,
