@@ -126,7 +126,7 @@ def validate(config, root=ROOT):
     profile = read_rt_radio_profile(paths['radio_config'], mission.raw)
     if mission.terrain_bundle_path is not None and paths['scene_xml'] != mission.terrain_bundle_path / 'scene.xml':
         raise ValueError('map and mission must use the same terrain scene')
-    manifest_path = paths['scene_xml'].parent / 'scene-manifest.json'
+    manifest_path = inside(root, str(paths['scene_xml'].parent / 'scene-manifest.json'))
     manifest = load_json(manifest_path)
     if manifest.get('coordinate_frame') != 'ENU' or manifest.get('units') != 'm':
         raise ValueError('scene requires the prepared ENU/metre manifest')
@@ -544,7 +544,8 @@ def service_maps(snapshot, evidence, output, *, profile_path=None, root=ROOT, pl
     from network.coordination.service_profiles import load_service_profiles, qualify_payload_services
     snapshot, output, root = Path(snapshot).resolve(), Path(output).resolve(), Path(root).resolve()
     snapshot.relative_to(root); output.relative_to(root)
-    metadata = load_json(snapshot / "metadata.json")
+    snapshot_files = {name: inside(root, str(snapshot / name)) for name in ("metadata.json", "maps.npz")}
+    metadata = load_json(snapshot_files["metadata.json"])
     if metadata.get("status") != "completed":
         raise ValueError("service maps require a completed RF snapshot")
     fields(evidence, {"schema_version", "snapshot_metadata_sha256", "snapshot_npz_sha256",
@@ -553,7 +554,7 @@ def service_maps(snapshot, evidence, output, *, profile_path=None, root=ROOT, pl
     if type(evidence["schema_version"]) is not int or evidence["schema_version"] != 1:
         raise ValueError("service-map evidence schema must be integer 1")
     for name, key in (("metadata.json", "snapshot_metadata_sha256"), ("maps.npz", "snapshot_npz_sha256")):
-        if _stream_sha(snapshot/name) != evidence[key]:
+        if _stream_sha(snapshot_files[name]) != evidence[key]:
             raise ValueError("RF snapshot hash mismatch: " + name)
     count, target = evidence["uav_count"], evidence["target_uav_id"]
     if type(count) is not int or type(target) is not int or not 1 <= target <= count <= 5:
@@ -574,7 +575,7 @@ def service_maps(snapshot, evidence, output, *, profile_path=None, root=ROOT, pl
         raise ValueError("service bindings must be an explicit list")
     profiles = load_service_profiles(profile_path)
     names = list(profiles["config"]["profiles"])
-    with np.load(snapshot/"maps.npz", allow_pickle=False) as data:
+    with np.load(snapshot_files["maps.npz"], allow_pickle=False) as data:
         centers = np.array(data["cell_centers_enu_m"], copy=True)
     if centers.ndim != 3 or centers.shape[-1] != 3 or not np.isfinite(centers).all():
         raise ValueError("RF snapshot lacks a rectangular ENU grid")

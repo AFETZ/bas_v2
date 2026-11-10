@@ -19,7 +19,7 @@
 
 В приватный [UAVcosim/main](https://github.com/HSE-Intelligent-Unmanned-Systems-Lab/UAVcosim)
 без force push отправлены `247f338`, `68b5845`, `7373a38` и
-`25d5ae5` и `849734ce8a1c6551b43285bde1d69373413b5b4f`.
+`25d5ae5`, `849734c` и `37313aa1271889c2423649c0c89d6b2e164dd6b0`.
 Добавлен отдельный remote `UAVcosim`; существующих remotes не было.
 Это инженерная публикация с известными отказами свежести, а не завершённая приёмка.
 
@@ -42,6 +42,7 @@ Gitleaks 8.30.1 проверил подготовленные файлы и от
 | `gazebo-wait-diagnostic-20261110-a`, 7373a38 | До пяти, остановка на первом отказе | Первая failed / invalid: emitter SDK не завершился через 62,264 мс. Четыре не запускались. BPF не успел подключиться; это отдельный незакрытый источник задержки. |
 | `gazebo-wait-diagnostic-20261111-b`, 7373a38 | До пяти, остановка на первом отказе | Первая completed / succeeded / valid; вторая failed / invalid, физическая пауза 99,124 мс; три не запускались. BPF второй попытки подключился поздно из-за повторной компиляции helper. |
 | `gazebo-wait-diagnostic-20261111-c`, 25d5ae5 | Ровно пять, остановка на первом отказе | Все пять completed / succeeded / valid. Возраст применённой позы: 97,645 / 93,175 / 90,488 / 89,122 / 90,047 мс. Guards не менялись. |
+| `clone849-interframe-20261111-a`, чистый GitHub clone849 | 20 попыток, остановка на первом runtime-invalid | Первая failed / failed / invalid: native applied pose stale/future; 19 не запускались. Новых повторов этой серии нет. |
 
 
 Это повторы исполнения seed 1 / RngRun 1 / Sionna seed 42, а не независимая статистика RT.
@@ -146,8 +147,23 @@ UAVcosim-github-verify-849734c-20261111. Из Release заново получе�
 собраны заново за 267,06 с. Ни SDK, ни environments, ни build из прежнего каталога
 не копировались. Проверки bootstrap (ready=true, gaps=[]), assets и inspect terrain прошли.
 Закреплённый Docker image уже был на хосте и проверен по digest.
-Новый runtime ещё не завершён; из этой копии подготовлена фиксированная серия
-clone849-interframe-20261111-a из 20 попыток с остановкой на первом runtime-invalid.
+Первая попытка фиксированной серии clone849-interframe-20261111-a отказала:
+failed / failed / invalid; 19 не запускались. Это новая доказанная неустойчивость,
+не успешный E2E и не завершённая проверка воспроизведения.
+SDK job занял 20,395 мс, новый кадр был готов. Receiver enqueue→native poll занял
+1,026 мс, decode — 88,826 мкс; held-поза достигла 100,194 мс до замены новым кадром.
+Межкадровые паузы Gazebo <2,048 мс; SDK-tail и physics-freeze здесь не подтверждены.
+Простое снятие pre-commit guard отклонено: прежний verifier требует maximum_applied_pose_age≤100 мс.
+Проверяется более частый pickup готовых результатов (500 вместо 1000 мкс) с теми же
+guards и max/hist. Компонентный native RED/GREEN прошёл; прежний 1-мс prefetch margin
+должен сохраниться отдельно. Production integration / новый совместный запуск ещё нужны.
+
+Наблюдатель C1 дал 170,7 МБ ожидаемых ENOENT от delete отсутствующих BPF map keys.
+Это зарегистрированное вмешательство диагностического инструмента, не пустой хост.
+Timing histograms сохранились, CPU profile частичен. Новая версия v6 сохраняет -k,
+guards для delete и исходные ownership checks. Настоящий attach к собственному
+синтетическому callback binary: stderr=0, 512 событий, 209 suppressed, END/pending
+и retirement проверены. Это kernel-harness test, не новый полёт.
 
 [Компактные доказательства на GitHub](https://github.com/HSE-Intelligent-Unmanned-Systems-Lab/UAVcosim/releases/tag/engineering-evidence-20261111-849734c):
 166 исходных сводок и команд, включая отказы, 878628 байт,
@@ -183,6 +199,33 @@ packet lineage и условия каждого опыта; новый анал�
 Это один UART, point-to-point TDM/FHSS, RF default 64 Кбит/с; он не закрывает автоматически
 два UART, многоточечность или эквивалентность Wi-Fi. Модель устройства владельца
 по-прежнему неизвестна, физические устройства не подключены.
+
+Переносимый maps entry в рабочем дереве использует тот же pinned container:
+RF через общий lease, CPU overlay без GPU, единственный writable runs/maps output.
+Реальные CUDA / LLVM RF point-grid и PNG прошли за 8,09 / 6,35 с; все четыре
+клетки рассчитаны, point_cells выбирает дополнительные контрольные сравнения, не область
+основного расчёта. Различие RSS backend на этих четырёх клетках — до 0,42 дБ при 20k samples
+и одинаковом seed; общая сходимость из четырёх точек не заявляется. CPU overlay сохранил 54 not_measured.
+Добавлен поставочный radio_map_terrain.json: baseline CP→iso/V, полный квадрат 10×10 км,
+100 ячеек, ENU Z=230 м, источники выключены. Все параметры CP / радио взяты из фактического
+каноничного frozen input. Новая подготовка из tracked terrain config и настоящий CUDA
+расчёт этого preset (менялись только три input paths) прошли за 8,51 с; PNG визуально проверен.
+Белый J/S означает J=0, серый — sampled-zero / отсутствие данных, не доказанный outage.
+Исправлены найденные при review внешние sidecar symlinks и перенаправление runs/maps
+в source tree. После границ файлов и SIGTERM cleanup — 624 Python tests PASS,
+один прежний skip. Реальный cancellation harness01 не достиг условия отправки сигнала
+за своё короткое окно; вычисление завершилось успешно, это не проверка отмены.
+Квитанция сохранена. Исправленный bounded harness02 послал настоящий SIGTERM работающему
+map CLI: exit143 / attempt cancelled, только его Docker container удалён; raw входы сохранены.
+Следующий LLVM compute прошёл с новым output, lease / ресурсы освобождены.
+
+Hybrid R3 подготовлен изолированно: qualified-hybrid-r3.patch,
+SHA 50d80bc45d5014c28ed6a0576c43d495eadcf877debbcca48c3b7c53e355c6b2.
+Закрыты review-дефекты public shell gates и body orientation; нулевой RT-reference
+не заменяется положительной Friis-мощностью. 95 Python / native boundary checks прошли.
+В core ещё не интегрирован, production build / joint не выполнены. Domain только
+static iso/V SISO empty scene 2,412 ГГц; для прочих условий видимый fullRT fallback.
+Parent extra CUDA context при explicit hybrid — известный ресурсный риск, ускорение не заявляется.
 
 **Следующая ступень и доказательства**
 

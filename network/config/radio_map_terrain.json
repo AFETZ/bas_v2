@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "mission_scene": "runs/control/terrain-five-001/generated/mission-scene.json",
+  "scene_xml": "runs/control/terrain-five-001/generated/terrain/scene.xml",
+  "radio_config": "runs/control/terrain-five-001/generated/radio-resolved.yaml",
+  "sources": null,
+  "desired": {
+    "id": "cp",
+    "position_m": [
+      -2000,
+      -2000,
+      79.96654565164894
+    ],
+    "orientation_rad": [
+      0,
+      0
+    ],
+    "pattern": "iso",
+    "gain_dbi": 0,
+    "center_hz": 2412000000,
+    "bandwidth_hz": 20000000,
+    "power_w": 1
+  },
+  "receiver": {
+    "center_hz": 2412000000,
+    "bandwidth_hz": 20000000,
+    "temperature_k": 290,
+    "noise_figure_db": 7
+  },
+  "map": {
+    "method": "point_grid",
+    "center_m": [
+      0,
+      0,
+      230
+    ],
+    "size_m": [
+      10000,
+      10000
+    ],
+    "cell_size_m": [
+      1000,
+      1000
+    ],
+    "time_s": 0,
+    "direction": "gcs_to_air_isotropic_probe",
+    "samples_per_tx": 20000,
+    "point_cells": [
+      [
+        0,
+        0
+      ],
+      [
+        4,
+        4
+      ],
+      [
+        9,
+        9
+      ]
+    ]
+  }
+}

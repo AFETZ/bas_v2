@@ -48,6 +48,28 @@ python3 bas.py inspect --config runtime-terrain.json
 python3 bas.py run --config runtime-terrain.json --run-id terrain-five-001
 ```
 
+Когда этот запуск создал `runs/control/terrain-five-001/generated/`, готовый
+RF-пример использует его замороженные сцену и радиопрофиль:
+
+```sh
+python3 bas.py maps --config network/config/radio_map_terrain.json \
+  --output-dir runs/maps/terrain-five-001-baseline-check --validate-only
+python3 bas.py maps --config network/config/radio_map_terrain.json \
+  --output-dir runs/maps/terrain-five-001-baseline --plot
+```
+
+Это базовая карта без активных источников помех (`sources: null`): 10×10 км,
+100 точек с шагом 1 км, 20 000 RT samples на передатчик и три отдельные контрольные
+точки. Положение НПУ и её 1 Вт / 2412 МГц / 20 МГц взяты из сценария и радиопрофиля.
+Приёмник использует эталонные 290 К и NF 7 дБ закреплённого ns-3.
+Приёмники лежат на горизонтальной плоскости ENU Z=230 м, выше максимума рельефа
+200 м. Это фиксированная координата Z относительно начала ENU, не 230 м над местной землёй.
+Грубая сетка и сравнение точек не подтверждают всю площадь клетки, полётные
+маршруты, пакетную доставку или SLA. RF-карта использует полный Sionna RT.
+Параметры меняются в JSON; для другого run ID замените три входных пути.
+Каталоги проверки и расчёта разные: каждая попытка сохраняется отдельно.
+
+
 `runtime-terrain.json` — поставочный короткий совместный профиль: 5 БАС, Sionna full-mesh,
 направленная помеха, control/payload, 10 Кбит/с полезных синтетических данных на каждый БАС.
 Это заданная нагрузка перед накладными MAVLink/BSF1/IP, не гарантированная доставленная скорость.
@@ -146,7 +168,9 @@ python3 scripts/product/summarize_native_radio_five_uav.py   --run-dir runs/nati
 шести классов без нового GPU-расчёта:
 
 ```sh
-python3 scripts/product/compute_radio_maps.py   --service-map-from runs/maps/rf-snapshot   --service-evidence runs/analysis/cell-run-bindings.json   --output runs/maps/service-snapshot --plot
+python3 bas.py maps --service-map-from runs/maps/rf-snapshot/data \
+  --service-evidence runs/analysis/cell-run-bindings.json \
+  --output-dir runs/maps/service-snapshot --plot
 ```
 
 Evidence JSON строго связывает SHA `metadata.json` и `maps.npz`, состав1–5БАС,
@@ -378,8 +402,18 @@ Wi-Fi TX-антенну UAV/НПУ. SDK-конвертер `src/spectrum/model/s
 Городской экспорт сохраняет `metrics/native_source_summary.json`: привязку
 времени, события включения/выключения и доступность наблюдений в каждом окне.
 
-Офлайн-карты RF строятся `scripts/product/compute_radio_maps.py --config <json>
---output <new-directory>` в закреплённом GPU runtime. Проверка входа без GPU:
+Офлайн-карты RF строятся `python3 bas.py maps --config <json>
+--output-dir runs/maps/<new-id>` через существующий solver в закреплённом runtime.
+По умолчанию используется CUDA; `--variant llvm_ad_mono_polarized` явно выбирает CPU.
+RF-расчёт получает общий lock моделирования и сборки; параллельный запуск отклоняется.
+Overlay завершённого снимка и его PNG выполняются без GPU и сети.
+В host-среде достаточно requirements-host.txt; Matplotlib и pymavlink берутся из образа.
+Новый каталог содержит receipt, версии зависимостей и хеши входов; файлы карты лежат
+в подкаталоге `data/`. Остальная рабочая копия доступна контейнеру только для чтения.
+Ctrl+C / SIGTERM сохраняют отменённую попытку и освобождают её контейнер; следующий
+расчёт использует новый output. CUDA и LLVM — явно выбранные backend; одинаковый seed
+не гарантирует побитовое равенство Monte Carlo результата.
+Проверка входа без GPU:
 `--validate-only`. `point_grid` использует PathSolver и iso/V приёмники в центрах
 до 256 ячеек; `radio_map` — штатный RadioMapSolver и неполяризованное усреднение
 по ячейке. Конфиг задаёт подготовленные `mission_scene`, `scene_xml`, `radio_config`,

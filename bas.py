@@ -12,6 +12,7 @@ import re
 import signal
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 import time
 
 ROOT = Path(__file__).resolve().parent
@@ -918,7 +919,8 @@ def analyze(run_id, output, *, service_batch=False):
             raise ValueError(f'analyzer did not produce {report}')
         attempt['status'] = 'completed'
     except BaseException as error:
-        attempt.update(status='failed', error=f'{type(error).__name__}: {error}')
+        attempt.update(status='cancelled' if isinstance(error, KeyboardInterrupt) else 'failed',
+                       error=f'{type(error).__name__}: {error}')
         raise
     finally:
         attempt['ended_host_monotonic_ns'] = time.monotonic_ns()
@@ -928,6 +930,141 @@ def analyze(run_id, output, *, service_batch=False):
                           runtime_status=record.get('runtime_status'),
                           measurement_validity=record.get('measurement_validity'),
                           output=output.relative_to(ROOT).as_posix())))
+    return 0
+
+
+def maps(config, output, *, service_map_from=None, service_evidence=None,
+         service_profile=None, validate_only=False, plot=False,
+         variant='cuda_ad_mono_polarized'):
+    """Run the existing map tool with one owned writable directory."""
+    from contextlib import nullcontext
+    from scripts.product import bootstrap_native_runtime as native
+    os.environ['OPENBLAS_NUM_THREADS'] = '1'
+    from scripts.product import compute_radio_maps as mapper
+    if sys.platform != 'linux':
+        raise ValueError('container maps require a Linux Docker host')
+    if variant not in ('cuda_ad_mono_polarized', 'llvm_ad_mono_polarized'):
+        raise ValueError('unsupported existing map runtime variant')
+    if validate_only and plot:
+        raise ValueError('--plot excludes --validate-only')
+    overlay = service_map_from is not None
+    if (overlay and (config is not None or validate_only or service_evidence is None)
+            or not overlay and (config is None or service_evidence is not None or service_profile is not None)):
+        raise ValueError('choose RF --config or CPU --service-map-from with --service-evidence')
+    def inside(value, *, directory=False):
+        path = (ROOT / value).resolve()
+        path.relative_to(ROOT.resolve())
+        if not (path.is_dir() if directory else path.is_file()):
+            raise ValueError(f'map input is missing: {value}')
+        return path
+    manifest_path = inside('.devcontainer/runtime-assets.json')
+    manifest = mapper.load_json(manifest_path)
+    image = manifest['image_id']
+    bindings = [manifest_path]
+    for relative in (native.RECEIPT, '.external/native-runtime-wheels/manifest.json'):
+        candidate = ROOT / relative
+        if candidate.is_file():
+            bindings.append(inside(candidate))
+    arguments = []
+    if overlay:
+        snapshot = inside(service_map_from, directory=True)
+        evidence = inside(service_evidence)
+        profile = inside(service_profile or 'network/config/service_profiles_v1.json')
+        metadata = inside(snapshot / 'metadata.json')
+        if mapper.load_json(metadata).get('status') != 'completed':
+            raise ValueError('maps overlay requires a closed completed RF snapshot')
+        bindings += [metadata, inside(snapshot / 'maps.npz'), evidence, profile]
+        for option, path in (('--service-map-from', snapshot), ('--service-evidence', evidence),
+                             ('--service-profile', profile)):
+            arguments += [option, str(Path(native.MOUNT) / path.relative_to(ROOT))]
+    else:
+        config = inside(config)
+        paths, mission, _, _ = mapper.validate(mapper.load_json(config), root=ROOT)
+        bindings += [config, *paths.values(), inside(paths['scene_xml'].parent / 'scene-manifest.json')]
+        if mission.terrain_manifest is not None:
+            bindings += [inside(mission.terrain_bundle_path / name) for name in mission.terrain_manifest['files']]
+        for element in ET.parse(paths['scene_xml']).findall('.//string[@name="filename"]'):
+            bindings.append(inside(paths['scene_xml'].parent / element.get('value')))
+        arguments += ['--config', str(Path(native.MOUNT) / config.relative_to(ROOT)), '--variant', variant]
+    maps_root = ROOT / 'runs/maps'
+    if maps_root.resolve() != maps_root:
+        raise ValueError('maps require the canonical runs/maps directory without symlink redirection')
+    output = (ROOT / output).resolve()
+    output.relative_to(maps_root)
+    if output == (ROOT / 'runs/maps').resolve() or output.exists():
+        raise ValueError('maps require a new directory below runs/maps')
+    if overlay and output.is_relative_to(snapshot):
+        raise ValueError('map output must not overlap the input snapshot')
+    destination = Path(native.MOUNT) / output.relative_to(ROOT)
+    arguments += ['--output', str(destination / 'data')]
+    if validate_only:
+        arguments += ['--validate-only']
+    if plot:
+        arguments += ['--plot']
+    gpu = not overlay and not validate_only and variant.startswith('cuda_')
+    # Same non-blocking lease as simulation/bootstrap, before creating an attempt.
+    with (native.runtime_lock() if not overlay and not validate_only else nullcontext()):
+        input_bindings = [dict(path=path.relative_to(ROOT).as_posix(), bytes=path.stat().st_size,
+                               sha256=native.sha256(path)) for path in sorted(set(bindings))]
+        native.image_id(image)
+        output.mkdir(parents=True, exist_ok=False)
+        attempt = dict(schema_version=1, status='running', mode='service_overlay' if overlay else 'rf',
+            validation_only=validate_only, gpu_requested=gpu, image=image, variant=None if overlay else variant,
+            source_commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
+            source_dirty=bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT)),
+            adapter_sha256=native.sha256(Path(__file__)),
+            mapper_sha256=native.sha256(ROOT / 'scripts/product/compute_radio_maps.py'),
+            container_helper_sha256=native.sha256(Path(native.__file__)),
+            source_bindings=input_bindings, started_host_monotonic_ns=time.monotonic_ns(),
+            container_permissions=dict(user=f'{os.getuid()}:{os.getgid()}', supplementary_groups=[1000],
+                source='read_only', output='single_owned_workspace_directory', network='none'),
+            scope='Existing RF solver or transport overlay; no new channel model, packet simulation, or hardware claim.',
+            dependency_scope='Available pinned-image/SDK package versions; service overlays and validation do not execute RT packages. RF computation independently enforces the existing solver versions.')
+        receipt = output / 'maps-attempt.json'
+        write_json(receipt, attempt)
+        dependency_path = destination / 'maps-dependencies.json'
+        program = (
+            'import importlib.metadata,json,pathlib,runpy,sys\n'
+            'import numpy,yaml\n'
+            'assert sys.version_info[:2] == (3,10), "pinned map image requires Python3.10"\n'
+            'assert (numpy.__version__,yaml.__version__) == ("1.26.4","6.0.2"), "map dependency versions differ"\n'
+            'versions={}\n'
+            'for name in ("numpy","PyYAML","pymavlink","matplotlib","sionna-rt","mitsuba","drjit"):\n'
+            ' try: versions[name]=importlib.metadata.version(name)\n'
+            ' except importlib.metadata.PackageNotFoundError: versions[name]=None\n'
+            + f'pathlib.Path({str(dependency_path)!r}).write_text(json.dumps(versions,indent=2)+"\\n")\n'
+            + f'sys.argv=["compute_radio_maps.py"]+{arguments!r}\n'
+            'runpy.run_path("scripts/product/compute_radio_maps.py",run_name="__main__")\n')
+        script = (
+            'export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1\n'
+            'export MPLCONFIGDIR=/tmp/bas-maps-mpl\n'
+            'SDK="$PWD/.external/ns-3-sionna-native"\n'
+            'export PYTHONPATH="$SDK/.tooling-py310:$SDK/.python-deps-py310:/home/ubuntu/.local/lib/python3.10/site-packages:$PWD"\n'
+            "python3 - <<'BAS_MAPS_PY'\n" + program + 'BAS_MAPS_PY\n')
+        try:
+            native.container(ROOT, image, script, readonly=True, output=output,
+                workspace_output=True, gpu=gpu, supplementary_groups=(1000,), log=output / 'maps-runtime.log')
+            for item in input_bindings:
+                if native.sha256(ROOT / item['path']) != item['sha256']:
+                    raise ValueError('map input changed during computation')
+            if not validate_only:
+                name = 'service_metadata.json' if overlay else 'metadata.json'
+                if mapper.load_json(output / 'data' / name).get('status') != 'completed':
+                    raise ValueError('existing map tool did not report completed output')
+            attempt['dependencies'] = mapper.load_json(output / 'maps-dependencies.json')
+            attempt['output_files'] = [dict(path=path.relative_to(output).as_posix(),
+                bytes=path.stat().st_size, sha256=native.sha256(path))
+                for path in sorted((output / 'data').rglob('*')) if path.is_file()]
+            attempt['status'] = 'completed'
+        except BaseException as error:
+            attempt.update(status='cancelled' if isinstance(error, KeyboardInterrupt) else 'failed',
+                       error=f'{type(error).__name__}: {error}')
+            raise
+        finally:
+            attempt['ended_host_monotonic_ns'] = time.monotonic_ns()
+            write_json(receipt, attempt)
+    print(json.dumps(dict(status=attempt['status'], validation_only=validate_only,
+        output=output.relative_to(ROOT).as_posix(), data=None if validate_only else (output / 'data').relative_to(ROOT).as_posix())))
     return 0
 
 
@@ -946,6 +1083,15 @@ def main():
     analysis.add_argument('run_id', help='Closed run ID, or batch ID with --service-batch')
     analysis.add_argument('--service-batch', action='store_true', help='Compare all attempts in a closed batch using original packet lineage')
     analysis.add_argument('--output-dir', required=True, type=Path, help='New directory below runs/analysis; raw evidence remains read-only')
+    map_command = commands.add_parser('maps', help='Existing RF snapshots or observed service overlays in the pinned image')
+    map_command.add_argument('--config', type=Path)
+    map_command.add_argument('--output-dir', required=True, type=Path)
+    map_command.add_argument('--service-map-from', type=Path)
+    map_command.add_argument('--service-evidence', type=Path)
+    map_command.add_argument('--service-profile', type=Path)
+    map_command.add_argument('--validate-only', action='store_true')
+    map_command.add_argument('--plot', action='store_true')
+    map_command.add_argument('--variant', choices=('cuda_ad_mono_polarized','llvm_ad_mono_polarized'), default='cuda_ad_mono_polarized')
     for name in ('inspect', 'run'):
         p = commands.add_parser(name)
         p.add_argument('--config', type=Path, default=ROOT / 'runtime.json')
@@ -959,7 +1105,8 @@ def main():
             p.add_argument('--event')
             p.add_argument('--limit', type=int, default=50)
     args = parser.parse_args()
-    identifier(args.run_id)
+    if args.command != 'maps':
+        identifier(args.run_id)
     if args.command in ('inspect', 'run'):
         config = load_config(args.config)
         if args.duration is not None:
@@ -969,6 +1116,10 @@ def main():
             return run(config, args.run_id)
         print(json.dumps({'config': config, 'environment': {k: v for k, v in environment(config, args.run_id).items()
                                                           if k.startswith('BAS_')}}, indent=2))
+    elif args.command == 'maps':
+        return maps(args.config, args.output_dir, service_map_from=args.service_map_from,
+                    service_evidence=args.service_evidence, service_profile=args.service_profile,
+                    validate_only=args.validate_only, plot=args.plot, variant=args.variant)
     elif args.command == 'analyze':
         return analyze(args.run_id, args.output_dir, service_batch=args.service_batch)
     elif args.command == 'stop':
@@ -994,6 +1145,10 @@ def main():
 if __name__ == '__main__':
     try:
         sys.exit(main())
+    except KeyboardInterrupt as exc:
+        signum = exc.args[0] if exc.args and exc.args[0] in (signal.SIGINT, signal.SIGTERM) else signal.SIGINT
+        print(f'BAS: cancelled by signal {int(signum)}', file=sys.stderr)
+        sys.exit(128 + int(signum))
     except (ValueError, OSError, subprocess.CalledProcessError, RuntimeError) as exc:
         print(f'BAS: {exc}', file=sys.stderr)
         sys.exit(2)
