@@ -251,11 +251,16 @@ int main(int argc, char** argv)
             socketPath, "family"_a="AF_UNIX", "authkey"_a=py::none());
         auto time = py::module_::import("time");
         const auto hostNow = [&]() { return time.attr("monotonic_ns")().cast<int64_t>(); };
+        const auto traceSetting=py::module_::import("os").attr("environ").attr("get")(
+            "BAS_NATIVE_RT_STAGE_TRACE","0").cast<std::string>();
+        Require(traceSetting=="0" || traceSetting=="1","BAS_NATIVE_RT_STAGE_TRACE must be0 or1");
+        const bool traceStages=traceSetting=="1";
         auto ready=py::dict("schema"_a=1, "kind"_a="ready", "worker_id"_a=workerId,
             "pid"_a=py::module_::import("os").attr("getpid")(), "versions"_a=versions,
             "mitsuba_variant"_a=variant, "gpu_solve_verified"_a=false,
             "applied_config"_a=config, "worker_cache_update_period_ns"_a=1, "render_images"_a=false,
             "scope"_a="public_native_sdk_rt_producer_probe");
+        ready["job_stage_trace_enabled"]=traceStages;
         ready["path_storage"]=PathStorageStats(model->GetPathStorageStats());
         if(!sourceProfiles.empty())
         {
@@ -288,11 +293,27 @@ int main(int argc, char** argv)
             auto message = connection.attr("recv")();
             if (py::isinstance<py::dict>(message) && message.cast<py::dict>().contains("kind") &&
                 message["kind"].cast<std::string>() == "stop") break;
+            // Receive/decode completion precedes validation/fingerprint work.
+            const auto stageReceivedHost=traceStages ? hostNow() : 0;
+            const auto stageReceivedCpu=traceStages ? time.attr("thread_time_ns")().cast<int64_t>() : 0;
             contract.attr("validate_job")(message, baseCount, config);
             py::dict job = message.cast<py::dict>();
             requestId = job["request_id"].cast<int64_t>();
             Require(requestId > lastRequestId, "request_id must be strictly increasing for this worker");
             lastRequestId = requestId;
+            py::object fingerprints=py::none();
+            if(traceStages) fingerprints=contract.attr("job_fingerprints")(job);
+            const auto stage=[&](const char* name,int64_t knownHost=0,int64_t knownCpu=0) {
+                if(!traceStages)return;
+                auto progress=py::dict("schema"_a=1,"kind"_a="progress","worker_id"_a=workerId,
+                    "request_id"_a=requestId,"stage"_a=name,
+                    "host_monotonic_ns"_a=(knownHost ? knownHost : hostNow()),
+                    "thread_cpu_ns"_a=(knownCpu ? knownCpu : time.attr("thread_time_ns")().cast<int64_t>()),
+                    "job_sha256"_a=fingerprints["job_sha256"],
+                    "geometry_sha256"_a=fingerprints["geometry_sha256"]);
+                connection.attr("send")(progress);
+            };
+            stage("job_received",stageReceivedHost,stageReceivedCpu);
             const auto sampleNs = job["sample_native_ns"].cast<int64_t>();
             Require(sampleNs >= Simulator::Now().GetNanoSeconds(), "Worker sample time cannot move backwards");
             const auto started = hostNow();
@@ -330,12 +351,17 @@ int main(int argc, char** argv)
                 const auto fullCallsBefore = model->GetFullMeshStats().completedCalls;
                 const auto emitterCallsBefore=emitterJob ? activeModel->GetEmitterBatchStats().completedCalls : 0;
                 const auto sourceBatchBefore=emitterJob ? activeModel->GetReceiverBatchStats().completedCalls : 0;
+                stage("preparation_done");
+                // This API interval includes scene setup, GPU solve and SDK
+                // extraction/publication; it is not a GPU-kernel-only timer.
+                stage("solver_call_start");
                 // Our minimal SDK extension forces prefetch even at the same
                 // simulation timestamp or before ordinary cache expiry.
                 if(emitterJob) activeModel->RefreshEmitterBatch();
                 else if(sourceJob) sourceContext->array->ForceFresh();
                 else if(fullMeshJob) model->RefreshFullMesh();
                 else model->RefreshReceiverBatch(mobility[anchor], antennas[anchor]);
+                stage("solver_call_end");
                 std::vector<std::pair<size_t,size_t>> requested;
                 if(emitterJob)for(size_t peer=0;peer<baseCount;++peer)requested.emplace_back(anchor,peer);
                 else if(sourceJob) requested.emplace_back(anchor,job["peer_index"].cast<size_t>());
@@ -465,7 +491,9 @@ int main(int argc, char** argv)
             result["worker_completed_host_monotonic_ns"] = finished;
             result["sample_to_completion_ns"] = finished - job["sample_host_monotonic_ns"].cast<int64_t>();
             result["producer_wall_ns"] = finished - started;
+            stage("result_send_start");
             connection.attr("send")(result);
+            stage("result_send_end");
             requestId = 0;
         }
         workerGc.attr("close")();

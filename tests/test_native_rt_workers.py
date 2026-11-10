@@ -24,7 +24,7 @@ from scripts.product.native_rt_workers import (NativeRtWorkerPool, validate_conf
 
 
 STUB = r'''
-import argparse,json,os,struct,time
+import argparse,hashlib,json,os,struct,time
 from multiprocessing.connection import Client
 p=argparse.ArgumentParser()
 p.add_argument('--socket');p.add_argument('--config');p.add_argument('--worker-id',type=int)
@@ -32,9 +32,26 @@ a=p.parse_args();mode=json.load(open(a.config))['test_mode']
 if mode=='never_connect':time.sleep(60)
 c=Client(a.socket,family='AF_UNIX',authkey=None)
 print('development stub stdout is separate from the result connection',flush=True)
-c.send(dict(schema=1,kind='ready',worker_id=a.worker_id,pid=os.getpid(),development_stub=True))
+trace=mode.startswith('stage_')
+c.send(dict(schema=1,kind='ready',worker_id=a.worker_id,pid=os.getpid(),development_stub=True,job_stage_trace_enabled=trace))
 while True:
  j=c.recv()
+ if trace:
+  encode=lambda x:json.dumps(x,sort_keys=True,separators=(',',':'),allow_nan=False).encode()
+  fingerprints=dict(job_sha256=hashlib.sha256(encode(j)).hexdigest(),
+                    geometry_sha256=hashlib.sha256(encode(j['poses'])).hexdigest())
+  def stage(label):
+   c.send(dict(schema=1,kind='progress',worker_id=a.worker_id,request_id=j['request_id'],stage=label,
+               host_monotonic_ns=time.monotonic_ns(),thread_cpu_ns=time.thread_time_ns(),**fingerprints))
+  if mode=='stage_wrong_hash':fingerprints['geometry_sha256']='0'*64
+  stage('job_received')
+  stage('solver_call_end' if mode=='stage_bad_order' else 'preparation_done')
+  stage('solver_call_start')
+  if mode=='stage_hang':time.sleep(60)
+  if mode=='stage_partial':
+   c._send(struct.pack('!i',128)+b'x');time.sleep(60)
+  if mode=='stage_delayed':time.sleep(.08)
+  stage('solver_call_end');stage('result_send_start')
  if mode=='hang':time.sleep(60)
  if mode=='partial':
   c._send(struct.pack('!i',128)+b'x') # Deliberately incomplete standard Connection frame.
@@ -43,6 +60,7 @@ while True:
  if mode=='error':c.send(dict(schema=1,kind='error',worker_id=a.worker_id,request_id=j['request_id'],error='injected failure'));break
  c.send(dict(schema=1,kind='result',worker_id=a.worker_id,
   request_id=j['request_id']+(1 if mode=='wrong_id' else 0),echo=j))
+ if trace:stage('result_send_end')
 '''
 
 
@@ -218,7 +236,7 @@ class SourceStarValidationTests(unittest.TestCase):
     def test_emitter_results_require_real_sdk_proof_original_epochs_and_full_coverage(self):
         value=emitter_job();config=validate_config(self.config)
         def receive(message):
-            pool=object.__new__(NativeRtWorkerPool)
+            pool=object.__new__(NativeRtWorkerPool);pool.stage_trace_enabled=False
             worker=SimpleNamespace(failed=None,pending=copy.deepcopy(value),submitted_ns=time.monotonic_ns(),
                 completed=0,emitter_batch_completed_jobs=0,last_emitter_batch_stats=None)
             pool._workers,pool._messages,pool.job_timeout_ns={0:worker},queue.Queue(2),10**9
@@ -332,7 +350,7 @@ class JobValidationTests(unittest.TestCase):
         class UnreadableConnection:
             def __getattr__(self, key):
                 raise AssertionError(f'poll must not touch the connection: {key}')
-        pool = object.__new__(NativeRtWorkerPool)
+        pool = object.__new__(NativeRtWorkerPool); pool.stage_trace_enabled = False
         worker = SimpleNamespace(failed=None, pending=job(), submitted_ns=time.monotonic_ns(),
             completed=0, connection=UnreadableConnection())
         pool._workers, pool._messages, pool.job_timeout_ns = {0:worker}, queue.Queue(2), 10**9
@@ -345,7 +363,7 @@ class JobValidationTests(unittest.TestCase):
         self.assertIsNone(worker.pending)
 
     def test_poll_reports_timeout_once_without_io_or_automatic_retry(self):
-        pool = object.__new__(NativeRtWorkerPool)
+        pool = object.__new__(NativeRtWorkerPool); pool.stage_trace_enabled = False
         worker = SimpleNamespace(failed=None, pending=job(), submitted_ns=0, completed=0)
         pool._workers, pool._messages, pool.job_timeout_ns = {0:worker}, queue.Queue(2), 1
         self.assertIn('timeout', pool.poll()[0]['error'])
@@ -358,11 +376,12 @@ class JobValidationTests(unittest.TestCase):
                 value=incoming.get(timeout=2)
                 if isinstance(value,Exception):raise value
                 return value
-        pool=object.__new__(NativeRtWorkerPool);connection=Connection();pending=job()
+        pool=object.__new__(NativeRtWorkerPool);pool.stage_trace_enabled=False;connection=Connection();pending=job()
         worker=SimpleNamespace(identity=0,listener=SimpleNamespace(accept=lambda:connection),
             process=SimpleNamespace(pid=4321),ready=None,failed=None,pending=pending,
             submitted_ns=time.monotonic_ns(),completed=0,full_mesh_completed_jobs=0,last_full_mesh_stats=None,
-            emitter_batch_completed_jobs=0,last_emitter_batch_stats=None,last_transport_receive=None)
+            emitter_batch_completed_jobs=0,last_emitter_batch_stats=None,last_transport_receive=None,
+            stage_requests={},stage_records=[],stage_records_overwritten=0)
         pool._workers,pool._messages,pool.job_timeout_ns={0:worker},queue.Queue(2),10**9
         pool._closing,pool.socket_dir,pool._last_request_id=threading.Event(),None,1
         pool.allow_development_stub=True
@@ -400,7 +419,7 @@ class JobValidationTests(unittest.TestCase):
             self.assertFalse(thread.is_alive())
 
     def test_full_mesh_reply_proof_is_correlated_and_frozen_per_producer(self):
-        pool=object.__new__(NativeRtWorkerPool)
+        pool=object.__new__(NativeRtWorkerPool);pool.stage_trace_enabled=False
         pending=job();pending['channel_mode']='full_mesh'
         worker=SimpleNamespace(failed=None,pending=pending,submitted_ns=time.monotonic_ns(),completed=0,
                                full_mesh_completed_jobs=0,last_full_mesh_stats=None)
@@ -423,7 +442,7 @@ class JobValidationTests(unittest.TestCase):
                 self.sent = []
             def send(self, value):
                 self.sent.append(value)
-        pool = object.__new__(NativeRtWorkerPool)
+        pool = object.__new__(NativeRtWorkerPool); pool.stage_trace_enabled = False
         connection = Connection()
         worker = SimpleNamespace(failed=None, pending=None, connection=connection, submitted_ns=0, completed=0)
         pool._workers, pool._messages, pool.job_timeout_ns = {0:worker}, queue.Queue(2), 10**9
@@ -758,6 +777,85 @@ class PoolProcessTests(unittest.TestCase):
         self.assertEqual(pool.snapshot()['last_request_id'], 5)
         self.assertTrue(pool.submit(0, job(6)))
         self.assertEqual(self.completed()[0]['request_id'], 6)
+
+    def test_stage_trace_keeps_delayed_solver_separate_from_result_transport(self):
+        with patch.dict(os.environ, BAS_NATIVE_RT_STAGE_TRACE='1'):
+            pool = self.create('stage_delayed')
+            original = job()
+            pool.submit(0, original)
+            reply = self.completed()[0]
+            self.assertEqual(reply['kind'], 'result')
+            trace = reply['job_stage_trace']
+            self.assertEqual(trace['geometry_sha256'], hashlib.sha256(json.dumps(
+                original['poses'], sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest())
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline:
+                stages = pool.snapshot()['workers'][0]['job_stage_trace']['requests'][-1]['stages']
+                if len(stages) == 6:
+                    break
+                time.sleep(.001)
+            self.assertEqual([s['stage'] for s in stages],
+                             ['job_received', 'preparation_done', 'solver_call_start', 'solver_call_end',
+                              'result_send_start', 'result_send_end'])
+            self.assertGreaterEqual(stages[3]['host_monotonic_ns'] - stages[2]['host_monotonic_ns'], 60_000_000)
+            self.assertTrue(all(s['host_monotonic_ns'] <= s['receiver_host_monotonic_ns'] for s in stages))
+            self.assertTrue(all(s['request_id'] == 1 for s in stages))
+
+    def test_partial_or_hung_result_retains_incomplete_stage_after_shutdown(self):
+        for mode in ('stage_partial', 'stage_hang'):
+            with self.subTest(mode=mode), patch.dict(os.environ, BAS_NATIVE_RT_STAGE_TRACE='1'):
+                pool = self.create(mode, job_timeout_s=.15)
+                pool.submit(0, job())
+                started = time.monotonic()
+                for _ in range(100):
+                    self.assertEqual(pool.poll(), [])
+                self.assertLess(time.monotonic()-started, .1)
+                result = self.completed()[0]
+                self.assertEqual(result['kind'], 'error')
+                self.assertIn('timeout', result['error'])
+                before = pool.snapshot()['workers'][0]['job_stage_trace']
+                self.assertEqual(before['requests'][-1]['stages'][-1]['stage'], 'solver_call_start')
+                pool.close()
+                self.assertEqual(pool.snapshot()['workers'][0]['job_stage_trace'], before)
+                self.assertEqual(len(result['job_stage_trace']['stages']), 3)
+                self.pool = None
+                self.root = self.root / mode
+                self.root.mkdir()
+                self.stub = self.root / 'stub.py'
+                self.stub.write_text(STUB, encoding='utf-8')
+
+    def test_stage_trace_is_bounded_and_progress_does_not_fill_result_queue(self):
+        with patch.dict(os.environ, BAS_NATIVE_RT_STAGE_TRACE='1'):
+            pool = self.create('stage_normal')
+            for identity in range(1, 31):
+                self.assertTrue(pool.submit(0, job(identity)))
+                self.assertEqual(self.completed()[0]['request_id'], identity)
+            deadline = time.monotonic()+1
+            while time.monotonic()<deadline:
+                trace = pool.snapshot()['workers'][0]['job_stage_trace']
+                if len(trace['requests'][-1]['stages']) == 6:
+                    break
+                time.sleep(.001)
+            self.assertEqual(len(trace['requests']), 2)
+            self.assertEqual(len(trace['records']), 64)
+            self.assertEqual(trace['overwritten_records'], 30*6-64)
+            self.assertLessEqual(pool._messages.qsize(), 1)
+
+    def test_wrong_geometry_or_out_of_order_stage_is_an_explicit_error(self):
+        for mode in ('stage_wrong_hash', 'stage_bad_order'):
+            with self.subTest(mode=mode), patch.dict(os.environ, BAS_NATIVE_RT_STAGE_TRACE='1'):
+                pool = self.create(mode)
+                pool.submit(0, job())
+                reply = self.completed()[0]
+                self.assertEqual(reply['kind'], 'error')
+                self.assertIn('stage', reply['error'])
+                self.assertIsNotNone(pool.snapshot()['workers'][0]['failed'])
+                pool.close()
+                self.pool = None
+                self.root = self.root / mode
+                self.root.mkdir()
+                self.stub = self.root / 'stub.py'
+                self.stub.write_text(STUB, encoding='utf-8')
 
     def test_poll_never_reads_partial_frames_or_waits_for_hanging_worker(self):
         for mode in ('partial', 'hang'):

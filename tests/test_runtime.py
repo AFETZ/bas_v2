@@ -404,6 +404,39 @@ capture_effective_configuration() {
                 with self.assertRaises(ValueError):
                     self.load(config)
 
+    def test_worker_stage_trace_is_typed_default_off_and_frozen_as_effective_config(self):
+        resolved = self.load()
+        self.assertIs(resolved['runtime']['rt_stage_trace'], False)
+        self.assertEqual(bas.environment(resolved, 'trace-off', {'BAS_NATIVE_RT_STAGE_TRACE': '1'})
+                         ['BAS_NATIVE_RT_STAGE_TRACE'], '0')
+        for value in (0, 1, 'true', None, [], {}):
+            changed = copy.deepcopy(self.config)
+            changed['runtime']['rt_stage_trace'] = value
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'rt_stage_trace'):
+                self.load(changed)
+        self.config['runtime']['rt_stage_trace'] = True
+        with self.assertRaisesRegex(ValueError, 'worker_pool'):
+            self.load()
+        radio = self.root / 'radio.yaml'
+        radio.write_bytes((bas.ROOT / 'network/config/native_wifi_fullmesh_100ms.yaml').read_bytes())
+        self.config['propagation'] = dict(model='sionna', radio_config='radio.yaml',
+            ground_material='medium_dry_ground', building_material='concrete', thickness_m=.2)
+        resolved = self.load()
+        self.assertIs(resolved['runtime']['rt_stage_trace'], True)
+        env = bas.environment(resolved, 'trace-on', {'BAS_NATIVE_RT_STAGE_TRACE': '0'})
+        self.assertEqual(env['BAS_NATIVE_RT_STAGE_TRACE'], '1')
+        folder = self.root / 'runs/control/trace-on'
+        folder.mkdir(parents=True)
+        with patch.object(bas, 'ROOT', self.root):
+            bas.snapshot_inputs(resolved, folder, env)
+        frozen = json.loads((folder / 'config.json').read_text())
+        self.assertIs(frozen['runtime']['rt_stage_trace'], True)
+        # A recognized true setting cannot silently affect an in-process solver.
+        text = radio.read_text().replace('execution_mode: worker_pool', 'execution_mode: in_process')
+        radio.write_text(text.replace('receiver_batch_mode: full_mesh', 'receiver_batch_mode: pairwise'))
+        with self.assertRaisesRegex(ValueError, 'worker_pool'):
+            self.load()
+
     def test_diagnostic_log_level_is_explicit_and_cannot_inject_nslog_components(self):
         resolved = self.load()
         self.assertEqual(resolved['runtime']['sionna_log_level'], 'info')

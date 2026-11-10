@@ -77,6 +77,10 @@ WIFI_AGGREGATION="${BAS_NATIVE_WIFI_AGGREGATION:-$WIFI_AGGREGATION_DEFAULT}"
   printf 'BAS_NATIVE_WIFI_AGGREGATION must be 0 or 1.\n' >&2; exit 2;
 }
 PROPAGATION_PROFILE="${BAS_NATIVE_PROPAGATION_PROFILE:-sionna}"
+RT_STAGE_TRACE="${BAS_NATIVE_RT_STAGE_TRACE:-0}"
+[[ "$RT_STAGE_TRACE" == 0 || "$RT_STAGE_TRACE" == 1 ]] || {
+  printf 'BAS_NATIVE_RT_STAGE_TRACE must be 0 or 1.\n' >&2; exit 2;
+}
 SIONNA_LOG_LEVEL="${BAS_NATIVE_SIONNA_LOG_LEVEL:-info}"
 [[ "$SIONNA_LOG_LEVEL" == info || "$SIONNA_LOG_LEVEL" == debug ]] || {
   printf 'BAS_NATIVE_SIONNA_LOG_LEVEL must be info or debug.\n' >&2; exit 2;
@@ -264,6 +268,7 @@ run_in_container() {
     -e BAS_SOURCE_HEAD="$(git -C "$ROOT_DIR" rev-parse HEAD)" \
     -e BAS_SOURCE_DIRTY="$(git -C "$ROOT_DIR" status --porcelain | wc -l)" \
     -e BAS_NATIVE_PROPAGATION_PROFILE="${BAS_NATIVE_PROPAGATION_PROFILE:-sionna}" \
+    -e BAS_NATIVE_RT_STAGE_TRACE="$RT_STAGE_TRACE" \
     -e BAS_NATIVE_SIONNA_LOG_LEVEL="$SIONNA_LOG_LEVEL" \
     -e BAS_NATIVE_URBAN_CONFIG="$container_geometry" \
     -e BAS_NATIVE_URBAN_OUTPUT="$container_urban_output" \
@@ -779,7 +784,7 @@ export PYTHONPATH="$PYTHON_TOOLING:$PYTHON_DEPS:${PYTHONPATH:-}"
 cp "$PROJECT_SOURCE" "$UPSTREAM_SOURCE"
 cp "$ROOT_DIR/network/ns3/scratch/native-geometry-loss.h" "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" "$ROOT_DIR/network/ns3/scratch/native-live-state.h" "$ROOT_DIR/network/ns3/scratch/native-lockstep.h" "$NS3_DIR/scratch/"
 cp "$ROOT_DIR/network/ns3/scratch/native-rt-cache.h" "$ROOT_DIR/network/ns3/scratch/native-rt-pool.h" "$ROOT_DIR/network/ns3/scratch/native-rt-worker.cc" "$NS3_DIR/scratch/"
-cp "$ROOT_DIR/network/ns3/scratch/native-log-phase.h" "$NS3_DIR/scratch/"
+cp "$ROOT_DIR/network/ns3/scratch/native-log-phase.h" "$ROOT_DIR/network/ns3/scratch/native-timing-distribution.h" "$NS3_DIR/scratch/"
 source_args=()
 if [[ "$SCENARIO_KEY" == urban ]]; then
   cp "$GEOMETRY_CONFIG" "$RUN_DIR/logs/urban_scenario.json"
@@ -829,8 +834,8 @@ if [[ "${BAS_NATIVE_FIVE_SKIP_BUILD:-0}" == 1 ]]; then
   [[ "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-rt-cache.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-rt-pool.h" ]] || {
     printf 'Binary predates native RT cache/pool header.\n' >&2; exit 2;
   }
-  [[ "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-log-phase.h" ]] || {
-    printf 'Binary predates logging phase observer.\n' >&2; exit 2;
+  [[ "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-log-phase.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-timing-distribution.h" ]] || {
+    printf 'Binary predates logging phase observer or timing distribution header.\n' >&2; exit 2;
   }
   if [[ "$SIONNA_RT_EXECUTION_MODE" == worker_pool ]]; then
     [[ -x "$RT_WORKER_BINARY" && "$RT_WORKER_BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-rt-worker.cc" && "$RT_WORKER_BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-live-state.h" ]] || {
@@ -1085,6 +1090,7 @@ capture_effective_configuration() {
     --config "native_rt_pool_source=$ROOT_DIR/network/ns3/scratch/native-rt-pool.h"
     --config "native_rt_cache_source=$ROOT_DIR/network/ns3/scratch/native-rt-cache.h"
     --config "native_log_phase_header=$ROOT_DIR/network/ns3/scratch/native-log-phase.h"
+    --config "native_timing_distribution_header=$ROOT_DIR/network/ns3/scratch/native-timing-distribution.h"
   )
   if [[ "$SIONNA_RT_EXECUTION_MODE" == worker_pool ]]; then
     config_args+=(--config "native_rt_worker_source=$ROOT_DIR/network/ns3/scratch/native-rt-worker.cc"

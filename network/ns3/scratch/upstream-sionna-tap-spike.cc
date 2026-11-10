@@ -38,6 +38,7 @@
 #include "native-geometry-loss.h"
 #include "native-rt-pool.h"
 #include "native-log-phase.h"
+#include "native-timing-distribution.h"
 #include <memory>
 
 #include <algorithm>
@@ -101,6 +102,7 @@ size_t g_spectrumMaximumBins{0};
 uint64_t g_stalePoseSamples{0};
 uint64_t g_pathObservations{0};
 uint64_t g_realtimeLagSamples{0};
+bas::TimingDistribution g_realtimeLagDistribution;
 double g_latestRealtimeLagMs{std::numeric_limits<double>::infinity()};
 double g_readinessLagMaxMs{50.0};
 uint32_t g_readinessConsecutiveSamples{3};
@@ -927,6 +929,18 @@ class LivePositionSource
     uint64_t ObservedSnapshots() const { return m_observedSnapshots; }
     uint64_t AppliedSnapshots() const { return m_appliedSnapshots; }
     uint64_t MaximumAppliedPoseAgeNs() const { return m_maximumAppliedAgeNs; }
+    void WriteAgeDistributions(std::ostream& output) const
+    {
+        output << "{\"enabled\":" << (!g_lockstep ? "true" : "false")
+               << ",\"scope\":\"realtime_operational;maximum_host_age_of_complete_applied_cohort;"
+                  "includes_static_cp;sampled_at_refresh_entry_freshness_checks_candidate_validation_application;"
+                  "not_per_packet_or_continuous_age\",\"freshness_checks\":";
+        m_freshnessAge.Write(output);
+        output << ",\"refresh_entry_held_frame\":"; m_refreshHeldAge.Write(output);
+        output << ",\"candidate_validation\":"; m_candidateAge.Write(output);
+        output << ",\"successful_applications\":"; m_applicationAge.Write(output);
+        output << '}';
+    }
 
     void Poll()
     {
@@ -940,6 +954,15 @@ class LivePositionSource
         m_started = true;
         py::gil_scoped_acquire gil;
         const int64_t nowNs = HostNowNs();
+        // A failed reader/lag guard must not erase an already held stale frame.
+        // This is observation only; the existing validation order is unchanged.
+        if (!g_lockstep && g_runtimeOperational && !m_applied.empty())
+        {
+            const auto ageNs=bas::MaximumMeasuredPoseAgeNs(m_applied,nowNs);
+            m_maximumAppliedAgeNs=std::max(m_maximumAppliedAgeNs,ageNs);
+            m_refreshHeldAge.Observe(DistributionAgeNs(m_applied,nowNs),nowNs,
+                                     static_cast<int64_t>(g_stateMaxAgeS*1e9));
+        }
         try
         {
             const int64_t eventNs = EventHostNs(nowNs);
@@ -1017,12 +1040,21 @@ class LivePositionSource
         return bas::MeasuredEventHostNs(m_deferred,g_runtimeOperational,g_radioEpochNs,
                                         Simulator::Now().GetNanoSeconds(),wallNs);
     }
+    static int64_t DistributionAgeNs(const std::vector<bas::MeasuredState>& states,int64_t wallNs)
+    {
+        if (states.empty() || std::any_of(states.begin(),states.end(),[&](const auto& state) {
+                return state.sampleNs<0 || state.sampleNs>wallNs;
+            })) return -1;
+        return static_cast<int64_t>(bas::MaximumMeasuredPoseAgeNs(states,wallNs));
+    }
     void CheckAppliedFreshness(int64_t eventNs, int64_t wallNs)
     {
         if (!m_deferred || !g_runtimeOperational) return;
         // Record a known violating age before rejecting it. A fresh observation
         // cannot make an old held geometry frame fresh or invent an application.
-        m_maximumAppliedAgeNs = std::max(m_maximumAppliedAgeNs,bas::MaximumMeasuredPoseAgeNs(m_applied,wallNs));
+        const auto ageNs=bas::MaximumMeasuredPoseAgeNs(m_applied,wallNs);
+        m_maximumAppliedAgeNs = std::max(m_maximumAppliedAgeNs,ageNs);
+        m_freshnessAge.Observe(DistributionAgeNs(m_applied,wallNs),wallNs,static_cast<int64_t>(g_stateMaxAgeS*1e9));
         bas::ValidateMeasuredCohort(m_applied,m_mobility.size(),eventNs,wallNs,
                                    static_cast<int64_t>(g_stateMaxAgeS*1e9));
     }
@@ -1031,6 +1063,11 @@ class LivePositionSource
     {
         if (m_deferred)
         {
+            // Observe the attempted measured frame before the unchanged guard.
+            // A rejected candidate must remain visible in the distribution.
+            if (g_runtimeOperational)
+                m_candidateAge.Observe(DistributionAgeNs(snapshot,wallNs),
+                                       wallNs,static_cast<int64_t>(g_stateMaxAgeS*1e9));
             bas::CommitMeasuredCohort(snapshot,m_mobility,g_positions,m_applied,eventNs,wallNs,
                 static_cast<int64_t>(g_stateMaxAgeS*1e9),true,[&] {
                     if (publishDependents) publishDependents();
@@ -1055,8 +1092,12 @@ class LivePositionSource
     {
         ++m_appliedSnapshots;
         ++g_poseSnapshots;
-        if (m_deferred && g_runtimeOperational)
-            m_maximumAppliedAgeNs = std::max(m_maximumAppliedAgeNs,bas::MaximumMeasuredPoseAgeNs(m_applied,wallNs));
+        if (!g_lockstep && g_runtimeOperational)
+        {
+            const auto ageNs=bas::MaximumMeasuredPoseAgeNs(m_applied,wallNs);
+            m_maximumAppliedAgeNs = std::max(m_maximumAppliedAgeNs,ageNs);
+            m_applicationAge.Observe(DistributionAgeNs(m_applied,wallNs),wallNs,static_cast<int64_t>(g_stateMaxAgeS*1e9));
+        }
         for (size_t i=0; i<snapshot.size(); ++i)
         {
             const double ageMs = g_lockstep ? (i==0 ? 0 :
@@ -1094,6 +1135,7 @@ class LivePositionSource
     std::vector<bas::MeasuredState> m_applied;
     bool m_deferred{false}, m_started{false};
     uint64_t m_observedSnapshots{0}, m_appliedSnapshots{0}, m_maximumAppliedAgeNs{0};
+    bas::TimingDistribution m_freshnessAge,m_refreshHeldAge,m_candidateAge,m_applicationAge;
 };
 
 // Non-owning statistics view; the run closes it before the local pose owner dies.
@@ -1117,7 +1159,13 @@ class NativeRuntimeSampler
             DynamicCast<RealtimeSimulatorImpl>(Simulator::GetImplementation());
         if (realtime)
         {
-            const double lagMs = (realtime->RealtimeNow() - Simulator::Now()).GetSeconds() * 1000.0;
+            const auto lag = realtime->RealtimeNow() - Simulator::Now();
+            const double lagMs = lag.GetSeconds() * 1000.0;
+            const int64_t observedNs=std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            if (g_runtimeOperational)
+                g_realtimeLagDistribution.Observe(lag.GetNanoSeconds(),observedNs,
+                                                  static_cast<int64_t>(g_runtimeLagMaxMs*1e6));
             ++g_realtimeLagSamples;
             g_latestRealtimeLagMs = lagMs;
             if (lagMs <= g_readinessLagMaxMs)
@@ -1542,7 +1590,11 @@ WriteStats(const std::string& path)
            << "\",\"observed_snapshots\":" << (g_poseSourceForStats ? g_poseSourceForStats->ObservedSnapshots() : 0)
            << ",\"applied_snapshots\":" << (g_poseSourceForStats ? g_poseSourceForStats->AppliedSnapshots() : 0)
            << ",\"maximum_applied_pose_age_ns\":" << (g_poseSourceForStats ? g_poseSourceForStats->MaximumAppliedPoseAgeNs() : 0)
-           << ",\"state_max_age_ns\":" << static_cast<int64_t>(g_stateMaxAgeS*1e9) << "},\n"
+           << ",\"state_max_age_ns\":" << static_cast<int64_t>(g_stateMaxAgeS*1e9)
+           << ",\"age_distributions\":";
+    if (g_poseSourceForStats) g_poseSourceForStats->WriteAgeDistributions(output);
+    else output << "null";
+    output << "},\n"
            << "  \"pose_poll_period_ms\": " << g_posePollPeriodMs << ",\n"
            << "  \"successful_pose_reader_calls\": " << g_poseReaderCalls << ",\n"
            << "  \"successful_pose_reader_wall_ns\": " << g_poseReaderWallNs << ",\n"
@@ -1577,6 +1629,10 @@ WriteStats(const std::string& path)
            << "  \"path_observation_scope\": \""
            << (g_eventLogging == "metrics_only" ? "periodic_cp_uav" : "periodic_and_decoded_packet_pairs") << "\",\n"
            << "  \"realtime_lag_samples\": " << g_realtimeLagSamples << ",\n"
+           << "  \"operational_realtime_lag_distribution\":";
+    g_realtimeLagDistribution.Write(output);
+    output << ",\n  \"realtime_lag_distribution_scope\":\"host realtime minus native event time;"
+              "50ms native poll;operational_only;not_odometry_age_or_control_latency\",\n"
            << "  \"readiness_lag_max_ms\": " << g_readinessLagMaxMs << ",\n"
            << "  \"readiness_consecutive_samples\": " << g_readinessConsecutiveSamples << ",\n"
            << "  \"mac_tx_total\": " << macTx << ",\n"

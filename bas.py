@@ -20,7 +20,7 @@ SHAPE = {
     'environment': {'engine', 'scene'}, 'drone': {'autopilot', 'count'},
     'propagation': {'model'}, 'network': {'engine', 'topology'},
     'experiment': {'policy', 'duration_s', 'seed', 'run'},
-    'runtime': {'clock', 'image', 'land_timeout_s', 'sionna_log_level', 'event_logging', 'capture_storage'},
+    'runtime': {'clock', 'image', 'land_timeout_s', 'sionna_log_level', 'event_logging', 'capture_storage', 'rt_stage_trace'},
     'flows': {'channels', 'payload_attitude_interval_s', 'payload_load'},
     'interference': {'sources'},
     'hitl': {'mode', 'request', 'request_sha256', 'profiles_sha256'},
@@ -228,6 +228,7 @@ def load_config(path, root=ROOT):
         config['runtime'].setdefault('sionna_log_level', 'info')
         config['runtime'].setdefault('event_logging', 'metrics_only')
         config['runtime'].setdefault('capture_storage', 'tmpfs')
+        config['runtime'].setdefault('rt_stage_trace', False)
     if isinstance(config['flows'], dict):
         config['flows'].setdefault('payload_load', None)
     for section, keys in SHAPE.items():
@@ -254,6 +255,10 @@ def load_config(path, root=ROOT):
         raise ValueError('runtime.sionna_log_level must be info or debug')
     if config['runtime']['event_logging'] not in ('metrics_only', 'batched_trace'):
         raise ValueError('runtime.event_logging must be metrics_only or batched_trace')
+    if type(config['runtime']['rt_stage_trace']) is not bool:
+        raise ValueError('runtime.rt_stage_trace must be boolean')
+    if config['runtime']['rt_stage_trace'] and config['propagation']['model'] != 'sionna':
+        raise ValueError('runtime.rt_stage_trace requires Sionna worker_pool')
     if type(count) is not int or not 1 <= count <= 5:
         raise ValueError('drone.count must be an integer from 1 to 5')
     channels = config['flows']['channels']
@@ -328,6 +333,8 @@ def load_config(path, root=ROOT):
                 and config.get('interference', {}).get('sources') is not None
                 and radio_profile['sionna']['receiver_batch_mode'] != 'full_mesh'):
             raise ValueError('worker_pool with directed sources requires receiver_batch_mode=full_mesh')
+        if config['runtime']['rt_stage_trace'] and radio_profile['sionna']['execution_mode'] != 'worker_pool':
+            raise ValueError('runtime.rt_stage_trace requires Sionna worker_pool')
         thickness = propagation['thickness_m']
         if type(thickness) not in (int, float) or not 0 < thickness <= sys.float_info.max:
             raise ValueError('propagation.thickness_m must be finite and positive')
@@ -381,6 +388,7 @@ def environment(config, run_id, inherited=None):
         'NATIVE_EXPERIMENT_PILOT': 1, 'NATIVE_PARAMETER_SNAPSHOTS': 0,
         'NATIVE_COMMAND_PERIOD_S': 1, 'NATIVE_TASK_PERIOD_S': 20,
         'NATIVE_SIONNA_LOG_LEVEL': config['runtime'].get('sionna_log_level', 'info'),
+        'NATIVE_RT_STAGE_TRACE': int(config['runtime'].get('rt_stage_trace', False)),
     }
     if config['propagation']['model'] == 'sionna':
         propagation = config['propagation']
