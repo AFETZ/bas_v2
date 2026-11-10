@@ -1092,6 +1092,10 @@ capture_effective_configuration() {
     --config "native_log_phase_header=$ROOT_DIR/network/ns3/scratch/native-log-phase.h"
     --config "native_timing_distribution_header=$ROOT_DIR/network/ns3/scratch/native-timing-distribution.h"
   )
+  local scene_execution_settings="$(dirname "$LAUNCH_WORLD")/runtime-settings.json"
+  if [[ -f "$scene_execution_settings" ]]; then
+    config_args+=(--config "scene_execution=$scene_execution_settings")
+  fi
   if [[ "$SIONNA_RT_EXECUTION_MODE" == worker_pool ]]; then
     config_args+=(--config "native_rt_worker_source=$ROOT_DIR/network/ns3/scratch/native-rt-worker.cc"
                   --config "native_rt_pool_adapter=$ROOT_DIR/scripts/product/native_rt_workers.py")

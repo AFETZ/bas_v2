@@ -52,7 +52,7 @@ class SceneConfigurationTests(unittest.TestCase):
 
     def test_unknown_scene_frame_mission_radio_and_barrier_fields_are_rejected(self):
         mutations = [
-            lambda s: s.update(physics={'max_step_size_s': .02}),
+            lambda s: s.update(physics={'solver_step_s': .02}),
             lambda s: s['frame'].update(yaw_offset_rad=1),
             lambda s: s['mission'].update(failsafe={'mode': 'LAND'}),
             lambda s: s['radio'].update(baud_rate=57600),

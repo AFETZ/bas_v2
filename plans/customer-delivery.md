@@ -1,4 +1,4 @@
-**BAS: план доведения до поставки заказчику — 10.11.2026**
+**BAS: план доведения до поставки заказчику — 11.11.2026**
 
 Статус: план работ и предлагаемая программа приёмки, не отчёт о готовности.
 Основание: пересланные итоги созвона 16.06, уточнения модема и ответ пользователя «до 5 дронов».
@@ -19,7 +19,7 @@
 
 В приватный [UAVcosim/main](https://github.com/HSE-Intelligent-Unmanned-Systems-Lab/UAVcosim)
 без force push отправлены `247f338`, `68b5845`, `7373a38` и
-`25d5ae53a1c277afe2389041d56af9830692b7ce`.
+`25d5ae5` и `849734ce8a1c6551b43285bde1d69373413b5b4f`.
 Добавлен отдельный remote `UAVcosim`; существующих remotes не было.
 Это инженерная публикация с известными отказами свежести, а не завершённая приёмка.
 
@@ -113,7 +113,25 @@ Raw capture и его SHA сохранены. Есть явный дисковы
 Аудит сцены выявил молчаливое принятие NED, ground offset, неизвестных physics/failsafe и version.
 В текущем рабочем дереве общая проверка UrbanScenario отклоняет неподдержанные поля,
 дубли JSON и неверные типы; легитимные metadata и legacy defaults сохранены.
-Общий suite после этой проверки: 550 tests PASS, один существующий платформенный skip. Это проверка достоверности настроек; обязательные новые physics/failsafe knobs ещё нужно реализовать.
+Общий suite после этой проверки: 550 tests PASS, один существующий платформенный skip. Это проверка достоверности настроек; ниже зафиксировано последующее узкое расширение поддержанных physics/failsafe.
+
+Сцена теперь поддерживает только новые-run параметры physics.max_step_size_s
+(0,25 / 0,5 / 1 мс) и GCS failsafe action disabled / rtl / land, timeout 2–120 с.
+Использованы существующие SDF и последний SITL --defaults, без новой подсистемы.
+Defaults сохранены; FS_OPTIONS не переопределяется, актуальные MAV_GCS_SYSID / HI
+не подменены устаревшим SYSID_MYGCS. runtime-settings.json различает configured input
+и ещё не выполненный runtime readback и входит в effective capture.
+
+После этого изменения: 612 tests PASS, один прежний skip. Stock Gazebo подтвердил
+три точных шага через δsim/δiterations. Pinned SITL PARAM_VALUE подтвердили action
+0/1/5, timeout 2/5/120 и MAV identity. Отдельный тест использовал настоящие generator-produced
+.parm и два TCP MAVLink канала с system255: при потере control 10,1 с AP-time с живым
+payload сохранялись GUIDED / armed; после потери обоих наблюдались LAND / RTL через
+3100 / 3000 мс от последнего heartbeat при timeout 3 с. Использован forcearm в
+изолированном stock SITL 10×; отметки реакции опираются на GLOBAL_POSITION_INT с периодом 100 мс.
+Полные посадка / disarm и совместная Gazebo / ns-3 реакция здесь не проверялись.
+Доказательства: runs/control/publication-physics-failsafe-20261111/analysis.json
+и отдельный worktree runs/control/physics-failsafe-probe-20261111/gcs-loss-01/results.json.
 
 **Установка, оборудование и критерии**
 
@@ -122,10 +140,26 @@ Raw capture и его SHA сохранены. Есть явный дисковы
 ROS и оба native targets собраны заново за 260,53 с; check-only: ready=true, gaps=[].
 Единственный E2E этой копии отказал, как указано в таблице. Новые ревизии требуют своей проверки.
 
+Новый независимый GitHub clone `849734c` создан в отдельном каталоге
+UAVcosim-github-verify-849734c-20261111. Из Release заново получены wheels,
+официальный SDK клонирован и пропатчен; private environments, ROS и native targets
+собраны заново за 267,06 с. Ни SDK, ни environments, ни build из прежнего каталога
+не копировались. Проверки bootstrap (ready=true, gaps=[]), assets и inspect terrain прошли.
+Закреплённый Docker image уже был на хосте и проверен по digest.
+Новый runtime ещё не завершён; из этой копии подготовлена фиксированная серия
+clone849-interframe-20261111-a из 20 попыток с остановкой на первом runtime-invalid.
+
+[Компактные доказательства на GitHub](https://github.com/HSE-Intelligent-Unmanned-Systems-Lab/UAVcosim/releases/tag/engineering-evidence-20261111-849734c):
+166 исходных сводок и команд, включая отказы, 878628 байт,
+SHA-256 7b8e078ee65794e7504e044f4168c0bc262f3833dda02c6a3a9fd032afa9f78c.
+Архив скачан обратно, SHA подтверждён; Gitleaks не нашёл секретов.
+Эта публикация предшествует новой сборке849 и physics/failsafe tests; новые результаты
+в неё задним числом не добавляются.
+
 Владелец подтвердил: оборудование пока не подключено. Нужны реальные два UART и Ethernet,
 модем/контроллер и их фактические версии. Инвентаризация не нашла ttyUSB/ttyACM.
 16 software HitL tests и подготовка профилей не заменяют аппаратные испытания.
-Готовим совместимые профили распространённых китайских плат/модемов; native Wi-Fi
+Подготовлены интерфейсные references китайских плат/модемов; native Wi-Fi
 остаётся инженерной моделью, эквивалентность произвольному устройству не заявляется.
 
 Решение владельца: выбрать и реализовать рабочие SLA / hybrid profiles по опубликованным

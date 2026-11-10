@@ -309,6 +309,13 @@ def load_config(path, root=ROOT):
     config['environment']['scene'] = scene.relative_to(root).as_posix()
     from scripts.product.urban_mission import UrbanScenario
     scenario = UrbanScenario.load(scene, root=root)
+    if set(scenario.raw) & {'physics', 'failsafe'}:
+        from scripts.product.urban_mission import EXECUTION_SETTINGS_IMAGE
+        if image != EXECUTION_SETTINGS_IMAGE:
+            raise ValueError('explicit scene physics/failsafe settings require the pinned qualified runtime image')
+    if (config['hitl'] is not None
+            and scenario.raw.get('failsafe', {}).get('gcs_action', 'disabled') != 'disabled'):
+        raise ValueError('GCS failsafe actions require the virtual relay GCS; radio_bench does not configure a physical controller')
     if tuple(sorted(scenario.spawns)) != tuple(range(1, count + 1)):
         raise ValueError('scene UAV roster must match drone.count exactly')
     if scenario.terrain_bundle_path is not None and config['propagation']['model'] != 'sionna':

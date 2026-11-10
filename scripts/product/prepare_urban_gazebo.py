@@ -228,6 +228,8 @@ def prepare(config: Path, output: Path, uav_count: int | None = None, *,
                     raise ValueError(f"route UAV{uid} intersects building safety envelope {b['id']}")
     output.mkdir(parents=True, exist_ok=True)
     resolved = copy.deepcopy(data)
+    settings = scenario.execution_settings()
+    resolved["physics"] = {"max_step_size_s": settings["physics"]["max_step_size_s"]}
     if scenario.terrain_bundle_path is not None:
         frozen_bundle = output / "terrain"
         frozen_bundle.mkdir(exist_ok=False)
@@ -247,8 +249,9 @@ def prepare(config: Path, output: Path, uav_count: int | None = None, *,
     UrbanScenario.load(mission_scene, root=ROOT)
     sdf = ET.Element("sdf", version="1.9")
     world = sub(sdf, "world", name="map")
-    physics = sub(world, "physics", name="1ms", type="ode")
-    for tag, value in (("max_step_size", .001), ("real_time_factor", 1), ("real_time_update_rate", 1000)):
+    step = settings["physics"]["max_step_size_s"]
+    physics = sub(world, "physics", name="1ms" if step == .001 else "configured_step", type="ode")
+    for tag, value in (("max_step_size", step), ("real_time_factor", 1), ("real_time_update_rate", round(1 / step))):
         sub(physics, tag, value)
     systems = {"physics": "Physics", "user-commands": "UserCommands", "scene-broadcaster": "SceneBroadcaster",
                "contact": "Contact", "imu": "Imu", "air-pressure": "AirPressure", "air-speed": "AirSpeed",
@@ -290,6 +293,15 @@ def prepare(config: Path, output: Path, uav_count: int | None = None, *,
     defaults = output / "urban_sitl.parm"
     defaults.write_text((ROOT / "network/config/town01_sitl.parm").read_text()
                         + f"\n# Pinned ArduCopter4.8 native waypoint speed, m/s\nWP_SPD {speed:.9g}\n")
+    if settings["failsafe"]["configured"]:
+        with defaults.open("a") as stream:
+            stream.write("\n# Explicit scene GCS failsafe; pinned ArduCopter4.8 parameter names\n")
+            for name, value in settings["failsafe"]["parameter_overrides"].items():
+                stream.write(f"{name} {value:.9g}\n")
+    settings["generated_inputs"] = {
+        "world_sdf_sha256": hashlib.sha256((output / "world.sdf").read_bytes()).hexdigest(),
+        "sitl_defaults_sha256": hashlib.sha256(defaults.read_bytes()).hexdigest()}
+    (output / "runtime-settings.json").write_text(json.dumps(settings, indent=2, allow_nan=False) + "\n")
     launch["base_simulation"]["sitl_defaults"] = defaults.resolve().relative_to(ROOT).as_posix()
     launch["base_simulation"]["sitl_home"] = ",".join(str(frame[key]) for key in
             ("origin_latitude_deg", "origin_longitude_deg", "origin_elevation_m", "spherical_heading_deg"))

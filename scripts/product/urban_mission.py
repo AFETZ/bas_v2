@@ -49,6 +49,7 @@ class NedFrame:
 
 
 ROOT = Path(__file__).resolve().parents[2]
+EXECUTION_SETTINGS_IMAGE = "sha256:89d78eff9914b1644a1b01b793612e9ee8b19916c5a7bf5f578ba6d8bfbfafe5"
 
 
 def _unique_scene_fields(pairs):
@@ -90,12 +91,24 @@ def validate_scene_fields(raw):
 
     Small control-only fixtures may omit environment/radio metadata as before.
     Present fields must describe the fixed ENU/native contract; unsupported
-    physics/failsafe settings must not look successfully applied in UI exports.
+    settings must not look successfully applied in UI exports.
     """
     _scene_fields(raw, {"spawns", "routes", "mission"},
-        {"schema_version", "scenario", "status", "frame", "gcs", "buildings", "radio", "terrain_bundle"}, "scene")
+        {"schema_version", "scenario", "status", "frame", "gcs", "buildings", "radio", "terrain_bundle", "physics", "failsafe"}, "scene")
     if "schema_version" in raw and (type(raw["schema_version"]) is not int or raw["schema_version"] != 1):
         raise ValueError("scene schema_version must be integer 1")
+    if "physics" in raw:
+        _scene_fields(raw["physics"], set(), {"max_step_size_s"}, "physics")
+        step = _scene_number(raw["physics"].get("max_step_size_s", .001), "physics.max_step_size_s")
+        if step not in (.00025, .0005, .001):
+            raise ValueError("physics.max_step_size_s must be 0.00025, 0.0005 or 0.001 seconds; 1/2/4 substeps per 1000 Hz IMU period")
+    if "failsafe" in raw:
+        _scene_fields(raw["failsafe"], set(), {"gcs_action", "gcs_timeout_s"}, "failsafe")
+        if raw["failsafe"].get("gcs_action", "disabled") not in ("disabled", "rtl", "land"):
+            raise ValueError("failsafe.gcs_action must be disabled, rtl or land")
+        timeout = _scene_number(raw["failsafe"].get("gcs_timeout_s", 5), "failsafe.gcs_timeout_s")
+        if not 2 <= timeout <= 120:
+            raise ValueError("failsafe.gcs_timeout_s must be between 2 and 120 seconds")
     if "frame" in raw:
         frame = raw["frame"]
         _scene_fields(frame, set(), {"coordinate_frame", "ground_surface_z_m", "spherical_heading_deg",
@@ -304,6 +317,38 @@ class UrbanScenario:
     terrain_grid: dict | None = dataclasses.field(default=None, repr=False)
     model_rest_clearance_m: float | None = None
     ground_reference_derivation: str | None = None
+
+    def execution_settings(self):
+        """New-run settings; configured values are distinct from upstream read-back."""
+        step = self.raw.get("physics", {}).get("max_step_size_s", .001)
+        failsafe = self.raw.get("failsafe", {})
+        action = failsafe.get("gcs_action", "disabled")
+        parameters = dict(FS_GCS_ENABLE={"disabled": 0, "rtl": 1, "land": 5}[action],
+                          FS_GCS_TIMEOUT=failsafe.get("gcs_timeout_s", 5),
+                          MAV_GCS_SYSID=255, MAV_GCS_SYSID_HI=0)
+        configured = "failsafe" in self.raw
+        return dict(schema_version=1, lifecycle="new_run_only",
+            compatibility=dict(image=EXECUTION_SETTINGS_IMAGE,
+                gazebo_sim_version="8.14.0",
+                ardupilot_source_sha="3c073f9a09590307e99f49f960dd0f4dac7fc5bb"),
+            parameter_contract={
+                "physics.max_step_size_s": dict(type="number", units="s",
+                    allowed=[.00025, .0005, .001], default=.001),
+                "failsafe.gcs_action": dict(type="string", units=None,
+                    allowed=["disabled", "rtl", "land"], default="disabled"),
+                "failsafe.gcs_timeout_s": dict(type="number", units="s",
+                    minimum=2, maximum=120, default=5)},
+            physics=dict(max_step_size_s=step, real_time_factor=1,
+                imu_rate_hz=1000, imu_substeps=round(.001 / step),
+                supported_max_step_size_s=[.00025, .0005, .001],
+                scope="Gazebo SDF input; actual stepping requires runtime clock observation"),
+            failsafe=dict(gcs_action=action, gcs_timeout_s=parameters["FS_GCS_TIMEOUT"],
+                configured=configured, parameter_overrides=parameters if configured else {},
+                pinned_default_expectations=parameters if not configured else {},
+                inherited_parameters=["FS_OPTIONS"],
+                upstream_readback_status="not_recorded",
+                heartbeat_scope="Any accepted system255 GCS heartbeat on either UART refreshes the common upstream timer; a control-only outage is not total GCS loss.",
+                scope="Pinned ArduCopter4.8 GCS heartbeat failsafe; configured parameters do not prove reaction in flight."))
 
     def ground_for(self, uav_id):
         return self.ground_reference_by_uav_m[uav_id] if self.ground_reference_by_uav_m is not None else self.ground_reference_z_m
