@@ -917,6 +917,32 @@ class RelayExperiment:
                 armed=local["armed"]))
         return max(observed, key=lambda row: row["stamp_ns"]) if observed else None
 
+    def close_landing_observation(self, reason):
+        """Close the controller observation without inventing radio delivery.
+
+        A final UART heartbeat may still be in the modeled channel when the
+        lifecycle completes. Missing application receipt at this boundary is
+        censored observation, not proof of a dropped RF packet.
+        """
+        closed_ns = time.monotonic_ns()
+        self.summary["landing_observation"] = dict(
+            closed_host_monotonic_ns=closed_ns, reason=reason,
+            policy="ends_with_lifecycle_no_radio_drain")
+        for i in self.uav_ids:
+            heartbeat = self.fresh(i, "HEARTBEAT")
+            confirmed = heartbeat is not None and not bool(
+                heartbeat.base_mode & self.mav.MAV_MODE_FLAG_SAFETY_ARMED)
+            self.summary["uavs"][str(i)].update(
+                landing_radio_confirmation=confirmed,
+                radio_confirmation_status=("observed" if confirmed else
+                    "not_observed_before_observation_end"),
+                radio_observation_end_host_monotonic_ns=closed_ns,
+                radio_heartbeat_producer_host_monotonic_ns=(
+                    self.gcs.latest_message_ns.get(i, {}).get("HEARTBEAT")),
+                radio_heartbeat_received_host_monotonic_ns=(
+                    self.gcs.latest_message_received_ns.get(i, {}).get("HEARTBEAT")))
+        self.emit("landing_observation_closed", **self.summary["landing_observation"])
+
     def land(self):
         self.stopping = True
         self.phase("experiment_landing")  # native fault is explicitly removed for bounded cleanup
@@ -970,8 +996,10 @@ class RelayExperiment:
                 if any(trace.terminal_reason for trace in self.landing_traces.values()):
                     raise ScenarioError(f"terminal disarm without controlled LAND evidence: {incomplete}")
                 if not incomplete:
+                    self.close_landing_observation("all_lifecycle_observed")
                     return
         incomplete = [i for i, trace in self.landing_traces.items() if not trace.completed]
+        self.close_landing_observation("landing_timeout")
         self.summary["landing_unconfirmed_uavs"] = incomplete
         raise ScenarioError(f"landing/automatic disarm not observed for UAVs {incomplete}")
 

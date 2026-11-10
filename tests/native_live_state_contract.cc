@@ -246,6 +246,12 @@ void AgeBoundedHistory(const std::filesystem::path& input)
         {
             if (prune && i>5) continue; // Publication at base, 100ms inclusive budget.
             auto pose=Pose("uav",i);
+            // Turning/accelerating trajectory: pruning must preserve all
+            // measured motion used by RT and Doppler, not only position.
+            const double yaw=.17*i, speed=.5*i;
+            pose["position_m"]=std::vector<double>{10.*std::cos(yaw),10.*std::sin(yaw),20.+.1*i};
+            pose["velocity_enu_mps"]=std::vector<double>{-speed*std::sin(yaw),speed*std::cos(yaw),.1*i};
+            pose["orientation_quat_xyzw"]=std::vector<double>{0.,0.,std::sin(yaw/2),std::cos(yaw/2)};
             pose["source_sim_time_s"]=10.-i*.02;
             pose["sample_monotonic_ns"]=base-i*20*ms;
             history.append(pose);
@@ -266,8 +272,9 @@ void AgeBoundedHistory(const std::filesystem::path& input)
             Require(acceptedA==acceptedB,"Age pruning changed causal reader acceptance");
             if (acceptedA)
                 Require(a.size()==b.size() && a[1].sourceTime==b[1].sourceTime &&
-                        a[1].sampleNs==b[1].sampleNs && a[1].position==b[1].position,
-                        "Age pruning selected a different measured state");
+                        a[1].sampleNs==b[1].sampleNs && a[1].position==b[1].position &&
+                        a[1].velocity==b[1].velocity && a[1].orientation==b[1].orientation,
+                        "Age pruning selected a different measured motion state");
         }
 }
 } // namespace

@@ -16,10 +16,67 @@ ArduPilot SITL, геометрическая модель или Sionna RT и na
 из одного снимка генерируются здания Gazebo и входные данные радиомодели.
 Модель распространения исследовательская, без калибровки по натурным измерениям.
 
-## Запуск на ПК4
+## Установка UAVcosim и проверенный вход
+
+Репозиторий: `https://github.com/HSE-Intelligent-Unmanned-Systems-Lab/UAVcosim` (приватный).
+Нужен Linux x86-64, Docker Engine с NVIDIA Container Toolkit, NVIDIA GPU и достаточным
+объёмом памяти/диска. Исходные короткие опыты выполнены на ПК4 с RTX 5070 Ti 16 ГБ,
+32 логическими CPU, драйвером 595.99.02. Это условия измерений, не минимальная спецификация.
+Для длинных trace-опытов нужен отдельный дисковый бюджет: короткий цикл создаёт примерно 1,5 ГБ
+native packet CSV. Длительная производительность и чистая целевая машина пока не квалифицированы.
+
+Получение закрытого репозитория и assets требует доступа GitHub. Нужны `git`, `gh`,
+`python3`, `docker`, `zstd`; пользователь должен иметь доступ к Docker.
+Зафиксированные manifests проверяют SHA-256; build receipt проверяет версии и исходники SDK.
+Установленные каталоги из рабочей копии ПК4 не копируются.
 
 ```sh
-cd /home/bas/bas_v2-core
+gh auth login
+gh repo clone HSE-Intelligent-Unmanned-Systems-Lab/UAVcosim
+cd UAVcosim
+python3 scripts/product/fetch_runtime_assets.py --image --native-wheels --terrain
+python3 scripts/product/bootstrap_native_runtime.py --bootstrap
+python3 scripts/product/bootstrap_native_runtime.py --check-only
+python3 scripts/product/fetch_runtime_assets.py --check-only
+python3 bas.py inspect --config runtime-terrain.json
+python3 bas.py run --config runtime-terrain.json --run-id terrain-five-001
+```
+
+`runtime-terrain.json` — поставочный короткий совместный профиль: 5 БАС, Sionna full-mesh,
+направленная помеха, control/payload, 10 Кбит/с полезных синтетических данных на каждый БАС.
+Это заданная нагрузка перед накладными MAVLink/BSF1/IP, не гарантированная доставленная скорость.
+Предел свежести поз и RT-кэша — 100 мс. Карта 10×10 км содержит рельеф до 200 м и здания
+до 15 этажей; короткие маршруты не проверяют всю карту и городское затенение.
+
+Три исторических полных цикла 09/10/11 проверены на `0ec5f67`, с 20-секундным окном.
+В 09/10 финальный heartbeat UAV5 принят PHY НПУ после окончания наблюдения
+(11,082/0,565 мс); это цензурированное наблюдение, фактическая посадка/disarm подтверждены.
+Новые результаты привязываются к своей ревизии и сохраняются в единственном
+[плане поставки](plans/customer-delivery.md). Публикация программного состояния
+не означает полную аппаратную или длительную приёмку.
+
+Аппаратный вход: `python3 scripts/product/test_radio_hitl.py --help`.
+Подготовьте профиль и проверьте его через `--prepare` до подключения.
+Два UART в прежних полётах виртуальные (SITL/socat). Физические UART и реальный модем
+не подключены; их тесты остаются открытыми. Native Wi-Fi — инженерная модель,
+соответствие конкретному модему требует его характеристик и измерений.
+Hybrid закрыт до квалификации точности и правил переключения.
+
+Пакетные повторы используют существующий контроллер, immutable run ID и очередь:
+
+```sh
+python3 scripts/product/run_batch.py --config runtime-terrain.json   --batch-id short-repeat-001 --seeds 1 --rng-runs 1 --repeats 20 --dry-run
+python3 scripts/product/run_batch.py --config runtime-terrain.json   --batch-id short-repeat-001 --seeds 1 --rng-runs 1 --repeats 20
+```
+
+Повтор одного seed/run проверяет исполнение. Отдельные RngRun дают substreams ns-3;
+RT имеет отдельный `sionna.seed` в YAML и не становится независимым при смене RngRun.
+Нужны отдельные неизменяемые входы и явные seeds для исследования случайности RT.
+
+## Запуск существующего рабочего стенда
+
+```sh
+cd UAVcosim
 python3 bas.py inspect
 python3 bas.py run --run-id urban-01
 ```
@@ -424,7 +481,7 @@ docker image inspect "$IMAGE" --format '{{.Id}}'
 пользователь в отдельной чистой рабочей копии. Новый
 `scripts/product/bootstrap_native_runtime.py` использует canonical mount
 `/workspace/multiagent_simulation`, общий lock стенда и собирает ROS-пакет,
-ns-3.48 `d2add90b452d600cfb4859baed8e9ea633519447`, тринадцать patches и оба native targets.
+ns-3.48 `d2add90b452d600cfb4859baed8e9ea633519447`, пятнадцать patches и оба native targets.
 Симуляторы при этом не запускаются, GPU не требуется.
 Bootstrap использует переносимый `default` профиль с `-O3 -g -DNDEBUG`, сохраняя
 `NS3_ASSERT` и `NS3_LOG`; `-march=native` не включается, имена бинарников остаются
@@ -436,7 +493,7 @@ fresh-сборка `f2557bc` использовала штатный `-Os`; её
 хранение путей для ограничения JIT-перекомпиляций при изменении их числа. Состав
 patches и исходники фиксируются в receipt; runtime проверяет также актуальность
 Spectrum library. Прежние fresh-сборки с 10 и 12 patches относятся к своим версиям;
-они не подтверждают установку текущего набора из 13 patches или его E2E-приёмку.
+они не подтверждают установку текущего набора из 15 patches или его E2E-приёмку.
 
 ```sh
 python3 scripts/product/bootstrap_native_runtime.py --check-only
@@ -462,7 +519,7 @@ Runtime также проверяет точный patched SDK tree; несов�
 включает транзитивные зависимости и собирает недостающие wheels. Затем создаются
 два lock-файла с SHA-256, manifest и выполняется пробная установка без сети.
 Это фиксация полученных wheels; побитовую повторяемость их исходной сборки не
-обещаем. До успешной генерации полный lock отсутствует.
+обещаем. Для поставки используйте опубликованный hash-checked bundle из runtime-assets.json; повторное разрешение создаёт новый набор зависимостей и требует проверки.
 
 ```sh
 python3 scripts/product/bootstrap_native_runtime.py --resolve-lock \

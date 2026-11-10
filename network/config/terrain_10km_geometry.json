@@ -1,0 +1,206 @@
+{
+  "schema_version": 1,
+  "scene_id": "terrain_10km_procedural_reference_v1",
+  "extent_m": [
+    10000,
+    10000
+  ],
+  "cells_per_axis": 128,
+  "relief_m": 200,
+  "origin": {
+    "latitude_deg": 46.607213,
+    "longitude_deg": 14.278461,
+    "elevation_m": 446.0,
+    "heading_deg": 0.0
+  },
+  "radio": {
+    "frequency_hz": 2412000000.0,
+    "ground_material": "medium_dry_ground",
+    "building_material": "concrete",
+    "thickness_m": 0.2
+  },
+  "buildings": [
+    {
+      "id": "building_0_0",
+      "center_xy_m": [
+        600,
+        600
+      ],
+      "size_xy_m": [
+        20,
+        30
+      ],
+      "storeys": 5,
+      "floor_height_m": 3
+    },
+    {
+      "id": "building_0_1",
+      "center_xy_m": [
+        700,
+        600
+      ],
+      "size_xy_m": [
+        20,
+        30
+      ],
+      "storeys": 5,
+      "floor_height_m": 3
+    },
+    {
+      "id": "building_0_2",
+      "center_xy_m": [
+        800,
+        600
+      ],
+      "size_xy_m": [
+        20,
+        30
+      ],
+      "storeys": 5,
+      "floor_height_m": 3
+    },
+    {
+      "id": "building_0_3",
+      "center_xy_m": [
+        900,
+        600
+      ],
+      "size_xy_m": [
+        20,
+        30
+      ],
+      "storeys": 5,
+      "floor_height_m": 3
+    },
+    {
+      "id": "building_1_0",
+      "center_xy_m": [
+        600,
+        700
+      ],
+      "size_xy_m": [
+        20,
+        30
+      ],
+      "storeys": 9,
+      "floor_height_m": 3
+    },
+    {
+      "id": "building_1_1",
+      "center_xy_m": [
+        700,
+        700
+      ],
+      "size_xy_m": [
+        20,
+        30
+      ],
+      "storeys": 9,
+      "floor_height_m": 3
+    },
+    {
+      "id": "building_1_2",
+      "center_xy_m": [
+        800,
+        700
+      ],
+      "size_xy_m": [
+        20,
+        30
+      ],
+      "storeys": 9,
+      "floor_height_m": 3
+    },
+    {
+      "id": "building_1_3",
+      "center_xy_m": [
+        900,
+        700
+      ],
+      "size_xy_m": [
+        20,
+        30
+      ],
+      "storeys": 9,
+      "floor_height_m": 3
+    },
+    {
+      "id": "building_2_0",
+      "center_xy_m": [
+        600,
+        800
+      ],
+      "size_xy_m": [
+        20,
+        30
+      ],
+      "storeys": 15,
+      "floor_height_m": 3
+    },
+    {
+      "id": "building_2_1",
+      "center_xy_m": [
+        700,
+        800
+      ],
+      "size_xy_m": [
+        20,
+        30
+      ],
+      "storeys": 15,
+      "floor_height_m": 3
+    },
+    {
+      "id": "building_2_2",
+      "center_xy_m": [
+        800,
+        800
+      ],
+      "size_xy_m": [
+        20,
+        30
+      ],
+      "storeys": 15,
+      "floor_height_m": 3
+    },
+    {
+      "id": "building_2_3",
+      "center_xy_m": [
+        900,
+        800
+      ],
+      "size_xy_m": [
+        20,
+        30
+      ],
+      "storeys": 15,
+      "floor_height_m": 3
+    }
+  ],
+  "sample_sites_xy_m": {
+    "gcs": [
+      -2000,
+      -2000
+    ],
+    "uav1": [
+      -1800,
+      -1800
+    ],
+    "uav2": [
+      -1770,
+      -1800
+    ],
+    "uav3": [
+      -1740,
+      -1800
+    ],
+    "uav4": [
+      -1710,
+      -1800
+    ],
+    "uav5": [
+      -1680,
+      -1800
+    ]
+  }
+}

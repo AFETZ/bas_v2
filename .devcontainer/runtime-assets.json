@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "image_id": "sha256:89d78eff9914b1644a1b01b793612e9ee8b19916c5a7bf5f578ba6d8bfbfafe5",
+  "repository": "AFETZ/bas_v2",
+  "release": "urban-article-v7-20261104",
+  "upstream_manifest": "https://github.com/AFETZ/bas_v2/blob/ed260ca9de57bb76df4de5baa8471a651814d499/artifacts.json",
+  "parts": [
+    {
+      "name": "runtime-image.tar.zst.part00",
+      "bytes": 1992294400,
+      "sha256": "cb3643bfd854f3826e004393ca7b5423ff1bb7b2ed7e7c9f0762d8694605f6b1"
+    },
+    {
+      "name": "runtime-image.tar.zst.part01",
+      "bytes": 1992294400,
+      "sha256": "94f40f5cf4cc256e6a44342efa92e33c5b4685d2ce1989059e7f2b478b70b5ba"
+    },
+    {
+      "name": "runtime-image.tar.zst.part02",
+      "bytes": 1992294400,
+      "sha256": "8fb9964341847294f727e87117a58bf96ef38a3ec162f17569d9cfee3cb5b9a3"
+    },
+    {
+      "name": "runtime-image.tar.zst.part03",
+      "bytes": 417371013,
+      "sha256": "cd790245ba4871de5c24d7f7ca9f20ee65e1f8a3d745c62d3d57d1b32ba2aa12"
+    }
+  ],
+  "terrain": {
+    "source": "network/config/terrain_10km_geometry.json",
+    "source_sha256": "4ec0938dbe588d125bd1f49c28531f8305d0003d91eaa7f0e3daa478e117b82a",
+    "output": ".external/terrain-reference",
+    "deterministic_files": {
+      "terrain.obj": "8ade7c6d2f9883b696505b99d001467caf10e5e95c65fdfcaa69ae1be96ef671",
+      "buildings.obj": "4ea6b43ac019724de992d91a20679905b48e42fbd84009b088d7e9033e7a121c",
+      "scene.xml": "b32012a891910dd59a6110c771711bda46bd18f3b3b77ac2393bd941f537914a",
+      "world.sdf": "fb89e5d623b88eb810d47f956634764eec5a82104a27c5135ee3f66e7aa68720"
+    },
+    "dependencies": {
+      "numpy": "1.26.4",
+      "trimesh": "4.10.1"
+    }
+  },
+  "native_wheels": {
+    "repository": "HSE-Intelligent-Unmanned-Systems-Lab/UAVcosim",
+    "release": "runtime-dependencies-20261110",
+    "name": "native-runtime-wheels-20261110.tar",
+    "bytes": 889845760,
+    "sha256": "7a5be95a6036296f32193dc55bc99ae320b94ba0b695d68e8ecdd2b26cf34dd5",
+    "output": ".external/native-runtime-wheels",
+    "manifest_sha256": "f5ac93f425c582fcc648d03dfb179f1fc9f5876f6946d0bf68f01b71c4ccb7fc"
+  }
+}

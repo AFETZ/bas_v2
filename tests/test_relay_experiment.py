@@ -115,6 +115,62 @@ class RelayExperimentTests(unittest.TestCase):
         self.assertFalse(row["armed"])
         self.assertTrue(row["mode_land"])
 
+    def test_landing_closes_before_inflight_radio_heartbeat_without_calling_it_loss(self):
+        # Reproduces the 09/10 ordering: the UART observes disarm while its
+        # telemetry frame is still in transit. The existing lifecycle is enough
+        # to finish, but must not imply GCS processing or RF packet loss.
+        for arrival_tick in (3, 4):
+            with self.subTest(arrival_tick=arrival_tick):
+                scenario = RelayExperiment.__new__(RelayExperiment)
+                clock = SimpleNamespace(now=10_000_000_000, tick=0)
+                scenario._uav_ids = (1,)
+                scenario.args = SimpleNamespace(uav_count=1, land_timeout_s=120,
+                    land_z_tolerance_m=1.5, max_landing_descent_mps=3.)
+                scenario.initial = {1: pose(0., z=.5, host=clock.now)}
+                scenario.poses = {1: pose(0., z=10., host=clock.now)}
+                scenario.onboard_mode = {}
+                scenario.summary = dict(uavs={"1": dict(armed=True)})
+                scenario.land_commands = {}
+                scenario.modes = {"LAND": 9}
+                scenario.mav = SimpleNamespace(MAV_MODE_FLAG_SAFETY_ARMED=128,
+                    MAV_MODE_FLAG_CUSTOM_MODE_ENABLED=1)
+                scenario.tx = SimpleNamespace(set_mode_encode=lambda *args: args)
+                scenario.gcs = SimpleNamespace(latest_message_ns={1: {}},
+                                               latest_message_received_ns={1: {}})
+                scenario.fresh = lambda *args: (SimpleNamespace(base_mode=89, custom_mode=9)
+                    if clock.tick >= arrival_tick else None)
+                scenario.phase, scenario.emit = Mock(), Mock()
+                def send(i, message):
+                    scenario.landing_traces[i].admit("land", clock.now)
+                    return SimpleNamespace(command_id="land")
+                scenario.send = send
+                def pump(**kwargs):
+                    clock.tick += 1
+                    clock.now += 10_000_000
+                    scenario.poses[1] = pose(clock.tick,
+                        z=8. if clock.tick == 1 else .5, host=clock.now,
+                        velocity=(0., 0., -1.) if clock.tick == 1 else (0., 0., 0.))
+                    scenario.onboard_mode[1] = dict(node_id=1, mode="LAND",
+                        armed=clock.tick < 3, host_monotonic_ns=clock.now)
+                    if clock.tick >= arrival_tick:
+                        scenario.gcs.latest_message_ns[1]["HEARTBEAT"] = clock.now
+                        scenario.gcs.latest_message_received_ns[1]["HEARTBEAT"] = clock.now
+                scenario.pump = pump
+                with patch("scripts.product.relay_experiment.time.monotonic_ns",
+                           side_effect=lambda: clock.now), patch(
+                           "scripts.product.relay_experiment.time.monotonic",
+                           side_effect=lambda: clock.now / 1e9):
+                    scenario.land()
+                self.assertEqual(clock.tick, 3)  # no drain wait or new timeout
+                uav = scenario.summary["uavs"]["1"]
+                self.assertTrue(uav["landed"] and uav["auto_disarm"])
+                self.assertEqual(uav["landing_radio_confirmation"], arrival_tick == 3)
+                self.assertEqual(uav["radio_confirmation_status"],
+                    "observed" if arrival_tick == 3 else "not_observed_before_observation_end")
+                self.assertEqual(uav["radio_observation_end_host_monotonic_ns"], clock.now)
+                self.assertEqual(scenario.summary["landing_observation"]["reason"],
+                                 "all_lifecycle_observed")
+
     def test_stale_wrong_node_or_legacy_mode_event_cannot_prove_disarm(self):
         scenario = RelayExperiment.__new__(RelayExperiment)
         scenario.fresh = lambda *args: None
