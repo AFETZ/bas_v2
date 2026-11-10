@@ -296,6 +296,7 @@ not a standalone measure of collector CPU time or a change to GC policy.
         self.started = self.completed = self.overwritten = self.unmatched_stops = 0
         self.by_generation = [0, 0, 0]
         self.maximum_wall_ns = self.maximum_thread_cpu_ns = None
+        self.total_wall_ns = self.total_thread_cpu_ns = 0
 
     def start(self):
         if self not in gc.callbacks:
@@ -332,8 +333,10 @@ not a standalone measure of collector CPU time or a change to GC policy.
             self.overwritten += len(self.records) == self.records.maxlen
             self.records.append(record)
             if wall_ns is not None:
+                self.total_wall_ns += wall_ns
                 self.maximum_wall_ns = max(self.maximum_wall_ns or 0, wall_ns)
             if thread_cpu_ns is not None:
+                self.total_thread_cpu_ns += thread_cpu_ns
                 self.maximum_thread_cpu_ns = max(self.maximum_thread_cpu_ns or 0, thread_cpu_ns)
 
     def snapshot(self):
@@ -343,6 +346,7 @@ not a standalone measure of collector CPU time or a change to GC policy.
             record_limit=self.records.maxlen, started_collections=self.started, completed_collections=self.completed,
             completed_by_generation=list(self.by_generation), overwritten_records=self.overwritten,
             unmatched_stop_callbacks=self.unmatched_stops, maximum_wall_ns=self.maximum_wall_ns,
+            total_wall_ns=self.total_wall_ns, total_thread_cpu_ns=self.total_thread_cpu_ns,
             maximum_thread_cpu_ns=self.maximum_thread_cpu_ns, active_collection=copy.deepcopy(self.active),
             collections=copy.deepcopy(list(self.records)))
 

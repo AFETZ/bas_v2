@@ -649,6 +649,8 @@ class GcObservationTests(unittest.TestCase):
         self.assertEqual(len(record['allocation_counts_stop']), 3)
         self.assertGreaterEqual(state['maximum_wall_ns'], record['wall_ns'])
         self.assertGreaterEqual(state['maximum_thread_cpu_ns'], record['thread_cpu_ns'])
+        self.assertGreaterEqual(state['total_wall_ns'], record['wall_ns'])
+        self.assertGreaterEqual(state['total_thread_cpu_ns'], record['thread_cpu_ns'])
 
     def test_actual_collections_on_another_thread_keep_that_threads_cpu_domain(self):
         self.observer.start()

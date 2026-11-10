@@ -131,6 +131,7 @@ int main(int argc, char** argv)
     }
     py::scoped_interpreter python;
     py::object connection = py::none();
+    py::object workerGc = py::none();
     Ptr<SionnaRtChannelModel> model;
     Ptr<SionnaRtChannelModel> lastActiveModel;
     std::map<SourceSignature,SourceContext> sourceContexts;
@@ -278,6 +279,8 @@ int main(int argc, char** argv)
             ready["source_profile_count"]=sourceProfiles.size();
             ready["source_profile_contexts"]=contexts;
         }
+        workerGc=contract.attr("_GcObserver")();
+        workerGc.attr("start")();
         connection.attr("send")(ready);
         int64_t lastRequestId = 0;
         while (true)
@@ -293,6 +296,9 @@ int main(int argc, char** argv)
             const auto sampleNs = job["sample_native_ns"].cast<int64_t>();
             Require(sampleNs >= Simulator::Now().GetNanoSeconds(), "Worker sample time cannot move backwards");
             const auto started = hostNow();
+            const auto cpuStarted=time.attr("thread_time_ns")().cast<int64_t>();
+            const auto gcWallBefore=workerGc.attr("total_wall_ns").cast<int64_t>();
+            const auto gcCountBefore=workerGc.attr("completed").cast<uint64_t>();
             Require(job["sample_host_monotonic_ns"].cast<int64_t>() <= started,
                 "Sample host timestamp is in the future on this AF_UNIX host");
             py::dict result;
@@ -452,6 +458,9 @@ int main(int argc, char** argv)
             });
             Simulator::Run(); // Default scheduler advances directly to sampled time; never wall-clock pacing.
             const auto finished = hostNow();
+            result["producer_thread_cpu_ns"]=time.attr("thread_time_ns")().cast<int64_t>()-cpuStarted;
+            result["producer_gc_wall_ns"]=workerGc.attr("total_wall_ns").cast<int64_t>()-gcWallBefore;
+            result["producer_gc_collections"]=workerGc.attr("completed").cast<uint64_t>()-gcCountBefore;
             result["worker_started_host_monotonic_ns"] = started;
             result["worker_completed_host_monotonic_ns"] = finished;
             result["sample_to_completion_ns"] = finished - job["sample_host_monotonic_ns"].cast<int64_t>();
@@ -459,6 +468,7 @@ int main(int argc, char** argv)
             connection.attr("send")(result);
             requestId = 0;
         }
+        workerGc.attr("close")();
         model->Dispose();
         for(auto& [signature,context]:sourceContexts) {context.pairwise->Dispose();context.emitter->Dispose();}
         Simulator::Destroy(); connection.attr("close")();

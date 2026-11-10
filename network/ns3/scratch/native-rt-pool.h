@@ -927,6 +927,9 @@ class NativeRtPool
                 "decode_wall"_a=decoded.first-validated.first,"decode_cpu"_a=decoded.second-validated.second,
                 "stats_encode_wall"_a=encoded.first-decoded.first,"stats_encode_cpu"_a=encoded.second-decoded.second,
                 "stage_wall"_a=staged.first-encoded.first,"stage_cpu"_a=staged.second-encoded.second);
+            for(const auto* field:{"producer_thread_cpu_ns","producer_gc_wall_ns","producer_gc_collections",
+                                   "worker_started_host_monotonic_ns","worker_completed_host_monotonic_ns"})
+                if(value.contains(field))log[field]=value[field];
             if (value.contains("receiver_enqueued_host_monotonic_ns"))
                 log["receiver_enqueued_host_monotonic_ns"]=value["receiver_enqueued_host_monotonic_ns"];
             else log["receiver_enqueued_host_monotonic_ns"]=py::none();
