@@ -141,14 +141,22 @@ def command(argv, *, cwd=None, env=None, input=None, log=None, check=True):
     return stdout.strip()
 
 
-def docker_command(root, image, script, *, network=False, readonly=False, cidfile=None):
+def docker_command(root, image, script, *, network=False, readonly=False, cidfile=None, output=None, supplementary_groups=()):
     args = ['docker', 'run', '--rm', '-i', '--network', 'bridge' if network else 'none']
     if cidfile is not None:
         args += ['--cidfile', str(cidfile)]
     if hasattr(os, 'getuid'):
         args += ['--user', f'{os.getuid()}:{os.getgid()}']
+    for group in supplementary_groups:
+        if type(group) is not int or group < 0:
+            raise ValueError('supplementary groups must be nonnegative numeric GIDs')
+        args += ['--group-add', str(group)]
     if readonly:
         args += ['--read-only', '--tmpfs', '/tmp:rw,nosuid,mode=1777']
+    if output is not None:
+        if not readonly or not Path(output).is_dir():
+            raise ValueError('analysis output mount requires an existing directory and read-only workspace')
+        args += ['--mount', f'type=bind,src={Path(output).resolve()},dst=/bas-analysis-output']
     args += ['-e', 'HOME=/tmp/bas-native-build-home', '-e', 'PYTHONDONTWRITEBYTECODE=1',
              '-e', 'PIP_DISABLE_PIP_VERSION_CHECK=1', '-e', 'PIP_NO_CACHE_DIR=1',
              '-v', f'{root.resolve()}:{MOUNT}' + (':ro' if readonly else ''),
@@ -156,12 +164,13 @@ def docker_command(root, image, script, *, network=False, readonly=False, cidfil
     return args
 
 
-def container(root, image, script, *, network=False, readonly=False, log=None):
+def container(root, image, script, *, network=False, readonly=False, log=None, output=None, supplementary_groups=()):
     with tempfile.TemporaryDirectory(prefix='bas-native-docker-') as temporary:
         cidfile = Path(temporary) / 'container.cid'
         try:
             return command(docker_command(root, image, 'mkdir -p "$HOME"\n' + script,
-                           network=network, readonly=readonly, cidfile=cidfile), log=log)
+                           network=network, readonly=readonly, cidfile=cidfile, output=output,
+                           supplementary_groups=supplementary_groups), log=log)
         finally:
             if cidfile.exists():
                 cid = cidfile.read_text().strip()

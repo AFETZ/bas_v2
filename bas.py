@@ -825,6 +825,105 @@ def events(paths, command_id=None, event=None, limit=50):
     return [row for _, _, row in sorted(latest)]
 
 
+def analyze(run_id, output, *, service_batch=False):
+    """Analyze closed raw evidence inside its existing pinned runtime image."""
+    from scripts.product import bootstrap_native_runtime as native
+    if sys.platform != 'linux':
+        raise ValueError('container analysis requires a Linux Docker host')
+    run_id = identifier(run_id)
+    folder, raw = control_dir(run_id), raw_dir(run_id)
+    record_path, config_path = folder / ('batch.json' if service_batch else 'run.json'), folder / 'config.json'
+    record = json.loads(record_path.read_text(encoding='utf-8'),
+                        object_pairs_hook=unique_json_fields, parse_constant=reject_json_constant)
+    start, end = record.get('started_host_monotonic_ns'), record.get('ended_host_monotonic_ns')
+    terminal = ('completed', 'completed_with_failures', 'failed', 'cancelled', 'stopped_on_failure') if service_batch else ('completed', 'failed', 'stopped')
+    identity_field = 'batch_id' if service_batch else 'run_id'
+    if (record.get(identity_field) != run_id or record.get('status') not in terminal
+            or (not service_batch and record.get('runtime_status') not in terminal)
+            or type(start) is not int or type(end) is not int or not 0 <= start < end
+            or type(record.get('returncode')) is not int):
+        raise ValueError('analysis requires a closed terminal run record, including failed attempts')
+    if not service_batch and not raw.is_dir():
+        raise ValueError('closed run has no preserved raw directory')
+    config = record.get('config', {}) if service_batch else json.loads(
+        config_path.read_text(encoding='utf-8'),
+        object_pairs_hook=unique_json_fields, parse_constant=reject_json_constant)
+    bindings = (record_path,) if service_batch else (record_path, config_path)
+    image = config.get('runtime', {}).get('image')
+    if not isinstance(image, str) or not re.fullmatch(r'sha256:[a-f0-9]{64}', image):
+        raise ValueError('closed run requires its recorded immutable runtime image')
+    output = (ROOT / output).resolve()
+    output.relative_to(ROOT.resolve())
+    if any(output.is_relative_to(protected.resolve()) for protected in (raw, folder)):
+        raise ValueError('analysis output must not overlap raw or control evidence')
+    output.relative_to((ROOT / 'runs/analysis').resolve())
+    if output == (ROOT / 'runs/analysis').resolve() or output.exists():
+        raise ValueError('analysis requires a new directory below runs/analysis')
+    output.mkdir(parents=True, exist_ok=False)
+    attempt = dict(schema_version=1, run_id=run_id, status='running', image=image,
+        source_commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
+        source_dirty=bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT)),
+        analysis_mode='service_batch' if service_batch else 'single_run',
+        analyzed_batch_status=record['status'] if service_batch else None,
+        analyzed_runtime_status=record.get('runtime_status'),
+        analyzed_measurement_validity=record.get('measurement_validity'),
+        analyzer_sha256=native.sha256(ROOT / 'scripts/product/analyze_relay_experiment.py'),
+        adapter_sha256=native.sha256(Path(__file__)),
+        container_helper_sha256=native.sha256(Path(native.__file__)),
+        source_bindings=[dict(path=path.relative_to(ROOT).as_posix(), sha256=native.sha256(path),
+                              bytes=path.stat().st_size) for path in bindings],
+        started_host_monotonic_ns=time.monotonic_ns(),
+        scope='Existing CPU analyzer; full original captures read-only; no new simulation, GPU, or host pymavlink.',
+        options=dict(plots=False,live_export=False),
+        container_permissions=dict(user=f'{os.getuid()}:{os.getgid()}', supplementary_groups=[1000],
+            basis='Pinned image ubuntu home0750/group1000 contains existing pymavlink; output retains caller UID.'))
+    receipt = output / 'analysis-attempt.json'
+    write_json(receipt, attempt)
+    # Run IDs have already passed identifier(); script contains no user shell text.
+    analyzer_arguments = (
+        f'--service-batch {native.MOUNT}/runs/control/{run_id}/batch.json '
+        f'--runs-root {native.MOUNT}/runs/native-radio-realtime --output-dir /bas-analysis-output'
+        if service_batch else
+        f'--run-dir {native.MOUNT}/runs/native-radio-realtime/{run_id} '
+        '--output-dir /bas-analysis-output --no-plots --skip-live-export')
+    script = (
+        'export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1\n'
+        'export MPLCONFIGDIR=/tmp/bas-analysis-mpl\n'
+        'SDK="$PWD/.external/ns-3-sionna-native"\n'
+        'export PYTHONPATH="$SDK/.tooling-py310:$SDK/.python-deps-py310:/home/ubuntu/.local/lib/python3.10/site-packages:$PWD"\n'
+        'python3 - <<\'PY\'\n'
+        'import sys,numpy,yaml,pymavlink\n'
+        'assert sys.version_info[:2] == (3,10), "pinned analysis image requires Python3.10"\n'
+        'assert (numpy.__version__,yaml.__version__,pymavlink.__version__) == '
+        '("1.26.4","6.0.2","2.4.49"), "analysis dependency versions differ"\n'
+        'PY\n'
+        'python3 scripts/product/analyze_relay_experiment.py '
+        + analyzer_arguments + '\n')
+    try:
+        native.image_id(image)
+        native.container(ROOT, image, script, readonly=True, output=output,
+                         supplementary_groups=(1000,), log=output / 'analysis-runtime.log')
+        for item in attempt['source_bindings']:
+            if native.sha256(ROOT / item['path']) != item['sha256']:
+                raise ValueError('closed run metadata changed during analysis')
+        report = 'service_series_analysis.json' if service_batch else 'relay_analysis.json'
+        if not (output / 'metrics' / report).is_file():
+            raise ValueError(f'analyzer did not produce {report}')
+        attempt['status'] = 'completed'
+    except BaseException as error:
+        attempt.update(status='failed', error=f'{type(error).__name__}: {error}')
+        raise
+    finally:
+        attempt['ended_host_monotonic_ns'] = time.monotonic_ns()
+        write_json(receipt, attempt)
+    print(json.dumps(dict(identity=run_id, analysis_status=attempt['status'],
+                          batch_status=record['status'] if service_batch else None,
+                          runtime_status=record.get('runtime_status'),
+                          measurement_validity=record.get('measurement_validity'),
+                          output=output.relative_to(ROOT).as_posix())))
+    return 0
+
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == 'ui':
         from scripts.product.operator_ui import main as ui_main
@@ -836,6 +935,10 @@ def main():
     commands = parser.add_subparsers(dest='command', required=True)
     commands.add_parser('batch', help='sequential parameter/seed runs; use batch --help')
     commands.add_parser('ui', help='local operator interface on 127.0.0.1; use ui --help')
+    analysis = commands.add_parser('analyze', help='CPU analysis of a closed run inside its pinned image')
+    analysis.add_argument('run_id', help='Closed run ID, or batch ID with --service-batch')
+    analysis.add_argument('--service-batch', action='store_true', help='Compare all attempts in a closed batch using original packet lineage')
+    analysis.add_argument('--output-dir', required=True, type=Path, help='New directory below runs/analysis; raw evidence remains read-only')
     for name in ('inspect', 'run'):
         p = commands.add_parser(name)
         p.add_argument('--config', type=Path, default=ROOT / 'runtime.json')
@@ -859,6 +962,8 @@ def main():
             return run(config, args.run_id)
         print(json.dumps({'config': config, 'environment': {k: v for k, v in environment(config, args.run_id).items()
                                                           if k.startswith('BAS_')}}, indent=2))
+    elif args.command == 'analyze':
+        return analyze(args.run_id, args.output_dir, service_batch=args.service_batch)
     elif args.command == 'stop':
         request_stop(args.run_id)
     elif args.command == 'status':
@@ -882,6 +987,6 @@ def main():
 if __name__ == '__main__':
     try:
         sys.exit(main())
-    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
+    except (ValueError, OSError, subprocess.CalledProcessError, RuntimeError) as exc:
         print(f'BAS: {exc}', file=sys.stderr)
         sys.exit(2)

@@ -1,0 +1,11 @@
+# Host CLI/UI only. Native simulation/analysis dependencies stay inside the pinned image.
+# CPython3.10-3.12, Linux x86_64 glibc>=2.17; wheels only, no global pip.
+# Source hashes: official PyPI release JSON; install with --require-hashes --only-binary=:all:.
+numpy==1.26.4 \
+    --hash=sha256:ffa75af20b44f8dba823498024771d5ac50620e6915abac414251bd971b4529f \
+    --hash=sha256:666dbfb6ec68962c033a450943ded891bed2d54e6755e35e5835d63f4f6931d5 \
+    --hash=sha256:675d61ffbfa78604709862923189bad94014bef562cc35cf61d3a07bba02a7ed
+PyYAML==6.0.2 \
+    --hash=sha256:ec031d5d2feb36d1d1a24380e4db6d43695f3748343d99434e6f5f9156aaa2ed \
+    --hash=sha256:3ad2a3decf9aaba3d29c8f537ac4b243e36bef957511b4766cb0057d32b0be85 \
+    --hash=sha256:80bab7bfc629882493af4aa31a4cfa43a4c57c83813253626916b8c7ada83476

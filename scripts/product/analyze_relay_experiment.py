@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter, defaultdict
 import csv
+import copy
 import hashlib
 import importlib.util
 import itertools
@@ -14,7 +15,12 @@ import math
 from pathlib import Path
 import random
 import statistics
+import sys
 from typing import Any
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 UAVS = tuple(range(1, 6))
 CONDITIONS = ("none", "selective", "total_GCS")
@@ -1485,10 +1491,289 @@ def analyze_campaign(plan_path: Path, runs_root: Path, output: Path, *, plots: b
     return result
 
 
+def _service_file_binding(path, base):
+    before = path.stat()
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(block)
+    after = path.stat()
+    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        raise ValueError(f"input changed during service analysis: {path}")
+    return dict(path=path.relative_to(base).as_posix(), bytes=after.st_size, sha256=digest.hexdigest())
+
+
+def _service_small_snapshot(path, base):
+    before = path.stat()
+    raw = path.read_bytes()
+    after = path.stat()
+    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        raise ValueError(f"input changed during service analysis: {path}")
+    return raw, dict(path=path.relative_to(base).as_posix(), bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+
+
+def _service_attempt(run_dir, profiles, order, planned=None):
+    """Rebuild delivery observations from raw files, never cached pass reports."""
+    from network.coordination.service_profiles import qualify_payload_services
+    run_dir = Path(run_dir).resolve()
+    attempt = dict(order=order, run_id=run_dir.name, run_dir=str(run_dir),
+        planned_case=copy.deepcopy(planned), input_binding_errors=[], source_files=[],
+        conditions=None, condition_sha256=None, record_counts={}, qualification=None,
+        runtime_status="not_recorded", mission_outcome="not_recorded", measurement_validity="not_recorded")
+    control_dir = run_dir.parents[1] / "control" / run_dir.name
+    try:
+        if not run_dir.is_dir():
+            attempt["status"] = "not_started" if planned and planned.get("status") == "not_started" else "missing_attempt_artifacts"
+            return attempt
+        from bas import unique_json_fields
+        def frozen_json(path, base):
+            raw, binding = _service_small_snapshot(path, base)
+            value = json.loads(raw, object_pairs_hook=unique_json_fields)
+            if not isinstance(value, dict):
+                raise ValueError(f"frozen metadata must be a JSON object: {path}")
+            return value, binding
+        control, control_binding = frozen_json(control_dir / "run.json", run_dir.parents[1])
+        config, config_binding = frozen_json(control_dir / "config.json", run_dir.parents[1])
+        summary, summary_binding = frozen_json(run_dir / "metrics/relay_experiment_summary.json", run_dir)
+        stats, stats_binding = frozen_json(run_dir / "metrics/native_radio_stats.json", run_dir)
+        _, load_binding = frozen_json(run_dir / "metrics/relay_experiment_config.json", run_dir)
+        raw_environment, environment_binding = _service_small_snapshot(run_dir / "environment.txt", run_dir)
+        environment = dict(line.split("=", 1) for line in raw_environment.decode().splitlines() if "=" in line)
+        attempt["source_files"] += [control_binding, config_binding]
+        source_files = [summary_binding, load_binding, stats_binding, environment_binding]
+        errors = attempt["input_binding_errors"]
+        if control.get("run_id") != run_dir.name or summary.get("run_id") != run_dir.name:
+            errors.append("run_identity_disagrees")
+        source = control.get("source_commit")
+        if (not isinstance(source, str) or len(source) != 40 or any(c not in "0123456789abcdef" for c in source)
+                or environment.get("git_head") != source or control.get("source_dirty") is not False
+                or environment.get("source_dirty_paths") != "0"):
+            errors.append("source_revision_not_clean_or_bound")
+        for name, length in (("ns3_exact_sha", 40), ("native_binary_sha256", 64)):
+            value = environment.get(name)
+            if not isinstance(value, str) or len(value) != length or any(c not in "0123456789abcdef" for c in value):
+                errors.append(name + "_identity_missing")
+        labels = {"scene"}
+        if config["propagation"]["model"] == "sionna":
+            labels.add("radio")
+        if config.get("interference", {}).get("sources") is not None:
+            labels.add("sources")
+        input_sha = {}
+        for label in ("scene", "radio", "sources"):
+            digest = None
+            if label in labels:
+                suffix = ".json" if label == "scene" else ".yaml"
+                binding = _service_file_binding(control_dir / (label + suffix), run_dir.parents[1])
+                attempt["source_files"].append(binding)
+                digest = binding["sha256"]
+                if control.get(label + "_sha256") != digest:
+                    errors.append(label + "_frozen_input_hash_disagrees")
+            elif control.get(label + "_sha256") is not None:
+                errors.append(label + "_unexpected_recorded_input")
+            input_sha[label] = digest
+        solver = stats.get("sionna_solver")
+        metadata = dict(run_id=run_dir.name, source_commit=source,
+            source_dirty_paths=environment.get("source_dirty_paths"), rng_seed=stats.get("rng_seed"),
+            rng_run=stats.get("rng_run"), rt_solver_seed=solver.get("seed") if isinstance(solver, dict) else None,
+            source_files=source_files)
+        if (metadata["rng_seed"] != config["experiment"]["seed"] or metadata["rng_run"] != config["experiment"]["run"]):
+            errors.append("declared_and_actual_rng_identity_disagree")
+        if planned and (planned.get("seed") != metadata["rng_seed"] or planned.get("rng_run") != metadata["rng_run"]):
+            errors.append("planned_and_actual_rng_identity_disagree")
+        attempt.update({key: control.get(key, "not_recorded") for key in
+                        ("runtime_status", "mission_outcome", "measurement_validity")})
+        for field in ("runtime_status", "measurement_validity"):
+            if control.get(field) != summary.get(field):
+                errors.append(field + "_control_summary_disagrees")
+        start, stop = summary.get("measurement_start_host_monotonic_ns"), summary.get("measurement_end_host_monotonic_ns")
+        runtime_valid = (attempt["runtime_status"] == "completed" and attempt["measurement_validity"] == "valid"
+            and summary.get("measurement_window_completed") is True
+            and stats.get("stop_reason") in ("duration", "sionna_ns3_process_stopped") and not errors)
+        lineage = analyze_payload_lineage(run_dir, start, stop, complete=runtime_valid)
+        if errors:
+            lineage["measurement_eligible"] = False
+        load = lineage.get("offered_load", {}).get("profile")
+        if load != config.get("flows", {}).get("payload_load"):
+            errors.append("audited_load_profile_missing" if load is None else "control_and_audited_load_profile_disagree")
+            lineage["measurement_eligible"] = False
+        if lineage.get("offered_load", {}).get("config_sha256") not in (None, load_binding["sha256"]):
+            errors.append("offered_configuration_changed_during_analysis")
+            lineage["measurement_eligible"] = False
+        qualification = qualify_payload_services(lineage, profiles, run_metadata=metadata)
+        counts = Counter()
+        for row in lineage.get("records", []):
+            if row.get("load_id") is not None:
+                counts[f'{row["uav_id"]}|{row["direction"]}'] += 1
+        fixed_config = copy.deepcopy(config)
+        fixed_config["experiment"].pop("run", None)
+        conditions = dict(effective_config_except_rng_run=fixed_config, service_profile_sha256=profiles["sha256"], source_commit=source,
+            image=config["runtime"]["image"], propagation_model=config["propagation"]["model"],
+            scene_sha256=input_sha["scene"], radio_sha256=input_sha["radio"], sources_sha256=input_sha["sources"],
+            uav_ids=list(range(1, config["drone"]["count"] + 1)), load_profile=config.get("flows", {}).get("payload_load"),
+            ns3_seed=metadata["rng_seed"], rt_solver_seed=metadata["rt_solver_seed"],
+            observation_duration_s=config["experiment"]["duration_s"],
+            runtime_implementation={key: environment.get(key) for key in (
+                "ns3_version", "ns3_exact_sha", "native_binary_sha256", "sionna", "sionna-rt",
+                "mitsuba", "drjit", "pybind11", "cppyy", "physics_profile", "state_transport",
+                "stack_cpuset", "radio_cpuset", "pose_publication_rate_hz", "sionna_worker_count")})
+        attempt.update(qualification=qualification, metadata=metadata, conditions=conditions,
+            condition_sha256=hashlib.sha256(json.dumps(conditions, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest(),
+            record_counts=dict(counts), runtime_valid=runtime_valid and not errors,
+            status="invalid" if errors else qualification["status"], source_files=attempt["source_files"] + source_files,
+            evaluation_origin="fresh_raw_payload_lineage",
+            runtime_gate_scope="Recorded runtime/measurement gates plus actual native stop reason; this service comparison does not rehash the full RF-event capture.")
+    except (ValueError, TypeError, KeyError, OSError, ImportError) as error:
+        attempt.update(status="invalid", runtime_valid=False)
+        attempt["input_binding_errors"].append(f"{type(error).__name__}: {error}")
+    return attempt
+
+
+def _aggregate_service_attempts(attempts, profiles):
+    """All attempts stay visible; no best repeat or rolling-window double count."""
+    from network.coordination.service_profiles import _combined_status
+    config = profiles["config"]
+    grouped, ungrouped = defaultdict(list), []
+    for attempt in attempts:
+        if attempt.get("condition_sha256") is None:
+            ungrouped.append(attempt["order"])
+        else:
+            grouped[attempt["condition_sha256"]].append(attempt)
+    groups = []
+    for fingerprint, members in grouped.items():
+        pairs, unknown = defaultdict(list), []
+        for attempt in members:
+            identity = attempt.get("qualification", {}).get("replication_qualification", {}).get("identity", {}).get("key")
+            if (not isinstance(identity, list) or len(identity) != 2 or any(type(x) is not int for x in identity)):
+                unknown.append(attempt["order"])
+            else:
+                pairs[tuple(identity)].append(attempt)
+        counted = Counter()
+        pair_rows = []
+        for pair, repeats in sorted(pairs.items()):
+            statuses = [a["status"] for a in repeats]
+            measurable = all(a.get("runtime_valid") is True and a["status"] in ("measured_pass", "measured_fail")
+                             and not a.get("input_binding_errors") for a in repeats)
+            streams = set().union(*(set(a["record_counts"]) for a in repeats))
+            minimum = {key: min(a["record_counts"].get(key, 0) for a in repeats) for key in streams}
+            if measurable:
+                counted.update(minimum)
+            pair_rows.append(dict(key=list(pair), attempt_orders=[a["order"] for a in repeats],
+                repeat_count=len(repeats), observed_service_status=_combined_status(statuses),
+                measurement_eligible=measurable, independent_counted_records=minimum if measurable else {},
+                record_count_rule="Count the smallest observed offer count across repeats once; retain every repeat's outcome."))
+        eligible_pairs = sum(pair["measurement_eligible"] for pair in pair_rows)
+        statuses = [a["status"] for a in members]
+        observed = _combined_status(statuses)
+        stream_names = {f'{uav}|{members[0]["conditions"]["load_profile"]["direction"]}'
+                        for uav in (members[0]["conditions"].get("load_profile") or {}).get("uav_ids", [])}
+        checks = dict(all_attempts_valid=all(a.get("runtime_valid") is True and not a.get("input_binding_errors") for a in members),
+            all_observed_service_windows_pass=all(s == "measured_pass" for s in statuses),
+            rng_identity_complete=not unknown,
+            independent_replications=eligible_pairs >= config["minimum_independent_replications"],
+            independent_records_per_stream=bool(stream_names) and all(counted[name] >= config["minimum_records_per_stream"] for name in stream_names))
+        grade = ("qualified_observed_transport_series" if all(checks.values()) else
+                 "invalid_or_incomplete_attempts" if not checks["all_attempts_valid"] else
+                 "observed_service_limits_failed" if "measured_fail" in statuses else "insufficient_replication_evidence")
+        groups.append(dict(condition_sha256=fingerprint, conditions=members[0]["conditions"],
+            attempt_orders=[a["order"] for a in members], observed_service_status=observed,
+            configured_rng_pairs=len(pairs), eligible_independent_replications=eligible_pairs,
+            unknown_rng_attempt_orders=unknown, independent_counted_records=dict(counted), pairs=pair_rows,
+            replication_qualification=grade, checks=checks,
+            all_missions_succeeded=all(a.get("mission_outcome") == "succeeded" for a in members),
+            scope="Fixed ns3 seed with different RngRun substreams; fixed RT seed and all listed inputs. This is transport-load evidence, not semantic application or hardware certification."))
+    qualified = bool(groups) and not ungrouped and all(g["replication_qualification"] == "qualified_observed_transport_series" for g in groups)
+    return dict(schema_version=1, profile_id=config["profile_id"], service_profile_sha256=profiles["sha256"],
+        service_profile_path=profiles["path"], profile_planning_defaults=dict(
+            minimum_independent_replications=config["minimum_independent_replications"],
+            minimum_records_per_stream=config["minimum_records_per_stream"]),
+        status="qualified_observed_transport_series" if qualified else "not_qualified",
+        supplied_attempts=len(attempts), attempt_status_counts=dict(Counter(a["status"] for a in attempts)),
+        ungrouped_attempt_orders=ungrouped, groups=groups, attempts=attempts,
+        retention_policy="Every supplied/planned attempt is retained, including failed, missing, not-started and repeated executions; no best-of selection.",
+        independence_policy="Group by fixed ns3 seed and fixed RT seed/inputs; deduplicate(seed,RngRun) within each group. Repeated execution is not another independent replication.",
+        interpretation="A valid mission failure remains separately visible; service grade does not rewrite runtime, mission or measurement outcomes.")
+
+
+def analyze_service_series(run_dirs, output_dir=None, *, profile_path=None, planned_cases=None):
+    from network.coordination.service_profiles import load_service_profiles
+    profiles = load_service_profiles(profile_path)
+    plans = planned_cases or [None] * len(run_dirs)
+    if len(plans) != len(run_dirs):
+        raise ValueError("one planned case is required for every service-series input")
+    attempts = [_service_attempt(path, profiles, order, planned)
+                for order, (path, planned) in enumerate(zip(run_dirs, plans), 1)]
+    result = _aggregate_service_attempts(attempts, profiles)
+    if output_dir is not None:
+        target = Path(output_dir) / "metrics/service_series_analysis.json"
+        if target.exists():
+            raise ValueError("service-series report exists; use a fresh output directory")
+        write_json(target, result)
+    return result
+
+
+def analyze_service_batch(plan_path, runs_root, output_dir=None, *, profile_path=None):
+    """Consume the existing run_batch.py ledger, retaining unstarted cases."""
+    from bas import identifier, unique_json_fields
+    from network.coordination.service_profiles import load_service_profiles
+    plan_path = Path(plan_path).resolve()
+    raw_plan, plan_binding = _service_small_snapshot(plan_path, plan_path.parent)
+    plan = json.loads(raw_plan, object_pairs_hook=unique_json_fields)
+    if not isinstance(plan, dict):
+        raise ValueError("batch ledger must be an object")
+    cases = plan.get("cases")
+    if (type(plan.get("schema_version")) is not int or plan["schema_version"] != 1
+            or not isinstance(cases, list) or not cases or plan.get("planned_cases") != len(cases)):
+        raise ValueError("service batch requires an existing schema1 batch ledger and all planned cases")
+    ids = []
+    for case in cases:
+        if not isinstance(case, dict):
+            raise ValueError("batch cases must be objects")
+        run_id = identifier(case.get("run_id"))
+        if case.get("run_record") != f"runs/control/{run_id}/run.json" or run_id in ids:
+            raise ValueError("batch case IDs/paths must be unique and match the existing run controller")
+        ids.append(run_id)
+    result = analyze_service_series([Path(runs_root) / run_id for run_id in ids], None,
+                                   profile_path=profile_path, planned_cases=cases)
+    # Cross-check declared batch expectations, retaining any mismatched attempt.
+    for attempt, case in zip(result["attempts"], cases):
+        if attempt.get("conditions") is None:
+            continue
+        expected_config = copy.deepcopy(plan.get("config"))
+        if not isinstance(expected_config, dict) or not isinstance(expected_config.get("experiment"), dict):
+            raise ValueError("batch ledger must retain its effective config")
+        expected_config["experiment"].update(seed=case["seed"])
+        expected_config["experiment"].pop("run", None)
+        errors = attempt["input_binding_errors"]
+        if attempt["conditions"]["effective_config_except_rng_run"] != expected_config:
+            errors.append("attempt_config_disagrees_with_batch_plan")
+        for label, entry in plan.get("input_sha256", {}).items():
+            if label in ("scene", "radio", "sources") and (not isinstance(entry, dict) or
+                    attempt["conditions"].get(label + "_sha256") != entry.get("sha256")):
+                errors.append(label + "_disagrees_with_batch_plan")
+        if errors:
+            attempt.update(status="invalid", runtime_valid=False)
+    profiles = load_service_profiles(profile_path)
+    if profiles["sha256"] != result["service_profile_sha256"]:
+        raise ValueError("service profile changed during batch analysis")
+    if _service_file_binding(plan_path, plan_path.parent) != plan_binding:
+        raise ValueError("batch ledger changed during analysis")
+    result = _aggregate_service_attempts(result["attempts"], profiles)
+    result["batch_source"] = dict(path=str(plan_path), sha256=plan_binding["sha256"],
+                                batch_id=plan.get("batch_id"), recorded_status=plan.get("status"))
+    if output_dir is not None:
+        target = Path(output_dir) / "metrics/service_series_analysis.json"
+        if target.exists():
+            raise ValueError("service-series report exists; use a fresh output directory")
+        write_json(target, result)
+    return result
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--run-dir", type=Path)
+    mode.add_argument("--service-series", type=Path, nargs="+", help="Recompute and compare all raw service attempts")
+    mode.add_argument("--service-batch", type=Path, help="Compare every case in an existing run_batch.py batch.json")
     mode.add_argument("--write-plan", type=Path, help="Write the randomized 30-row plan; no simulator is launched")
     mode.add_argument("--campaign-plan", type=Path, help="Analyze all rows of an existing frozen plan")
     parser.add_argument("--output-dir", type=Path)
@@ -1497,9 +1782,21 @@ def main(argv=None):
     parser.add_argument("--no-plots", action="store_true")
     parser.add_argument("--skip-live-export", action="store_true")
     parser.add_argument("--runs-root", type=Path)
+    parser.add_argument("--service-profile", type=Path)
     args = parser.parse_args(argv)
     if not args.deadline_ms > 0 or not math.isfinite(args.deadline_ms) or not args.restricted_horizon_s > 0 or not math.isfinite(args.restricted_horizon_s):
         parser.error("finite positive deadline and restricted horizon required")
+    if args.service_series or args.service_batch:
+        if args.output_dir is None or args.service_batch and args.runs_root is None:
+            parser.error("service comparison requires --output-dir; --service-batch also requires --runs-root")
+        if args.service_batch:
+            result = analyze_service_batch(args.service_batch, args.runs_root, args.output_dir,
+                                           profile_path=args.service_profile)
+        else:
+            result = analyze_service_series(args.service_series, args.output_dir, profile_path=args.service_profile)
+        print(json.dumps(dict(status=result["status"], supplied_attempts=result["supplied_attempts"],
+                              attempt_status_counts=result["attempt_status_counts"], conditions=len(result["groups"]))))
+        return 0
     if args.write_plan:
         rows = campaign_plan()
         fields = list(rows[0])

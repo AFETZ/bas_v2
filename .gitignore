@@ -5,3 +5,4 @@ log/
 runs/
 __pycache__/
 *.pyc
+.venv-host/

@@ -26,7 +26,9 @@ ArduPilot SITL, геометрическая модель или Sionna RT и na
 native packet CSV. Длительная производительность и чистая целевая машина пока не квалифицированы.
 
 Получение закрытого репозитория и assets требует доступа GitHub. Нужны `git`, `gh`,
-`python3`, `docker`, `zstd`; пользователь должен иметь доступ к Docker.
+CPython 3.10–3.12 с `venv` / `ensurepip`, `docker`, `zstd`; пользователь должен иметь доступ к Docker.
+На host устанавливаются только закреплённые NumPy и PyYAML. Зависимости симуляторов
+и pymavlink остаются внутри закреплённого образа и отдельного SDK.
 Зафиксированные manifests проверяют SHA-256; build receipt проверяет версии и исходники SDK.
 Установленные каталоги из рабочей копии ПК4 не копируются.
 
@@ -34,6 +36,10 @@ native packet CSV. Длительная производительность и 
 gh auth login
 gh repo clone HSE-Intelligent-Unmanned-Systems-Lab/UAVcosim
 cd UAVcosim
+python3 -m venv .venv-host
+.venv-host/bin/python -m pip --isolated install --disable-pip-version-check \
+  --no-deps --only-binary=:all: --require-hashes -r requirements-host.txt
+. .venv-host/bin/activate
 python3 scripts/product/fetch_runtime_assets.py --image --native-wheels --terrain
 python3 scripts/product/bootstrap_native_runtime.py --bootstrap
 python3 scripts/product/bootstrap_native_runtime.py --check-only
@@ -64,6 +70,10 @@ python3 bas.py run --config runtime-terrain.json --run-id terrain-five-001
 Два UART в прежних полётах виртуальные (SITL/socat). Физические UART и реальный модем
 не подключены; их тесты остаются открытыми. Native Wi-Fi — инженерная модель,
 соответствие конкретному модему требует его характеристик и измерений.
+В каталоге есть китайский reference Holybro Pixhawk 6C и SiK Telemetry Radio V3 100mW.
+SiK имеет один UART и point-to-point TDM/FHSS; он сам по себе не закрывает два физических
+UART и многоточечный общий эфир. Это профиль подготовки, не идентификация устройства
+владельца и не калибровка native Wi-Fi ([характеристики производителя](https://docs.holybro.com/radio/sik-telemetry-radio-v3)).
 Hybrid закрыт до квалификации точности и правил переключения.
 
 Пакетные повторы используют существующий контроллер, immutable run ID и очередь:
@@ -76,6 +86,15 @@ python3 scripts/product/run_batch.py --config runtime-terrain.json   --batch-id 
 Повтор одного seed/run проверяет исполнение. Отдельные RngRun дают substreams ns-3;
 RT имеет отдельный `sionna.seed` в YAML и не становится независимым при смене RngRun.
 Нужны отдельные неизменяемые входы и явные seeds для исследования случайности RT.
+
+Сравнение пакетной серии пересчитывает сырую packet lineage и сохраняет все записи
+плана, включая незапущенные попытки. Одинаковые пары seed/RngRun учитываются один раз;
+повтор с худшим результатом не исключается.
+
+```sh
+python3 bas.py analyze short-repeat-001 --service-batch \
+  --output-dir runs/analysis/short-repeat-001-services
+```
 
 Source-only экспорт читает CSV последовательно и использует временный SQLite для точных
 percentiles/fmean; полный raw capture и его SHA сохраняются. На исходных capture09/11
@@ -165,10 +184,12 @@ control/payload с эмуляцией baud и 20 секунд измерений
 ```sh
 python3 bas.py inspect --config runtime-link-test.json
 python3 bas.py run --config runtime-link-test.json --run-id link-test-01
-python3 scripts/product/analyze_relay_experiment.py \
-  --run-dir runs/native-radio-realtime/link-test-01 \
-  --output-dir runs/analysis/link-test-01 --no-plots --skip-live-export
+python3 bas.py analyze link-test-01 --output-dir runs/analysis/link-test-01
 ```
+
+`bas.py analyze` обрабатывает закрытые успешные и неуспешные попытки в их записанном
+Docker-образе: raw и код доступны для чтения, новый каталог анализа — для записи;
+сеть и GPU не нужны. Исходные итоги запуска сохраняются. На host pymavlink не требуется.
 
 Для повторного опыта выберите новый run ID и каталог анализа. Это базовая
 программная интеграция на плоской сцене с некалиброванной радиомоделью.
