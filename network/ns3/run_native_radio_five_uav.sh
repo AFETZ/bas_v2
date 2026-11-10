@@ -1216,7 +1216,11 @@ trap 'exit 143' TERM HUP
 
 run_with_native_watchdog() {
   # Supervise liveness even when radio exits before wait() sees the child.
-  setsid "$@" &
+  # Terrain validation imports NumPy after native readiness. Its default BLAS
+  # pool can occupy every host core during import, including the radio cores.
+  # Keep scenario/control clients in the stack partition, with one BLAS thread
+  # for their small terrain arrays. RT workers retain their own radio affinity.
+  setsid taskset -c "$STACK_CPUSET" env OPENBLAS_NUM_THREADS=1 "$@" &
   local client_pid=$!
   managed_pids+=("$client_pid")
   while kill -0 "$client_pid" 2>/dev/null; do
