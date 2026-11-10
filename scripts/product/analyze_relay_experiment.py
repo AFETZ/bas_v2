@@ -1086,6 +1086,20 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
     payload = result['payload_lineage'] = analyze_payload_lineage(run_dir,
         payload_window['start_host_monotonic_ns'], payload_window['end_host_monotonic_ns'],
         complete=bool(full_window and meta.get('measurement_validity')=='valid' and timing['eligible']))
+    from network.coordination.service_profiles import qualify_payload_services
+    service_metadata_files = [run_dir / name for name in
+        ('metrics/relay_experiment_summary.json', 'metrics/relay_experiment_config.json',
+         'metrics/native_radio_stats.json', 'environment.txt')]
+    rt_solver_metadata = stats.get('sionna_solver')
+    service_metadata = dict(run_id=expected_run, rng_seed=stats.get('rng_seed'), rng_run=stats.get('rng_run'),
+        rt_solver_seed=rt_solver_metadata.get('seed') if isinstance(rt_solver_metadata, dict) else None,
+        source_commit=environment.get('git_head'),
+        source_dirty_paths=environment.get('source_dirty_paths'),
+        source_files=[dict(path=path.relative_to(run_dir).as_posix(), bytes=path.stat().st_size,
+                           sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+                      for path in service_metadata_files if path.is_file()])
+    result['service_class_qualification'] = qualify_payload_services(payload, run_metadata=service_metadata)
+    write_json(output / 'metrics/service_class_qualification.json', result['service_class_qualification'])
     write_csv(output / 'metrics/payload_records.csv',payload['records'],
         ['frame_uid','uav_id','direction','process_epoch','message_type','mavlink_body_bytes',
          'load_id','load_sequence','application_useful_bytes','application_useful_sha256','scheduled_host_monotonic_ns',

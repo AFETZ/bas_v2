@@ -122,6 +122,9 @@ class DeliveryAnalysisTests(unittest.TestCase):
             self.assertEqual(engineering['status'], 'observed_limits_failed')
             self.assertEqual(engineering['per_uav']['1']['timely'], 2)  # Fixed250, not exploratory50.
             self.assertEqual(result['rates']['uav1']['timely'], 1)
+            self.assertEqual(result['service_class_qualification']['status'], 'not_measured')
+            self.assertEqual(result['run_status'], 'completed')
+            self.assertTrue((output / 'metrics/service_class_qualification.json').is_file())
             self.assertEqual(engineering['per_uav']['1']['missing'], 1)
             self.assertEqual(engineering['per_uav']['1']['unavailable'], 1)
             self.assertEqual(engineering['per_uav']['1']['created_to_uart_latency_ms']['p99'], 69.6)
