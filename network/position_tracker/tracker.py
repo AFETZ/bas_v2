@@ -341,7 +341,15 @@ class LiveState:
             node['stale'] = node['sample_age_ms'] > self.stale_ns/1e6
             if node['stale']:
                 stale.append(name)
-            node['history'] = list(history)
+            # A reader observes this publication at or after now_ns and uses
+            # the same state-age budget. Older samples can never become timely
+            # again, even when the native event cutoff trails the host clock.
+            # Keep the internal ordering history and the original archive row;
+            # only omit unusable records from the frequently parsed live file.
+            # Lockstep freshness uses source time, so host-age pruning is invalid.
+            node['history'] = ([sample for sample in history
+                                if sample['sample_monotonic_ns'] >= now_ns-self.stale_ns]
+                               if self.simulation_mode == 'realtime' else list(history))
             nodes.append(node)
         return dict(type='node_state', schema_version=2, session_id=self.session,
             simulation_mode=self.simulation_mode, coordinate_frame='ENU', source=self.source, time_s=time.time(),

@@ -230,6 +230,46 @@ void EpochTransition(const std::filesystem::path& input)
     Reject([&]{bas::MeasuredEventHostNs(true,true,std::numeric_limits<int64_t>::max(),1,wall);},
            "Native/host epoch addition overflowed silently");
 }
+void AgeBoundedHistory(const std::filesystem::path& input)
+{
+    const auto fullPath=input.string()+".full.json", prunedPath=input.string()+".pruned.json";
+    for (const bool prune:{false,true})
+    {
+        const auto& path=prune ? prunedPath : fullPath;
+        Require(!std::filesystem::exists(path),"Preserve existing bounded-history fixture");
+        auto root=Fixture();
+        root["published_monotonic_ns"]=base;
+        auto nodes=root["nodes"].cast<py::list>();
+        auto node=nodes[1].cast<py::dict>();
+        py::list history;
+        for (int i=31;i>=0;--i)
+        {
+            if (prune && i>5) continue; // Publication at base, 100ms inclusive budget.
+            auto pose=Pose("uav",i);
+            pose["source_sim_time_s"]=10.-i*.02;
+            pose["sample_monotonic_ns"]=base-i*20*ms;
+            history.append(pose);
+        }
+        node["history"]=history;
+        std::ofstream(path)<<py::module_::import("json").attr("dumps")(root).cast<std::string>();
+    }
+    bas::LiveStateReader full,pruned;
+    for (const int delay:{0,1,20,99,100,101})
+        for (int cutoff=-120;cutoff<=20;cutoff+=5)
+        {
+            std::vector<bas::MeasuredState> a,b;
+            bool acceptedA=true,acceptedB=true;
+            try {a=full.Read(fullPath,{"cp","uav1"},base+cutoff*ms,base+delay*ms,100*ms);}
+            catch(const std::exception&) {acceptedA=false;}
+            try {b=pruned.Read(prunedPath,{"cp","uav1"},base+cutoff*ms,base+delay*ms,100*ms);}
+            catch(const std::exception&) {acceptedB=false;}
+            Require(acceptedA==acceptedB,"Age pruning changed causal reader acceptance");
+            if (acceptedA)
+                Require(a.size()==b.size() && a[1].sourceTime==b[1].sourceTime &&
+                        a[1].sampleNs==b[1].sampleNs && a[1].position==b[1].position,
+                        "Age pruning selected a different measured state");
+        }
+}
 } // namespace
 int main(int argc,char** argv)
 {
@@ -238,7 +278,7 @@ int main(int argc,char** argv)
     const auto input=std::string(argv[1])+".snapshot.json";
     if(std::filesystem::exists(input)) throw std::runtime_error("Preserve the previous reader input");
     std::string error;
-    try { Test(input); CohortCommit(); EpochTransition(input+".transition.json"); }
+    try { Test(input); CohortCommit(); EpochTransition(input+".transition.json"); AgeBoundedHistory(input); }
     catch(const std::exception& failure) { error=failure.what(); }
     std::ofstream report(argv[1]);
     report << py::module_::import("json").attr("dumps")(py::dict("schema"_a=1,"passed"_a=error.empty(),

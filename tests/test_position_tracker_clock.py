@@ -90,6 +90,39 @@ class MeasuredClockTests(unittest.TestCase):
         self.assertAlmostEqual(node['sample_age_ms'], 20.)
         self.assertFalse(node['stale'])
 
+    def fill_history(self):
+        for index in range(32):
+            source_ns = 10_000_000_000 + index*20_000_000
+            host_ns = 1_000_000_000 + index*20_000_000
+            self.state.clock(source_ns/1e9, host_ns)
+            self.assertTrue(self.receive(source_ns, host_ns))
+        return host_ns
+
+    def test_live_history_keeps_every_timely_sample_including_exact_age_boundary(self):
+        now = self.fill_history()
+        node = self.state.snapshot(now)['nodes'][1]
+        self.assertEqual([sample['sample_monotonic_ns'] for sample in node['history']],
+                         [now-offset for offset in range(100_000_000, -1, -20_000_000)])
+        self.assertEqual(len(self.state.history['uav1']), 32)
+        self.assertEqual(node['sample_monotonic_ns'], now)
+        self.assertEqual(node['sample_age_ms'], 0.)
+        self.assertFalse(node['stale'])
+
+    def test_expired_publication_stays_stale_and_keeps_original_archive_sample(self):
+        now = self.fill_history()
+        node = self.state.snapshot(now+100_000_001)['nodes'][1]
+        self.assertEqual(node['history'], [])
+        self.assertTrue(node['stale'])
+        self.assertEqual(node['sample_monotonic_ns'], now)
+        self.assertEqual(len(self.state.history['uav1']), 32)
+
+    def test_lockstep_history_is_not_pruned_by_host_waits(self):
+        self.state.simulation_mode = 'lockstep'
+        now = self.fill_history()
+        node = self.state.snapshot(now+5_000_000_000)['nodes'][1]
+        self.assertEqual(len(node['history']), 32)
+        self.assertEqual(node['sample_age_ms'], 0.)
+
 
 if __name__ == '__main__':
     unittest.main()
