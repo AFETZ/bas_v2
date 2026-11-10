@@ -41,6 +41,7 @@ PATCH_NAMES = (
     'mr2608-emitter-batch.patch',
     'mr2608-fixed-path-storage.patch',
     'mr2608-promisc-qos-receive-context.patch',
+    'mr2608-cfr-doppler-factorization.patch',
 )
 SCRATCH_FILES = (
     'upstream-sionna-tap-spike.cc', 'native-geometry-loss.h', 'native-spectrum-sources.h',

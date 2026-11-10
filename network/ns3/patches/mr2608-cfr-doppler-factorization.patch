@@ -1,0 +1,63 @@
+--- a/src/spectrum/model/sionna-rt-spectrum-propagation-loss-model.cc
++++ b/src/spectrum/model/sionna-rt-spectrum-propagation-loss-model.cc
+@@ -372,15 +372,13 @@
+         }
+     }
+ 
+-    // Compute the product between the doppler and the delay sincos
+-    auto delaySincosCopy = channelParams->m_cachedDelaySincos;
+-    for (size_t iRb = 0; iRb < inPsd->GetValuesN(); iRb++)
+-    {
+-        for (std::size_t cIndex = 0; cIndex < numCluster; cIndex++)
+-        {
+-            delaySincosCopy(iRb, cIndex) *= doppler[cIndex];
+-        }
+-    }
++    // Doppler is constant across frequency bins for each port/path. Apply it
++    // once to this private directional copy, leaving the cached long-term and
++    // delay phases immutable and preserving the path summation order.
++    for (size_t rx = 0; rx < numRxPorts; ++rx)
++        for (size_t tx = 0; tx < numTxPorts; ++tx)
++            for (size_t path = 0; path < numCluster; ++path)
++                directionalLongTerm(rx, tx, path) *= doppler[path];
+ 
+     // If "params" (ChannelMatrix) and longTerm were computed for the reverse direction (e.g. this
+     // is a DL transmission but params and longTerm were last updated during UL), then the elements
+@@ -402,7 +400,7 @@
+                     for (size_t cIndex = 0; cIndex < numCluster; cIndex++)
+                     {
+                         subsbandGain += directionalLongTerm(rxPortIdx, txPortIdx, cIndex) *
+-                                        delaySincosCopy(iRb, cIndex);
++                                        channelParams->m_cachedDelaySincos(iRb, cIndex);
+                     }
+                     // Multiply with the square root of the input PSD so that the norm (absolute
+                     // value squared) of chanSpct will be the output PSD
+--- a/src/spectrum/test/sionna-channel-model-test.cc
++++ b/src/spectrum/test/sionna-channel-model-test.cc
+@@ -281,6 +281,26 @@
+         Check(model->GenSpectrumChannelMatrix(psd, longTerm, channel, params,
+                                               doppler, 1, 1, false), nominal); // Warm cache.
+ 
++        // Distinct nontrivial Doppler phases exercise the factored port/path
++        // multiplication. Repeated forward/reverse calls must not mutate either
++        // cached long-term coefficients or delay phases.
++        doppler[0] = {0.0, 1.0};
++        doppler[1] = {-1.0, 0.0};
++        const std::vector<std::complex<double>> moving{{-0.5, 1.0}, {0.0, 1.5}, {0.5, 1.0}};
++        for (bool reverse : {false, true, false})
++            Check(model->GenSpectrumChannelMatrix(psd, longTerm, channel, params,
++                                                  doppler, 1, 1, reverse), moving);
++        NS_TEST_ASSERT_MSG_EQ((*longTerm)(0, 0, 0), std::complex<double>(1.0, 0.0),
++                              "Doppler mutated the cached direct path");
++        NS_TEST_ASSERT_MSG_EQ((*longTerm)(0, 0, 1), std::complex<double>(0.0, -0.5),
++                              "Doppler mutated the cached reflected path");
++        auto zeroPsd = Psd(0, {0.0, 0.0, 0.0});
++        Check(model->GenSpectrumChannelMatrix(zeroPsd, longTerm, channel, params,
++                                              doppler, 1, 1, false), {{0, 0}, {0, 0}, {0, 0}});
++        doppler[0] = doppler[1] = {1.0, 0.0};
++        Check(model->GenSpectrumChannelMatrix(psd, longTerm, channel, params,
++                                              doppler, 1, 1, false), nominal);
++
+         // Width/count are unchanged, but every RF bin is shifted. Reusing the
+         // old delay phases would return nominal instead of these values.
+         auto shifted = Psd(2500000.0, {1.0, 1.0, 1.0});

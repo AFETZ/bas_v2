@@ -455,6 +455,7 @@ FULL_MESH_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-fullmesh.patch"
 EMITTER_BATCH_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-emitter-batch.patch"
 FIXED_PATH_STORAGE_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-fixed-path-storage.patch"
 PROMISC_QOS_RECEIVE_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-promisc-qos-receive-context.patch"
+DOPPLER_FACTORIZATION_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-cfr-doppler-factorization.patch"
 TAP_QUEUE_SELECTION_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-tap-device-queue-selection.patch"
 if [[ "$SCENARIO_KEY" == urban ]]; then
   SCENARIO="$URBAN_OUTPUT/scenario.yaml"
@@ -530,7 +531,7 @@ MAP_ID="${SCENARIO_VALUES[5]}"
 
 for required_file in "$ROOT_DIR/scripts/product/capture_effective_config.py" \
   "$PROJECT_SOURCE" "$PATCH_FILE" "$REALTIME_CACHE_PATCH" \
-    "$PHASED_ARRAY_ADAPTER_PATCH" "$LOCKSTEP_TAP_PATCH" "$SOLVER_BUDGET_PATCH" "$BASEBAND_PHASE_PATCH" "$DOPPLER_EPOCH_PATCH" "$RECEIVER_BATCH_PATCH" "$DYNAMIC_RT_INPUTS_PATCH" "$FULL_MESH_PATCH" "$EMITTER_BATCH_PATCH" "$FIXED_PATH_STORAGE_PATCH" "$PROMISC_QOS_RECEIVE_PATCH" "$TAP_QUEUE_SELECTION_PATCH" "$RADIO_CONFIG" "$WORLD" "$CAMERA_FRAGMENT" "$SITL_DEFAULTS"; do
+    "$PHASED_ARRAY_ADAPTER_PATCH" "$LOCKSTEP_TAP_PATCH" "$SOLVER_BUDGET_PATCH" "$BASEBAND_PHASE_PATCH" "$DOPPLER_EPOCH_PATCH" "$RECEIVER_BATCH_PATCH" "$DYNAMIC_RT_INPUTS_PATCH" "$FULL_MESH_PATCH" "$EMITTER_BATCH_PATCH" "$FIXED_PATH_STORAGE_PATCH" "$PROMISC_QOS_RECEIVE_PATCH" "$DOPPLER_FACTORIZATION_PATCH" "$TAP_QUEUE_SELECTION_PATCH" "$RADIO_CONFIG" "$WORLD" "$CAMERA_FRAGMENT" "$SITL_DEFAULTS"; do
   [[ -f "$required_file" ]] || { printf 'Missing input: %s\n' "$required_file" >&2; exit 2; }
 done
 if [[ "$REQUIRES_RT" == 1 && ! -f "$SCENE" ]]; then
@@ -804,6 +805,9 @@ if [[ "${BAS_NATIVE_FIVE_SKIP_BUILD:-0}" == 1 ]]; then
   SPECTRUM_LIBRARY="$NS3_DIR/build/lib/libns3.48-spectrum-default.so"
   TAP_LIBRARY="$NS3_DIR/build/lib/libns3.48-tap-bridge-default.so"
   WIFI_LIBRARY="$NS3_DIR/build/lib/libns3.48-wifi-default.so"
+  [[ -s "$SPECTRUM_LIBRARY" && "$SPECTRUM_LIBRARY" -nt "$DOPPLER_FACTORIZATION_PATCH" ]] || {
+    printf 'Spectrum library predates per-path Doppler factorization.\n' >&2; exit 2;
+  }
   [[ -s "$WIFI_LIBRARY" && "$WIFI_LIBRARY" -nt "$PROMISC_QOS_RECEIVE_PATCH" ]] || {
     printf 'Wi-Fi library predates promiscuous QoS receive context fix.\n' >&2; exit 2;
   }
@@ -1075,6 +1079,7 @@ capture_effective_configuration() {
     --config "sionna_emitter_batch_patch=$EMITTER_BATCH_PATCH"
     --config "sionna_fixed_path_storage_patch=$FIXED_PATH_STORAGE_PATCH"
     --config "promisc_qos_receive_context_patch=$PROMISC_QOS_RECEIVE_PATCH"
+    --config "sionna_doppler_factorization_patch=$DOPPLER_FACTORIZATION_PATCH"
     --observed-params "native_sdk_sources=$RUN_DIR/logs/native_sdk_source_verification.json"
     --config "tap_queue_selection_patch=$TAP_QUEUE_SELECTION_PATCH"
     --config "native_rt_pool_source=$ROOT_DIR/network/ns3/scratch/native-rt-pool.h"
