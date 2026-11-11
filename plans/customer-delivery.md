@@ -45,6 +45,7 @@ Gitleaks 8.30.1 проверил подготовленные файлы и от
 | `gazebo-wait-diagnostic-20261111-c`, 25d5ae5 | Ровно пять, остановка на первом отказе | Все пять completed / succeeded / valid. Возраст применённой позы: 97,645 / 93,175 / 90,488 / 89,122 / 90,047 мс. Guards не менялись. |
 | `clone849-interframe-20261111-a`, чистый GitHub clone849 | 20 попыток, остановка на первом runtime-invalid | Первая failed / failed / invalid: native applied pose stale/future; 19 не запускались. Новых повторов этой серии нет. |
 | `pickup500-joint-20261111-a`, 8b910e6 | Ровно одна интеграционная попытка после production rebuild | exit0; completed / succeeded / valid. Все пять маршрутов, посадок и disarm; radio landing5/5; applied pose max84,178мс; 858725cache hits /0miss. Не квалификация20повторов. |
+| `hybrid5-5f62c59-20261111-a`, 5f62c59, UI | Первая из двух заранее заданных разных конфигураций; stop-on-first-invalid | exit1; runtime completed / mission failed / measurement invalid. Preflight120с не получил control HEARTBEAT/GPS. Не взлетел ни один БАС; окно не начато. Payload bidirectional5/5, CIR694290hits/0miss, pose max65,245мс. Вторая canonical конфигурация не запускалась. |
 
 
 Это повторы исполнения seed 1 / RngRun 1 / Sionna seed 42, а не независимая статистика RT.
@@ -323,6 +324,55 @@ immutable runtime-terrain copy отличается только rt_stage_trace=
 per-run tmpfs≤4ГиБ последовательно. V6 drycheck переиспользуется, actual BPF
 LLVMcompile остаётся на каждый PIDattach; это явно инструментированная серия.
 До запуска source freeze и настоящий production rebuild; пока не запускалась.
+
+Source5f62c59 зафиксирован чистым;23подготовленных файла и вся отправляемая
+история133коммита прошли Gitleaks8.30.1:0findings. Source5 ещё не отправлен как
+проверенный совместный вариант. Первую production build попытку остановила ошибка
+вспомогательного wrapper: он требовал отсутствующий в старом SDK Gitindex. Это
+произошло до копирования/сборки. V2 сохраняет отсутствие index; build02 действительно
+пересобрал main/worker за36,803с, source copy и исходники совпали, Spectrum/Wifi/TAP
+байты/mtime и indexabsence сохранены. Фальшивый bootstrap receipt не создавался.
+
+Первый E2E5f выполнен настоящим browser Save→Start→Observe→export на отдельном UI
+port40911; исходный UI8765 не трогался. Source5clean, savedscene/radio SHA совпали,
+readiness5SITL/5models/5odometry healthy. Первый nominalhybrid не начался из-за
+связности на земле:337 reports UAV1 всегда missing3, ни один из1600GCSreports
+не имел всех4peer echoes. available()/initialmaster policy не выдала ниодного grant;
+localUART наблюдала126–127HEARTBEAT, ноtelemetry return безgrant не разрешён. Payload
+получил120HEARTBEAT/598–599ATTITUDE на каждый БАС; это не измерительное окно.
+Watchdogtracebacks появились43,9–53,1мс ПОСЛЕ missiontimeout; это cleanupследствие.
+Ни UI configcorruption, ни пропущенный hybridgate, ни RTcachefault не найдены.
+
+Причина отсутствующих peer links подтверждена по всему nativeCSV863МБ/SHA,
+прочитанному один раз existingstreamparser (48,3с, peakRSS42,6МиБ). Для восьми
+направлений149,69–164м:0successful intended control MPDU из32977PHY attempts;
+31503(95,53%) drops PREAMBLE_DETECT_FAILURE. Все их signal arrivals ниже actual
+readbackMinimumRssi−82дБм, примерно−83,65…−85,51. Это другой параметр, чем
+RxSensitivity−101дБм; параметры не менялись. FullRT54calls/270rows на actualclosed
+poses по3seeds/3budgets дал160м→−84,9403дБм,114,56м→−79,2345,62,77м→−68,8836;
+coherentmultipath cancellation подтверждена. SNRfar≈9дБ выше4дБ, ноRSSниже−82.
+Это результат инженерной модели, не калибровка физического модема. Неверный
+номинальный стартовый input5f и весь отказ сохранены, не подменены новым успехом.
+
+Для следующей версии принят новый вход: пять radial3м маршрутов на дуге82м
+с углами−30/−15/0/15/30°, cruise20,2м; minimum separation21,406м, maximum async
+peer span85м. ActualgeneratorXML9058 неизменён; cruiseуглы74,851–75,363° в прежнем
+qualifieddomain. Контрфактический RT54calls/270rows дал worstpeer−73,4887дБм,
+запас8,5113дБ до ТОГОЖЕ−82. Это numericalprediction, не полёт. Policy/PHY/ARQ,
+100мс,120с timeout и определение success не менялись.
+
+Закрыт выявленный пробел объяснения: read-only selection_diagnostics snapshot
+сохраняется при прежнем timeout; UI показывает mission error/отсутствующих соседей
+и отдельно native diagnostic. Independent AST review подтверждает неизменность
+available/update_role/dispatch/telemetryeligibility и wait predicate. Source patch
+6a4a162b5bc32e1d57d830dee60d481cede80cd30a1f2315e036f6e4009a740a;39 targeted PASS
+и realChromium closedfailureCOPY rendering прошли, исходные результаты не правились.
+Общий suite после этого изменения:652всего,651PASS/1non-Linux skip. Новая версия с этим объяснением и новым input требует нового E2E; пока не запускалась.
+
+Ключевые proof: publication-final-joint-5f62c59-20261111-a/ui-hybrid-first/
+native-packet-rf-01/{correlation,threshold-identity,selection-diagnostics-review}.json;
+publication-hybrid-ground-startup-rf-20261111/evaluation.json;
+publication-hybrid-ground-startup-rf-candidate-20261111/evaluation.json.
 
 **Следующая ступень и доказательства**
 

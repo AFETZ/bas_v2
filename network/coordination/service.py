@@ -615,6 +615,22 @@ class GCSService(Network):
                 candidates.append(i)
         return sorted(candidates, key=lambda i: (self.peer_rtt_ns.get(i, 1 << 63), i))
 
+    def selection_diagnostics(self, now=None):
+        """Read-only explanation of the current selection inputs and policy."""
+        now = time.monotonic_ns() if now is None else now
+        deadline, reports = int(self.args.detection_s * 1e9), {}
+        for i in self.uav_ids:
+            report = self.heartbeat.get(i)
+            peer = report[1].get("peer_echo_ns", {}) if report else {}
+            others = [j for j in self.uav_ids if j != i]
+            reports[str(i)] = dict(direct_available=self.direct_available(i, now),
+                missing_or_invalid_peer_ids=[j for j in others if type(peer.get(str(j))) is not int],
+                stale_or_future_peer_ids=[j for j in others if type(peer.get(str(j))) is int
+                                         and not 0 <= now - peer[str(j)] <= deadline])
+        return dict(observed_host_monotonic_ns=now, initial_master=self.args.initial_master,
+                    leader_id=self.authority.leader_id, available_candidates=self.available(now),
+                    peer_reports=reports)
+
     def update_role(self, now: int):
         candidates = self.available(now)
         leader = self.authority.leader_id

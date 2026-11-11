@@ -524,6 +524,9 @@ class RelayExperiment:
                 except (ProtocolError, BlockingIOError):
                     pass
                 next_retry = time.monotonic() + retry_s
+        diagnostic = self.gcs.selection_diagnostics()
+        self.summary.setdefault("selection_diagnostics", diagnostic)
+        self.emit("mission_wait_timeout", label=label, selection_diagnostics=diagnostic)
         raise ScenarioError(f"timeout: {label}")
 
     def prepare(self):
