@@ -108,6 +108,8 @@ double g_readinessLagMaxMs{50.0};
 uint32_t g_readinessConsecutiveSamples{3};
 uint32_t g_healthyLagSamples{0};
 Ptr<PcapFileWrapper> g_radioPcap;
+// Non-owning: WriteStats is called only while main owns its local sourceRouter.
+bas::SourcePropagation* g_sourceRouterForStats{nullptr};
 std::ofstream g_events;
 volatile std::sig_atomic_t g_stopRequested = 0;
 std::string g_stopReason = "duration";
@@ -1539,10 +1541,11 @@ WriteStats(const std::string& path)
         wifiAssociations += counters.wifiAssociations;
         wifiDeassociations += counters.wifiDeassociations;
     }
+    const bool hybridActive = g_propagationProfile=="hybrid" && g_sourceRouterForStats;
     const bool sionnaDrivesRxPsd =
-        g_propagationProfile == "sionna" && g_phasedArraySpectrumPropagationModels.size() == 1 &&
-        g_phasedArraySpectrumPropagationModels.front() ==
-            "ns3::SionnaRtSpectrumPropagationLossModel";
+        (g_propagationProfile == "sionna" && g_phasedArraySpectrumPropagationModels.size() == 1 &&
+         g_phasedArraySpectrumPropagationModels.front() == "ns3::SionnaRtSpectrumPropagationLossModel") ||
+        (hybridActive && g_sourceRouterForStats->HybridRtEvaluations()>0);
     std::ofstream output(path, std::ios::out | std::ios::trunc);
     output << "{\n"
            << "  \"stop_reason\": \"" << g_stopReason << "\",\n"
@@ -1726,6 +1729,7 @@ WriteStats(const std::string& path)
            << "  \"solver_profile\": \"" << g_solverProfile << "\",\n"
            << "  \"sionna_receiver_batch_mode\": \"" << g_sionnaReceiverBatchMode << "\",\n"
            << "  \"sionna_receiver_batch\": " << g_sionnaReceiverBatchStatsJson << ",\n"
+            << "  \"hybrid_selection\": " << (hybridActive ? g_sourceRouterForStats->HybridSnapshotJson() : "null") << ",\n"
            << "  \"sionna_rt_execution_mode\": \"" << g_sionnaRtExecutionMode << "\",\n"
            << "  \"sionna_rt_workers\": " << g_sionnaRtWorkersJson << ",\n"
            << "  \"sionna_solver\": {\"max_depth\": " << g_sionnaMaxDepth
@@ -1747,7 +1751,7 @@ WriteStats(const std::string& path)
            << ", \"cache_expiry_jitter_fraction\": " << g_sionnaCacheJitterFraction
            << "},\n"
            << "  \"packet_outcome_affected\": "
-           << ((sionnaDrivesRxPsd || g_geometry) ? "true" : "false") << "\n"
+           << ((sionnaDrivesRxPsd || g_geometry || (hybridActive && g_sourceRouterForStats->HybridFriisEvaluations()>0)) ? "true" : "false") << "\n"
            << "}\n";
 }
 
@@ -1966,12 +1970,15 @@ main(int argc, char* argv[])
                     sionnaReceiverBatchMode != "full_mesh",
                     "sionnaReceiverBatchMode must be pairwise, receiver_batch or explicit full_mesh");
     NS_ABORT_MSG_IF(sionnaReceiverBatchMode != "pairwise" &&
-                    (g_propagationProfile != "sionna" || radioBackend != "wifi" ||
+                    (!requiresRt || radioBackend != "wifi" ||
                      g_executionMode != "realtime" || !sionnaSyntheticArray),
                     "RT batching requires the native Wi-Fi/Sionna realtime iso 1x1 reference");
     NS_ABORT_MSG_IF(sionnaRtExecutionMode != "in_process" && sionnaRtExecutionMode != "worker_pool",
                     "sionnaRtExecutionMode must be in_process or worker_pool");
     const bool useRtWorkers = sionnaRtExecutionMode == "worker_pool";
+    NS_ABORT_MSG_IF(g_propagationProfile=="hybrid" &&
+                    (!useRtWorkers || g_stateMaxAgeS>0.1 || channelStateMaxAgeS>0.1),
+                    "qualified hybrid requires worker_pool and pose/cache age limits <=100 ms");
     NS_ABORT_MSG_IF(sionnaReceiverBatchMode == "full_mesh" && !useRtWorkers,
                     "full_mesh requires the explicit worker_pool execution mode");
     NS_ABORT_MSG_IF(sionnaWorkerCount < 1 || sionnaWorkerCount > 3 ||
@@ -2143,20 +2150,29 @@ main(int argc, char* argv[])
     else
     {
         auto& router = sourceRouter;
-        if (sourceConfig.empty()) { router=CreateObject<bas::SourcePropagation>(); router->reference=sionna; }
+        if (sourceConfig.empty())
+        {
+            router=CreateObject<bas::SourcePropagation>(); router->reference=sionna;
+            if (g_propagationProfile=="hybrid") router->ConfigureHybridScene(scene,
+                [](const auto& event,const auto& id,double value,const auto& details) {
+                    LogEvent(event,id,"",0,value,details);
+                });
+        }
         else router = bas::InstallSpectrumSources(sionna, channel, sourceConfig, scene,
             solver, sionnaMaxNumberOfPaths, g_propagationProfile,
             [](const std::string& event, const std::string& id, double value,
                const std::string& details) { LogEvent(event, id, "", 0, value, details); },
             sionnaReceiverBatchMode != "pairwise", []() { return ReadPhase(); });
         router->profile=g_propagationProfile;
+        if (g_propagationProfile=="hybrid") router->hybridCommandPost=mobility.front();
+        g_sourceRouterForStats=PeekPointer(router);
         channel->AddPhasedArraySpectrumPropagationLossModel(router);
         LogEvent("source_propagation_dispatch", "ns3", "", 0, router->sources.size(),
                  "wrapper=bas::SourcePropagation;selected_profile=" + g_propagationProfile + ";one_model_per_signal=true");
     }
     if (!geometryProfile) g_phasedArraySpectrumPropagationModels.push_back(g_propagationProfile == "sionna"
         ? sionna->GetInstanceTypeId().GetName() : (g_propagationProfile == "friis"
-            ? "ns3::FriisSpectrumPropagationLossModel" : "bas::ExplicitNativeSionnaFriisSelection"));
+            ? "ns3::FriisSpectrumPropagationLossModel" : "bas::QualifiedSionnaFriisSelection"));
     LogEvent("rx_psd_model_binding",
              "ns3",
              "",

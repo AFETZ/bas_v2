@@ -1554,7 +1554,7 @@ def _service_attempt(run_dir, profiles, order, planned=None):
             if not isinstance(value, str) or len(value) != length or any(c not in "0123456789abcdef" for c in value):
                 errors.append(name + "_identity_missing")
         labels = {"scene"}
-        if config["propagation"]["model"] == "sionna":
+        if config["propagation"]["model"] in ("sionna", "hybrid"):
             labels.add("radio")
         if config.get("interference", {}).get("sources") is not None:
             labels.add("sources")

@@ -27,6 +27,8 @@ UAVS = tuple(f"uav{index}" for index in range(1, 6))
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+from scripts.product.hybrid_policy import native_dispatch_valid
+
 RUNTIME_PHASE_ALIASES = {
     "pre_no_bypass": "no_bypass_test",
     "no_bypass_stop": "no_bypass_test",
@@ -936,8 +938,9 @@ def native_rt_worker_contract(stats: dict[str, Any], scenario_config: dict[str, 
         "worker_cache_drives_native_psd": integer(cache.get("hits"), 1) and type(cache.get("misses")) is int
             and cache["misses"] == 0 and integer(cache.get("accepted"), 1)
             and cache["accepted"] == snapshot.get("published_pairs")
-            and stats.get("selected_propagation_profile") == "sionna"
-            and stats.get("sionna_drives_rx_psd") is True and stats.get("packet_outcome_affected") is True
+            and (stats.get("selected_propagation_profile") == "sionna" and stats.get("sionna_drives_rx_psd") is True
+                 or native_dispatch_valid(stats))
+            and stats.get("packet_outcome_affected") is True
             and stats.get("native_ns3_phy") is True and stats.get("native_ns3_mac") is True
             and same(stats.get("carrier_hz"), radio.get("carrier_hz"))
             and same(stats.get("wifi_actual_center_frequency_hz"), radio.get("carrier_hz"))
@@ -945,10 +948,14 @@ def native_rt_worker_contract(stats: dict[str, Any], scenario_config: dict[str, 
             and type(stats.get("shared_spectrum_channel_count")) is int and stats["shared_spectrum_channel_count"] == 1
             and type(stats.get("scalar_base_propagation_model_count")) is int and stats["scalar_base_propagation_model_count"] == 0
             and type(stats.get("phased_array_spectrum_propagation_model_count")) is int and stats["phased_array_spectrum_propagation_model_count"] == 1
-            and stats.get("rx_psd_propagation_model") == "ns3::SionnaRtSpectrumPropagationLossModel",
+            and (stats.get("rx_psd_propagation_model") == "ns3::SionnaRtSpectrumPropagationLossModel"
+                 or native_dispatch_valid(stats)),
         "worker_cache_hit_ages_within_budget": maximum_age_ns is not None
             and all(integer(cache.get(key)) and cache[key] <= maximum_age_ns for key in
                 ("maximum_hit_native_age_ns", "maximum_hit_host_age_ns")),
+        "hybrid_uses_actual_rt_scene": stats.get("selected_propagation_profile") != "hybrid"
+            or (native_dispatch_valid(stats) and scene_hash is not None
+                and stats["hybrid_selection"].get("scene_sha256")==scene_hash),
         "worker_profiles_match": False,
         "worker_cache_pair_provenance": False,
         "worker_desired_mode": snapshot.get("desired_mode", "receiver_batch") == desired_mode
@@ -1284,6 +1291,19 @@ def native_product_runtime_contract(
             exact["sionna_out_of_process"] = stats.get("sionna_in_process") is False
             workers = native_rt_worker_contract(stats, scenario_config, run_dir=run_dir)
             exact["worker_pool_runtime_contract"] = workers["passed"]
+    if stats.get("selected_propagation_profile") == "hybrid":
+        exact.pop("single_sionna_rx_psd_model")
+        exact.pop("sionna_drives_rx_psd")
+        exact["single_qualified_hybrid_rx_psd_model"] = (
+            stats.get("phased_array_spectrum_propagation_model_count")==1
+            and stats.get("scalar_base_propagation_model_count")==0
+            and native_dispatch_valid(stats))
+        exact["hybrid_requires_bounded_worker_pool"] = (
+            requested_mode==observed_mode=="worker_pool"
+            and type(stats.get("state_max_age_s")) in (int,float)
+            and 0<stats["state_max_age_s"]<=.1
+            and type(stats.get("channel_state_max_age_s")) in (int,float)
+            and 0<stats["channel_state_max_age_s"]<=.1)
     return {"passed": all(exact.values()), "checks": exact,
             "propagation_profile": stats.get("selected_propagation_profile", "sionna"),
             "sionna_rt_execution_mode": observed_mode if not geometry else None,

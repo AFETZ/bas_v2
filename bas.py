@@ -29,6 +29,7 @@ SHAPE = {
 PROPAGATION_FIELDS = {
     'geometry_logdistance': {'model'},
     'sionna': {'model', 'radio_config', 'ground_material', 'building_material', 'thickness_m'},
+    'hybrid': {'model', 'radio_config', 'ground_material', 'building_material', 'thickness_m'},
 }
 MILESTONES = {'service_started', 'phase_requested', 'takeoff_observed',
               'waypoint_reached_telemetry', 'barrier_released', 'experiment_failed',
@@ -138,8 +139,8 @@ def _interference_input(config, root, radio_profile=None):
     name = config.get('interference', {}).get('sources')
     if name is None:
         return None, None
-    if config['propagation']['model'] != 'sionna':
-        raise ValueError('interference.sources requires propagation.model=sionna')
+    if config['propagation']['model'] not in ('sionna', 'hybrid'):
+        raise ValueError('interference.sources requires propagation.model=sionna or hybrid')
     if not isinstance(name, str) or not name or ':' in name:
         raise ValueError('interference.sources must be null or a workspace-relative YAML path')
     relative = Path(name.replace('\\', '/'))
@@ -241,7 +242,7 @@ def load_config(path, root=ROOT):
         if section == 'propagation' and isinstance(config[section], dict):
             model = config[section].get('model')
             if not isinstance(model, str) or model not in PROPAGATION_FIELDS:
-                raise ValueError('propagation.model must be geometry_logdistance or sionna; hybrid is not qualified')
+                raise ValueError('propagation.model must be geometry_logdistance, sionna or qualified hybrid')
             keys = PROPAGATION_FIELDS[model]
         if not isinstance(config[section], dict) or set(config[section]) != keys:
             raise ValueError(f'expected {section} fields: {sorted(keys)}')
@@ -258,7 +259,7 @@ def load_config(path, root=ROOT):
         raise ValueError('runtime.event_logging must be metrics_only or batched_trace')
     if type(config['runtime']['rt_stage_trace']) is not bool:
         raise ValueError('runtime.rt_stage_trace must be boolean')
-    if config['runtime']['rt_stage_trace'] and config['propagation']['model'] != 'sionna':
+    if config['runtime']['rt_stage_trace'] and config['propagation']['model'] not in ('sionna', 'hybrid'):
         raise ValueError('runtime.rt_stage_trace requires Sionna worker_pool')
     if type(count) is not int or not 1 <= count <= 5:
         raise ValueError('drone.count must be an integer from 1 to 5')
@@ -319,9 +320,9 @@ def load_config(path, root=ROOT):
         raise ValueError('GCS failsafe actions require the virtual relay GCS; radio_bench does not configure a physical controller')
     if tuple(sorted(scenario.spawns)) != tuple(range(1, count + 1)):
         raise ValueError('scene UAV roster must match drone.count exactly')
-    if scenario.terrain_bundle_path is not None and config['propagation']['model'] != 'sionna':
+    if scenario.terrain_bundle_path is not None and config['propagation']['model'] not in ('sionna', 'hybrid'):
         raise ValueError('terrain_bundle requires Sionna; flat geometry propagation cannot represent terrain')
-    if config['propagation']['model'] == 'sionna':
+    if config['propagation']['model'] in ('sionna', 'hybrid'):
         propagation = config['propagation']
         radio_name = propagation['radio_config']
         if not isinstance(radio_name, str) or not radio_name:
@@ -343,6 +344,9 @@ def load_config(path, root=ROOT):
             raise ValueError('worker_pool with directed sources requires receiver_batch_mode=full_mesh')
         if config['runtime']['rt_stage_trace'] and radio_profile['sionna']['execution_mode'] != 'worker_pool':
             raise ValueError('runtime.rt_stage_trace requires Sionna worker_pool')
+        if config['propagation']['model'] == 'hybrid':
+            from scripts.product.hybrid_policy import validate_radio_profile
+            validate_radio_profile(radio_profile)
         thickness = propagation['thickness_m']
         if type(thickness) not in (int, float) or not 0 < thickness <= sys.float_info.max:
             raise ValueError('propagation.thickness_m must be finite and positive')
@@ -358,7 +362,7 @@ def load_config(path, root=ROOT):
             raise ValueError('RT profile materials/thickness must match the shared terrain bundle')
         propagation['radio_config'] = radio_file.relative_to(root).as_posix()
     source_path, _ = _interference_input(config, root,
-        radio_profile if config['propagation']['model'] == 'sionna' else None)
+        radio_profile if config['propagation']['model'] in ('sionna', 'hybrid') else None)
     if source_path is not None:
         config['interference']['sources'] = source_path.relative_to(root).as_posix()
     hitl_input = _hitl_input(config, root)
@@ -398,7 +402,7 @@ def environment(config, run_id, inherited=None):
         'NATIVE_SIONNA_LOG_LEVEL': config['runtime'].get('sionna_log_level', 'info'),
         'NATIVE_RT_STAGE_TRACE': int(config['runtime'].get('rt_stage_trace', False)),
     }
-    if config['propagation']['model'] == 'sionna':
+    if config['propagation']['model'] in ('sionna', 'hybrid'):
         propagation = config['propagation']
         settings.update(NATIVE_RADIO_CONFIG=propagation['radio_config'],
                         NATIVE_RT_GROUND_MATERIAL=propagation['ground_material'],
@@ -422,38 +426,39 @@ def raw_dir(run_id):
     return ROOT / 'runs/native-radio-realtime' / identifier(run_id)
 
 
-def snapshot_inputs(config, folder, env):
+def snapshot_inputs(config, folder, env, *, root=None):
     """Freeze the exact input files consumed by both host preparation and Docker."""
+    root = ROOT if root is None else Path(root)
     write_json(folder / 'config.json', config)
-    scene_bytes = (ROOT / config['environment']['scene']).read_bytes()
+    scene_bytes = (root / config['environment']['scene']).read_bytes()
     (folder / 'scene.json').write_bytes(scene_bytes)
-    env['BAS_NATIVE_URBAN_CONFIG'] = (folder / 'scene.json').relative_to(ROOT).as_posix()
+    env['BAS_NATIVE_URBAN_CONFIG'] = (folder / 'scene.json').relative_to(root).as_posix()
     hashes = dict(scene_sha256=hashlib.sha256(scene_bytes).hexdigest(), radio_sha256=None, sources_sha256=None)
-    if config['propagation']['model'] == 'sionna':
-        radio_bytes = (ROOT / config['propagation']['radio_config']).read_bytes()
+    if config['propagation']['model'] in ('sionna', 'hybrid'):
+        radio_bytes = (root / config['propagation']['radio_config']).read_bytes()
         (folder / 'radio.yaml').write_bytes(radio_bytes)
-        env['BAS_NATIVE_RADIO_CONFIG'] = (folder / 'radio.yaml').relative_to(ROOT).as_posix()
+        env['BAS_NATIVE_RADIO_CONFIG'] = (folder / 'radio.yaml').relative_to(root).as_posix()
         hashes['radio_sha256'] = hashlib.sha256(radio_bytes).hexdigest()
     # Source bytes can change after UI validation. Revalidate the exact bytes
     # being frozen and forward only this owned snapshot, never ambient BAS_*.
     env.pop('BAS_NATIVE_SOURCES', None)
-    source_path, source_bytes = _interference_input(config, ROOT.resolve())
+    source_path, source_bytes = _interference_input(config, root.resolve())
     if source_path is not None:
         snapshot = folder / 'sources.yaml'
         snapshot.write_bytes(source_bytes)
-        env['BAS_NATIVE_SOURCES'] = snapshot.relative_to(ROOT).as_posix()
+        env['BAS_NATIVE_SOURCES'] = snapshot.relative_to(root).as_posix()
         hashes['sources_sha256'] = hashlib.sha256(source_bytes).hexdigest()
     env.pop('BAS_NATIVE_EXTERNAL_BUNDLE', None)
     env.pop('BAS_NATIVE_EXTERNAL_PROFILES', None)
-    hitl_input = _hitl_input(config, ROOT.resolve())
+    hitl_input = _hitl_input(config, root.resolve())
     if hitl_input is not None:
         _, request_bytes, profiles_bytes, bundle = hitl_input
         (folder / 'hitl-request.json').write_bytes(request_bytes)
         (folder / 'hitl-reference-profiles.json').write_bytes(profiles_bytes)
         path = folder / 'hitl-bundle.json'
         write_json(path, bundle)
-        env['BAS_NATIVE_EXTERNAL_BUNDLE'] = path.relative_to(ROOT).as_posix()
-        env['BAS_NATIVE_EXTERNAL_PROFILES'] = (folder / 'hitl-reference-profiles.json').relative_to(ROOT).as_posix()
+        env['BAS_NATIVE_EXTERNAL_BUNDLE'] = path.relative_to(root).as_posix()
+        env['BAS_NATIVE_EXTERNAL_PROFILES'] = (folder / 'hitl-reference-profiles.json').relative_to(root).as_posix()
         hashes.update(hitl_request_sha256=hashlib.sha256(request_bytes).hexdigest(),
                       hitl_profiles_sha256=hashlib.sha256(profiles_bytes).hexdigest(),
                       hitl_bundle_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
@@ -1069,6 +1074,8 @@ def maps(config, output, *, service_map_from=None, service_evidence=None,
 
 
 def main():
+    from scripts.product.town01_runtime_monitor import limit_host_math_threads
+    limit_host_math_threads()
     if len(sys.argv) > 1 and sys.argv[1] == 'ui':
         from scripts.product.operator_ui import main as ui_main
         return ui_main(['--serve', *sys.argv[2:]])

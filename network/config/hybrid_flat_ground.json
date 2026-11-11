@@ -1,0 +1,141 @@
+{
+  "schema_version": 1,
+  "scenario": "flat_ground_hybrid_short_routes_v1",
+  "status": "configuration_and_RF_domain_checked_flight_not_yet_run",
+  "frame": {
+    "coordinate_frame": "ENU",
+    "ground_surface_z_m": 0.0,
+    "spherical_heading_deg": 0,
+    "origin_latitude_deg": 46.607213,
+    "origin_longitude_deg": 14.278461,
+    "origin_elevation_m": 446.0,
+    "datum": "Exact generated2km flatground cube; same Gazebo/Sionna geometry; not surveyed terrain.",
+    "world_enu_to_local_ned": "N=y,E=x,D=-z per iris_radio_headless gazeboXYZToNED"
+  },
+  "gcs": [
+    0,
+    0,
+    2
+  ],
+  "buildings": [],
+  "spawns": {
+    "1": [
+      80.0,
+      0.0,
+      2.0
+    ],
+    "2": [
+      0.0,
+      82.0,
+      2.0
+    ],
+    "3": [
+      -80.0,
+      0.0,
+      2.0
+    ],
+    "4": [
+      0.0,
+      -82.0,
+      2.0
+    ],
+    "5": [
+      58.0,
+      58.0,
+      2.0
+    ]
+  },
+  "routes": {
+    "1": [
+      [
+        80.0,
+        0.0,
+        20.2
+      ],
+      [
+        83.0,
+        0.0,
+        20.2
+      ]
+    ],
+    "2": [
+      [
+        0.0,
+        82.0,
+        20.2
+      ],
+      [
+        0.0,
+        85.0,
+        20.2
+      ]
+    ],
+    "3": [
+      [
+        -80.0,
+        0.0,
+        20.2
+      ],
+      [
+        -83.0,
+        0.0,
+        20.2
+      ]
+    ],
+    "4": [
+      [
+        0.0,
+        -82.0,
+        20.2
+      ],
+      [
+        0.0,
+        -85.0,
+        20.2
+      ]
+    ],
+    "5": [
+      [
+        58.0,
+        58.0,
+        20.2
+      ],
+      [
+        60.121320343559645,
+        60.121320343559645,
+        20.2
+      ]
+    ]
+  },
+  "mission": {
+    "telemetry_max_age_s": 0.5,
+    "speed_mps": 1.5,
+    "waypoint_dwell_s": 3.0,
+    "world_ground_reference_z_m": 0.195,
+    "ground_reference_source": "iris/model.sdf base_collision poseZ=-.08 minus box halfheight .115; ground topZ=0, contact residual not corrected",
+    "route_design_reason": "Input waypoints: five separated short radial3m legs in the predeclared flat-ground RSS domain; no optimization. Takeoff, transitions and landing can explicitly select fullRT outside the domain.",
+    "waypoint_dwell_reason": "3s dwell reuses the existing mission completion contract. This configuration is not a flight acceptance result.",
+    "barriers": {}
+  },
+  "radio": {
+    "parameter_set": "flat_ground_hybrid_reference_v1",
+    "calibration": "uncalibrated_parametric_study",
+    "mode": "geometry",
+    "frequency_hz": 2412000000,
+    "los": {
+      "exponent": 2.0,
+      "reference_distance_m": 1.0,
+      "reference_loss_db": 40.09532929124565
+    },
+    "nlos": {
+      "exponent": 2.7,
+      "reference_distance_m": 1.0,
+      "reference_loss_db": 40.09532929124565
+    },
+    "sensitivity_exponents": [
+      2.7,
+      3.3
+    ],
+    "parameters_source": "Legacy simple-profile fields remain schema-compatible; runtime-hybrid selects full Sionna/native Friis online guarded at1dB. Not a calibrated modem model."
+  }
+}

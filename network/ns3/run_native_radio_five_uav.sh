@@ -161,11 +161,11 @@ PYEXTERNAL
   EXTERNAL_BENCH=1
 fi
 if [[ "$SCENARIO_KEY" == urban ]]; then
-  [[ ( "$PROPAGATION_PROFILE" == geometry_logdistance || "$PROPAGATION_PROFILE" == sionna ) && "$FAULT_PROFILE" == none &&
+  [[ ( "$PROPAGATION_PROFILE" == geometry_logdistance || "$REQUIRES_RT" == 1 ) && "$FAULT_PROFILE" == none &&
      ( "$COORDINATION_POLICY" != off || "$EXTERNAL_BENCH" == 1 ) ]] || {
-    printf 'Urban mission requires explicit geometry_logdistance or Sionna, coordinator policy and no injected fault.\n' >&2; exit 2;
+    printf 'Urban mission requires explicit geometry_logdistance, Sionna or qualified hybrid, coordinator policy and no injected fault.\n' >&2; exit 2;
   }
-  if [[ "$PROPAGATION_PROFILE" == sionna ]]; then
+  if [[ "$REQUIRES_RT" == 1 ]]; then
     [[ -n "$RADIO_CONFIG_OVERRIDE" && -n "${BAS_NATIVE_RT_GROUND_MATERIAL:-}" &&
        -n "${BAS_NATIVE_RT_BUILDING_MATERIAL:-}" && -n "${BAS_NATIVE_RT_THICKNESS_M:-}" ]] || {
       printf 'Urban Sionna requires an explicit radio config and ITU material/thickness profile.\n' >&2; exit 2;
@@ -186,10 +186,10 @@ if not name or ':' in name or relative.is_absolute() or '..' in relative.parts o
     raise ValueError('native sources require a workspace-relative YAML input without traversal')
 path = (root / relative).resolve()
 canonical = path.relative_to(root).as_posix()
-if sys.argv[3:5] == ['urban', 'sionna']:
+if sys.argv[3] == 'urban' and sys.argv[4] in ('sionna', 'hybrid'):
     from bas import _interference_input
     _interference_input(dict(interference=dict(sources=canonical), propagation=dict(
-        model='sionna', ground_material=sys.argv[5], building_material=sys.argv[6])), root)
+        model=sys.argv[4], ground_material=sys.argv[5], building_material=sys.argv[6])), root)
 else:
     import yaml
     from scripts.product.prepare_native_sources import UniqueSafeLoader, prepare
@@ -217,7 +217,7 @@ run_in_container() {
   if [[ "$SCENARIO_KEY" == urban ]]; then
     local -a urban_args=(--config "$GEOMETRY_CONFIG" --output "$URBAN_OUTPUT" --uav-count "$UAV_COUNT"
                          --propagation-profile "$PROPAGATION_PROFILE")
-    if [[ "$PROPAGATION_PROFILE" == sionna ]]; then
+    if [[ "$REQUIRES_RT" == 1 ]]; then
       urban_args+=(--radio-config "$RADIO_CONFIG_OVERRIDE" --ground-material "$BAS_NATIVE_RT_GROUND_MATERIAL"
                    --building-material "$BAS_NATIVE_RT_BUILDING_MATERIAL" --thickness-m "$BAS_NATIVE_RT_THICKNESS_M")
     fi
@@ -378,11 +378,11 @@ if [[ "${BAS_NATIVE_FLIGHT_DIAGNOSTIC:-0}" == 1 ]]; then
 fi
 if [[ "$COORDINATION_POLICY" != off ]]; then
   [[ "$BAS_SIMULATION_MODE" == realtime &&
-     ( "$PROPAGATION_PROFILE" == friis || "$PROPAGATION_PROFILE" == geometry_logdistance || "$PROPAGATION_PROFILE" == sionna ) && "$WIFI_TOPOLOGY" == adhoc &&
+     ( "$PROPAGATION_PROFILE" == friis || "$PROPAGATION_PROFILE" == geometry_logdistance || "$REQUIRES_RT" == 1 ) && "$WIFI_TOPOLOGY" == adhoc &&
      "$SCENARIO_MODE" == product && ( "$ACTIVE_UART_CHANNELS" == control || "$ACTIVE_UART_CHANNELS" == control,payload ) &&
      -z "${BAS_NATIVE_EXTERNAL_CONFIG:-}" && -z "$EXTERNAL_BUNDLE" &&
-     ( -z "${BAS_NATIVE_SOURCES:-}" || "$PROPAGATION_PROFILE" == sionna ) ]] || {
-    printf 'Coordination requires 1..5 realtime UAVs, explicit Friis/geometry_logdistance/Sionna ad-hoc, control with optional payload UART, and no other scenario mode.\n' >&2
+     ( -z "${BAS_NATIVE_SOURCES:-}" || "$REQUIRES_RT" == 1 ) ]] || {
+    printf 'Coordination requires 1..5 realtime UAVs, explicit Friis/geometry_logdistance/Sionna/qualified hybrid ad-hoc, control with optional payload UART, and no other scenario mode.\n' >&2
     exit 2
   }
   SCENARIO_MODE="relay_experiment"
@@ -543,12 +543,16 @@ if [[ "$REQUIRES_RT" == 1 && ! -f "$SCENE" ]]; then
   printf 'Missing RT scene: %s\n' "$SCENE" >&2; exit 2
 fi
 export GZ_SIM_RESOURCE_PATH="${GZ_SIM_RESOURCE_PATH:-}:$(dirname "$WORLD")"
-mapfile -t RADIO_VALUES < <(python3 - "$RADIO_CONFIG" <<'PY'
+mapfile -t RADIO_VALUES < <(python3 - "$RADIO_CONFIG" "$ROOT_DIR" <<'PY'
 import sys
 import yaml
+sys.path.insert(0, sys.argv[2])
+from scripts.product.prepare_urban_gazebo import validate_native_wifi_modes
 
 value = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
 radio = value["radio"]
+if radio["backend"] == "wifi":
+    validate_native_wifi_modes(radio)
 sionna = value["sionna"]
 coupling = value.get("coupling", {})
 for item in (
@@ -632,6 +636,15 @@ SIONNA_MAX_NUM_PATHS_PER_SOURCE="${RADIO_VALUES[32]}"
 SIONNA_RECEIVER_BATCH_MODE="${RADIO_VALUES[33]}"
 SIONNA_RT_EXECUTION_MODE="${RADIO_VALUES[34]}"
 SIONNA_WORKER_COUNT="${RADIO_VALUES[35]}"
+if [[ "$PROPAGATION_PROFILE" == hybrid ]]; then
+  python3 - "$ROOT_DIR" "$SIONNA_RT_EXECUTION_MODE" "$STATE_MAX_AGE_S" "$CHANNEL_STATE_MAX_AGE_S" <<'PYHYBRIDPROFILE'
+import sys
+sys.path.insert(0,sys.argv[1])
+from scripts.product.hybrid_policy import validate_radio_profile
+validate_radio_profile(dict(sionna=dict(execution_mode=sys.argv[2],channel_state_max_age_s=float(sys.argv[4])),
+                            coupling=dict(state_max_age_s=float(sys.argv[3]))))
+PYHYBRIDPROFILE
+fi
 POSE_PUBLICATION_RATE_HZ=50
 [[ "$SIONNA_RT_EXECUTION_MODE" != worker_pool ]] || POSE_PUBLICATION_RATE_HZ=100
 [[ "$SIONNA_RT_EXECUTION_MODE" == in_process || "$SIONNA_RT_EXECUTION_MODE" == worker_pool ]] || {

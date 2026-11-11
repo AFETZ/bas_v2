@@ -51,15 +51,159 @@ class RadioProfileTests(unittest.TestCase):
         path.write_text(json.dumps(self.config if config is None else config))
         return bas.load_config(path, self.root)
 
-    def test_rt_profile_requires_every_explicit_argument_and_rejects_hybrid(self):
+    def test_modes_reject_unknown_or_multiple_spatial_streams_before_preparation(self):
+        original = copy.deepcopy(self.radio)
+        for field, modes in (
+                ('data_mode', ['HtMcs8', 'HtMcs31', 'HtMcs99', 'OfdmRate6Mbps', 'HtMcs0 ']),
+                ('control_mode', ['HtMcs0', 'DsssRate1Mbps', 'ErpOfdmRate7Mbps', True, None])):
+            for mode in modes:
+                with self.subTest(field=field, mode=mode):
+                    self.radio = copy.deepcopy(original)
+                    self.radio['radio'][field] = mode
+                    self.write_radio()
+                    with self.assertRaisesRegex(ValueError, field):
+                        self.load()
+
+    def test_single_stream_native_rates_survive_resolved_configuration(self):
+        for mode in ('HtMcs0', 'HtMcs1', 'HtMcs2', 'HtMcs3',
+                     'HtMcs4', 'HtMcs5', 'HtMcs6', 'HtMcs7'):
+            with self.subTest(mode=mode):
+                self.radio['radio']['data_mode'] = mode
+                self.write_radio()
+                self.load()
+                self.assertEqual(generator.read_rt_radio_profile(self.radio_file, self.scene)
+                                 ['radio']['data_mode'], mode)
+        for rate in (6, 9, 12, 18, 24, 36, 48, 54):
+            mode = f'ErpOfdmRate{rate}Mbps'
+            with self.subTest(mode=mode):
+                self.radio['radio']['control_mode'] = mode
+                self.write_radio()
+                self.load()
+                self.assertEqual(generator.read_rt_radio_profile(self.radio_file, self.scene)
+                                 ['radio']['control_mode'], mode)
+
+    def test_real_inner_radio_parser_rejects_unsupported_modes_before_values(self):
+        import sys
+        project = Path(__file__).resolve().parents[1]
+        runner = (project / 'network/ns3/run_native_radio_five_uav.sh').read_text()
+        marker = 'mapfile -t RADIO_VALUES < <(python3 - "$RADIO_CONFIG" "$ROOT_DIR" <<' + "'PY'" + "\n"
+        code = runner.split(marker, 1)[1].split("\nPY\n", 1)[0]
+        def execute():
+            return subprocess.run([sys.executable, '-', str(self.radio_file), str(project)],
+                                  input=code, cwd=project, capture_output=True, text=True, timeout=10)
+        valid = execute()
+        self.assertEqual(valid.returncode, 0, valid.stderr)
+        self.assertEqual(len(valid.stdout.splitlines()), 36)
+        for field, mode in [('data_mode', 'HtMcs8'), ('control_mode', 'ErpOfdmRate7Mbps')]:
+            original = self.radio['radio'][field]
+            self.radio['radio'][field] = mode
+            self.write_radio()
+            rejected = execute()
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn(field, rejected.stderr)
+            self.assertEqual(rejected.stdout, '')
+            self.radio['radio'][field] = original
+
+    def test_rt_profile_requires_every_explicit_argument_for_hybrid_too(self):
         for field in ('radio_config', 'ground_material', 'building_material', 'thickness_m'):
             config = copy.deepcopy(self.config)
             del config['propagation'][field]
             with self.subTest(field=field), self.assertRaises(ValueError):
                 self.load(config)
         self.config['propagation'] = {'model': 'hybrid'}
-        with self.assertRaisesRegex(ValueError, 'not qualified'):
+        with self.assertRaisesRegex(ValueError, 'expected propagation fields'):
             self.load()
+
+    def test_hybrid_reuses_explicit_rt_inputs_and_requires_bounded_worker_cache(self):
+        self.config['propagation']['model'] = 'hybrid'
+        with self.assertRaisesRegex(ValueError,'worker_pool'):
+            self.load()
+        self.radio['sionna'].update(execution_mode='worker_pool',receiver_batch_mode='full_mesh',
+                                    cache_expiry_jitter_fraction=0,max_number_of_paths=90,
+                                    channel_state_max_age_s=.1)
+        self.radio['coupling']['state_max_age_s']=.1
+        self.write_radio()
+        config=self.load()
+        env=bas.environment(config,'hybrid-1',inherited={'BAS_NATIVE_PROPAGATION_PROFILE':'friis'})
+        self.assertEqual(env['BAS_NATIVE_PROPAGATION_PROFILE'],'hybrid')
+        self.assertEqual(env['BAS_NATIVE_RADIO_CONFIG'],'radio.yaml')
+        self.assertEqual(env['BAS_NATIVE_RT_THICKNESS_M'],'0.1')
+        self.assertEqual(env['BAS_NATIVE_UART_CHANNELS'],'control,payload')
+        folder=self.root/'runs/control/hybrid-1'
+        folder.mkdir(parents=True)
+        with patch.object(bas,'ROOT',self.root):
+            bas.snapshot_inputs(config,folder,env)
+        self.assertEqual((folder/'radio.yaml').read_bytes(),self.radio_file.read_bytes())
+        self.assertEqual(env['BAS_NATIVE_RADIO_CONFIG'],'runs/control/hybrid-1/radio.yaml')
+        for where,name in [('coupling','state_max_age_s'),('sionna','channel_state_max_age_s')]:
+            current=self.radio[where][name];self.radio[where][name]=.100001;self.write_radio()
+            with self.subTest(field=name),self.assertRaisesRegex(ValueError,'100 ms'):
+                self.load()
+            self.radio[where][name]=current
+
+    @unittest.skipIf(os.name == 'nt', 'Linux shell preparation boundary')
+    def test_actual_runner_prepares_hybrid_and_sionna_before_docker_boundary(self):
+        import sys
+        project=Path(__file__).resolve().parents[1]
+        (project/'runs').mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='hybrid-runner-test-',dir=project/'runs') as temporary:
+            folder=Path(temporary);tools=folder/'bin';tools.mkdir()
+            capture=folder/'docker-arguments.json'
+            (tools/'docker').write_text('#!'+sys.executable+'\n'+
+                'import json,os,pathlib,sys\n'
+                'if sys.argv[1:3]==["image","inspect"]: print(os.environ["HYBRID_PREFLIGHT_IMAGE"])\n'
+                'elif sys.argv[1:2]==["inspect"]: raise SystemExit(1)\n'
+                'elif sys.argv[1:2]==["run"]:\n'
+                ' pathlib.Path(os.environ["HYBRID_PREFLIGHT_ARGUMENTS"]).write_text(json.dumps(sys.argv[1:]))\n'
+                ' raise SystemExit(86)\n'
+                'else: raise SystemExit(99)\n')
+            (tools/'docker').chmod(0o755)
+            (tools/'nvidia-smi').write_text('#!/bin/sh\nexit 1\n')
+            (tools/'nvidia-smi').chmod(0o755)
+            scene=folder/'scene.json';scene.write_text(json.dumps(self.scene))
+            radio=folder/'radio.yaml'
+            radio.write_bytes((project/'network/config/native_wifi_fullmesh_100ms.yaml').read_bytes())
+            config=copy.deepcopy(self.config)
+            config['environment']['scene']=scene.relative_to(project).as_posix()
+            config['propagation']['radio_config']=radio.relative_to(project).as_posix()
+            config['interference']=dict(sources='network/config/terrain_directional_source.yaml')
+            for model in ('hybrid','sionna'):
+                with self.subTest(model=model):
+                    config['propagation']['model']=model
+                    path=folder/'runtime.json';path.write_text(json.dumps(config))
+                    parsed=bas.load_config(path,project)
+                    env=bas.environment(parsed,'boundary-'+model,inherited=os.environ)
+                    output=folder/model
+                    env.update(BAS_NATIVE_URBAN_OUTPUT=str(output),
+                        PATH=str(tools)+os.pathsep+str(Path(sys.executable).parent)+os.pathsep+os.environ['PATH'],
+                        PYTHONPATH=str(project)+os.pathsep+os.environ.get('PYTHONPATH',''),
+                        HYBRID_PREFLIGHT_ARGUMENTS=str(capture),
+                        HYBRID_PREFLIGHT_IMAGE=config['runtime']['image'])
+                    capture.unlink(missing_ok=True)
+                    result=subprocess.run(['bash',str(project/'network/ns3/run_native_radio_five_uav.sh')],
+                        cwd=project,env=env,capture_output=True,text=True,timeout=20)
+                    self.assertEqual(result.returncode,86,result.stdout+result.stderr)
+                    self.assertTrue((output/'scenario.yaml').is_file())
+                    self.assertTrue((output/'rt/scene.xml').is_file())
+                    resolved=yaml.safe_load((output/'radio-resolved.yaml').read_text())
+                    supplied=yaml.safe_load(radio.read_text())
+                    for key in ('radio','sionna','coupling'):
+                        self.assertEqual(resolved[key],supplied[key])
+                    arguments=json.loads(capture.read_text())
+                    for value in ('BAS_NATIVE_PROPAGATION_PROFILE='+model,
+                                  'BAS_NATIVE_RT_GROUND_MATERIAL=medium_dry_ground',
+                                  'BAS_NATIVE_RT_BUILDING_MATERIAL=concrete',
+                                  'BAS_NATIVE_RT_THICKNESS_M=0.1'):
+                        self.assertIn(value,arguments)
+                    # The RT material guard must still run before preparation or
+                    # the Docker boundary. This is not a mocked successful flight.
+                    env['BAS_NATIVE_RT_GROUND_MATERIAL']=''
+                    capture.unlink()
+                    result=subprocess.run(['bash',str(project/'network/ns3/run_native_radio_five_uav.sh')],
+                        cwd=project,env=env,capture_output=True,text=True,timeout=20)
+                    self.assertEqual(result.returncode,2,result.stdout+result.stderr)
+                    self.assertIn('explicit radio config',result.stderr)
+                    self.assertFalse(capture.exists())
 
     def test_all_runtime_arguments_are_forwarded_from_selected_profile(self):
         config = self.load()

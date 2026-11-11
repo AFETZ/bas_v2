@@ -19,7 +19,8 @@
 
 В приватный [UAVcosim/main](https://github.com/HSE-Intelligent-Unmanned-Systems-Lab/UAVcosim)
 без force push отправлены `247f338`, `68b5845`, `7373a38` и
-`25d5ae5`, `849734c` и `37313aa1271889c2423649c0c89d6b2e164dd6b0`.
+`25d5ae5`, `849734c`, `37313aa`, `cbaaf26` и
+`8b910e6087557e1d61746ef4ed8de3816ade1444`.
 Добавлен отдельный remote `UAVcosim`; существующих remotes не было.
 Это инженерная публикация с известными отказами свежести, а не завершённая приёмка.
 
@@ -43,6 +44,7 @@ Gitleaks 8.30.1 проверил подготовленные файлы и от
 | `gazebo-wait-diagnostic-20261111-b`, 7373a38 | До пяти, остановка на первом отказе | Первая completed / succeeded / valid; вторая failed / invalid, физическая пауза 99,124 мс; три не запускались. BPF второй попытки подключился поздно из-за повторной компиляции helper. |
 | `gazebo-wait-diagnostic-20261111-c`, 25d5ae5 | Ровно пять, остановка на первом отказе | Все пять completed / succeeded / valid. Возраст применённой позы: 97,645 / 93,175 / 90,488 / 89,122 / 90,047 мс. Guards не менялись. |
 | `clone849-interframe-20261111-a`, чистый GitHub clone849 | 20 попыток, остановка на первом runtime-invalid | Первая failed / failed / invalid: native applied pose stale/future; 19 не запускались. Новых повторов этой серии нет. |
+| `pickup500-joint-20261111-a`, 8b910e6 | Ровно одна интеграционная попытка после production rebuild | exit0; completed / succeeded / valid. Все пять маршрутов, посадок и disarm; radio landing5/5; applied pose max84,178мс; 858725cache hits /0miss. Не квалификация20повторов. |
 
 
 Это повторы исполнения seed 1 / RngRun 1 / Sionna seed 42, а не независимая статистика RT.
@@ -160,7 +162,18 @@ SDK job занял 20,395 мс, новый кадр был готов. Receiver 
 проверку, GREEN прошёл: bundle887/cache340/live354/prefetch45. Дополнительно 187 Python
 native-interface tests PASS. Все девять компонентных CPU samples сохранены; медианная
 добавка 1,524 мс CPU на model-second (~0,1524% одного CPU этого компонента), без claim
-о полной real-time производительности. Production rebuild / новый совместный запуск ещё нужны.
+о полной real-time производительности. Production main/worker действительно пересобраны,
+байты/mtime Spectrum, Wifi и TAP библиотек не менялись. Единственный новый совместный
+запуск на чистом8b910e6 прошёл, как записано в таблице. Native poll_period_ns=500000,
+response_forecast_margin_ns=1000000; maxlag31,845мс. Queue-enqueue→post-poll proxy
+p99=0,962мс / max1,438мс включает decode и scheduler: это не C2latency и не wall-clock
+гарантия500мкс. Были1129queue drops/6863retries при помехе; это модельные исходы,
+а не CIRcache misses. BPFv6 подключён до active phase, ENOENT flood0, normalEND;
+CPU profile частичен (stack collisions/map-full), timinghelper ошибок не сообщил.
+Во время preflight был250-мс readonly scan39КБ nice19CPU0; хост не объявляется пустым.
+Все собственные runtime PIDs/containers завершены, GPU освобождён.
+Квитанция: runs/control/pickup500-integration-20261111-a/verification.json,
+SHA2567b98adda8fc41c5ece463d94c7f3d537dbd4f2a604a7ccb679390a55b8e43a0f.
 
 Наблюдатель C1 дал 170,7 МБ ожидаемых ENOENT от delete отсутствующих BPF map keys.
 Это зарегистрированное вмешательство диагностического инструмента, не пустой хост.
@@ -227,9 +240,89 @@ Hybrid R3 подготовлен изолированно: qualified-hybrid-r3.p
 SHA 50d80bc45d5014c28ed6a0576c43d495eadcf877debbcca48c3b7c53e355c6b2.
 Закрыты review-дефекты public shell gates и body orientation; нулевой RT-reference
 не заменяется положительной Friis-мощностью. 95 Python / native boundary checks прошли.
-В core ещё не интегрирован, production build / joint не выполнены. Domain только
-static iso/V SISO empty scene 2,412 ГГц; для прочих условий видимый fullRT fallback.
-Parent extra CUDA context при explicit hybrid — известный ресурсный риск, ускорение не заявляется.
+UI Save + hybridR3 интегрированы в рабочее дерево после8b910e6. Full Python:
+635 проверок:634 PASS и один прежний skip (python-suite-06-command.json). Skip —
+ветка сообщения об ошибке для non-Linux; на ПК4 Linux она не выполнялась. Он не
+считается успешной проверкой. Ранее указанные размеры suite — числа unittest Ran,
+которые также включали этот skip. R4 очищает hybrid
+Python callback под существующим GIL: реальный native refcount/deleter regression
+проверяет повторное clear и уничтожение после interpreter finalize. Production build /
+joint этой интеграции ещё не выполнены. Domain только static iso/V SISO empty scene
+2,412 ГГц; для прочих условий видимый fullRT fallback. Parent extra CUDA context при
+explicit hybrid — известный ресурсный риск, ускорение не заявляется.
+
+UI Save замораживает копии входов без runtime_started; duplicate ID не перезаписывается,
+ошибки валидации не создают draft. Настоящий браузер подтвердил Save→reload→validate,
+изменения duration/speed/physics/failsafe и видимые неизвестные параметры. Закрытый
+неуспешный clone849 показан с раздельными Error/Error/Invalid и причиной. Runtime не
+запускался этим браузерным тестом. Доказательства: publication-ui-e2e-20261111/analysis-save.json.
+
+Fresh-process audit выявил отдельный host gap: config/UI импорт NumPy создавал32BLAS
+threads на всех ядрах, хотя runtime child masks уже делились. Отдельный per-process
+OPENBLAS1 probe устранил pool, без OS/global environment изменений. Прошлые runtime
+отказы этому не приписываются. Минимальный entrypoint fix интегрирован: existing
+stdlib runtime-monitor helper вызывается из bas/UI/batch main до NumPy. Host affinity
+не меняется, повторного деления нет. 6 tests плюс actual fresh CLI/batch/оба HTTP UI:
+NumPy1.26.4/1native thread, inherited stack mask сохранена. Production runner partition
+не менялся. После mode-validation вместе прошли31 targeted tests.
+
+Найден конкретный preflight gap: любые непустые data/control mode имена принимались
+до ns-3 abort. Actual pinned ConstantRateWifiManager Set/Get и PHY rate API подтвердили
+HtMcs0..7/NSS1 и восемь ERP modes; HtMcs8 требуетNSS2. Добавлена минимальная whitelist
+в существующий radio validator, defaults неизменны. Regression RED:10 subcases
+показывали поздний/неименованный отказ; GREEN:31 radio+host tests PASS.
+Review нашёл обход direct town01 shell: inner RADIO_VALUES читал YAML напрямую.
+Один общий mode-validator теперь используется обоими входами; тест выполняет
+настоящий inner heredoc, проверяет36baseline values и ранний отказ неверных modes. Это API/конфиг
+совместимость, не квалификация пакетной ёмкости65Мбит/с. Proof publication-radio-modes-20261111.
+
+Практическое расширение hybrid на физическую землю проверяется отдельно: область
+выбрана до RT по официальному lossy-slab API medium_dry_ground, без собственной
+формулы распространения и без замены на неподходящий TwoRayGround. Frozen inputs /
+seeds / budgets: publication-hybrid-ground-20261111. Full-01 завершён:17010/17010
+RT-вызовов,546/546 ожидаемых групп по1000unique links,447,99с. Все положительные
+static/dynamic numerical и reference группы прошли: max|bias|0,06616дБ, p95abs0,43893дБ,
+p99abs0,46953дБ; top-budget convergence p99≤2,05e-6дБ. Negative angle/wall/metal/crosspol
+сохранили большие ошибки и требуют RT. >100мс не даёт большой численной RSSошибки
+автоматически: это invalid по временному контракту, native rejection проверяется отдельно.
+Независимый review отметил ограничение постоянной attitude в пробе при существующем
+cache допуске5°. Поэтому выбран минимальный onlineguard: actualRTPSD один раз плюс
+штатная Friis один раз, единственный выходPSD; все positiveinput bins finiteRT>0 и
+ошибка≤1дБ, иначе видимый RT. NonfinitePSD failclosed. Это новый явный hybridконтракт,
+без собственного CIR/Doppler/cache и без обещания ускорения; реализация в изоляции.
+
+R5 и два review fixes R5b интегрированы: numerical ground evidence дополнена
+actual RT PSD≤1дБ onlineguard. Registered sources используют собственный RT,
+невозможные fallback counts отклоняются. Native compile/link/cache contracts/main
+syntax прошли на точных afterSHA;73 targeted Python в изоляции прошли. Независимый
+review R5b PASS: ac2421678bd665006376612342b6b70a4a7b8196f68bead6f3e50b8750b5ece7.
+В core общий suite после R5:646 всего,645 PASS/1non-Linux skip; после R5b —87
+затронутых Python PASS и5 UI discovery PASS. Первая попытка адресного набора
+сохранила ImportError test fixture при package invocation; исправлен только import
+существующей fixture, оба способа запуска теперь проходят. Product code этой
+ошибкой не затрагивался.
+
+Поставлен отдельный runtime-hybrid.json / hybrid_flat_ground.json:40с,5БАС,
+5×10Кбит/с, общий RT fullmesh100мс, без помехи. Existing generator создал XML
+905807072f010dbca786a3842919de50d1d3988656bb08400cb428c1166acdde, actual pinned
+LLVM loader подтвердил qualified_flat_ground_scene=true. Routes разнесены минимум
+62,032м, ENUZ20,2м, углы74,491–75,367°. Input/domain review PASS, не полёт.
+Дополнительная заранее замороженная emptyвыборка содержит ровно1000links внутри
+2–10000м:567RTcalls exit0, p99abs0,114725дБ, convergence0. Прежние962inside-domain
+более широкой выборки не выдаются за1000.
+
+Read-only аудит coldworkers исключил гипотезу first-ever idleworker activation:
+во всех4отказах и source8 worker2 idle/completed0; worker0/1 прогреты при native0.
+B4 emitter имел168completed,737 —165 и предыдущийSDK16,754мс. Дополнительный
+arbitraryidleprewarm не обоснован; SDK-tail/JIT/GPUwake причина не объявлена закрытой.
+Proof publication-final-build-20261111/worker-first-call-audit.json.
+
+Следующая fixed20 diagnostic series —qualification-short-20261111-d, setupv2:
+immutable runtime-terrain copy отличается только rt_stage_trace=true;1/1/42
+повторы исполнения. V1 сохраняется unused. Оценка по source8 —около87мин/40–65ГБ;
+per-run tmpfs≤4ГиБ последовательно. V6 drycheck переиспользуется, actual BPF
+LLVMcompile остаётся на каждый PIDattach; это явно инструментированная серия.
+До запуска source freeze и настоящий production rebuild; пока не запускалась.
 
 **Следующая ступень и доказательства**
 
@@ -242,7 +335,7 @@ Parent extra CUDA context при explicit hybrid — известный ресу
 Следующий непосредственный опыт — 20 заранее заданных коротких попыток с расширенной
 scoped BPF-диагностикой после завершения hybrid probe и фиксации чистой ревизии.
 Серия останавливается на первом runtime-invalid; это не повтор до удобного числа успехов.
-Параллельно завершаются проверенный узкий hybrid и применение physics / GCS-failsafe knobs.
+Hybrid и physics/failsafe теперь реализованы и проверены компонентно; совместные проверки привязываются к следующей чистой ревизии.
 
 Артефакты относительно рабочего корня:
 

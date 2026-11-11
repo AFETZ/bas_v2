@@ -30,6 +30,16 @@ MATCHES = {
 }
 
 
+def limit_host_math_threads():
+    """Set BAS entrypoint limits before NumPy loads, without changing affinity.
+
+    Repeated calls and child CLI launches retain the caller's CPU mask.
+    The runtime runner continues to own stack/radio partitioning.
+    """
+    os.environ['OPENBLAS_NUM_THREADS'] = '1'
+    os.environ['OMP_NUM_THREADS'] = '1'
+
+
 def cpu_partition(allowed=None, cpu_root=Path('/sys/devices/system/cpu')):
     """Keep each physical core's allowed SMT threads in one BAS role.
 

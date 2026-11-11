@@ -58,7 +58,7 @@ def plan_batch(config, batch_id, seeds, rng_runs, repeats=1, duration=None, *, r
         config['experiment']['duration_s'] = bas.validate_duration(duration)
     bas.validate_capture_storage(config)
     paths = dict(scene=config['environment']['scene'])
-    if config['propagation']['model'] == 'sionna':
+    if config['propagation']['model'] in ('sionna', 'hybrid'):
         paths['radio'] = config['propagation']['radio_config']
     sources = config.get('interference', {}).get('sources')
     if sources is not None:
@@ -200,6 +200,8 @@ def execute(plan, *, root=None, run_fn=None, fail_fast=False):
 
 
 def main(argv=None):
+    from scripts.product.town01_runtime_monitor import limit_host_math_threads
+    limit_host_math_threads()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, default=bas.ROOT / 'runtime.json')
     parser.add_argument('--batch-id', required=True)

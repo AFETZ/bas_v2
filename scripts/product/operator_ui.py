@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import copy
 import hmac
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import math
@@ -14,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from urllib.parse import parse_qs, quote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -75,6 +77,50 @@ class UIState:
             resolved['environment']['scene'] = payload['config']['environment']['scene']
         return resolved
 
+    def snapshot_inputs(self, payload, config, run_id, *, complete=False):
+        """Reuse the run input freezer; a saved draft never launches a process."""
+        if (self.root / 'runs/control' / run_id).exists() or (self.root / 'runs/native-radio-realtime' / run_id).exists():
+            raise ValueError('Идентификатор уже использован опытом; создайте копию.')
+        folder = self.root / 'runs/control/ui-inputs' / run_id
+        folder.resolve().relative_to(self.root / 'runs/control/ui-inputs')
+        folder.mkdir(parents=True, exist_ok=False)
+        config = copy.deepcopy(config)
+        if 'scene' in payload:
+            bas.write_json(folder / 'scene.json', payload['scene'])
+            config['environment']['scene'] = (folder / 'scene.json').relative_to(self.root).as_posix()
+        hashes = {}
+        if complete:
+            hashes = bas.snapshot_inputs(config, folder, {}, root=self.root)
+            config['environment']['scene'] = (folder / 'scene.json').relative_to(self.root).as_posix()
+            if hashes.get('radio_sha256') is not None:
+                config['propagation']['radio_config'] = (folder / 'radio.yaml').relative_to(self.root).as_posix()
+            if hashes.get('sources_sha256') is not None:
+                config['interference']['sources'] = (folder / 'sources.yaml').relative_to(self.root).as_posix()
+            if config.get('hitl') is not None:
+                config['hitl'].update(request=(folder / 'hitl-request.json').relative_to(self.root).as_posix(),
+                    request_sha256=hashes['hitl_request_sha256'], profiles_sha256=hashes['hitl_profiles_sha256'])
+        bas.write_json(folder / 'config.json', config)
+        if complete:
+            # Validate the actual copied scene/radio/source/request bytes.
+            config = bas.load_config(folder / 'config.json', root=self.root)
+            bas.write_json(folder / 'config.json', config)
+        return folder, config, hashes
+
+    def save(self, payload):
+        if not isinstance(payload, dict):
+            raise ValueError('save requires a configuration object')
+        draft_id = bas.identifier(payload.get('run_id'))
+        config = self.validate(payload)
+        with self.lock:
+            folder, config, hashes = self.snapshot_inputs(payload, config, draft_id, complete=True)
+            draft = dict(schema_version=1, kind='saved_scenario', draft_id=draft_id,
+                config_path=(folder / 'config.json').relative_to(self.root).as_posix(),
+                config_sha256=hashlib.sha256((folder / 'config.json').read_bytes()).hexdigest(),
+                input_sha256=hashes, created_host_monotonic_ns=time.monotonic_ns(),
+                runtime_started=False)
+            bas.write_json(folder / 'draft.json', draft)
+        return dict(**draft, **self.config(draft['config_path']))
+
     def start(self, payload):
         if not isinstance(payload, dict):
             raise ValueError('start requires a configuration object')
@@ -85,14 +131,7 @@ class UIState:
         with self.lock:
             if any(child.poll() is None for child in self.children.values()):
                 raise ValueError('Один запуск интерфейса уже активен; дождитесь его завершения.')
-            if (self.root / 'runs/control' / run_id).exists() or (self.root / 'runs/native-radio-realtime' / run_id).exists():
-                raise ValueError('Идентификатор опыта уже использован.')
-            folder = self.root / 'runs/control/ui-inputs' / run_id
-            folder.mkdir(parents=True, exist_ok=False)
-            if 'scene' in payload:
-                bas.write_json(folder / 'scene.json', payload['scene'])
-                config['environment']['scene'] = (folder / 'scene.json').relative_to(self.root).as_posix()
-            bas.write_json(folder / 'config.json', config)
+            folder, config, _ = self.snapshot_inputs(payload, config, run_id)
             argv = [sys.executable, str(self.root / 'bas.py'), 'run', '--config', str(folder / 'config.json'), '--run-id', run_id]
             with (folder / 'controller.log').open('x') as log:
                 try:
@@ -148,6 +187,7 @@ class UIState:
         inputs = self.root / 'runs/control/ui-inputs' / run_id
         if not record.exists() and child is None and not inputs.is_dir():
             raise FileNotFoundError('Опыт не найден.')
+        draft_path = inputs / 'draft.json'
         phase = raw / 'logs/current_phase.txt'
         log = control / 'runtime.log'
         if not log.exists():
@@ -168,6 +208,7 @@ class UIState:
         returncode = child.poll() if child is not None else None
         return dict(run_id=run_id, controller=json.loads(record.read_text()) if record.exists() else None,
                     mission=json.loads(mission.read_text()) if mission.exists() else None,
+                    draft=json.loads(draft_path.read_text()) if draft_path.exists() else None,
                     phase=phase.read_text().strip() if phase.exists() else None, log_tail=tail, artifacts=artifacts,
                     native_diagnostics=self.native_diagnostics(raw),
                     launcher_returncode=returncode,
@@ -276,6 +317,8 @@ def make_server(port=8765, *, state=None):
                                      parse_constant=bas.reject_json_constant)
                 if self.path == '/api/validate':
                     self.send(200, dict(valid=True, config=state.validate(payload)))
+                elif self.path == '/api/save':
+                    self.send(201, state.save(payload))
                 elif self.path == '/api/start':
                     self.send(202, state.start(payload))
                 elif self.path == '/api/stop':
@@ -298,6 +341,8 @@ def make_server(port=8765, *, state=None):
 
 
 def main(argv=None):
+    from scripts.product.town01_runtime_monitor import limit_host_math_threads
+    limit_host_math_threads()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--serve', action='store_true', required=True)
     parser.add_argument('--port', type=int, default=8765)
