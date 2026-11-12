@@ -1,0 +1,24 @@
+--- a/src/spectrum/model/sionna-rt-spectrum-propagation-loss-model.cc
++++ b/src/spectrum/model/sionna-rt-spectrum-propagation-loss-model.cc
+@@ -266,6 +266,21 @@
+                   "Unexpected mismatch in the number of RBs and channel matrix and precoding "
+                   "matrix. MultiModelSpectrumChannel conversion is not yet supported.");
+ 
++    // With one RX/TX port and no explicit precoder, P is exactly (1+0i).
++    // Preserve both complex products and the original zero-initialized sum,
++    // while avoiding the replicated precoder and intermediate matrix arrays.
++    if (!rxParams->precodingMatrix && numTxPorts == 1 && numRxPorts == 1)
++    {
++        for (uint32_t rbIdx = 0; rbIdx < rxParams->psd->GetValuesN(); ++rbIdx)
++        {
++            const auto hP = (*rxParams->spectrumChannelMatrix)(0, 0, rbIdx) *
++                            std::complex<double>(1.0, 0.0);
++            (*rxParams->psd)[rbIdx] = 0.0;
++            (*rxParams->psd)[rbIdx] += std::real(std::conj(hP) * hP);
++        }
++        return rxParams;
++    }
++
+     // Calculate RX PSD from the spectrum channel matrix H and
+     // the precoding matrix P as: PSD = (H*P)^h * (H*P)
+     Ptr<const ComplexMatrixArray> p;
