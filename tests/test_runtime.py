@@ -879,6 +879,20 @@ capture_effective_configuration() {
         self.assertFalse(result['native_library_verification']['passed'])
         self.assertIn('native loaded library identity is not verified', result['data_quality_errors'])
 
+    def test_native_mapping_producer_does_not_follow_a_reused_pid_during_exec_wait(self):
+        raw, summary, identity = self.native_library_evidence()
+        observed = json.loads((raw / identity.OBSERVED).read_bytes())
+        maps = (raw / identity.MAPS).read_bytes()
+        process = observed['process_before']
+        with patch.object(identity, 'process_identity', side_effect=[dict(process, executable='/bin/wrapper'),
+                                                                    dict(process, start_ticks=101)]), \
+                patch.object(Path, 'read_bytes', return_value=maps), \
+                patch.object(identity.time, 'monotonic', side_effect=[0, 0, 16]), \
+                patch.object(identity.time, 'sleep'), patch.object(identity, 'file_identity') as hashing:
+            with self.assertRaisesRegex(ValueError, 'PID was reused'):
+                identity.observe(raw, process['pid'], 15)
+            hashing.assert_not_called()
+
     @unittest.skipUnless(sys.platform.startswith('linux') and Path('/lib/x86_64-linux-gnu/libm.so.6').is_file(),
                          'actual proc maps capture needs Linux libm fixture')
     def test_native_library_producer_reads_actual_process_mapping_and_rejects_replaced_file(self):

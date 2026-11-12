@@ -120,11 +120,17 @@ def observe(run, pid, timeout_s=15):
     run = Path(run).resolve()
     expected = read_json(run / EXPECTED)
     deadline = time.monotonic() + timeout_s
+    birth = None
     # setsid/ip/env/taskset/stdbuf exec in-place. Wait for the owned PID to become
     # the exact executable and finish mapping Wi-Fi; do not select another PID.
     while True:
         try:
             before = process_identity(pid)
+            current_birth = (before['pid'], before['start_ticks'], before['uid'])
+            if birth is None:
+                birth = current_birth
+            elif current_birth != birth:
+                raise ValueError('native PID was reused while awaiting its executable')
             maps = (Path('/proc') / str(pid) / 'maps').read_bytes()
             rows = parse_maps(maps)
             if before['executable'] != expected['files']['executable']['path']:
