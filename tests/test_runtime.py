@@ -360,7 +360,8 @@ capture_effective_configuration() {
 '''
                 script += cleanup + '\ntrap cleanup EXIT\nset +e\n'
                 script += f'"$BASH" -c "exit {code}"\n' + status
-                env = dict(os.environ, BAS_TEST_PYTHON=sys.executable.replace('\\', '/'))
+                env = dict(os.environ, BAS_TEST_PYTHON=sys.executable.replace('\\', '/'),
+                           ROOT_DIR=str(bas.ROOT).replace('\\', '/'))
                 env.pop('BAS_NATIVE_SOURCES', None)
                 result = subprocess.run([bash, '-c', script], cwd=folder, env=env, capture_output=True, text=True)
                 self.assertEqual(result.returncode, code, result.stderr)
@@ -369,6 +370,12 @@ capture_effective_configuration() {
                 publication = json.loads((raw / 'logs/native_capture_storage.json').read_text())['publication']
                 self.assertEqual(publication['status'], 'direct_disk')
                 self.assertEqual(publication['errors'], [])
+                # The real helper rejects missing library evidence. Its failed
+                # closure must neither replace cancellation nor skip publication.
+                library_log = (raw / 'logs/native_library_close.log').read_text()
+                self.assertIn('native library identity:', library_log)
+                self.assertIn('native_library_expected.json', library_log)
+                self.assertIn('Native library closure verification failed', result.stderr)
 
     def test_radio_bench_frozen_input_tamper_cannot_pass(self):
         raw, folder, config = self.radio_bench_evidence()
