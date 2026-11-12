@@ -66,7 +66,8 @@ def main():
             argv=['/usr/bin/socat','-d','-d',address,'FILE:'+str(devices[channel])+',raw,echo=0,b115200']
             child=subprocess.Popen(argv,cwd=ROOT,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
             children[channel]=child
-            record['children'][channel]=dict(owner=identity(child.pid),argv=argv,log=str(path))
+            record['children'][channel]=dict(owner=None,argv=argv,log=str(path))
+            record['children'][channel]['owner']=identity(child.pid)
             publish(state,record)
         record['status']='running';publish(state,record)
         while not stopped:

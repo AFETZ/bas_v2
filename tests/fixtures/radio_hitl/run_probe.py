@@ -4,6 +4,7 @@ No outer flock: bas.run owns /tmp/bas-paper-runtime.lock throughout its runtime.
 Only --execute opens ports/starts the public controller and owned bridge peers.
 """
 import argparse,hashlib,json,os,signal,socket,subprocess,sys,time
+from functools import partial
 from pathlib import Path
 
 HERE=Path(__file__).resolve().parent
@@ -16,6 +17,20 @@ INSPECT='{"id":{{json .Id}},"image":{{json .Image}},"running":{{json .State.Runn
 def sha(path):return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 def write(path,value):
     temp=path.with_suffix('.tmp');temp.write_text(json.dumps(value,indent=2)+'\n');temp.replace(path)
+
+
+def stop_on_parent_exit(parent_pid):
+    """Linux child setup: losing this collector requests the public BAS stop."""
+    import ctypes
+    # Until exec installs bas.run's handler, do not inherit the collector's
+    # Python handler (which would only set its copied 'stopped' variable).
+    signal.signal(signal.SIGTERM,signal.SIG_DFL)
+    libc=ctypes.CDLL(None,use_errno=True)
+    if libc.prctl(1,signal.SIGTERM,0,0,0)!=0:  # PR_SET_PDEATHSIG
+        raise OSError(ctypes.get_errno(),'cannot install parent-death stop')
+    # Parent can exit between fork and prctl; do not leave that race unguarded.
+    if os.getppid()!=parent_pid:
+        os.kill(os.getpid(),signal.SIGTERM)
 
 
 def prepare_inputs(run_id, transport, duration_s):
@@ -77,7 +92,7 @@ def main():
         files_sha256={p.relative_to(ROOT).as_posix():sha(p) for p in (HERE/'run_probe.py',HERE/'bridge.py',inputs/'runtime.json',inputs/'request.json',ROOT/config['environment']['scene'],ROOT/'network/config/hitl_reference_devices.json')},
         scope='Software '+args.transport+' to actual SITL UART PTYs on UAV1; five native nodes and NPU; no physical hardware or flight qualification',
         expected_data_path='SITL UART -> '+('socat UDP/TCP -> ' if args.transport=='ethernet' else '')+'external_endpoint BSF1 -> native ns-3 PHY/MAC -> GCS; requests return through the modeled radio',
-        goodput_fields='Request reference ceilings only, not a generated/measured 1/10kbps load',commands=[],error=None)
+        goodput_fields='MAVLink diagnostic exchanges only; no generated payload load or throughput SLA',commands=[],error=None)
     if not args.execute:
         print(json.dumps(record,indent=2));return 0
     if sys.platform!='linux':raise ValueError('execution requires Linux; configuration-only check remains portable')
@@ -114,7 +129,8 @@ def main():
         if command(['docker','inspect','--format',INSPECT,name],required=False).returncode==0:
             raise RuntimeError('container name already exists; never attach to or remove it')
         output=(attempt/'controller.stdout.log').open('xb');streams.append(output)
-        child=subprocess.Popen(controller,cwd=ROOT,env=os.environ.copy(),stdout=output,stderr=subprocess.STDOUT,start_new_session=True)
+        child=subprocess.Popen(controller,cwd=ROOT,env=os.environ.copy(),stdout=output,stderr=subprocess.STDOUT,
+                               start_new_session=True,preexec_fn=partial(stop_on_parent_exit,os.getpid()))
         record.update(controller_pid=child.pid,started_host_monotonic_ns=time.monotonic_ns());write(ledger,record)
         startup_deadline=time.monotonic()+limits['native_budgets']['native_readiness_s']
         while not stopped and child.poll() is None:
