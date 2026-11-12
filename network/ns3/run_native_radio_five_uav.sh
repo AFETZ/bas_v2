@@ -886,6 +886,7 @@ PYBINARYSHA
 python3 "$ROOT_DIR/scripts/product/native_library_identity.py" prepare \
   --run-dir "$RUN_DIR" --executable "$BINARY" \
   --wifi "$NS3_DIR/build/lib/libns3.48-wifi-default.so" \
+  --spectrum "$NS3_DIR/build/lib/libns3.48-spectrum-default.so" \
   > "$RUN_DIR/logs/native_library_prepare.log" 2>&1
 
 mapfile -t DEPENDENCIES < <(PYTHONPATH="$PYTHON_DEPS" python3 - <<'PY'
@@ -918,7 +919,7 @@ PY
   printf 'ns3_rng_seed=%s\nns3_rng_run=%s\n' "$RNG_SEED" "$RNG_RUN"
   printf 'ns3_exact_sha=%s\n' "$(git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" rev-parse HEAD)"
   printf 'native_binary_sha256=%s\n' "$NATIVE_BINARY_SHA256"
-  printf 'native_library_identity_mode=proc_maps_sha256_v1\n'
+  printf 'native_library_identity_mode=proc_maps_sha256_v2\n'
   printf 'ns3_compatibility_patch=true\n'
   printf 'python_version=%s\n' "$(python3 --version | awk '{print $2}')"
   printf '%s\n' "${DEPENDENCIES[@]}"
