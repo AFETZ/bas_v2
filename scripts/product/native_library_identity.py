@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bind a native run to the executable and Wi-Fi library actually mapped by Linux.
+"""Bind a native run to executable, Wi-Fi and Spectrum mappings actually used.
 
 Capture runs during warmup, outside the measurement window. Closure checks the
 same files again; it does not claim continuous sampling of the process mappings.
@@ -14,7 +14,8 @@ import re
 import time
 
 
-MODE = 'proc_maps_sha256_v1'
+LEGACY_MODE = 'proc_maps_sha256_v1'
+MODE = 'proc_maps_sha256_v2'
 EXPECTED = 'logs/native_library_expected.json'
 OBSERVED = 'logs/native_library_observed.json'
 CLOSED = 'logs/native_library_closed.json'
@@ -92,8 +93,30 @@ def mapped(rows, identity):
     return selected
 
 
+def library_paths(rows, name):
+    return {row['path'] for row in rows if re.search(
+        r'/libns3[^/]*-' + re.escape(name) + r'[^/]*\.so(?:\.[0-9.]+)?(?: \(deleted\))?$', row['path'])}
+
+
 def wifi_paths(rows):
-    return {row['path'] for row in rows if re.search(r'/libns3[^/]*-wifi[^/]*\.so(?:\.[0-9.]+)?(?: \(deleted\))?$', row['path'])}
+    return library_paths(rows, 'wifi')
+
+
+def required_libraries(mode):
+    if mode == LEGACY_MODE:
+        return ('wifi',)
+    if mode == MODE:
+        return ('wifi', 'spectrum')
+    raise ValueError('unsupported native library mode')
+
+
+def expected_libraries(expected):
+    if not isinstance(expected, dict):
+        raise ValueError('expected native library evidence must be an object')
+    names = required_libraries(expected.get('mode'))
+    if not isinstance(expected.get('files'), dict) or set(expected['files']) != {'executable', *names}:
+        raise ValueError('expected native library identities are missing or unexpected')
+    return names
 
 
 def process_identity(pid):
@@ -105,11 +128,13 @@ def process_identity(pid):
                 argv=(proc / 'cmdline').read_bytes().decode().rstrip('\0').split('\0'))
 
 
-def prepare(run, executable, wifi):
+def prepare(run, executable, wifi, spectrum):
     run = Path(run).resolve()
-    identities = dict(executable=file_identity(executable), wifi=file_identity(wifi))
-    if not wifi_paths([dict(path=identities['wifi']['path'])]):
-        raise ValueError('expected Wi-Fi library has an unexpected filename')
+    identities = dict(executable=file_identity(executable), wifi=file_identity(wifi),
+                      spectrum=file_identity(spectrum))
+    for name in required_libraries(MODE):
+        if not library_paths([dict(path=identities[name]['path'])], name):
+            raise ValueError(f'expected {name} library has an unexpected filename')
     value = dict(schema_version=1, mode=MODE, run_id=run.name, run_dir=str(run),
                  prepared_host_monotonic_ns=time.monotonic_ns(), files=identities)
     write_new(run / EXPECTED, value)
@@ -119,10 +144,11 @@ def prepare(run, executable, wifi):
 def observe(run, pid, timeout_s=15):
     run = Path(run).resolve()
     expected = read_json(run / EXPECTED)
+    libraries = expected_libraries(expected)
     deadline = time.monotonic() + timeout_s
     birth = None
     # setsid/ip/env/taskset/stdbuf exec in-place. Wait for the owned PID to become
-    # the exact executable and finish mapping Wi-Fi; do not select another PID.
+    # the exact executable and required libraries; do not select another PID.
     while True:
         try:
             before = process_identity(pid)
@@ -137,8 +163,9 @@ def observe(run, pid, timeout_s=15):
                 raise ValueError('native PID has not execed the expected binary')
             if f'--statsFile={run}/metrics/native_radio_stats.json' not in before['argv']:
                 raise ValueError('native process is not bound to this run')
-            if wifi_paths(rows) != {expected['files']['wifi']['path']}:
-                raise ValueError('expected Wi-Fi mapping is absent, deleted or ambiguous')
+            for name in libraries:
+                if library_paths(rows, name) != {expected['files'][name]['path']}:
+                    raise ValueError(f'expected {name} mapping is absent, deleted or ambiguous')
             for identity in expected['files'].values():
                 mapped(rows, identity)
             break
@@ -151,13 +178,14 @@ def observe(run, pid, timeout_s=15):
     final_rows = parse_maps((Path('/proc') / str(pid) / 'maps').read_bytes())
     if before != after or actual != expected['files']:
         raise ValueError('native process or mapped file changed during capture')
-    if wifi_paths(final_rows) != {actual['wifi']['path']}:
-        raise ValueError('Wi-Fi mappings changed during capture')
+    for name in libraries:
+        if library_paths(final_rows, name) != {actual[name]['path']}:
+            raise ValueError(f'{name} mappings changed during capture')
     for identity in actual.values():
         mapped(final_rows, identity)
     with (run / MAPS).open('xb') as stream:
         stream.write(maps)
-    value = dict(schema_version=1, mode=MODE, run_id=run.name, status='observed',
+    value = dict(schema_version=1, mode=expected['mode'], run_id=run.name, status='observed',
                  expected_sha256=digest(run / EXPECTED), files=actual,
                  process_before=before, process_after=after,
                  captured_host_monotonic_ns=time.monotonic_ns(),
@@ -169,10 +197,11 @@ def observe(run, pid, timeout_s=15):
 def close(run):
     run = Path(run).resolve()
     expected, observed = read_json(run / EXPECTED), read_json(run / OBSERVED)
+    expected_libraries(expected)
     files = {name: file_identity(value['path']) for name, value in expected['files'].items()}
     if files != expected['files'] or observed.get('files') != files:
-        raise ValueError('native executable or Wi-Fi library changed before closure')
-    value = dict(schema_version=1, mode=MODE, run_id=run.name, status='closed', files=files,
+        raise ValueError('native executable or library changed before closure')
+    value = dict(schema_version=1, mode=expected['mode'], run_id=run.name, status='closed', files=files,
                  expected_sha256=digest(run / EXPECTED), observed_sha256=digest(run / OBSERVED),
                  closed_host_monotonic_ns=time.monotonic_ns())
     write_new(run / CLOSED, value)
@@ -192,8 +221,10 @@ def verify(run):
                      for stage in ('initial', 'final'))
         if not declarations and not evidence and not frozen:
             return dict(status='not_requested_legacy', passed=None)
-        if declarations != [MODE]:
+        if len(declarations) != 1 or declarations[0] not in (LEGACY_MODE, MODE):
             raise ValueError('missing, duplicate or unsupported native library mode')
+        mode = declarations[0]
+        libraries = required_libraries(mode)
         artifact_names = [EXPECTED, OBSERVED, CLOSED, MAPS, 'environment.txt']
         for stage in ('initial', 'final'):
             artifact_names.extend((f'configuration/{stage}/manifest.json',
@@ -206,8 +237,8 @@ def verify(run):
         if not all(isinstance(item, dict) for item in (expected, observed, closed)):
             raise ValueError('native library evidence must be objects')
         identities = expected.get('files')
-        if not isinstance(identities, dict) or set(identities) != {'executable', 'wifi'}:
-            raise ValueError('expected executable and Wi-Fi identities are missing')
+        if not isinstance(identities, dict) or set(identities) != {'executable', *libraries}:
+            raise ValueError('expected executable and declared library identities are missing')
         for identity in identities.values():
             if (not isinstance(identity, dict) or not isinstance(identity.get('path'), str)
                     or not PurePosixPath(identity['path']).is_absolute() or '..' in PurePosixPath(identity['path']).parts
@@ -228,7 +259,7 @@ def verify(run):
             raise ValueError('expected identity belongs to a different run')
         checks = dict(
             schema=all(type(item.get('schema_version')) is int and item['schema_version'] == 1
-                       and item.get('mode') == MODE and item.get('run_id') == run.name for item in (expected, observed, closed)),
+                       and item.get('mode') == mode and item.get('run_id') == run.name for item in (expected, observed, closed)),
             files=observed.get('files') == closed.get('files') == identities,
             process=(proc == observed.get('process_after') and all(type(proc.get(key)) is int and proc[key] > 0
                       for key in ('pid', 'start_ticks')) and type(proc.get('uid')) is int and proc['uid'] >= 0
@@ -265,10 +296,14 @@ def verify(run):
                 and data == (run / EXPECTED).read_bytes())
         binary_hashes = re.findall(r'^native_binary_sha256=(.*)$', text, re.M)
         checks['binary_environment'] = binary_hashes == [identities['executable']['sha256']]
+        if 'spectrum' in libraries:
+            checks['mapped_spectrum'] = library_paths(rows, 'spectrum') == {identities['spectrum']['path']}
         result.update(checks=checks, expected_sha256=digest(run / EXPECTED), observed_sha256=digest(run / OBSERVED),
                       closed_sha256=digest(run / CLOSED), maps_sha256=hashlib.sha256(maps).hexdigest(),
                       executable_sha256=identities['executable']['sha256'], wifi_sha256=identities['wifi']['sha256'],
                       process=proc, paths=dict(expected=EXPECTED, observed=OBSERVED, closed=CLOSED, maps=MAPS))
+        if 'spectrum' in libraries:
+            result['spectrum_sha256'] = identities['spectrum']['sha256']
         if all(checks.values()):
             result.update(status='verified_native_library_identity', passed=True)
     except (OSError, ValueError, TypeError, KeyError, AttributeError, IndexError) as error:
@@ -282,14 +317,15 @@ def main():
     parser.add_argument('--run-dir', required=True, type=Path)
     parser.add_argument('--executable', type=Path)
     parser.add_argument('--wifi', type=Path)
+    parser.add_argument('--spectrum', type=Path)
     parser.add_argument('--pid', type=int)
     parser.add_argument('--timeout-s', type=float, default=15)
     args = parser.parse_args()
     try:
         if args.operation == 'prepare':
-            if args.executable is None or args.wifi is None:
-                parser.error('prepare requires --executable and --wifi')
-            result = prepare(args.run_dir, args.executable, args.wifi)
+            if args.executable is None or args.wifi is None or args.spectrum is None:
+                parser.error('prepare requires --executable, --wifi and --spectrum')
+            result = prepare(args.run_dir, args.executable, args.wifi, args.spectrum)
         elif args.operation == 'observe':
             if args.pid is None or args.pid <= 0 or not 0 < args.timeout_s <= 30:
                 parser.error('observe requires a positive --pid and timeout at most 30 s')

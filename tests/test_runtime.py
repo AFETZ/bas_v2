@@ -777,16 +777,18 @@ capture_effective_configuration() {
             stream.write('\npayload_journal_mode=bounded_async_jsonl_v1\n')
         return raw, summary, path, metadata_path, metadata
 
-    def native_library_evidence(self):
+    def native_library_evidence(self, *, spectrum=True):
         from scripts.product import native_library_identity as identity
         raw, summary = self.qualified_source_run()
         run_dir = '/workspace/runs/' + raw.name
+        mode = identity.MODE if spectrum else identity.LEGACY_MODE
         files = {name: dict(path=path, bytes=1000, sha256=digest * 64, device_major=8,
                            device_minor=1, inode=inode, mtime_ns=10, ctime_ns=11)
                  for name, path, digest, inode in (
                      ('executable', '/sdk/native-main', 'a', 20),
-                     ('wifi', '/sdk/libns3.48-wifi-default.so', 'b', 30))}
-        expected = dict(schema_version=1, mode=identity.MODE, run_id=raw.name, run_dir=run_dir,
+                     ('wifi', '/sdk/libns3.48-wifi-default.so', 'b', 30),
+                     *([('spectrum', '/sdk/libns3.48-spectrum-default.so', 'c', 40)] if spectrum else []))}
+        expected = dict(schema_version=1, mode=mode, run_id=raw.name, run_dir=run_dir,
                         prepared_host_monotonic_ns=100, files=files)
         identity.write_new(raw / identity.EXPECTED, expected)
         maps = '\n'.join(f'{1000+i*100:x}-{1100+i*100:x} r-xp 00000000 08:01 {row["inode"]} {row["path"]}'
@@ -794,16 +796,16 @@ capture_effective_configuration() {
         (raw / identity.MAPS).write_bytes(maps)
         process = dict(pid=123, start_ticks=100, uid=0, executable=files['executable']['path'],
                        argv=[files['executable']['path'], f'--statsFile={run_dir}/metrics/native_radio_stats.json'])
-        observed = dict(schema_version=1, mode=identity.MODE, run_id=raw.name, status='observed', files=files,
+        observed = dict(schema_version=1, mode=mode, run_id=raw.name, status='observed', files=files,
             expected_sha256=identity.digest(raw / identity.EXPECTED), process_before=process, process_after=process,
             captured_host_monotonic_ns=200, maps=dict(path=identity.MAPS, bytes=len(maps), sha256=hashlib.sha256(maps).hexdigest()))
         identity.write_new(raw / identity.OBSERVED, observed)
-        closed = dict(schema_version=1, mode=identity.MODE, run_id=raw.name, status='closed', files=files,
+        closed = dict(schema_version=1, mode=mode, run_id=raw.name, status='closed', files=files,
             expected_sha256=identity.digest(raw / identity.EXPECTED), observed_sha256=identity.digest(raw / identity.OBSERVED),
             closed_host_monotonic_ns=400)
         identity.write_new(raw / identity.CLOSED, closed)
         (raw / 'metrics/relay_experiment_summary.json').write_text(json.dumps(dict(measurement_start_host_monotonic_ns=300)))
-        (raw / 'environment.txt').write_text(f'native_library_identity_mode={identity.MODE}\nnative_binary_sha256={"a"*64}\n')
+        (raw / 'environment.txt').write_text(f'native_library_identity_mode={mode}\nnative_binary_sha256={"a"*64}\n')
         relative = 'inputs/native_library_expected/value.json'
         for stage in ('initial', 'final'):
             directory = raw / 'configuration' / stage
@@ -819,11 +821,51 @@ capture_effective_configuration() {
         proof = bas.recorded_outcome(raw, 0, summary)['native_library_verification']
         self.assertTrue(proof['passed'], proof)
         self.assertEqual(proof['wifi_sha256'], 'b' * 64)
+        self.assertEqual(proof['spectrum_sha256'], 'c' * 64)
         self.assertEqual(proof, identity.verify(raw))
         absent = self.root / 'legacy'; absent.mkdir()
         self.assertEqual(bas.native_library_verification(absent), dict(status='not_requested_legacy', passed=None))
         (absent / 'environment.txt').write_text(f'native_library_identity_mode={identity.MODE}\n')
         self.assertFalse(bas.native_library_verification(absent)['passed'])
+
+    def test_historical_v1_proof_remains_valid_without_claiming_spectrum(self):
+        raw, summary, identity = self.native_library_evidence(spectrum=False)
+        proof = identity.verify(raw)
+        self.assertTrue(proof['passed'], proof)
+        self.assertNotIn('spectrum_sha256', proof)
+        self.assertNotIn('mapped_spectrum', proof['checks'])
+        # A new runtime cannot make this old capture satisfy its advertised v2.
+        path = raw / 'environment.txt'
+        path.write_text(path.read_text().replace(identity.LEGACY_MODE, identity.MODE))
+        self.assertFalse(identity.verify(raw)['passed'])
+
+    def test_spectrum_requires_its_actual_mapping_and_unchanged_closed_identity(self):
+        raw, summary, identity = self.native_library_evidence()
+        path = raw / identity.MAPS; original = path.read_bytes()
+        observed_path = raw / identity.OBSERVED; observed_original = observed_path.read_bytes()
+        closed_path = raw / identity.CLOSED; closed_original = closed_path.read_bytes()
+        candidates = (b'\n'.join(line for line in original.splitlines() if b'-spectrum' not in line) + b'\n',
+            original.replace(b' 40 ', b' 41 '), original.replace(b'08:01 40', b'08:02 40'),
+            original.replace(b'spectrum-default.so', b'spectrum-default.so (deleted)'),
+            original + b'100-200 r-xp 00000000 08:01 50 /other/libns3.48-spectrum-default.so\n')
+        for candidate in candidates:
+            with self.subTest(maps=candidate):
+                path.write_bytes(candidate)
+                observed = json.loads(observed_original)
+                observed['maps'].update(bytes=len(candidate), sha256=hashlib.sha256(candidate).hexdigest())
+                observed_path.write_text(json.dumps(observed))
+                closed = json.loads(closed_original)
+                closed['observed_sha256'] = identity.digest(observed_path)
+                closed_path.write_text(json.dumps(closed))
+                self.assertFalse(identity.verify(raw)['passed'])
+        path.write_bytes(original); observed_path.write_bytes(observed_original)
+        closed = json.loads(closed_original); closed['files']['spectrum']['sha256'] = 'd' * 64
+        closed_path.write_text(json.dumps(closed))
+        self.assertFalse(identity.verify(raw)['passed'])
+        closed_path.write_bytes(closed_original)
+        environment = raw / 'environment.txt'
+        environment.write_text(environment.read_text().replace(identity.MODE, identity.LEGACY_MODE))
+        self.assertFalse(identity.verify(raw)['passed'])  # No v2 -> v1 downgrade.
 
     def test_native_loaded_library_missing_capture_frozen_input_or_closed_proof_fails(self):
         raw, summary, identity = self.native_library_evidence()
@@ -906,24 +948,27 @@ capture_effective_configuration() {
         from scripts.product import native_library_identity as identity
         raw = self.root / 'loaded-library'; (raw / 'logs').mkdir(parents=True)
         wifi = self.root / 'libns3.48-wifi-default.so'
+        spectrum = self.root / 'libns3.48-spectrum-default.so'
         shutil.copyfile('/lib/x86_64-linux-gnu/libm.so.6', wifi)
+        shutil.copyfile('/lib/x86_64-linux-gnu/libm.so.6', spectrum)
         # This is a real mapping/identity contract test, not an ns-3 physics test.
         child = subprocess.Popen([sys.executable, '-c',
-            'import ctypes,sys,time; library=ctypes.CDLL(sys.argv[1]); time.sleep(20)', str(wifi),
+            'import ctypes,sys,time; libraries=[ctypes.CDLL(p) for p in sys.argv[1:3]]; time.sleep(20)', str(wifi), str(spectrum),
             f'--statsFile={raw}/metrics/native_radio_stats.json'])
         try:
-            expected = identity.prepare(raw, sys.executable, wifi)
+            expected = identity.prepare(raw, sys.executable, wifi, spectrum)
             observed = identity.observe(raw, child.pid, 5)
             self.assertEqual(observed['files'], expected['files'])
             self.assertEqual(observed['process_before']['pid'], child.pid)
             self.assertIn(str(wifi).encode(), (raw / identity.MAPS).read_bytes())
+            self.assertIn(str(spectrum).encode(), (raw / identity.MAPS).read_bytes())
         finally:
             child.terminate(); child.wait(timeout=5)
         closed = identity.close(raw)
         self.assertEqual(closed['files'], expected['files'])
         # Replacement after closure is detected by a fresh closure attempt.
         (raw / identity.CLOSED).unlink()
-        wifi.unlink(); wifi.write_bytes(b'different library')
+        spectrum.unlink(); spectrum.write_bytes(b'different library')
         with self.assertRaisesRegex(ValueError, 'changed'):
             identity.close(raw)
 
