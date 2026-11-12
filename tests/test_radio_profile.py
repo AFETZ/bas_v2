@@ -164,6 +164,10 @@ class RadioProfileTests(unittest.TestCase):
             radio=folder/'radio.yaml'
             radio.write_bytes((project/'network/config/native_wifi_fullmesh_100ms.yaml').read_bytes())
             config=copy.deepcopy(self.config)
+            # This boundary test invokes the shell directly, without bas.run's
+            # owned RAM lifecycle. Its radio-preparation check uses the explicit
+            # disk profile; an unowned tmpfs request must still be rejected.
+            config['runtime']['capture_storage']='disk'
             config['environment']['scene']=scene.relative_to(project).as_posix()
             config['propagation']['radio_config']=radio.relative_to(project).as_posix()
             config['interference']=dict(sources='network/config/terrain_directional_source.yaml')
@@ -180,6 +184,13 @@ class RadioProfileTests(unittest.TestCase):
                         HYBRID_PREFLIGHT_ARGUMENTS=str(capture),
                         HYBRID_PREFLIGHT_IMAGE=config['runtime']['image'])
                     capture.unlink(missing_ok=True)
+                    unowned=dict(env, BAS_NATIVE_CAPTURE_STORAGE='tmpfs',
+                        BAS_NATIVE_URBAN_OUTPUT=str(folder/(model+'-unowned')))
+                    rejected=subprocess.run(['bash',str(project/'network/ns3/run_native_radio_five_uav.sh')],
+                        cwd=project,env=unowned,capture_output=True,text=True,timeout=20)
+                    self.assertEqual(rejected.returncode,2,rejected.stdout+rejected.stderr)
+                    self.assertIn('requires the public BAS owned spool',rejected.stderr)
+                    self.assertFalse(capture.exists())
                     result=subprocess.run(['bash',str(project/'network/ns3/run_native_radio_five_uav.sh')],
                         cwd=project,env=env,capture_output=True,text=True,timeout=20)
                     self.assertEqual(result.returncode,86,result.stdout+result.stderr)
