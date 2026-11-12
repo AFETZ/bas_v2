@@ -318,7 +318,8 @@ class RadioHitlSoftwarePairTests(unittest.TestCase):
             tty.setraw(slave)
         with udp_socket() as control_radio, udp_socket() as payload_radio:
             addresses = [free_udp_address(), free_udp_address()]
-            channels = {channel: dict(endpoint=dict(kind='serial', device=os.ttyname(descriptors[index][1]), baud=115200),
+            rates = dict(control=57600, payload=115200)
+            channels = {channel: dict(endpoint=dict(kind='serial', device=os.ttyname(descriptors[index][1]), baud=rates[channel]),
                 radio=dict(bind=addresses[index], peer=radio.getsockname()))
                 for index, (channel, radio) in enumerate((('control', control_radio), ('payload', payload_radio)))}
             process, output = self.start(channels)
@@ -328,7 +329,7 @@ class RadioHitlSoftwarePairTests(unittest.TestCase):
                     serial.Serial(channels[channel]['endpoint']['device'], baudrate=115200, exclusive=True)
             for index, (channel, radio) in enumerate((('control', control_radio), ('payload', payload_radio))):
                 master, slave = descriptors[index]
-                self.assertEqual(termios.tcgetattr(slave)[4:6], [termios.B115200, termios.B115200])
+                self.assertEqual(termios.tcgetattr(slave)[4:6], [getattr(termios, f'B{rates[channel]}')] * 2)
                 original = channel.encode() + bytes(range(256))
                 os.write(master, original)
                 expected = self.exchange_radio(channel, radio, addresses[index], original)
@@ -340,6 +341,10 @@ class RadioHitlSoftwarePairTests(unittest.TestCase):
             self.assertNotEqual(identities['control']['st_rdev'], identities['payload']['st_rdev'])
             for channel in ('control', 'payload'):
                 metrics = json.loads((output / channel / 'metrics.json').read_text())
+                self.assertEqual(metrics['serial_baud_requested'], rates[channel])
+                self.assertEqual(metrics['serial_baud_reported_by_pyserial'], rates[channel])
+                self.assertEqual(metrics['serial_baud_observed'], rates[channel])
+                self.assertEqual(metrics['serial_baud_observed_reason'], 'standard_termios_input_output_match')
                 self.assertTrue(metrics['serial_exclusive'])
                 self.assertEqual(metrics['serial_device_identity'], identities[channel]['st_rdev'])
                 with serial.Serial(channels[channel]['endpoint']['device'], baudrate=115200, exclusive=True):
