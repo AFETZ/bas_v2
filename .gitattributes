@@ -1,2 +1,4 @@
 *.sh text eol=lf
 *.patch whitespace=-blank-at-eol
+# This input is pinned by its byte hash in the runtime asset manifest.
+network/config/terrain_10km_geometry.json text eol=lf
