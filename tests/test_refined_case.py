@@ -65,7 +65,7 @@ class RefinedCaseTests(unittest.TestCase):
         self.assertEqual(len(sources['sources']), 1)
         source = sources['sources'][0]
         self.assertEqual((source['start_s'], source['stop_s']), (20, 40))
-        self.assertEqual(self.source['experiment']['duration_s'], 60)
+        self.assertEqual(self.source['experiment']['duration_s'], 90)
         self.assertEqual(source['pattern'], 'tr38901')
         self.assertEqual(source['center_hz'], self.scene['radio']['frequency_hz'])
         self.assertGreater(source['bandwidth_hz'], 0)

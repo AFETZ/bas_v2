@@ -43,7 +43,7 @@
   },
   "experiment": {
     "policy": "failover",
-    "duration_s": 60,
+    "duration_s": 90,
     "seed": 1,
     "run": 1
   },
