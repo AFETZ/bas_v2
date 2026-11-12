@@ -768,6 +768,82 @@ def analyze_payload_lineage(run_dir: Path, start_ns=None, end_ns=None, *, comple
     return result
 
 
+def refined_phase_observations(meta, config, native, offers, commands, payload):
+    """Predeclared source/off comparison cohorts; no acceptance or SLA threshold."""
+    def ns(value):
+        if type(value) is int:
+            return value
+        if isinstance(value, str) and value.isdecimal():
+            return int(value)
+        if type(value) is float and math.isfinite(value) and value.is_integer():
+            return int(value)
+        return None
+    start, observed_end = ns(meta.get('measurement_start_host_monotonic_ns')), ns(meta.get('measurement_end_host_monotonic_ns'))
+    duration = finite(config.get('duration_s'))
+    source_start = finite(meta.get('measurement_start_source_sim_time_s'))
+    if start is None or observed_end is None or duration is None or duration <= 40 or source_start is None:
+        return dict(status='not_evaluated_missing_measurement_bounds')
+    source_start_ns = round(source_start * 1e9)
+    index = {str(row['command_id']): row for row in commands}
+    age_limit = finite(config.get('effective_service_args', {}).get('command_max_age_ms'))
+    result = dict(status='observed', qualification='not_evaluated', windows={},
+        window_basis='Predeclared refined-case comparator: [0,20), [20,40), [40,duration). Source-off has no artificial fault.',
+        clock_basis='Packet cohorts use host elapsed time; RF arrivals use ns-3 elapsed time. Actual source switch clocks are retained separately.',
+        denominator='Control: unique scheduled refresh offers. Payload: actual CRC/BSF1-audited created frames per direction, including ancillary MAVLink; synthetic load is an explicit subset.',
+        delivery_basis='Outcome follows the offered packet across a phase boundary; delivered_inside_same_phase is a separate count. Missing/censored/unverifiable outcomes are not asserted RF losses.',
+        delay_scope='Control creation to UART write end. Payload GCS creation to UART write end, or UAV UART ingress to GCS CRC release; no sensor creation or physical-wire delay.',
+        payload_generator_eligible=payload.get('offered_load', {}).get('generator_eligible'),
+        source_switches=[{key: row.get(key) for key in ('event','node','time_s','wall_monotonic_ns','details')}
+                         for row in native if row.get('event') in ('jammer_on','jammer_off')])
+    for name, low_s, high_s in (('before', 0, 20), ('source_window', 20, 40), ('after', 40, duration)):
+        low, high = start + round(low_s * 1e9), start + round(high_s * 1e9)
+        inside = lambda value: (stamp := ns(value)) is not None and low <= stamp < min(high, observed_end)
+        phase = dict(elapsed_s=[low_s, high_s], host_window_ns=[low, high],
+            window_fully_observed=observed_end >= high, control={}, payload={}, foreign_power_dbm_by_receiver={})
+        for uav in UAVS:
+            cohort = [row for row in offers if identifier(row.get('uav_id')) == uav
+                      and inside(row.get('scheduled_host_monotonic_ns', row.get('host_monotonic_ns')))]
+            counts = Counter(dict(admitted=0, unavailable=0, missing=0, right_censored=0, unverifiable=0))
+            latencies, same_phase = [], 0
+            for offer in cohort:
+                command = index.get(str(offer.get('command_id')))
+                if command is None:
+                    counts['unavailable'] += 1
+                    continue
+                admitted, created = ns(command.get('admitted_ns')), ns(command.get('created_ns'))
+                if admitted is None:
+                    counts['right_censored' if created is not None and age_limit is not None
+                        and created + age_limit * 1e6 > observed_end else 'missing'] += 1
+                    continue
+                delay = finite(command.get('latency_ms'))
+                valid = (command.get('uav_id') == uav and command.get('lease_status') == 'valid'
+                    and command.get('lineage_status') == 'valid' and command.get('application_chain_complete') is True
+                    and command.get('policy_allowed') is True and delay is not None and delay >= 0)
+                counts['admitted' if valid else 'unverifiable'] += 1
+                if valid:
+                    latencies.append(delay); same_phase += inside(admitted)
+            phase['control'][str(uav)] = dict(offered=len(cohort), **counts,
+                delivered_inside_same_phase=same_phase, delay_ms=distribution(latencies))
+            for direction in ('gcs_to_uav', 'uav_to_gcs'):
+                cohort = [row for row in payload.get('records', []) if row.get('uav_id') == uav
+                          and row.get('direction') == direction and inside(row.get('created_host_monotonic_ns'))]
+                delivered = [row for row in cohort if row.get('outcome') in ('timely', 'late')]
+                phase['payload'][f'{uav}:{direction}'] = dict(offered=len(cohort),
+                    outcomes=dict(Counter(row.get('outcome') for row in cohort)), delivered=len(delivered),
+                    delivered_inside_same_phase=sum(inside(row.get('accepted_host_monotonic_ns')) for row in delivered),
+                    synthetic_load_offered=sum(row.get('load_id') is not None for row in cohort),
+                    synthetic_load_delivered=sum(row.get('load_id') is not None for row in delivered),
+                    delay_ms=distribution([value for row in delivered if (value := finite(row.get('latency_ms'))) is not None]))
+        for node in ('cp', *(f'uav{i}' for i in UAVS)):
+            phase['foreign_power_dbm_by_receiver'][node] = distribution([finite(row.get('value')) for row in native
+                if row.get('event') == 'spectrum_signal_arrival' and row.get('node') == node
+                and 'foreign_signal=1' in str(row.get('details', '')).split(';')
+                and finite(row.get('value')) is not None and finite(row.get('time_s')) is not None
+                and round(low_s * 1e9) <= round(float(row['time_s']) * 1e9) - source_start_ns < round(high_s * 1e9)])
+        result['windows'][name] = phase
+    return result
+
+
 def refined_case_evidence(run_dir, meta, stats, environment, events, native, commands, payload, errors,
                           native_capture=None):
     """Observe the refined flight case without importing the separate SLA limits.
@@ -1428,6 +1504,12 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
         "censor_time_s", "restricted_horizon_s", "restricted_unrecovered_time_s", "leader_id", "epoch", "members"])
     result['refined_case'] = refined_case_evidence(run_dir, meta, stats, environment,
         events, native, commands, payload, errors, native_capture)
+    if result['refined_case'].get('applicable'):
+        result['refined_case']['phase_observations'] = refined_phase_observations(meta, config, native, offers, commands, payload)
+        source_summary = read_json(run_dir / 'metrics/native_source_summary.json')
+        source_summary = source_summary if isinstance(source_summary, dict) else {}
+        result['refined_case']['source_rf_summary'] = {key: source_summary.get(key) for key in
+            ('units', 'measurement_scope', 'window_availability', 'windows', 'event_capture')}
     write_json(output / "metrics/relay_analysis.json", result)
     if plots:
         plot_run(output, result, commands, events)

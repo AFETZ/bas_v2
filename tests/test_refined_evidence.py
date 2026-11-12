@@ -10,10 +10,54 @@ from unittest.mock import patch
 
 import numpy as np
 
-from scripts.product.analyze_relay_experiment import native_analysis_event, read_csv, refined_case_evidence
+from scripts.product.analyze_relay_experiment import native_analysis_event, read_csv, refined_case_evidence, refined_phase_observations
 
 
 class RefinedEvidenceTests(unittest.TestCase):
+    def test_phase_cohorts_keep_cross_boundary_delivery_and_censoring_distinct(self):
+        start = 10**15 + 7
+        stamp = lambda seconds: start + round(seconds * 10**9)
+        meta = dict(measurement_start_host_monotonic_ns=start,
+            measurement_end_host_monotonic_ns=stamp(90), measurement_start_source_sim_time_s=100)
+        config = dict(duration_s=90, effective_service_args=dict(command_max_age_ms=250))
+        offers = [dict(uav_id=1, command_id=str(i), scheduled_host_monotonic_ns=str(stamp(at)))
+                  for i, at in enumerate((19.99, 20, 89.9))]
+        commands = [dict(command_id=str(i), uav_id=1, created_ns=stamp(at), admitted_ns=received,
+            lease_status='valid', lineage_status='valid', application_chain_complete=True,
+            policy_allowed=True, latency_ms=delay) for i, at, received, delay in
+            ((0, 19.99, stamp(20.05), 60), (1, 20, stamp(20.1), 100), (2, 89.9, None, None))]
+        payload = dict(records=[dict(uav_id=1, direction='gcs_to_uav', created_host_monotonic_ns=stamp(19.99),
+            accepted_host_monotonic_ns=stamp(20.05), outcome='timely', latency_ms=60, load_id='payload_load'),
+            dict(uav_id=1, direction='uav_to_gcs', created_host_monotonic_ns=stamp(40),
+                 accepted_host_monotonic_ns=None, outcome='right_censored', latency_ms=None)])
+        native = [dict(event='spectrum_signal_arrival', node='uav1', time_s=str(at),
+            value='-50', details='foreign_signal=1') for at in (120, 140)]
+        result = refined_phase_observations(meta, config, native, offers, commands, payload)
+        before, active, after = (result['windows'][key] for key in ('before', 'source_window', 'after'))
+        self.assertEqual(before['control']['1']['offered'], 1)
+        self.assertEqual(before['control']['1']['admitted'], 1)
+        self.assertEqual(before['control']['1']['delivered_inside_same_phase'], 0)
+        self.assertEqual(active['control']['1']['offered'], 1)
+        self.assertEqual(after['control']['1']['right_censored'], 1)
+        self.assertEqual(after['control']['1']['missing'], 0)
+        self.assertEqual(before['payload']['1:gcs_to_uav']['delivered'], 1)
+        self.assertEqual(before['payload']['1:gcs_to_uav']['delivered_inside_same_phase'], 0)
+        self.assertEqual(after['payload']['1:uav_to_gcs']['outcomes'], {'right_censored': 1})
+        self.assertEqual(active['foreign_power_dbm_by_receiver']['uav1']['samples'], 1)
+        self.assertEqual(after['foreign_power_dbm_by_receiver']['uav1']['samples'], 1)
+        self.assertEqual(result['source_switches'], [])  # No manufactured fault on source-off.
+        self.assertEqual(result['qualification'], 'not_evaluated')
+
+    def test_incomplete_phase_window_is_observed_as_partial(self):
+        self.assertEqual(refined_phase_observations({}, {}, [], [], [], {})['status'],
+                         'not_evaluated_missing_measurement_bounds')
+        result = refined_phase_observations(dict(measurement_start_host_monotonic_ns=100,
+            measurement_end_host_monotonic_ns=30_000_000_100, measurement_start_source_sim_time_s=0),
+            dict(duration_s=90), [], [], [], {})
+        self.assertTrue(result['windows']['before']['window_fully_observed'])
+        self.assertFalse(result['windows']['source_window']['window_fully_observed'])
+        self.assertFalse(result['windows']['after']['window_fully_observed'])
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
