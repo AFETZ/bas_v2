@@ -266,7 +266,9 @@ class CoordinationJournalVerificationTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.run = Path(self.temporary.name)
+        self.workspace = Path(self.temporary.name)/'workspace'
+        self.run = self.workspace/'runs/native-radio-realtime/coordination-journal-fixture'
+        self.run.mkdir(parents=True)
         (self.run/'environment.txt').write_text('uav_count=5\ncoordination_journal_mode=bounded_async_jsonl_v1\n')
         for node_id in range(6):
             name = 'gcs' if node_id == 0 else f'uav{node_id}'
