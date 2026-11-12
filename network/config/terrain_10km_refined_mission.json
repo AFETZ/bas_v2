@@ -1,0 +1,192 @@
+{
+  "schema_version": 1,
+  "scenario": "terrain_10km_five_uav_refined_case_v1",
+  "status": "uncalibrated_refined_case_input_runtime_evidence_required",
+  "terrain_bundle": ".external/terrain-reference",
+  "frame": {
+    "coordinate_frame": "ENU",
+    "ground_surface_z_m": 0,
+    "spherical_heading_deg": 0,
+    "origin_latitude_deg": 46.607213,
+    "origin_longitude_deg": 14.278461,
+    "origin_elevation_m": 446,
+    "datum": "procedural shared triangle terrain; uncalibrated",
+    "world_enu_to_local_ned": "N=y,E=x,D=-z per iris_radio_headless gazeboXYZToNED"
+  },
+  "gcs": [
+    -2000,
+    -2000,
+    79.96654565164894
+  ],
+  "buildings": [],
+  "spawns": {
+    "1": [
+      -1800,
+      -1800,
+      83.01655176557686
+    ],
+    "2": [
+      -1770,
+      -1800,
+      82.97422942295289
+    ],
+    "3": [
+      -1740,
+      -1800,
+      82.92100009616158
+    ],
+    "4": [
+      -1710,
+      -1800,
+      82.8383511178307
+    ],
+    "5": [
+      -1680,
+      -1800,
+      82.68284340655887
+    ]
+  },
+  "routes": {
+    "1": [
+      [
+        -1800,
+        -1800,
+        112.86155176557689
+      ],
+      [
+        -1800,
+        -1770,
+        113.29357171790332
+      ],
+      [
+        -1790,
+        -1770,
+        113.28543259576925
+      ],
+      [
+        -1800,
+        -1800,
+        112.86155176557689
+      ]
+    ],
+    "2": [
+      [
+        -1770,
+        -1800,
+        117.81922942295292
+      ],
+      [
+        -1770,
+        -1770,
+        118.24682275671967
+      ],
+      [
+        -1760,
+        -1770,
+        118.22907964778923
+      ],
+      [
+        -1770,
+        -1800,
+        117.81922942295292
+      ]
+    ],
+    "3": [
+      [
+        -1740,
+        -1800,
+        122.7660000961616
+      ],
+      [
+        -1740,
+        -1770,
+        123.19359342992836
+      ],
+      [
+        -1730,
+        -1770,
+        123.17585032099792
+      ],
+      [
+        -1740,
+        -1800,
+        122.7660000961616
+      ]
+    ],
+    "4": [
+      [
+        -1710,
+        -1800,
+        127.68335111783071
+      ],
+      [
+        -1710,
+        -1770,
+        128.10878159506882
+      ],
+      [
+        -1700,
+        -1770,
+        128.05494419120325
+      ],
+      [
+        -1710,
+        -1800,
+        127.68335111783071
+      ]
+    ],
+    "5": [
+      [
+        -1680,
+        -1800,
+        132.5278434065589
+      ],
+      [
+        -1680,
+        -1770,
+        132.94964616485072
+      ],
+      [
+        -1670,
+        -1770,
+        132.89781026109344
+      ],
+      [
+        -1680,
+        -1800,
+        132.5278434065589
+      ]
+    ]
+  },
+  "mission": {
+    "telemetry_max_age_s": 0.5,
+    "speed_mps": 3,
+    "waypoint_dwell_s": 3,
+    "world_ground_reference_z_m": 0.195,
+    "ground_reference_source": "iris base_collision: poseZ=-0.08, halfheight=0.115",
+    "route_design_reason": "Five 30-50 m terrain-relative flight levels on closed local routes; shared 10 km terrain and buildings. This input does not qualify whole-map coverage or urban shadowing.",
+    "barriers": {},
+    "model_rest_clearance_m": 0.195
+  },
+  "radio": {
+    "parameter_set": "hypothesis_low_v1",
+    "calibration": "uncalibrated_parametric_study",
+    "mode": "geometry",
+    "frequency_hz": 2412000000,
+    "los": {
+      "exponent": 2,
+      "reference_distance_m": 1,
+      "reference_loss_db": 40.09532929124565
+    },
+    "nlos": {
+      "exponent": 2.7,
+      "reference_distance_m": 1,
+      "reference_loss_db": 40.09532929124565
+    },
+    "sensitivity_exponents": [
+      2.7,
+      3.3
+    ],
+    "parameters_source": "Legacy scene metadata; runtime-terrain.json explicitly selects Sionna RT."
+  }
+}

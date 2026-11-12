@@ -16,6 +16,42 @@ ArduPilot SITL, геометрическая модель или Sionna RT и na
 из одного снимка генерируются здания Gazebo и входные данные радиомодели.
 Модель распространения исследовательская, без калибровки по натурным измерениям.
 
+## Проверка уточнённого кейса
+
+`runtime-refined-baseline.json` и `runtime-refined-source.json` задают одинаковые
+пять БАС и НПУ, общую карту 10×10 км с рельефом до 200 м и домами до 15 этажей,
+два UART MAVLink и 10 Кбит/с полезной нагрузки на каждый БАС. Замкнутые маршруты
+длиной около 72 м проходят на пяти эшелонах 30–50 м над локальным рельефом;
+они проверяют местный участок карты. Проверка входов вычисляет просвет по всем
+пересечениям сегментов с треугольной сеткой и исключает пересечение зданий.
+Полётное отклонение проверяется по журналам симулятора.
+
+Разница входов — отдельный направленный источник: 2412 МГц, 20 МГц, 1 Вт,
+`tr38901`, включённый с 20-й до 40-й секунды 60-секундного измерительного окна.
+Оба входа сохраняют packet trace и диагностику этапов RT. Один общий
+Spectrum-канал и штатный Wi-Fi MAC ns-3 обеспечивают конкуренцию устройств:
+[ChannelAccessManager реализует DCF/EDCAF](https://www2.nsnam.org/docs/models/html/wifi-design.html).
+Здесь Sionna RT рассчитывает распространение. Отдельный
+[Sionna SYS поддерживает планирование пользователей](https://nvlabs.github.io/sionna/sys/index.html),
+но не участвует в MAC этого стенда.
+
+После установки выполните последовательно, используя новые ID каждой серии:
+
+```sh
+python3 bas.py batch --config runtime-refined-baseline.json --batch-id refined-baseline-001 --seeds 1 --rng-runs 1,2,3 --fail-fast
+python3 bas.py analyze refined-baseline-001 --service-batch --output-dir runs/analysis/refined-baseline-001
+python3 bas.py batch --config runtime-refined-source.json --batch-id refined-source-001 --seeds 1 --rng-runs 1,2,3 --fail-fast
+python3 bas.py analyze refined-source-001 --service-batch --output-dir runs/analysis/refined-source-001
+```
+
+Это шесть заранее заданных полных циклов с тремя подстримами ns-3 и фиксированным
+RT seed. Они не заменяют статистическую квалификацию SLA или аппаратный HitL.
+Серия останавливается на отказе и сохраняет все попытки. Для каждого опыта нужны
+`completed / succeeded / valid`, все маршруты, посадки и disarm, целые журналы и
+подтверждённые фактические source/RT события. Изменение доставки при помехе
+определяется из пакетных наблюдений; наличие источника не означает заданную потерю.
+`bas.py analyze <run-id> --output-dir runs/analysis/<run-id>` раскрывает отдельный опыт.
+
 ## Установка UAVcosim и проверенный вход
 
 Репозиторий: `https://github.com/HSE-Intelligent-Unmanned-Systems-Lab/UAVcosim` (приватный).
