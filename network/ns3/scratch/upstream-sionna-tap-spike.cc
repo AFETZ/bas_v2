@@ -369,6 +369,25 @@ LogEvent(const std::string& event,
     }
 }
 
+// Exceptional diagnostics can contain CSV delimiters or traceback lines.
+// Call this at failure sites so packet tracing keeps its original hot path.
+std::string
+QuoteEventCsvField(const std::string& value)
+{
+    if (value.find_first_of(",\"\r\n") == std::string::npos)
+        return value;
+    std::string quoted;
+    quoted.reserve(value.size() + 2);
+    quoted.push_back('"');
+    for (const char c : value)
+    {
+        if (c == '"') quoted.push_back('"');
+        quoted.push_back(c);
+    }
+    quoted.push_back('"');
+    return quoted;
+}
+
 void
 FlushEvents()
 {
@@ -1117,7 +1136,7 @@ class LivePositionSource
     {
         g_liveStateValid=false;
         LogEvent("position_snapshot_rejected","tracker","",0,
-                 std::numeric_limits<double>::quiet_NaN(),error.what());
+                 std::numeric_limits<double>::quiet_NaN(),QuoteEventCsvField(error.what()));
         if (g_runtimeOperational || g_lockstep)
         {
             ++g_stalePoseSamples;
@@ -2518,7 +2537,12 @@ main(int argc, char* argv[])
             rtPool = std::make_unique<bas::NativeRtPool>(rtCache, endpoints,
                 [&positions]() { return positions.Snapshot(); },
                 [](const std::string& event, const std::string& id, double value,
-                   const std::string& details) { LogEvent(event, id, "", 0, value, details); },
+                   const std::string& details) {
+                    if (event == "rt_pool_failed")
+                        LogEvent(event, id, "", 0, value, QuoteEventCsvField(details));
+                    else
+                        LogEvent(event, id, "", 0, value, details);
+                },
                 sionnaReceiverBatchMode == "full_mesh" ? bas::NativeRtPool::CommitSnapshot(
                     [&positions](const std::vector<bas::MeasuredState>& state, const std::function<void()>& publish) {
                         positions.Commit(state,publish);
