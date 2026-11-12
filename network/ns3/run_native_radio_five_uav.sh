@@ -263,6 +263,7 @@ run_in_container() {
       --mount "type=bind,src=$BAS_RUNTIME_SPOOL,dst=$BAS_RUNTIME_SPOOL"
       --mount "type=bind,src=$BAS_RUNTIME_SPOOL/caches/drjit,dst=/home/ubuntu/.drjit"
       --mount "type=bind,src=$BAS_RUNTIME_SPOOL/caches/gz,dst=/home/ubuntu/.gz"
+      --mount "type=bind,src=$BAS_RUNTIME_SPOOL/raw/$BAS_NATIVE_FIVE_RUN_ID/logs/sdformat,dst=/home/ubuntu/.sdformat"
       -e BAS_RUNTIME_SPOOL -e CUDA_CACHE_PATH="$BAS_RUNTIME_SPOOL/caches/cuda"
       -e XDG_CACHE_HOME="$BAS_RUNTIME_SPOOL/caches/xdg")
   fi
@@ -742,7 +743,7 @@ PY
 mkdir -p "$RUN_DIR"/{logs,metrics,pcap,screenshots,plots} "$UART_DIR" "$WORK_DIR"
 if [[ "$CAPTURE_STORAGE" == tmpfs ]]; then
   python3 "$ROOT_DIR/scripts/product/runtime_storage.py" --root "$ROOT_DIR" \
-    --run-id "$RUN_ID" --spool "$BAS_RUNTIME_SPOOL" > "$RUN_DIR/logs/runtime_storage_container.json"
+    --run-id "$RUN_ID" --spool "$BAS_RUNTIME_SPOOL" --container > "$RUN_DIR/logs/runtime_storage_container.json"
 fi
 printf '%s\n' "$CPU_PARTITION_JSON" > "$RUN_DIR/logs/cpu_partition.json"
 printf '%s\n' "$NATIVE_SDK_VERIFICATION" > "$RUN_DIR/logs/native_sdk_source_verification.json"

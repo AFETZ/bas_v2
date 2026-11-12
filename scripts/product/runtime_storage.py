@@ -19,6 +19,8 @@ import tempfile
 import time
 
 MODE = 'host_tmpfs_run_v1'
+DESCRIPTOR_SCHEMA = 2
+SDFORMAT_CONTAINER_PATH = '/home/ubuntu/.sdformat'
 INITIAL = 'logs/runtime_storage_initial.json'
 MANIFEST = 'logs/runtime_storage_manifest.json'
 RECEIPT = 'logs/runtime_storage_publication.json'
@@ -108,7 +110,7 @@ def identifier(value):
 
 def validate_descriptor(value, run_id):
     """Portable original-path relationships, independent of a deleted RAM source."""
-    if (not isinstance(value, dict) or type(value.get('schema')) is not int or value['schema'] != 1
+    if (not isinstance(value, dict) or type(value.get('schema')) is not int or value['schema'] not in (1, DESCRIPTOR_SCHEMA)
             or value.get('mode') != MODE or value.get('run_id') != identifier(run_id)
             or type(value.get('owner_uid')) is not int or value['owner_uid'] < 0
             or type(value.get('owner_gid')) is not int or value['owner_gid'] < 0):
@@ -134,6 +136,8 @@ def validate_descriptor(value, run_id):
     expected = dict(raw=spool/'raw'/run_id, runtime_log_parent=spool/'controller',
         stop_request_parent=spool, drjit_cache=spool/'caches/drjit', cuda_cache=spool/'caches/cuda',
         xdg_cache=spool/'caches/xdg', gazebo_cache=spool/'caches/gz')
+    if value['schema'] >= 2:
+        expected['sdformat_log'] = spool/'raw'/run_id/'logs/sdformat'
     locations = value.get('live_paths', {})
     mount = value.get('mount', {})
     if (set(locations) != set(expected) or mount.get('filesystem') != 'tmpfs'
@@ -190,11 +194,12 @@ def prepare(root, run_id, container_name, *, shm=Path('/dev/shm'), image=None):
     raw_source = spool/'raw'/run_id
     raw_source.mkdir(parents=True)
     (raw_source/'logs').mkdir()
+    (raw_source/'logs/sdformat').mkdir()
     for name in ('controller', 'caches/drjit', 'caches/cuda', 'caches/xdg', 'caches/gz'):
         (spool/name).mkdir(parents=True, exist_ok=True)
     if image is not None and not re.fullmatch(r'sha256:[a-f0-9]{64}', image):
         raise ValueError('runtime ownership helper requires an immutable image digest')
-    value = dict(schema=1, mode=MODE, run_id=run_id, owner_uid=os.getuid(), owner_gid=os.getgid(), runtime_image=image,
+    value = dict(schema=DESCRIPTOR_SCHEMA, mode=MODE, run_id=run_id, owner_uid=os.getuid(), owner_gid=os.getgid(), runtime_image=image,
                  spool=str(spool), raw_source=str(raw_source), raw_destination=str(raw),
                  runtime_log_source=str(spool/'controller/runtime.log'),
                  runtime_log_destination=str(control/'runtime.log'),
@@ -202,7 +207,8 @@ def prepare(root, run_id, container_name, *, shm=Path('/dev/shm'), image=None):
     value['live_paths'] = {name: dict(path=str(path), mount=tmpfs_observation(path)) for name, path in {
         'raw': raw_source, 'runtime_log_parent': spool/'controller', 'stop_request_parent': spool,
         'drjit_cache': spool/'caches/drjit', 'cuda_cache': spool/'caches/cuda',
-        'xdg_cache': spool/'caches/xdg', 'gazebo_cache': spool/'caches/gz'}.items()}
+        'xdg_cache': spool/'caches/xdg', 'gazebo_cache': spool/'caches/gz',
+        'sdformat_log': raw_source/'logs/sdformat'}.items()}
     control.mkdir(parents=True, exist_ok=True)
     raw.parent.mkdir(parents=True, exist_ok=True)
     write(spool/'owner.json', value)
@@ -241,12 +247,21 @@ def validate_live(root, run_id, spool, *, allow_partial_publication=False):
     return value
 
 
-def observe_live_paths(value):
-    return dict(schema=1, mode=MODE, run_id=value['run_id'],
+def observe_live_paths(value, *, container=False):
+    observation = dict(schema=1, mode=MODE, run_id=value['run_id'],
         observed_host_monotonic_ns=time.monotonic_ns(),
         owner_sha256=sha(Path(value['spool'])/'owner.json'),
         paths={name: dict(path=row['path'], mount=tmpfs_observation(row['path']))
                for name, row in value['live_paths'].items()})
+    if container and value['schema'] >= 2:
+        source = Path(value['live_paths']['sdformat_log']['path'])
+        alias = Path(SDFORMAT_CONTAINER_PATH)
+        if alias.is_symlink() or not alias.is_dir() or not os.path.samefile(source, alias):
+            raise ValueError('sdformat log directory is not the owned runtime bind')
+        observation['sdformat_binding'] = dict(source_path=str(source), container_path=str(alias),
+            source_inode=source.stat().st_ino, container_inode=alias.stat().st_ino,
+            mount=tmpfs_observation(alias))
+    return observation
 
 
 def container_closure(value):
@@ -484,8 +499,11 @@ def _verify(run, *, allow_pending_sync=False):
                 or receipt.get('mount') != value.get('mount') or run.is_symlink()):
             raise ValueError('runtime storage request/publication identity mismatch')
         locations = value.get('live_paths', {})
-        if (set(locations) != {'raw', 'runtime_log_parent', 'stop_request_parent', 'drjit_cache',
-                'cuda_cache', 'xdg_cache', 'gazebo_cache'} or value['mount'].get('filesystem') != 'tmpfs'
+        expected_locations = {'raw', 'runtime_log_parent', 'stop_request_parent', 'drjit_cache',
+                              'cuda_cache', 'xdg_cache', 'gazebo_cache'}
+        if value['schema'] >= 2:
+            expected_locations.add('sdformat_log')
+        if (set(locations) != expected_locations or value['mount'].get('filesystem') != 'tmpfs'
                 or value['mount'].get('directory_quota_bytes') is not None
                 or any(row.get('mount', {}).get('filesystem') != 'tmpfs' for row in locations.values())):
             raise ValueError('runtime live paths were not verified on tmpfs')
@@ -503,6 +521,17 @@ def _verify(run, *, allow_pending_sync=False):
                 if (actual.get('path') != expected['path'] or any(actual.get('mount', {}).get(key) != expected['mount'][key]
                         for key in ('filesystem', 'device_major', 'device_minor', 'total_bytes'))):
                     raise ValueError('live container path was not on the prospective tmpfs mount')
+            if value['schema'] >= 2:
+                binding = observed.get('sdformat_binding', {})
+                expected = locations['sdformat_log']
+                if (binding.get('source_path') != expected['path']
+                        or binding.get('container_path') != SDFORMAT_CONTAINER_PATH
+                        or type(binding.get('source_inode')) is not int or binding['source_inode'] <= 0
+                        or binding.get('container_inode') != binding['source_inode']
+                        or type(binding.get('container_inode')) is not int
+                        or any(binding.get('mount', {}).get(key) != expected['mount'][key]
+                               for key in ('filesystem', 'device_major', 'device_minor', 'total_bytes'))):
+                    raise ValueError('sdformat container log bind was not observed on the owned tmpfs inode')
         closed = receipt.get('producers_closed', {})
         if (closed.get('verified') is not True or closed.get('container_name') != value.get('container_name')
                 or type(receipt.get('controller_returncode')) is not int
@@ -538,6 +567,8 @@ def _verify(run, *, allow_pending_sync=False):
             source_run_dir=value['raw_source'], destination_run_dir=value['raw_destination'],
             manifest_sha256=manifest['sha256'], member_count=len(members), bytes=manifest['bytes'],
             runtime_log=log, members=members, receipt_sha256=sha(run/RECEIPT), descriptor_sha256=sha(descriptor))
+        if value['schema'] >= 2:
+            result['descriptor_schema'] = value['schema']
     except (OSError, ValueError, TypeError, KeyError, IndexError, AttributeError) as error:
         result['error'] = str(error)
     return result
@@ -552,5 +583,6 @@ if __name__ == '__main__':
     parser.add_argument('--root', required=True, type=Path)
     parser.add_argument('--run-id', required=True)
     parser.add_argument('--spool', required=True, type=Path)
+    parser.add_argument('--container', action='store_true', help='also verify fixed log bind inside the runtime container')
     args = parser.parse_args()
-    print(json.dumps(observe_live_paths(validate_live(args.root, args.run_id, args.spool))))
+    print(json.dumps(observe_live_paths(validate_live(args.root, args.run_id, args.spool), container=args.container)))
