@@ -1,0 +1,567 @@
+{
+  "schema_version": 1,
+  "status": "refined_flight_series_in_progress",
+  "scope": "Five simulated UAVs and one GCS; shared terrain/radio; two MAVLink channels; software Serial and Ethernet radio-HitL.",
+  "hardware_validation": "not_performed",
+  "statistical_service_qualification": "not_claimed",
+  "diagnostic_runs": {
+    "schema": 1,
+    "scope": "Compact provenance of diagnostic runs 01/02; not the final refined 90s acceptance series. Small derived artifacts only, no raw trace rescan during acceptance.",
+    "runs": [
+      {
+        "run_id": "refined-terrain-baseline-20261112-01",
+        "revision": "36332aef7fde4856b108c375706f93ffc8ca68c5",
+        "main_source_sha256": "be1800dac2cf8851c9006dce6c656c9ba16b203b1ee270a0cd0d9d2aa48a2699",
+        "main_binary_sha256": "b325c88080eea4c7df82650f3867df3ef9ce75a4833e84ac9ec3e247f7cc4d9a",
+        "sdk_revision": "d2add90b452d600cfb4859baed8e9ea633519447",
+        "outcome": {
+          "status": "failed",
+          "runtime_status": "failed",
+          "mission_outcome": "failed",
+          "measurement_validity": "invalid",
+          "measurement_window_completed": false
+        },
+        "stop_reason": "state_coupling_deadline",
+        "state_max_age_s": 0.1,
+        "channel_state_max_age_s": 0.1,
+        "pose": {
+          "observed_snapshots": 24189,
+          "applied_snapshots": 5816,
+          "maximum_applied_pose_age_ns": 100799836,
+          "state_max_age_ns": 100000000
+        },
+        "evidence": [
+          {
+            "path": "runs/native-radio-realtime/refined-terrain-baseline-20261112-01/environment.txt",
+            "sha256": "ff2436a2a3d5e00fa8bca860dea9ab8cdc4805d7adffe2109e88992f31b35790"
+          },
+          {
+            "path": "runs/native-radio-realtime/refined-terrain-baseline-20261112-01/metrics/native_radio_stats.json",
+            "sha256": "3a8b97f304a11e4fea9237c8263d2ef588b2ef4b4a4a5ae90ca5cc13c580cb59"
+          },
+          {
+            "path": "runs/native-radio-realtime/refined-terrain-baseline-20261112-01/metrics/relay_experiment_summary.json",
+            "sha256": "6b8952e00a45bddeaf43e2e7772bf4d99be5276b64704f87286019d61eea77c8"
+          },
+          {
+            "path": "runs/native-radio-realtime/refined-terrain-baseline-20261112-01/configuration/final/manifest.json",
+            "sha256": "6b118d043ebcfe35b0d7d936658a8a07d8748f4d4371e2dc86c99be1272238d0"
+          }
+        ]
+      },
+      {
+        "run_id": "refined-terrain-format-perf-20261112-02",
+        "revision": "2f453b0e8b16bccbe55d93aff60ee0807e66ee82",
+        "main_source_sha256": "a24393791e6e12ff94c6a4a83741f0200668712e2fe0dca581abbd6963c49dd9",
+        "main_binary_sha256": "8d9a93133a91bdfa549dde580bb058b3ac5d7ac681bbb00da951a2e8915e2d59",
+        "sdk_revision": "d2add90b452d600cfb4859baed8e9ea633519447",
+        "outcome": {
+          "status": "completed",
+          "runtime_status": "completed",
+          "mission_outcome": "succeeded",
+          "measurement_validity": "valid",
+          "measurement_window_completed": true
+        },
+        "stop_reason": "sionna_ns3_process_stopped",
+        "state_max_age_s": 0.1,
+        "channel_state_max_age_s": 0.1,
+        "pose": {
+          "observed_snapshots": 31861,
+          "applied_snapshots": 7602,
+          "maximum_applied_pose_age_ns": 94027429,
+          "state_max_age_ns": 100000000
+        },
+        "evidence": [
+          {
+            "path": "runs/native-radio-realtime/refined-terrain-format-perf-20261112-02/environment.txt",
+            "sha256": "c198ea9069febe9132c4fa8052fcdfbeca6368c204bc2991eb09181c16b0e507"
+          },
+          {
+            "path": "runs/native-radio-realtime/refined-terrain-format-perf-20261112-02/metrics/native_radio_stats.json",
+            "sha256": "60d31a7e16db38c7702342a8b348c6af3fa7d6f388357ad7a731ffa65ed2909e"
+          },
+          {
+            "path": "runs/native-radio-realtime/refined-terrain-format-perf-20261112-02/metrics/relay_experiment_summary.json",
+            "sha256": "c129cd4f886c1ca575fb68ede94108463ae07f9a7b0b194cf0c2935d55907397"
+          },
+          {
+            "path": "runs/native-radio-realtime/refined-terrain-format-perf-20261112-02/configuration/final/manifest.json",
+            "sha256": "2b0d8aef0d30559aaebcdab54378e31ca045b73c7c7f6526f73439ca6173f38f"
+          }
+        ]
+      }
+    ],
+    "failure_diagnosis": {
+      "classification": "main-thread backlog during traffic recovery aged the held coherent pose beyond the unchanged 100ms guard",
+      "certainty": "Causal timeline from raw trace/worker rows; formatter alone is not proven to eliminate all recurrence.",
+      "state_max_age_ns": 100000000,
+      "observed_terminal_age_ns": 100799836,
+      "raw_event_interval": {
+        "native_start_s": 113.3,
+        "native_end_s": 113.4,
+        "event_rows": 14087,
+        "preceding_100ms_windows_approx_rows": [
+          500,
+          1100
+        ],
+        "wall_duration_ms": 151.48,
+        "lag_samples_ms": [
+          0.064,
+          28.72,
+          51.6,
+          11.5
+        ]
+      },
+      "desired_worker_jobs": {
+        "request_ids": [
+          6034,
+          6035,
+          6036,
+          6037,
+          6038,
+          6039
+        ],
+        "producer_wall_cpu_approx_ms": [
+          19,
+          20
+        ],
+        "poll_pickup_approx_ms": [
+          0.1,
+          0.5
+        ]
+      },
+      "last_completed_job": {
+        "request_id": 6039,
+        "submitted_host_ns": 863722133929626,
+        "oldest_pose_host_ns": 863722071789391,
+        "received_host_ns": 863722154143827,
+        "pose_age_at_submit_ms": 62.140235,
+        "pose_age_at_receive_ms": 82.354436
+      },
+      "pending_job": {
+        "request_id": 6040,
+        "required_source_ids": [],
+        "completed_before_guard_failure": false
+      },
+      "tracker": {
+        "fresh_pose_age_approx_ms": 10.8,
+        "typed_rejections": 0
+      },
+      "evidence": [
+        "runs/native-radio-realtime/refined-terrain-baseline-20261112-01/logs/native_radio_events.csv",
+        "runs/native-radio-realtime/refined-terrain-baseline-20261112-01/logs/native_rt_workers/results.jsonl",
+        "runs/native-radio-realtime/refined-terrain-baseline-20261112-01/logs/node_state.jsonl"
+      ],
+      "raw_scan_policy": "Numbers preserved from initial completed offline diagnosis; large raw files were not rehashed or rescanned during acceptance."
+    },
+    "formatter_fix": {
+      "commit": "1d229997181edcb98a96a7b9f204955bfbd073b4",
+      "file": "network/ns3/scratch/upstream-sionna-tap-spike.cc",
+      "function": "WifiSignalArrival",
+      "change": "ostringstream to fmt::format, preserving event content",
+      "verification": {
+        "schema": 1,
+        "passed": true,
+        "saved_rows": 19775,
+        "ieee_edges": 114,
+        "fmt_version": 80101,
+        "summaries": {
+          "baseline_ostream": {
+            "trials": 6,
+            "median_thread_cpu_ns_per_call": 426.97711054923445,
+            "median_wall_ns_per_call": 427.0410254249192
+          },
+          "candidate_fmt": {
+            "trials": 6,
+            "median_thread_cpu_ns_per_call": 160.83050410872312,
+            "median_wall_ns_per_call": 160.9020190686894
+          }
+        },
+        "cpu_speedup": 2.6548266631098376,
+        "raw_sha256": "3f4e1682a650e278a4dd0336d6c7afbed9b5b9e48f3c7b4f8dd7ca027f594c6f",
+        "inputs_sha256": "cf60b28e4a6a70e915f4b721f8f62f61e7230e4cac1506b3d9bece9fe48e02a4",
+        "scope": "Verbatim production callback source blocks, actual saved durations with native ns3 Time roundtrip and separate format-only Time fixture for IEEE edges. CPU-only; no RF, GPU, live scheduler or SLA claim."
+      },
+      "evidence": {
+        "path": "runs/control/refined-wifi-arrival-format-20261112/attempt01/result.json",
+        "sha256": "c8e24cf7785cf4646224fa711ec227928489fe273165ba81fcd36b278aa56f6f"
+      },
+      "native_build": {
+        "returncode": 0,
+        "source_sha256": "a24393791e6e12ff94c6a4a83741f0200668712e2fe0dca581abbd6963c49dd9",
+        "staged_sha256": "a24393791e6e12ff94c6a4a83741f0200668712e2fe0dca581abbd6963c49dd9",
+        "binary_sha256": "8d9a93133a91bdfa549dde580bb058b3ac5d7ac681bbb00da951a2e8915e2d59",
+        "binary_mtime_ns": 1794500888001332040,
+        "source_mtime_ns": 1794500856683692277,
+        "head": "2f453b0e8b16bccbe55d93aff60ee0807e66ee82"
+      },
+      "production_build_method": "Authorized targeted CMake rebuild of exact synchronized scratch inputs in pinned image; no fabricated bootstrap receipt."
+    },
+    "profile": {
+      "run_id": "refined-terrain-format-perf-20261112-02",
+      "main_pid": 1826889,
+      "leader_samples": 12073,
+      "inclusive_overlapping_percent": {
+        "DoCalcRxPowerSpectralDensity": 22.869,
+        "GenSpectrumChannelMatrix": 12.557,
+        "LogEvent (": 9.757,
+        "Refresh (": 7.422,
+        "WifiMonitorRx": 7.123,
+        "sin": 6.121,
+        "cos": 6.105,
+        "CollectBundle": 4.415,
+        "WifiPhyRxStart": 4.059,
+        "PhyRxStart": 4.059,
+        "PacketTraceDetails": 3.023,
+        "WifiPhyStateRxOk": 2.278,
+        "RadioMacForAddress": 1.044,
+        "CalculatePayloadSnrPer": 0.986,
+        "CalculateSnr": 0.522,
+        "WriteRadioPcap": 0.505,
+        "GetChunkSuccessRate": 0.348,
+        "exp": 0.191,
+        "ReadPhase (": 0.149
+      },
+      "aggregation_warning": "Inclusive categories overlap and must not be summed.",
+      "raw": {
+        "path": "/home/bas/bas_v2-core/runs/control/refined-terrain-format-perf-20261112-02-profile/native-pair.perf.data",
+        "bytes": 531986080,
+        "sha256": "ece602021af8bdcec5b1201ff0c9772144d66373e3024addcf02fcd8beb205a4"
+      },
+      "collector_exit": -2,
+      "collector_stop_reason": "owned_target_exit",
+      "collector_status_caveat": "Collector records perf_failed after its deliberate SIGINT at owned target exit; raw decode subsequently succeeded.",
+      "decoder_exit": 0,
+      "decoder_warning": "4 out of order events recorded",
+      "main_binary_sha256": "8d9a93133a91bdfa549dde580bb058b3ac5d7ac681bbb00da951a2e8915e2d59",
+      "worker_binary_sha256": "035109ec0b2b1c1aab5c2c47925ab0bde9f2bfe4435f61e54a0167ba81e4b254",
+      "evidence": {
+        "path": "runs/control/refined-terrain-format-perf-20261112-02-profile/profile-summary.json",
+        "sha256": "27a33c1aef38d0536ab3fe288de360e363f7b9fef241279d2f17015bb73d225d"
+      }
+    },
+    "sdk16_zero_tap_candidate": {
+      "decision": "rejected; no tracked or production changes",
+      "reason": "No reproducible improvement over the actual SDK and identical-source controls; allocation and indirect indexing offset omitted short complex sums.",
+      "original_path_axis_distribution": {
+        "2": 5,
+        "5": 4,
+        "7": 4,
+        "8": 8,
+        "10": 4,
+        "17": 69,
+        "18": 34,
+        "24": 75
+      },
+      "total_original_slots": 3747,
+      "total_active_slots": 1696,
+      "zero_fraction": 0.5473712303175874,
+      "active_median": 8,
+      "active_mean": 8.354679802955665,
+      "important_scope": "Fixed-path adapter already trims storage to the original SDK path axis; configured capacity90 is not the CPU sum length.",
+      "numerical_checks": {
+        "actual_cirs": 203,
+        "actual_cases": 3248,
+        "actual_cfr_observations": 626864,
+        "mimo_observations": 69480,
+        "edge_observations": 10422,
+        "exceptional_cases": 36,
+        "cfr_numeric_differences": 0,
+        "psd_bit_differences": 0,
+        "includes": [
+          "signed zero",
+          "subnormal coefficients",
+          "zero PSD",
+          "NaN/Inf coefficients/delay/offset/Doppler",
+          "phase overflow",
+          "exact cancellation",
+          "near-null cancellation",
+          "same-dimension changed coefficients",
+          "forward/reverse",
+          "explicit MIMO precoder"
+        ]
+      },
+      "cpu_summary_ns_per_call": {
+        "GenSpectrumChannelMatrix": {
+          "actual_sdk": {
+            "trials": 4,
+            "median_thread_cpu_ns_per_call": 3776.210472017434,
+            "median_wall_ns_per_call": 3776.781917177105
+          },
+          "extracted_baseline": {
+            "trials": 4,
+            "median_thread_cpu_ns_per_call": 3729.263577779843,
+            "median_wall_ns_per_call": 3730.1713604114384,
+            "cpu_speedup_vs_actual_sdk": 1.012588784154951
+          },
+          "exact_fused": {
+            "trials": 4,
+            "median_thread_cpu_ns_per_call": 3915.182970092221,
+            "median_wall_ns_per_call": 3916.3987852352393,
+            "cpu_speedup_vs_actual_sdk": 0.9645042136890186
+          },
+          "reassociated": {
+            "trials": 4,
+            "median_thread_cpu_ns_per_call": 3772.7907683034264,
+            "median_wall_ns_per_call": 3774.2777333426066,
+            "cpu_speedup_vs_actual_sdk": 1.0009064122354034
+          }
+        },
+        "CalcBeamformingGain": {
+          "actual_sdk": {
+            "trials": 4,
+            "median_thread_cpu_ns_per_call": 8305.535166940339,
+            "median_wall_ns_per_call": 8306.933429118773
+          },
+          "extracted_baseline": {
+            "trials": 4,
+            "median_thread_cpu_ns_per_call": 7939.1529064039405,
+            "median_wall_ns_per_call": 7949.54052545156,
+            "cpu_speedup_vs_actual_sdk": 1.0461487849970574
+          },
+          "exact_fused": {
+            "trials": 4,
+            "median_thread_cpu_ns_per_call": 8140.939874485458,
+            "median_wall_ns_per_call": 8141.975706862811,
+            "cpu_speedup_vs_actual_sdk": 1.0202182174285233
+          },
+          "reassociated": {
+            "trials": 4,
+            "median_thread_cpu_ns_per_call": 8119.102942168837,
+            "median_wall_ns_per_call": 8126.925973412512,
+            "cpu_speedup_vs_actual_sdk": 1.0229621703406682
+          }
+        }
+      },
+      "legacy_probe_variant_names": {
+        "actual_sdk": "installed SDK15",
+        "extracted_baseline": "verbatim installed method",
+        "exact_fused": "second identical control",
+        "reassociated": "zero-tap compaction candidate; no reassociation in this experiment"
+      },
+      "evidence": {
+        "path": "runs/control/refined-zero-taps-20261112/attempt03/result.json",
+        "sha256": "4b4b36b87937dd26842f71815083b142a2d38c4b184d81e8dc568a720a1a87e0"
+      }
+    }
+  },
+  "diagnostic_provenance_sha256": "3e6b91174d3eea91a79d4d4e410966e3a66269ec20aeac2e385ff997da102e8e",
+  "hitl": [
+    {
+      "result": {
+        "run_id": "acceptance-hitl-serial-20261112-02",
+        "source_commit": "bad4a8537636659736cf99708b9c63f3de42596a",
+        "verified": true,
+        "checks": {
+          "inputs": true,
+          "scenario": true,
+          "observation_window": true,
+          "native_radio": true,
+          "readonly_exchange": true,
+          "external_endpoints": true,
+          "no_bypass": true
+        },
+        "endpoints": {
+          "control": {
+            "controller_kind": "serial",
+            "endpoint_to_radio_bytes": 4596,
+            "radio_to_endpoint_bytes": 1038,
+            "io_errors": 0,
+            "reconnects": 1,
+            "serial_baud_requested": 115200,
+            "serial_baud_observed": 115200,
+            "serial_baud_observed_reason": "standard_termios_input_output_match"
+          },
+          "payload": {
+            "controller_kind": "serial",
+            "endpoint_to_radio_bytes": 2154,
+            "radio_to_endpoint_bytes": 44,
+            "io_errors": 0,
+            "reconnects": 1,
+            "serial_baud_requested": 115200,
+            "serial_baud_observed": 115200,
+            "serial_baud_observed_reason": "standard_termios_input_output_match"
+          }
+        },
+        "transport": "serial",
+        "observation_window": {
+          "clock": "host_monotonic",
+          "ended_host_monotonic_ns": 864800621890434,
+          "message_counts": {
+            "control:uav1": 24,
+            "control:uav2": 24,
+            "control:uav3": 24,
+            "control:uav4": 24,
+            "control:uav5": 24,
+            "payload:uav1": 24,
+            "payload:uav2": 24,
+            "payload:uav3": 24,
+            "payload:uav4": 24,
+            "payload:uav5": 24
+          },
+          "observed_duration_s": 20.000689982,
+          "requested_duration_s": 20.0,
+          "scope": "stationary radio-HitL observation; no flight or service-class qualification",
+          "started_host_monotonic_ns": 864780621200452,
+          "status": "completed"
+        },
+        "hardware_validation": "not_performed",
+        "readonly_no_arm": true,
+        "evidence_sha256": {
+          "runs/control/acceptance-hitl-serial-20261112-02/run.json": "768167747c36d8c67d768b7e1fc139b957a4ac9370e648edb96c4db4513092c8",
+          "runs/control/acceptance-hitl-serial-20261112-02/config.json": "814c19cfffb187c3c0d29755dc361376fa3f010daddc2a4010bb20fcc7454e9f",
+          "runs/control/acceptance-hitl-serial-20261112-02/hitl-request.json": "318f9d33bc7ca44d47d53cc85f1171e4108f2ffac1a09536321c18ecf0dd9272",
+          "runs/native-radio-realtime/acceptance-hitl-serial-20261112-02/metrics/native_radio_stats.json": "374950fdc362ffd16162aceea2c5f73aa7cc187bba1897dc4843a81646480d20",
+          "runs/native-radio-realtime/acceptance-hitl-serial-20261112-02/metrics/no_bypass_summary.json": "d4c7d0f0d7f4470d0b18a42f84e73d7a3f08ea0e39b27064670e54189f8e2054",
+          "runs/native-radio-realtime/acceptance-hitl-serial-20261112-02/metrics/scenario_summary.json": "15d911e15c6d8c244f2bffb2366a9aa6e5ab9f5d0fc848eba92f944d11e1964f",
+          "runs/control/hitl-fixture-inputs/acceptance-hitl-serial-20261112-02/attempt/collector.json": "1c4fd2f608a1d4f0d8500f68fabda8622720d8eb0310cc4b0d537a25815cd395",
+          "runs/native-radio-realtime/acceptance-hitl-serial-20261112-02/external_endpoints/control/metrics.json": "85186365a905ea498adce2add65123ef79638adcd4c27a56d1373732ce6d25f6",
+          "runs/native-radio-realtime/acceptance-hitl-serial-20261112-02/external_endpoints/payload/metrics.json": "2a711fec61367f30a0c67d985f960843928f321991b00cf74a21f77c7c7b734f"
+        }
+      },
+      "verification_sha256": "6b5dff0c656c296e8cfa47ad9026d0b85da7ac211a85de2d3ce712b4172c7410"
+    },
+    {
+      "result": {
+        "run_id": "acceptance-hitl-ethernet-20261112",
+        "source_commit": "bad4a8537636659736cf99708b9c63f3de42596a",
+        "verified": true,
+        "checks": {
+          "inputs": true,
+          "scenario": true,
+          "observation_window": true,
+          "native_radio": true,
+          "readonly_exchange": true,
+          "external_endpoints": true,
+          "no_bypass": true
+        },
+        "endpoints": {
+          "control": {
+            "controller_kind": "udp",
+            "endpoint_to_radio_bytes": 4575,
+            "radio_to_endpoint_bytes": 1038,
+            "io_errors": 0,
+            "reconnects": 1,
+            "serial_baud_requested": null,
+            "serial_baud_observed": null,
+            "serial_baud_observed_reason": null
+          },
+          "payload": {
+            "controller_kind": "tcp_client",
+            "endpoint_to_radio_bytes": 2133,
+            "radio_to_endpoint_bytes": 44,
+            "io_errors": 0,
+            "reconnects": 1,
+            "serial_baud_requested": null,
+            "serial_baud_observed": null,
+            "serial_baud_observed_reason": null
+          }
+        },
+        "transport": "ethernet",
+        "observation_window": {
+          "clock": "host_monotonic",
+          "ended_host_monotonic_ns": 864929928306882,
+          "message_counts": {
+            "control:uav1": 24,
+            "control:uav2": 24,
+            "control:uav3": 24,
+            "control:uav4": 24,
+            "control:uav5": 24,
+            "payload:uav1": 24,
+            "payload:uav2": 24,
+            "payload:uav3": 24,
+            "payload:uav4": 24,
+            "payload:uav5": 24
+          },
+          "observed_duration_s": 20.000202031,
+          "requested_duration_s": 20.0,
+          "scope": "stationary radio-HitL observation; no flight or service-class qualification",
+          "started_host_monotonic_ns": 864909928104851,
+          "status": "completed"
+        },
+        "hardware_validation": "not_performed",
+        "readonly_no_arm": true,
+        "evidence_sha256": {
+          "runs/control/acceptance-hitl-ethernet-20261112/run.json": "2ac1f7544ac058ef9692da09c14cbd946711b07f189d1553b313145045908a68",
+          "runs/control/acceptance-hitl-ethernet-20261112/config.json": "f07a06cc3d36c786cf21fea2f0fcd93bd59b52ada864b97b66278725b8e907dc",
+          "runs/control/acceptance-hitl-ethernet-20261112/hitl-request.json": "1e4b86e6f43f258588a16fea630a5e047fd5e46b33fc223a56b86af77944f029",
+          "runs/native-radio-realtime/acceptance-hitl-ethernet-20261112/metrics/native_radio_stats.json": "b64d2a2eda40469fa793883d5a09e64609792244cf0c2c230e76f591b720afee",
+          "runs/native-radio-realtime/acceptance-hitl-ethernet-20261112/metrics/no_bypass_summary.json": "351ba87163ded2becd914e272b0b7a4f1c06ef5dcb2c891022aae03b7a69da25",
+          "runs/native-radio-realtime/acceptance-hitl-ethernet-20261112/metrics/scenario_summary.json": "aed8fbf2aedb7faf4bfc9ccc4f04898e06fa94ed5e65d33b6bc4ba85a78ea26d",
+          "runs/control/hitl-fixture-inputs/acceptance-hitl-ethernet-20261112/attempt/collector.json": "38de9eb0b9a61b42143883443d4f919a4fa451b795b7d9774ef3f1a7711733b5",
+          "runs/native-radio-realtime/acceptance-hitl-ethernet-20261112/external_endpoints/control/metrics.json": "e44b4b6fb7626157bde8cb4a5522cd91845d620d903d1c5824a5ec6ec393317b",
+          "runs/native-radio-realtime/acceptance-hitl-ethernet-20261112/external_endpoints/payload/metrics.json": "0a1dd0423ed4cddbbff812b42d1f055faca1bdaeb04194448af3de7bb6bf0482"
+        }
+      },
+      "verification_sha256": "cd794818eb1c637e02e056cf1b841aee6e179c7c9ac05850a255e1d1f89f57b8"
+    }
+  ],
+  "python_tests": {
+    "result": {
+      "argv": [
+        "docker",
+        "run",
+        "--rm",
+        "--init",
+        "--network",
+        "none",
+        "--user",
+        "0:0",
+        "--name",
+        "bas-acceptance-python-suite-20261112-02",
+        "-e",
+        "PYTHONDONTWRITEBYTECODE=1",
+        "-e",
+        "PYTHONPATH=/workspace/multiagent_simulation/.external/terrain-deps:/home/ubuntu/.local/lib/python3.10/site-packages",
+        "-v",
+        "/home/bas/bas_v2-core:/workspace/multiagent_simulation",
+        "-w",
+        "/workspace/multiagent_simulation",
+        "sha256:89d78eff9914b1644a1b01b793612e9ee8b19916c5a7bf5f578ba6d8bfbfafe5",
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests",
+        "-v"
+      ],
+      "image": "sha256:89d78eff9914b1644a1b01b793612e9ee8b19916c5a7bf5f578ba6d8bfbfafe5",
+      "source_commit": "bad4a8537636659736cf99708b9c63f3de42596a",
+      "started_utc": "2026-11-12T16:45:56.051488+00:00",
+      "returncode": 0,
+      "wall_s": 59.09746480605099,
+      "log_sha256": {
+        "stdout.log": "f001f6397e71053224001680f5a32972073a6a946469843743517db94bf0baaf",
+        "stderr.log": "3aa447f077e266481255fd9fed8eb7fa40bff02f54248ece3cd4e3e159828ae9"
+      },
+      "tests": 674,
+      "test_wall_s": 53.977,
+      "terminal_summary": "OK (skipped=1)"
+    },
+    "result_sha256": "0abe92f5765c41b063c4b6cdec6f4169ec80ed15b88d1e3685b53008feefdee7"
+  },
+  "refined_series": {
+    "source_commit": "2aad891e1ab2dacc208c63d81c4c9ea55e3db74f",
+    "duration_s": 90,
+    "seed": 1,
+    "rng_runs": [
+      1,
+      2,
+      3
+    ],
+    "batches": [
+      "refined-baseline-20261112-a",
+      "refined-source-20261112-a"
+    ],
+    "fail_fast": true,
+    "attempts": []
+  },
+  "public_dependency_archive": {
+    "url": "https://github.com/AFETZ/bas_v2/releases/download/runtime-dependencies-20261110/native-runtime-wheels-20261110.tar",
+    "bytes": 889845760,
+    "sha256": "7a5be95a6036296f32193dc55bc99ae320b94ba0b695d68e8ecdd2b26cf34dd5",
+    "github_digest_verified": true,
+    "unauthenticated_http_status": 200
+  }
+}
