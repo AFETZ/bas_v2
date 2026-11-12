@@ -770,6 +770,142 @@ capture_effective_configuration() {
             stream.write('\npayload_journal_mode=bounded_async_jsonl_v1\n')
         return raw, summary, path, metadata_path, metadata
 
+    def native_library_evidence(self):
+        from scripts.product import native_library_identity as identity
+        raw, summary = self.qualified_source_run()
+        run_dir = '/workspace/runs/' + raw.name
+        files = {name: dict(path=path, bytes=1000, sha256=digest * 64, device_major=8,
+                           device_minor=1, inode=inode, mtime_ns=10, ctime_ns=11)
+                 for name, path, digest, inode in (
+                     ('executable', '/sdk/native-main', 'a', 20),
+                     ('wifi', '/sdk/libns3.48-wifi-default.so', 'b', 30))}
+        expected = dict(schema_version=1, mode=identity.MODE, run_id=raw.name, run_dir=run_dir,
+                        prepared_host_monotonic_ns=100, files=files)
+        identity.write_new(raw / identity.EXPECTED, expected)
+        maps = '\n'.join(f'{1000+i*100:x}-{1100+i*100:x} r-xp 00000000 08:01 {row["inode"]} {row["path"]}'
+                         for i, row in enumerate(files.values())).encode() + b'\n'
+        (raw / identity.MAPS).write_bytes(maps)
+        process = dict(pid=123, start_ticks=100, uid=0, executable=files['executable']['path'],
+                       argv=[files['executable']['path'], f'--statsFile={run_dir}/metrics/native_radio_stats.json'])
+        observed = dict(schema_version=1, mode=identity.MODE, run_id=raw.name, status='observed', files=files,
+            expected_sha256=identity.digest(raw / identity.EXPECTED), process_before=process, process_after=process,
+            captured_host_monotonic_ns=200, maps=dict(path=identity.MAPS, bytes=len(maps), sha256=hashlib.sha256(maps).hexdigest()))
+        identity.write_new(raw / identity.OBSERVED, observed)
+        closed = dict(schema_version=1, mode=identity.MODE, run_id=raw.name, status='closed', files=files,
+            expected_sha256=identity.digest(raw / identity.EXPECTED), observed_sha256=identity.digest(raw / identity.OBSERVED),
+            closed_host_monotonic_ns=400)
+        identity.write_new(raw / identity.CLOSED, closed)
+        (raw / 'metrics/relay_experiment_summary.json').write_text(json.dumps(dict(measurement_start_host_monotonic_ns=300)))
+        (raw / 'environment.txt').write_text(f'native_library_identity_mode={identity.MODE}\nnative_binary_sha256={"a"*64}\n')
+        relative = 'inputs/native_library_expected/value.json'
+        for stage in ('initial', 'final'):
+            directory = raw / 'configuration' / stage
+            (directory / relative).parent.mkdir(parents=True, exist_ok=True)
+            data = (raw / identity.EXPECTED).read_bytes()
+            (directory / relative).write_bytes(data)
+            (directory / 'manifest.json').write_text(json.dumps(dict(stage=stage, files=[dict(
+                label='native_library_expected', status='observed', kind='configured_input', copied_path=relative, bytes=len(data))])))
+        return raw, summary, identity
+
+    def test_native_loaded_library_gate_is_portable_and_legacy_is_explicit(self):
+        raw, summary, identity = self.native_library_evidence()
+        proof = bas.recorded_outcome(raw, 0, summary)['native_library_verification']
+        self.assertTrue(proof['passed'], proof)
+        self.assertEqual(proof['wifi_sha256'], 'b' * 64)
+        self.assertEqual(proof, identity.verify(raw))
+        absent = self.root / 'legacy'; absent.mkdir()
+        self.assertEqual(bas.native_library_verification(absent), dict(status='not_requested_legacy', passed=None))
+        (absent / 'environment.txt').write_text(f'native_library_identity_mode={identity.MODE}\n')
+        self.assertFalse(bas.native_library_verification(absent)['passed'])
+
+    def test_native_loaded_library_missing_capture_frozen_input_or_closed_proof_fails(self):
+        raw, summary, identity = self.native_library_evidence()
+        for name in (identity.EXPECTED, identity.OBSERVED, identity.CLOSED, identity.MAPS,
+                     'configuration/initial/inputs/native_library_expected/value.json',
+                     'configuration/final/inputs/native_library_expected/value.json', 'environment.txt'):
+            path = raw / name; original = path.read_bytes(); path.unlink()
+            with self.subTest(missing=name):
+                result = bas.recorded_outcome(raw, 0, summary)
+                self.assertFalse(result['native_library_verification']['passed'])
+                self.assertEqual(result['runtime_status'], 'failed')
+                self.assertEqual(result['measurement_validity'], 'invalid')
+                self.assertIn('native_library_identity_invalid', result['runtime_verification_errors'])
+            path.write_bytes(original)
+
+    def test_native_maps_hash_inode_deleted_duplicate_and_missing_execute_cannot_pass(self):
+        raw, summary, identity = self.native_library_evidence()
+        path = raw / identity.MAPS; original = path.read_bytes()
+        observed_path = raw / identity.OBSERVED; observed_original = observed_path.read_bytes()
+        closed_path = raw / identity.CLOSED; closed_original = closed_path.read_bytes()
+        candidates = (original + b'malformed\n', original.replace(b' 30 ', b' 31 '),
+                      original.replace(b'wifi-default.so', b'wifi-default.so (deleted)'),
+                      original.replace(b'r-xp', b'r--p'),
+                      original + b'100-200 r-xp 00000000 08:01 40 /other/libns3.48-wifi-default.so\n')
+        for candidate in candidates:
+            path.write_bytes(candidate)
+            # Rehash the receipt to test map semantics, beyond a stale digest.
+            observed = json.loads(observed_original)
+            observed['maps'].update(bytes=len(candidate), sha256=hashlib.sha256(candidate).hexdigest())
+            observed_path.write_text(json.dumps(observed))
+            closed = json.loads(closed_original); closed['observed_sha256'] = identity.digest(observed_path)
+            closed_path.write_text(json.dumps(closed))
+            self.assertFalse(identity.verify(raw)['passed'], candidate)
+        path.write_bytes(original + b'\n')
+        observed_path.write_bytes(observed_original); closed_path.write_bytes(closed_original)
+        self.assertFalse(identity.verify(raw)['passed'])
+
+    def test_native_process_reuse_foreign_run_and_late_capture_fail(self):
+        raw, summary, identity = self.native_library_evidence()
+        path = raw / identity.OBSERVED; original = json.loads(path.read_bytes())
+        closed_path = raw / identity.CLOSED; closed_original = json.loads(closed_path.read_bytes())
+        for changes in (dict(process_after=dict(original['process_after'], start_ticks=101)),
+                        dict(process_before=dict(original['process_before'], pid=True)),
+                        dict(process_before=dict(original['process_before'], argv=['/sdk/native-main', '--statsFile=/foreign'])),
+                        dict(captured_host_monotonic_ns=301), dict(captured_host_monotonic_ns=float('inf')),
+                        dict(run_id='foreign'), dict(status='failed')):
+            path.write_text(json.dumps(dict(original, **changes)))
+            closed_path.write_text(json.dumps(dict(closed_original, observed_sha256=identity.digest(path))))
+            self.assertFalse(identity.verify(raw)['passed'], changes)
+
+    def test_analyzer_reuses_native_library_proof_and_rejects_missing_closed_evidence(self):
+        from scripts.product.analyze_relay_experiment import analyze_run
+        raw, summary, identity = self.native_library_evidence()
+        output = self.root / 'library-analysis'
+        result = analyze_run(raw, output, plots=False, live_export=False)
+        self.assertEqual(result['native_library_verification'], identity.verify(raw))
+        self.assertTrue(result['native_library_verification']['passed'])
+        (raw / identity.CLOSED).unlink()
+        result = analyze_run(raw, output, plots=False, live_export=False)
+        self.assertFalse(result['native_library_verification']['passed'])
+        self.assertIn('native loaded library identity is not verified', result['data_quality_errors'])
+
+    @unittest.skipUnless(sys.platform.startswith('linux') and Path('/lib/x86_64-linux-gnu/libm.so.6').is_file(),
+                         'actual proc maps capture needs Linux libm fixture')
+    def test_native_library_producer_reads_actual_process_mapping_and_rejects_replaced_file(self):
+        from scripts.product import native_library_identity as identity
+        raw = self.root / 'loaded-library'; (raw / 'logs').mkdir(parents=True)
+        wifi = self.root / 'libns3.48-wifi-default.so'
+        shutil.copyfile('/lib/x86_64-linux-gnu/libm.so.6', wifi)
+        # This is a real mapping/identity contract test, not an ns-3 physics test.
+        child = subprocess.Popen([sys.executable, '-c',
+            'import ctypes,sys,time; library=ctypes.CDLL(sys.argv[1]); time.sleep(20)', str(wifi),
+            f'--statsFile={raw}/metrics/native_radio_stats.json'])
+        try:
+            expected = identity.prepare(raw, sys.executable, wifi)
+            observed = identity.observe(raw, child.pid, 5)
+            self.assertEqual(observed['files'], expected['files'])
+            self.assertEqual(observed['process_before']['pid'], child.pid)
+            self.assertIn(str(wifi).encode(), (raw / identity.MAPS).read_bytes())
+        finally:
+            child.terminate(); child.wait(timeout=5)
+        closed = identity.close(raw)
+        self.assertEqual(closed['files'], expected['files'])
+        # Replacement after closure is detected by a fresh closure attempt.
+        (raw / identity.CLOSED).unlink()
+        wifi.unlink(); wifi.write_bytes(b'different library')
+        with self.assertRaisesRegex(ValueError, 'changed'):
+            identity.close(raw)
+
     def test_actual_closed_payload_writer_is_verified_and_legacy_is_unrequested(self):
         raw, summary, path, metadata_path, metadata = self.payload_journal_evidence()
         original = path.read_bytes()

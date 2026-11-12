@@ -617,6 +617,11 @@ def payload_journal_verification(raw):
     return result
 
 
+def native_library_verification(raw):
+    from scripts.product.native_library_identity import verify
+    return verify(raw)
+
+
 def radio_bench_summary(raw, code, config, folder):
     """Qualify existing non-flight evidence, never physical hardware or flight success."""
     checks = dict(inputs=False, scenario=False, observation_window=False, native_radio=False,
@@ -768,6 +773,10 @@ def recorded_outcome(raw, code, summary, *, source_configured=False):
     result['payload_journal_verification'] = payload_journal_verification(raw)
     if result['payload_journal_verification']['passed'] is False:
         verification_errors.append('payload_journal_invalid')
+        result['measurement_validity'] = 'invalid'
+    result['native_library_verification'] = native_library_verification(raw)
+    if result['native_library_verification']['passed'] is False:
+        verification_errors.append('native_library_identity_invalid')
         result['measurement_validity'] = 'invalid'
     if (not verification_errors and result['runtime_status'] == 'completed'
             and result['measurement_validity'] == 'valid'):
