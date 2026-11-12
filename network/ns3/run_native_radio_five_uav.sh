@@ -939,6 +939,9 @@ PY
     "$CARRIER_HZ" "$WIFI_CHANNEL_NUMBER" "$WIFI_CHANNEL_WIDTH_MHZ" "$WIFI_DATA_MODE" "$WIFI_CONTROL_MODE"
   printf 'phy_rate_bps=%s\ntx_power_w=%s\nwifi_ssid=%s\n' "$PHY_RATE_BPS" "$TX_POWER_W" "$WIFI_SSID"
   printf 'event_logging=%s\nactive_uart_channels=%s\nlatency_mode=%s\n' "$EVENT_LOGGING" "$ACTIVE_UART_CHANNELS" "$LATENCY_MODE"
+  if [[ "$SCENARIO_MODE" == relay_experiment && "$EVENT_LOGGING" == batched_trace && ",$ACTIVE_UART_CHANNELS," == *,payload,* ]]; then
+    printf 'payload_journal_mode=bounded_async_jsonl_v1\n'
+  fi
   printf 'native_duration_s=%s\nservice_duration_s=%s\nruntime_duration_budget=%s\n' \
     "$NATIVE_DURATION_S" "$SERVICE_DURATION_S" "$RUNTIME_BUDGET_JSON"
   printf 'native_capture_storage_requested=%s\nnative_capture_storage_effective=%s\n' "$CAPTURE_STORAGE" "$CAPTURE_STORAGE"

@@ -552,6 +552,10 @@ def analyze_payload_lineage(run_dir: Path, start_ns=None, end_ns=None, *, comple
     """Audit existing BSF1/MAVLink observations; never substitute ACKs or RF power."""
     run_dir = Path(run_dir)
     errors = []
+    from bas import payload_journal_verification
+    writer_proof = payload_journal_verification(run_dir)
+    if writer_proof['passed'] is False:
+        errors.append('payload async writer journal is not verified closed')
     ground = run_dir / 'payload/logs/scenario_events.jsonl'
     paths = [ground, *sorted((run_dir / 'logs').glob('payload_uart_uav*.jsonl'))]
     initial_files={path:(path.stat().st_size,path.stat().st_mtime_ns) for path in paths if path.is_file()}
@@ -569,6 +573,7 @@ def analyze_payload_lineage(run_dir: Path, start_ns=None, end_ns=None, *, comple
         minimum_distinct_seeds=ENGINEERING_DELIVERY_V1['minimum_distinct_rng_seeds'],
         minimum_samples_per_stream=ENGINEERING_DELIVERY_V1['minimum_samples_per_uav'],
         records=[], per_stream={}, audit_errors=errors,trace_files=[])
+    result['writer_verification'] = writer_proof
     if not any(path == ground.relative_to(run_dir).as_posix() for path, _epoch in sessions):
         logging=read_json(run_dir/'metrics/payload_channel.json').get('application_lineage',{})
         if isinstance(logging,dict) and logging.get('event_logging')=='metrics_only':

@@ -751,6 +751,88 @@ capture_effective_configuration() {
         audit_path.write_text(json.dumps(audit), encoding='utf-8')
         return raw, summary, path, audit_path, audit
 
+    def payload_journal_evidence(self):
+        from network.jsonl import AsyncJsonlWriter
+        raw, summary = self.qualified_source_run()
+        path = raw / 'payload/logs/scenario_events.jsonl'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        writer = AsyncJsonlWriter(path)
+        for event in ('payload_lineage_started', 'payload_lineage_closed'):
+            writer.write(json.dumps(dict(event=event, journal_mode='bounded_async_jsonl_v1',
+                run_id=raw.name, observed_host_monotonic_ns=123456789)))
+        writer.close()
+        metadata = dict(schema_version=1, channel='payload', status='closed', application_lineage=dict(
+            event_logging='batched_trace', status='gcs_boundary_trace_closed',
+            path='payload/logs/scenario_events.jsonl', journal_mode='bounded_async_jsonl_v1', writer=writer.snapshot()))
+        metadata_path = raw / 'metrics/payload_channel.json'
+        metadata_path.write_text(json.dumps(metadata))
+        with (raw / 'environment.txt').open('a') as stream:
+            stream.write('\npayload_journal_mode=bounded_async_jsonl_v1\n')
+        return raw, summary, path, metadata_path, metadata
+
+    def test_actual_closed_payload_writer_is_verified_and_legacy_is_unrequested(self):
+        raw, summary, path, metadata_path, metadata = self.payload_journal_evidence()
+        original = path.read_bytes()
+        result = bas.recorded_outcome(raw, 0, summary)
+        proof = result['payload_journal_verification']
+        self.assertTrue(proof['passed'], proof)
+        self.assertEqual((proof['rows'], proof['bytes'], proof['sha256']),
+                         (2, len(original), hashlib.sha256(original).hexdigest()))
+        self.assertEqual(result['measurement_validity'], 'valid')
+        self.assertEqual(path.read_bytes(), original)
+        (raw / 'environment.txt').write_text('')
+        metadata_path.unlink()
+        # An async first-row marker also prevents a missing export becoming legacy.
+        self.assertFalse(bas.payload_journal_verification(raw)['passed'])
+        path.write_text('{"event":"legacy"}\n')
+        self.assertEqual(bas.payload_journal_verification(raw), dict(status='not_requested_legacy', passed=None))
+
+    def test_advertised_payload_writer_requires_metadata_and_file(self):
+        raw, summary, path, metadata_path, metadata = self.payload_journal_evidence()
+        for missing in (path, metadata_path):
+            original = missing.read_bytes(); missing.unlink()
+            result = bas.recorded_outcome(raw, 0, summary)
+            self.assertFalse(result['payload_journal_verification']['passed'])
+            self.assertIn('payload_journal_invalid', result['runtime_verification_errors'])
+            self.assertEqual(result['measurement_validity'], 'invalid')
+            missing.write_bytes(original)
+        (raw / 'environment.txt').write_text('payload_journal_mode=unknown\n')
+        self.assertFalse(bas.payload_journal_verification(raw)['passed'])
+
+    def test_payload_writer_error_undrained_and_foreign_identity_cannot_pass(self):
+        raw, summary, path, metadata_path, original = self.payload_journal_evidence()
+        writer = original['application_lineage']['writer']
+        for changes in (dict(closed=False), dict(drained=False), dict(listener_alive=True),
+                        dict(error_count=1), dict(queue_depth=1), dict(rejected=1),
+                        dict(accepted=writer['written'] + 1), dict(accepted_bytes=writer['written_bytes'] + 1),
+                        dict(writer=dict(writer['writer'], pid=writer['producer']['pid'] + 1)),
+                        dict(path='/different-run/payload/logs/scenario_events.jsonl')):
+            changed = copy.deepcopy(original)
+            changed['application_lineage']['writer'].update(changes)
+            metadata_path.write_text(json.dumps(changed))
+            self.assertFalse(bas.payload_journal_verification(raw)['passed'], changes)
+        changed = copy.deepcopy(original); changed['close_error'] = 'drain failed'
+        metadata_path.write_text(json.dumps(changed))
+        self.assertFalse(bas.payload_journal_verification(raw)['passed'])
+
+    def test_payload_raw_tamper_missing_tail_and_extra_record_fail_ledger(self):
+        raw, summary, path, metadata_path, metadata = self.payload_journal_evidence()
+        original = path.read_bytes()
+        for data in (original[:-1], original.replace(b'123456789', b'123456788', 1), original + b'{}\n'):
+            path.write_bytes(data)
+            self.assertFalse(bas.payload_journal_verification(raw)['passed'])
+
+    def test_payload_analyzer_reuses_closed_writer_proof_and_reports_tampering(self):
+        from scripts.product.analyze_relay_experiment import analyze_payload_lineage
+        raw, summary, path, metadata_path, metadata = self.payload_journal_evidence()
+        result = analyze_payload_lineage(raw)
+        self.assertEqual(result['writer_verification'], bas.payload_journal_verification(raw))
+        self.assertTrue(result['writer_verification']['passed'])
+        path.write_bytes(path.read_bytes() + b'{}\n')
+        result = analyze_payload_lineage(raw)
+        self.assertFalse(result['writer_verification']['passed'])
+        self.assertIn('payload async writer journal is not verified closed', result['audit_errors'])
+
     def test_actual_closed_position_writer_is_verified_without_changing_pose_epochs(self):
         raw, summary, path, audit_path, audit = self.position_journal_evidence()
         original = (raw / 'logs/node_state.json').read_bytes(), path.read_bytes(), audit_path.read_bytes()

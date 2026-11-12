@@ -532,6 +532,91 @@ def node_state_journal_verification(raw):
     return result
 
 
+def payload_journal_verification(raw):
+    """Bind the optional async payload writer's closed ledger to its original file."""
+    raw = Path(raw)
+    metadata_path, path = raw / 'metrics/payload_channel.json', raw / 'payload/logs/scenario_events.jsonl'
+    result = dict(status='invalid_payload_journal', passed=False)
+    try:
+        def read(path):
+            return json.loads(path.read_text(encoding='utf-8'), object_pairs_hook=unique_json_fields,
+                              parse_constant=reject_json_constant)
+        environment = raw / 'environment.txt'
+        declared = re.search(r'^payload_journal_mode=(.+)$',
+            environment.read_text(encoding='utf-8') if environment.exists() else '', re.M)
+        metadata = read(metadata_path) if metadata_path.is_file() else {}
+        if not isinstance(metadata, dict):
+            raise ValueError('payload channel metadata must be an object')
+        lineage = metadata.get('application_lineage', {})
+        if not isinstance(lineage, dict):
+            raise ValueError('payload lineage metadata must be an object')
+        raw_mode = None
+        if path.is_file():
+            with path.open('rb') as stream:
+                first = stream.readline(65537)
+            if len(first) <= 65536:
+                try:
+                    row = json.loads(first)
+                    raw_mode = row.get('journal_mode') if isinstance(row, dict) else None
+                except (ValueError, UnicodeError):
+                    pass  # Legacy raw syntax is audited by the packet analyzer.
+        if not declared and 'journal_mode' not in lineage and raw_mode is None:
+            return dict(status='not_requested_legacy', passed=None)
+        if declared and declared.group(1).strip() != 'bounded_async_jsonl_v1':
+            raise ValueError('unsupported advertised payload journal mode')
+        audit = lineage.get('writer')
+        if not isinstance(audit, dict):
+            raise ValueError('payload writer audit is missing')
+        producer, writer = audit.get('producer'), audit.get('writer')
+        if not isinstance(producer, dict) or not isinstance(writer, dict):
+            raise ValueError('payload writer process and thread identity is missing')
+        parts = PurePosixPath(audit['path'].replace('\\', '/')).parts if isinstance(audit.get('path'), str) else ()
+        checks = dict(
+            metadata=(type(metadata.get('schema_version')) is int and metadata['schema_version'] == 1
+                and metadata.get('channel') == 'payload' and metadata.get('status') == 'closed'
+                and metadata.get('close_error') is None
+                and lineage.get('journal_mode') == 'bounded_async_jsonl_v1'
+                and raw_mode in (None, 'bounded_async_jsonl_v1')
+                and lineage.get('event_logging') == 'batched_trace'
+                and lineage.get('status') == 'gcs_boundary_trace_closed'
+                and lineage.get('path') == 'payload/logs/scenario_events.jsonl'),
+            closed=(audit.get('closed') is True and audit.get('drained') is True and audit.get('listener_alive') is False
+                and all(type(audit.get(key)) is int and audit[key] == 0 for key in ('queue_depth', 'failed', 'rejected', 'error_count'))
+                and audit.get('first_exception') is None and audit.get('last_exception') is None
+                and audit.get('unwritten_records') == [] and audit.get('in_progress_record') is None
+                and audit.get('rejected_record') is None),
+            ledger=(all(type(audit.get(key)) is int and audit[key] > 0
+                for key in ('accepted', 'written', 'accepted_bytes', 'written_bytes', 'capacity', 'max_record_bytes'))
+                and audit.get('accepted') == audit.get('written') and audit.get('accepted_bytes') == audit.get('written_bytes')
+                and audit['capacity'] <= 512 and audit['max_record_bytes'] <= 65536
+                and type(audit.get('max_queue')) is int and 0 <= audit['max_queue'] <= audit['capacity']),
+            identity=(all(type(item.get(key)) is int and item[key] > 0
+                for item in (producer, writer) for key in ('pid', 'thread_id', 'native_thread_id'))
+                and producer['pid'] == writer['pid'] and producer['native_thread_id'] != writer['native_thread_id']
+                and '..' not in parts and parts[-4:] == (raw.name, 'payload', 'logs', 'scenario_events.jsonl')))
+        if not path.resolve().is_relative_to(raw.resolve()):
+            raise ValueError('payload journal is outside its run')
+        before = path.stat()
+        digest, count, size, largest = hashlib.sha256(), 0, 0, 0
+        with path.open('rb') as stream:
+            while line := stream.readline(65537):
+                if len(line) > 65536 or not line.endswith(b'\n'):
+                    raise ValueError('payload journal record is oversized or incomplete')
+                digest.update(line); count += 1; size += len(line); largest = max(largest, len(line))
+        after = path.stat()
+        checks['file'] = (checks['ledger'] and largest <= audit['max_record_bytes']
+            and count == audit.get('written') and size == audit.get('written_bytes')
+            and digest.hexdigest() == audit.get('sha256')
+            and (before.st_size, before.st_mtime_ns) == (after.st_size, after.st_mtime_ns) and size == after.st_size)
+        result.update(checks=checks, rows=count, bytes=size, sha256=digest.hexdigest(),
+                      path='payload/logs/scenario_events.jsonl', audit_path='metrics/payload_channel.json')
+        if all(checks.values()):
+            result.update(status='verified_closed_payload_journal', passed=True)
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        result['error'] = str(error)
+    return result
+
+
 def radio_bench_summary(raw, code, config, folder):
     """Qualify existing non-flight evidence, never physical hardware or flight success."""
     checks = dict(inputs=False, scenario=False, observation_window=False, native_radio=False,
@@ -679,6 +764,10 @@ def recorded_outcome(raw, code, summary, *, source_configured=False):
     result['node_state_journal_verification'] = node_state_journal_verification(raw)
     if result['node_state_journal_verification']['passed'] is False:
         verification_errors.append('node_state_journal_invalid')
+        result['measurement_validity'] = 'invalid'
+    result['payload_journal_verification'] = payload_journal_verification(raw)
+    if result['payload_journal_verification']['passed'] is False:
+        verification_errors.append('payload_journal_invalid')
         result['measurement_validity'] = 'invalid'
     if (not verification_errors and result['runtime_status'] == 'completed'
             and result['measurement_validity'] == 'valid'):
