@@ -64,6 +64,7 @@ class Events:
         except BaseException as exc:
             error = exc
         audit = dict(self.writer.snapshot(), schema=1, journal_mode='bounded_async_jsonl_v1',
+                     journal_clock_domain='host_monotonic',
                      run_id=self.run_id, node_id=self.uav_id, uav_id=self.uav_id,
                      status='failed' if error or self.producer_error else 'closed',
                      producer_error=self.producer_error,
@@ -78,8 +79,9 @@ class Events:
         return audit
 
     def __call__(self, event: str, *, command: Command | None = None, **fields):
+        journal_ns = time.monotonic_ns()
         value = dict(run_id=self.run_id, event=event, stage=event,
-                     host_monotonic_ns=time.monotonic_ns(), clock_domain="host_monotonic",
+                     host_monotonic_ns=journal_ns, clock_domain="host_monotonic",
                      source_sim_time_s=None, uav_id=self.uav_id, node_id=self.uav_id,
                      journal_mode='bounded_async_jsonl_v1')
         if command is not None:
@@ -95,6 +97,11 @@ class Events:
                          target_frame=command.target_frame)
         value.update(fields)
         try:
+            if {'journal_clock_domain', 'journal_host_monotonic_ns'} & fields.keys():
+                raise ValueError('journal clock fields are producer-owned')
+            # Event clock/time fields may describe an earlier observation or
+            # autopilot time. Keep their meaning separate from emission time.
+            value.update(journal_clock_domain='host_monotonic', journal_host_monotonic_ns=journal_ns)
             # Encode now: the queue owns immutable producer-time bytes, never a
             # mutable fields dictionary or a timestamp assigned on disk write.
             self.writer.write(json.dumps(value, separators=(",", ":"), allow_nan=False))
