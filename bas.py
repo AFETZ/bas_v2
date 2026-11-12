@@ -666,6 +666,7 @@ def coordination_journal_verification(raw):
             checks = dict(
                 metadata=(type(audit.get('schema')) is int and audit['schema'] == 1
                     and audit.get('journal_mode') == 'bounded_async_jsonl_v1'
+                    and audit.get('journal_clock_domain') == 'host_monotonic'
                     and audit.get('run_id') == raw.name and type(audit.get('node_id')) is int
                     and audit['node_id'] == node_id and type(audit.get('uav_id')) is int
                     and audit['uav_id'] == node_id and audit.get('status') == 'closed'
@@ -695,7 +696,9 @@ def coordination_journal_verification(raw):
                         and row.get('journal_mode') == 'bounded_async_jsonl_v1' and row.get('run_id') == raw.name
                         and type(row.get('node_id')) is int and row['node_id'] == node_id
                         and type(row.get('host_monotonic_ns')) is int and row['host_monotonic_ns'] > 0
-                        and row.get('clock_domain') == 'host_monotonic')
+                        and row.get('journal_clock_domain') == 'host_monotonic'
+                        and type(row.get('journal_host_monotonic_ns')) is int
+                        and row['journal_host_monotonic_ns'] > 0)
                     digest.update(line); rows += 1; size += len(line); largest = max(largest, len(line))
             after = path.stat()
             checks['file'] = (checks['ledger'] and row_identity and largest <= audit['max_record_bytes']

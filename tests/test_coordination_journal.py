@@ -48,6 +48,21 @@ class CoordinationJournalTests(unittest.TestCase):
             self.run = Path(self.temporary.name)
         self.path = self.run / 'logs/coordination_gcs.jsonl'
 
+    def test_caller_cannot_forge_the_journal_clock_or_timestamp(self):
+        for index, fields in enumerate((dict(journal_clock_domain='autopilot_time_boot_ms'),
+                                       dict(journal_host_monotonic_ns=1))):
+            with self.subTest(fields=fields):
+                events = Events(self.run/f'logs/rejected-{index}.jsonl', self.run.name, 0)
+                try:
+                    with self.assertRaisesRegex(ValueError, 'journal clock fields are producer-owned'):
+                        events('urban_position_telemetry', **fields)
+                finally:
+                    audit = events.close()
+                self.assertEqual(audit['status'], 'failed')
+                self.assertIn('journal clock fields are producer-owned', audit['producer_error'])
+                self.assertEqual((audit['accepted'], audit['written']), (0, 0))
+                self.assertTrue(audit['closed'])
+
     def test_five_actual_udp_probes_complete_while_real_journal_write_is_blocked(self):
         peers = []
         for i in range(1, 6):
@@ -283,6 +298,77 @@ class CoordinationJournalVerificationTests(unittest.TestCase):
         self.assertEqual(proof['expected_node_ids'], list(range(6)))
         self.assertEqual(set(proof['journals']), set(map(str, range(6))))
         self.assertTrue(all(row['rows'] == 2 for row in proof['journals'].values()))
+
+    def test_actual_g1_urban_source_clock_survives_async_close_and_verification(self):
+        fixture = Path(__file__).parent/'fixtures/coordination/urban-position-telemetry-g1.json'
+        source = json.loads(fixture.read_text())['row']
+        path = self.run/'logs/coordination_gcs.jsonl'
+        path.unlink()
+        path.with_name(path.name+'.writer.json').unlink()
+        events = Events(path, self.run.name, 0)
+        fields = {key: value for key, value in source.items()
+                  if key not in ('run_id', 'event', 'stage', 'node_id', 'journal_mode')}
+        before = time.monotonic_ns()
+        try:
+            events(source['event'], **fields)
+            # Other existing callers pass a host event timestamp captured before
+            # emission; it remains distinct from the journal's own timestamp.
+            events('phase_requested', host_monotonic_ns=1, phase='fixture')
+        finally:
+            audit = events.close()
+        after = time.monotonic_ns()
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        self.assertTrue(bas.coordination_journal_verification(self.run)['passed'])
+        self.assertEqual({key: rows[0][key] for key in source if key != 'run_id'},
+                         {key: value for key, value in source.items() if key != 'run_id'})
+        self.assertEqual(rows[1]['host_monotonic_ns'], 1)
+        self.assertEqual(rows[1]['clock_domain'], 'host_monotonic')
+        self.assertTrue(all(row['journal_clock_domain'] == 'host_monotonic' for row in rows))
+        self.assertTrue(all(before <= row['journal_host_monotonic_ns'] <= after for row in rows))
+        self.assertLessEqual(rows[0]['journal_host_monotonic_ns'], rows[1]['journal_host_monotonic_ns'])
+        self.assertEqual(audit['journal_clock_domain'], 'host_monotonic')
+        self.assertEqual((audit['accepted'], audit['written']), (2, 2))
+        self.assertEqual(audit['sha256'], hashlib.sha256(path.read_bytes()).hexdigest())
+        self.assertTrue(audit['drained'])
+
+    def test_missing_unknown_or_malformed_journal_clock_cannot_pass_rehashed_ledger(self):
+        original_rows = self.path.read_bytes()
+        original_audit = json.loads(self.audit_path.read_text())
+        missing = object()
+        for key, values in (('journal_clock_domain', (missing, None, 'unknown', 'autopilot_time_boot_ms')),
+                            ('journal_host_monotonic_ns', (missing, None, True, 0, -1, '123'))):
+            for value in values:
+                with self.subTest(key=key, value=value):
+                    rows = [json.loads(line) for line in original_rows.splitlines()]
+                    if value is missing:
+                        rows[0].pop(key, None)
+                    else:
+                        rows[0][key] = value
+                    content = ''.join(json.dumps(row, separators=(',', ':'))+'\n' for row in rows).encode()
+                    self.path.write_bytes(content)
+                    audit = dict(original_audit, sha256=hashlib.sha256(content).hexdigest(),
+                                 accepted_bytes=len(content), written_bytes=len(content))
+                    self.audit_path.write_text(json.dumps(audit))
+                    proof = bas.coordination_journal_verification(self.run)
+                    self.assertFalse(proof['passed'], proof)
+                    self.assertFalse(proof['journals']['5']['checks']['file'])
+        self.path.write_bytes(original_rows)
+        self.audit_path.write_text(json.dumps(original_audit))
+
+    def test_missing_or_foreign_journal_audit_clock_is_invalid(self):
+        original = json.loads(self.audit_path.read_text())
+        for value in (None, 'unknown', 'autopilot_time_boot_ms'):
+            with self.subTest(value=value):
+                audit = dict(original)
+                if value is None:
+                    audit.pop('journal_clock_domain', None)
+                else:
+                    audit['journal_clock_domain'] = value
+                self.audit_path.write_text(json.dumps(audit))
+                proof = bas.coordination_journal_verification(self.run)
+                self.assertFalse(proof['passed'], proof)
+                self.assertFalse(proof['journals']['5']['checks']['metadata'])
+        self.audit_path.write_text(json.dumps(original))
 
     def test_missing_endpoint_or_sidecar_never_passes(self):
         for path in (self.path, self.audit_path):
