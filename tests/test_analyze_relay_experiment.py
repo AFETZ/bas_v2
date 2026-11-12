@@ -64,8 +64,8 @@ class DeliveryAnalysisTests(unittest.TestCase):
                 writer.writerows(rows)
             selected = analyze_run(raw, output, plots=False, live_export=False)
             original_reader = analyzer.read_csv
-            def full_reader(path, *, evidence=None, keep=None):
-                return original_reader(path, evidence=evidence)
+            def full_reader(path, *, evidence=None, keep=None, observe=None):
+                return original_reader(path, evidence=evidence, observe=observe)
             with patch.object(analyzer, 'read_csv', side_effect=full_reader):
                 full = analyze_run(raw, output, plots=False, live_export=False)
             self.assertEqual(selected, full)

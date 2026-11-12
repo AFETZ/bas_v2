@@ -1,5 +1,6 @@
 """Acceptance parser fixtures; simulator and hardware observations are not fabricated as results."""
 import copy
+import csv
 import hashlib
 import json
 from pathlib import Path
@@ -10,7 +11,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from scripts.product.analyze_relay_experiment import native_analysis_event, read_csv, refined_case_evidence, refined_phase_observations
+from scripts.product.analyze_relay_experiment import NativeMacObservations, native_analysis_event, read_csv, refined_case_evidence, refined_phase_observations
 
 
 class RefinedEvidenceTests(unittest.TestCase):
@@ -90,7 +91,8 @@ class RefinedEvidenceTests(unittest.TestCase):
             measurement_end_host_monotonic_ns=300, measurement_start_source_sim_time_s=0,
             measurement_end_source_sim_time_s=60, uavs={str(i): dict(armed=True, takeoff=True, landed=True, auto_disarm=True) for i in range(1, 6)})
         self.stats = dict(stop_reason='duration', uav_count=5, radio_node_count=6, shared_spectrum_channel_count=1,
-                          wifi_topology='adhoc', sionna_drives_rx_psd=True)
+            wifi_topology='adhoc', sionna_drives_rx_psd=True, radio_backend='wifi',
+            native_ns3_phy=True, native_ns3_mac=True, wifi_actual_center_frequency_hz=2412000000)
         self.events = []
         for i in range(1, 6):
             for stage in ('takeoff_observed', 'landing_disarm_observed', 'waypoint_reached_telemetry'):
@@ -106,6 +108,10 @@ class RefinedEvidenceTests(unittest.TestCase):
         self.write(self.raw / 'logs/node_state.json', dict(session_id='fixture'))
         self.positions()
         self.capture = dict(sha256='a' * 64, bytes=123, rows=3, malformed_rows=0, stable=True)
+        mac = NativeMacObservations(self.meta, self.stats)
+        for index, row in enumerate(self.mac_rows(), 1):
+            mac.observe(row, index)
+        self.capture['shared_mac_observations'] = mac.snapshot()
         self.write(self.raw / 'metrics/native_source_summary.json', dict(event_capture=dict(status='observed', sha256='a' * 64, bytes=123)))
         self.publication = dict(native_event_csv_path='/tmp/refined-fixture/native_radio_events.csv',
             publication=dict(status='copied', errors=[], files=[dict(
@@ -132,6 +138,60 @@ class RefinedEvidenceTests(unittest.TestCase):
         self.write(self.raw / 'logs/node_state.jsonl', dict(published_monotonic_ns=200, source='gazebo_odometry',
             type='node_state', schema_version=2, coordinate_frame='ENU', session_id='fixture', nodes=self.nodes))
 
+    @staticmethod
+    def mac_rows():
+        rows = []
+        for node in NativeMacObservations.ADDRESSES:
+            rows.extend([dict(event='mac_tx', node=node, peer='', wall_monotonic_ns='200', details='packet_uid=1'),
+                dict(event='wifi_mac_queue_enqueue', node=node, peer='', wall_monotonic_ns='200',
+                     details='packet_uid=1;ac=0;node_all_ac_queue_packets=1;source=WifiMacQueue.enqueue')])
+        for i in range(1, 6):
+            for sender, receiver in (('cp', f'uav{i}'), (f'uav{i}', 'cp')):
+                mac, source = NativeMacObservations.ADDRESSES[sender]
+                destination = NativeMacObservations.ADDRESSES[receiver][1]
+                rows.append(dict(event='wifi_monitor_rx', node=receiver, peer=mac, wall_monotonic_ns='200',
+                    details=f'packet_uid={len(rows)};src_ip={source};dst_ip={destination};ip_protocol=17;'
+                        'signal_dbm=-50;noise_interference_dbm=-90;frequency_mhz=2412;mac_sequence=17;mac_retry=0;'
+                        'source=WifiPhy.MonitorSnifferRx.SignalNoiseDbm;sampling=successfully_received_mpdu'))
+        return rows
+
+    def test_streamed_mac_coverage_requires_ten_addressed_directions_not_duplicates_or_foreign_frames(self):
+        path = self.root / 'native-mac.csv'
+        rows = self.mac_rows()
+        missing = rows.pop()  # UAV5 -> CP cannot be replaced by any other decoded frame.
+        rows.extend([copy.deepcopy(rows[-1]), copy.deepcopy(rows[-1]),
+            dict(missing, peer='02:99:99:99:99:99'),
+            dict(missing, details=missing['details'].replace('src_ip=10.71.5.10', 'src_ip=10.71.4.10')),
+            dict(missing, details=missing['details'].replace('dst_ip=10.71.0.10', 'dst_ip=10.71.2.10')),
+            dict(missing, details=missing['details'] + ';foreign_signal=1'),
+            dict(missing, event='spectrum_signal_arrival'),
+            dict(missing, wall_monotonic_ns='301')])
+        for complete in (False, True):
+            with self.subTest(complete=complete):
+                observed_rows = rows + ([missing] if complete else [])
+                with path.open('w', newline='') as stream:
+                    writer = csv.DictWriter(stream, fieldnames=list(missing))
+                    writer.writeheader()
+                    writer.writerows(observed_rows)
+                evidence, mac = {}, NativeMacObservations(self.meta, self.stats)
+                retained = read_csv(path, evidence=evidence, keep=native_analysis_event, observe=mac.observe)
+                self.assertEqual(retained, [])
+                self.assertEqual(evidence['rows'], len(observed_rows))
+                self.assertEqual(evidence['sha256'], hashlib.sha256(path.read_bytes()).hexdigest())
+                proof = mac.snapshot()
+                self.assertEqual(proof['passed'], complete)
+                self.assertEqual(proof['addressed_link_count'], 10 if complete else 9)
+                self.assertEqual(proof['excluded_observations']['not_addressed_cp_uav_data_mpdu'], 4)
+                self.assertEqual(proof['max_simultaneously_queued_nodes'], 6)
+                self.assertTrue(all(c['mac_tx'] == 1 and c['wifi_mac_queue_enqueue'] == 1
+                                    for c in proof['event_rows_by_node'].values()))
+                self.capture['shared_mac_observations'] = proof
+                self.assertEqual(self.evaluate()['checks']['one_shared_radio_channel'], complete)
+                if complete:
+                    sample = proof['first_addressed_mpdu_by_link']['uav5->cp']
+                    self.assertEqual(sample['csv_record'], len(observed_rows))
+                    self.assertEqual(sample['mpdu_transmitter_mac'], '02:71:05:00:10:10')
+
     def evaluate(self):
         with patch('scripts.product.urban_mission.UrbanScenario.load', return_value=self.scenario), \
                 patch('bas.node_state_journal_verification', return_value=dict(passed=True)), \
@@ -151,6 +211,9 @@ class RefinedEvidenceTests(unittest.TestCase):
         for mutate, gate in [
             (lambda: self.events.pop(), 'five_uav_flight_lifecycle'),
             (lambda: self.stats.update(shared_spectrum_channel_count=2), 'one_shared_radio_channel'),
+            (lambda: self.stats.update(native_ns3_mac=False), 'one_shared_radio_channel'),
+            (lambda: self.capture.update(shared_mac_observations=None), 'one_shared_radio_channel'),
+            (lambda: self.capture.pop('shared_mac_observations'), 'one_shared_radio_channel'),
             (lambda: self.payload['records'].pop(), 'two_mavlink_uart_channels'),
             (lambda: self.capture.update(malformed_rows=1), 'native_event_capture'),
             (lambda: self.capture.update(sha256='changed'), 'native_event_capture')]:

@@ -72,7 +72,7 @@ def read_jsonl(path: Path, errors: list[str]) -> list[dict[str, Any]]:
     return result
 
 
-def read_csv(path: Path, *, evidence=None, keep=None) -> list[dict[str, Any]]:
+def read_csv(path: Path, *, evidence=None, keep=None, observe=None) -> list[dict[str, Any]]:
     if not path.is_file():
         return []
     if evidence is not None:
@@ -89,6 +89,8 @@ def read_csv(path: Path, *, evidence=None, keep=None) -> list[dict[str, Any]]:
             for row in csv.DictReader(lines()):
                 rows += 1
                 malformed += None in row or None in row.values()
+                if observe is not None:
+                    observe(row, rows)
                 if keep is None or keep(row):
                     records.append(row)
         after = path.stat()
@@ -98,7 +100,13 @@ def read_csv(path: Path, *, evidence=None, keep=None) -> list[dict[str, Any]]:
                 and size == after.st_size)
         return records
     with path.open(newline="") as stream:
-        return [row for row in csv.DictReader(stream) if keep is None or keep(row)]
+        records = []
+        for index, row in enumerate(csv.DictReader(stream), 1):
+            if observe is not None:
+                observe(row, index)
+            if keep is None or keep(row):
+                records.append(row)
+        return records
 
 
 def native_analysis_event(row):
@@ -110,6 +118,117 @@ def native_analysis_event(row):
     return (row.get('event') in {'fault_start', 'fault_end', 'realtime_lag', 'jammer_on', 'jammer_off'}
         or row.get('event') == 'spectrum_signal_arrival'
         and 'foreign_signal=1' in str(row.get('details', '')).split(';'))
+
+
+class NativeMacObservations:
+    """Constant-size evidence of the six native radios, not a packet-loss model.
+
+    MonitorSnifferRx's peer is the actual MPDU Addr2. The src_mac/dst_mac
+    strings in PacketTraceDetails are derived from IP and are not MAC proof.
+    Keep one decoded, addressed UDP sample per CP/UAV direction; duplicates
+    cannot cover another link. No unbounded set of packet UIDs is retained.
+    """
+    ADDRESSES = {'cp': ('02:71:ff:00:00:01', '10.71.0.10'),
+        **{f'uav{i}': (f'02:71:{i:02x}:00:10:10', f'10.71.{i}.10') for i in UAVS}}
+    EVENTS = {'mac_tx', 'wifi_mac_queue_enqueue', 'wifi_mac_queue_dequeue',
+              'wifi_mac_queue_drop', 'wifi_data_retry', 'wifi_monitor_rx'}
+
+    def __init__(self, meta, stats):
+        self.start = self.integer(meta.get('measurement_start_host_monotonic_ns'))
+        self.end = self.integer(meta.get('measurement_end_host_monotonic_ns'))
+        self.frequency_mhz = finite(stats.get('wifi_actual_center_frequency_hz'))
+        if self.frequency_mhz is not None:
+            self.frequency_mhz /= 1e6
+        self.by_mac = {mac: node for node, (mac, _) in self.ADDRESSES.items()}
+        self.counters = {node: Counter() for node in self.ADDRESSES}
+        self.queue_depths = {node: 0 for node in self.ADDRESSES}
+        self.links, self.excluded = {}, Counter()
+        self.max_queued_nodes = self.overlapping_queue_observations = 0
+
+    @staticmethod
+    def integer(value):
+        text = str(value)
+        return int(text) if re.fullmatch(r'[0-9]+', text) else None
+
+    def observe(self, row, index):
+        event, node = row.get('event'), row.get('node')
+        if event not in self.EVENTS:
+            return
+        at = self.integer(row.get('wall_monotonic_ns'))
+        if node not in self.counters or at is None or None in row or None in row.values():
+            self.excluded['invalid_node_time_or_csv'] += 1
+            return
+        inside = self.start is not None and self.end is not None and self.start <= at <= self.end
+        if event in ('mac_tx', 'wifi_data_retry'):
+            if inside:
+                self.counters[node][event] += 1
+            return
+        parts = [part.split('=', 1) for part in str(row.get('details', '')).split(';') if '=' in part]
+        fields = dict(parts)
+        if len(fields) != len(parts):
+            self.excluded['duplicate_detail_keys'] += 1
+            return
+        if event.startswith('wifi_mac_queue_'):
+            action = event.removeprefix('wifi_mac_queue_')
+            depth = self.integer(fields.get('node_all_ac_queue_packets'))
+            ac = self.integer(fields.get('ac'))
+            if fields.get('source') != f'WifiMacQueue.{action}' or depth is None or ac not in range(4):
+                self.excluded['invalid_queue_observation'] += 1
+                return
+            self.queue_depths[node] = depth
+            if inside:
+                self.counters[node][event] += 1
+                queued = sum(value > 0 for value in self.queue_depths.values())
+                self.max_queued_nodes = max(self.max_queued_nodes, queued)
+                self.overlapping_queue_observations += queued > 1
+            return
+        if not inside:
+            return
+        self.counters[node]['wifi_monitor_rx_rows'] += 1
+        sender = self.by_mac.get(row.get('peer'))
+        uid, sequence = self.integer(fields.get('packet_uid')), self.integer(fields.get('mac_sequence'))
+        frequency = finite(fields.get('frequency_mhz'))
+        # ACKs, overheard unicast, foreign radios and IP-derived MAC strings do
+        # not demonstrate addressed CP <-> UAV data reception.
+        if (sender is None or sender == node or (sender != 'cp' and node != 'cp')
+                or fields.get('source') != 'WifiPhy.MonitorSnifferRx.SignalNoiseDbm'
+                or fields.get('sampling') != 'successfully_received_mpdu'
+                or fields.get('foreign_signal', '0') != '0'
+                or fields.get('src_ip') != self.ADDRESSES[sender][1]
+                or fields.get('dst_ip') != self.ADDRESSES[node][1]
+                or fields.get('ip_protocol') != '17' or uid is None
+                or sequence is None or not 0 <= sequence <= 4095
+                or fields.get('mac_retry') not in ('0', '1')
+                or self.frequency_mhz is None or frequency != self.frequency_mhz
+                or finite(fields.get('signal_dbm')) is None
+                or finite(fields.get('noise_interference_dbm')) is None):
+            self.excluded['not_addressed_cp_uav_data_mpdu'] += 1
+            return
+        self.counters[node]['addressed_mpdu_observations_including_retries'] += 1
+        key = f'{sender}->{node}'
+        if key not in self.links:
+            self.links[key] = dict(csv_record=index, wall_monotonic_ns=at,
+                receiver=node, transmitter=sender, mpdu_transmitter_mac=row['peer'],
+                src_ip=fields['src_ip'], dst_ip=fields['dst_ip'], packet_uid=uid,
+                mac_sequence=sequence, mac_retry=int(fields['mac_retry']), frequency_mhz=frequency)
+
+    def snapshot(self):
+        required = {f'{a}->{b}' for i in UAVS for a, b in (('cp', f'uav{i}'), (f'uav{i}', 'cp'))}
+        checks = dict(explicit_measurement_bounds=self.start is not None and self.end is not None
+                and self.start < self.end,
+            all_six_native_mac_transmitters=all(c['mac_tx'] > 0 for c in self.counters.values()),
+            all_six_native_mac_queues=all(c['wifi_mac_queue_enqueue'] > 0 for c in self.counters.values()),
+            bidirectional_cp_five_uav_mpdu=set(self.links) == required)
+        return dict(schema_version=1, passed=all(checks.values()), checks=checks,
+            scope='Native CSV measurement-window observations; one retained sample per addressed direction.',
+            limits='Row counters include retries and duplicate observations, not unique packets. Queue overlap is descriptive; it does not establish arbitration or collision outcomes. No all-pairs delivery or SLA claim.',
+            arbitration_implementation='ns-3 native WifiMac/QosTxop; Sionna RT supplies propagation.',
+            measurement_start_host_monotonic_ns=self.start, measurement_end_host_monotonic_ns=self.end,
+            node_addresses={node: dict(mac=mac, ip=ip) for node, (mac, ip) in self.ADDRESSES.items()},
+            event_rows_by_node={node: dict(counts) for node, counts in self.counters.items()},
+            addressed_link_count=len(self.links), first_addressed_mpdu_by_link=self.links,
+            excluded_observations=dict(self.excluded), max_simultaneously_queued_nodes=self.max_queued_nodes,
+            overlapping_queue_observations=self.overlapping_queue_observations)
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None:
@@ -920,11 +1039,19 @@ def refined_case_evidence(run_dir, meta, stats, environment, events, native, com
     details['native_event_capture_publication'] = dict(verified=publication_verified,
         source_summary_present=source_summary_path.exists(), source_summary_matches=source_capture_verified,
         files=event_files, hash_scope='Original closed CSV bytes at analysis time; no earlier digest inferred.')
+    mac_observations = native_capture.get('shared_mac_observations', {})
+    if not isinstance(mac_observations, dict):
+        mac_observations = {}
     checks['one_shared_radio_channel'] = (
         type(stats.get('uav_count')) is int and stats['uav_count'] == 5
         and type(stats.get('radio_node_count')) is int and stats['radio_node_count'] == 6
         and type(stats.get('shared_spectrum_channel_count')) is int and stats['shared_spectrum_channel_count'] == 1
-        and stats.get('wifi_topology') == 'adhoc' and stats.get('sionna_drives_rx_psd') is True)
+        and stats.get('wifi_topology') == 'adhoc' and stats.get('sionna_drives_rx_psd') is True
+        and stats.get('radio_backend') == 'wifi' and stats.get('native_ns3_phy') is True
+        and stats.get('native_ns3_mac') is True
+        and mac_observations.get('schema_version') == 1 and mac_observations.get('passed') is True)
+    details['native_mac_multipoint'] = dict(mac_observations,
+        source='logs/native_radio_events.csv', source_sha256=native_capture.get('sha256'))
     valid_commands = Counter(row['uav_id'] for row in commands if row.get('lease_status') == 'valid'
         and row.get('lineage_status') == 'valid' and row.get('application_chain_complete') is True
         and row.get('policy_allowed') is True and finite(row.get('admitted_ns')) is not None)
@@ -1137,7 +1264,10 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
     condition = str(meta.get("fault_profile", config.get("fault_profile", stats.get("fault_profile", "none"))))
     policy = str(meta.get("policy", config.get("policy", "not_recorded")))
     native_capture = {}
-    native = read_csv(run_dir / "logs/native_radio_events.csv", evidence=native_capture, keep=native_analysis_event)
+    native_mac = NativeMacObservations(meta, stats)
+    native = read_csv(run_dir / "logs/native_radio_events.csv", evidence=native_capture,
+                      keep=native_analysis_event, observe=native_mac.observe)
+    native_capture['shared_mac_observations'] = native_mac.snapshot()
     fault_events = [row for row in native if row.get("event") in ("fault_start", "fault_end")
                     and inside(finite(row.get("wall_monotonic_ns")))]
     fault_starts = [finite(row["wall_monotonic_ns"]) for row in fault_events if row["event"] == "fault_start"]
