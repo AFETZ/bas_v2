@@ -131,4 +131,3 @@ class PublishedRuntimeVerifierTests(unittest.TestCase):
         self.assertEqual(identity.read_json(canonical/identity.EXPECTED)['run_dir'], str(source))
         self.assertEqual(publication['source_run_dir'], str(source))
         self.assertEqual(publication['destination_run_dir'], str(canonical))
-
