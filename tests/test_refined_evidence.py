@@ -192,12 +192,12 @@ class RefinedEvidenceTests(unittest.TestCase):
                     self.assertEqual(sample['csv_record'], len(observed_rows))
                     self.assertEqual(sample['mpdu_transmitter_mac'], '02:71:05:00:10:10')
 
-    def evaluate(self):
+    def evaluate(self, runtime_spool_proof=None):
         with patch('scripts.product.urban_mission.UrbanScenario.load', return_value=self.scenario), \
                 patch('bas.node_state_journal_verification', return_value=dict(passed=True)), \
                 patch('scripts.product.summarize_native_radio_five_uav._native_source_schedule', return_value=self.schedule):
             return refined_case_evidence(self.raw, self.meta, self.stats, {'active_uart_channels': 'control,payload'},
-                self.events, self.native, self.commands, self.payload, [], self.capture)
+                self.events, self.native, self.commands, self.payload, [], self.capture, runtime_spool_proof)
 
     def test_complete_fixture_observes_flight_but_never_claims_hardware(self):
         result = self.evaluate()
@@ -251,6 +251,46 @@ class RefinedEvidenceTests(unittest.TestCase):
             self.assertFalse(self.evaluate()['checks']['native_event_capture'])
         publication_path.unlink()
         self.assertFalse(self.evaluate()['checks']['native_event_capture'])
+
+    def test_physical_capture_destination_requires_closed_same_run_and_same_bytes(self):
+        source = '/dev/shm/bas-runtime-1000-refined-fixture-fixture/raw/refined-fixture'
+        proof = dict(status='verified_closed_runtime_spool', passed=True, mode='host_tmpfs_run_v1',
+            run_id=self.raw.name, source_run_dir=source,
+            destination_run_dir='/home/bas/project/runs/native-radio-realtime/refined-fixture',
+            members={'logs/native_radio_events.csv': dict(kind='file', bytes=123, sha256='a'*64)})
+        publication = copy.deepcopy(self.publication)
+        publication['publication']['files'][0]['destination'] = source+'/logs/native_radio_events.csv'
+        self.write(self.raw/'logs/native_capture_storage.json', publication)
+        # A RAM path alone is never a substitute for the closed whole-run proof.
+        self.assertFalse(self.evaluate()['checks']['native_event_capture'])
+        result = self.evaluate(proof)
+        self.assertTrue(result['checks']['native_event_capture'], result)
+        self.assertTrue(result['observations']['native_event_capture_publication']['runtime_spool_mapping_verified'])
+        for mutate in (
+            lambda p: p.update(passed=False),
+            lambda p: p.update(run_id='foreign-run'),
+            lambda p: p.update(source_run_dir=source+'/../refined-fixture'),
+            lambda p: p.update(source_run_dir='/dev/shm/foreign/raw/foreign-run'),
+            lambda p: p.update(destination_run_dir='/home/bas/project/runs/native-radio-realtime/foreign-run'),
+            lambda p: p['members'].clear(),
+            lambda p: p['members']['logs/native_radio_events.csv'].update(sha256='b'*64),
+            lambda p: p['members']['logs/native_radio_events.csv'].update(bytes=124),
+            lambda p: p['members']['logs/native_radio_events.csv'].update(kind='symlink'),
+        ):
+            changed = copy.deepcopy(proof)
+            mutate(changed)
+            with self.subTest(proof=changed):
+                self.assertFalse(self.evaluate(changed)['checks']['native_event_capture'])
+        # A correct receipt cannot authorize another file within the same spool.
+        publication['publication']['files'][0]['destination'] = source+'/logs/foreign.csv'
+        self.write(self.raw/'logs/native_capture_storage.json', publication)
+        self.assertFalse(self.evaluate(proof)['checks']['native_event_capture'])
+
+    def test_failed_requested_spool_invalidates_runtime_even_with_canonical_capture(self):
+        result = self.evaluate(dict(status='invalid_runtime_spool_publication', passed=False))
+        self.assertTrue(result['checks']['native_event_capture'])
+        self.assertFalse(result['checks']['runtime_and_complete_window'])
+        self.assertFalse(result['flight_case_passed'])
 
     def test_mutable_geometry_fallback_is_rejected(self):
         path = self.raw / 'logs/urban_scenario.json'

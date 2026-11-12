@@ -969,7 +969,7 @@ def refined_phase_observations(meta, config, native, offers, commands, payload, 
 
 
 def refined_case_evidence(run_dir, meta, stats, environment, events, native, commands, payload, errors,
-                          native_capture=None):
+                          native_capture=None, runtime_spool_proof=None):
     """Observe the refined flight case without importing the separate SLA limits.
 
     Only frozen run geometry is usable. A successful process/mission summary is
@@ -996,10 +996,12 @@ def refined_case_evidence(run_dir, meta, stats, environment, events, native, com
         scope='Frozen refined-case input, recorded Gazebo samples and audited packet delivery; no physical hardware or statistical SLA certification.',
         sampling_limit='AGL and collision checks describe recorded Gazebo positions, not continuous motion between samples or the whole map.')
     record = read_json(control_dir / 'run.json')
+    runtime_spool_proof = runtime_spool_proof or {}
     checks['runtime_and_complete_window'] = (
         record.get('run_id') == run_dir.name and record.get('runtime_status') == 'completed'
         and record.get('mission_outcome') == 'succeeded' and record.get('measurement_validity') == 'valid'
         and not record.get('runtime_verification_errors') and not errors
+        and runtime_spool_proof.get('passed') is not False
         and meta.get('runtime_status') == 'completed' and meta.get('mission_outcome') == 'succeeded'
         and meta.get('measurement_validity') == 'valid' and meta.get('measurement_window_completed') is True
         and stats.get('stop_reason') in ('duration', 'sionna_ns3_process_stopped'))
@@ -1014,6 +1016,31 @@ def refined_case_evidence(run_dir, meta, stats, environment, events, native, com
     publication = publication if isinstance(publication, dict) else {}
     expected_destinations = {str(run_dir / 'logs/native_radio_events.csv'),
         '/workspace/multiagent_simulation/' + (run_dir / 'logs/native_radio_events.csv').relative_to(root).as_posix()}
+    # A staged run records its actual RAM destination. Authorize that exact
+    # member only through the fresh, closed whole-run publication proof, whose
+    # original CSV digest must also agree with this parser's byte audit.
+    relative_csv = 'logs/native_radio_events.csv'
+    members = runtime_spool_proof.get('members', {})
+    member = members.get(relative_csv, {}) if isinstance(members, dict) else {}
+    source_run_dir = runtime_spool_proof.get('source_run_dir')
+    destination_run_dir = runtime_spool_proof.get('destination_run_dir')
+    spool_capture_verified = (
+        runtime_spool_proof.get('passed') is True
+        and runtime_spool_proof.get('status') == 'verified_closed_runtime_spool'
+        and runtime_spool_proof.get('mode') == 'host_tmpfs_run_v1'
+        and runtime_spool_proof.get('run_id') == run_dir.name
+        and isinstance(source_run_dir, str) and source_run_dir.startswith('/')
+        and source_run_dir.split('/')[-2:] == ['raw', run_dir.name]
+        and '..' not in source_run_dir.split('/')
+        and isinstance(destination_run_dir, str)
+        and destination_run_dir.split('/')[-3:] == ['runs', 'native-radio-realtime', run_dir.name]
+        and '..' not in destination_run_dir.split('/')
+        and isinstance(member, dict) and member.get('kind') == 'file'
+        and type(member.get('bytes')) is int and member['bytes'] == native_capture.get('bytes')
+        and member.get('sha256') == native_capture.get('sha256'))
+    physical_csv = source_run_dir + '/' + relative_csv if spool_capture_verified else None
+    if physical_csv is not None:
+        expected_destinations.add(physical_csv)
     published_files = publication.get('files', [])
     event_files = [item for item in published_files if isinstance(item, dict)
         and isinstance(item.get('destination'), str) and item['destination'] in expected_destinations
@@ -1038,6 +1065,7 @@ def refined_case_evidence(run_dir, meta, stats, environment, events, native, com
     details['native_event_capture'] = native_capture
     details['native_event_capture_publication'] = dict(verified=publication_verified,
         source_summary_present=source_summary_path.exists(), source_summary_matches=source_capture_verified,
+        runtime_spool_mapping_verified=spool_capture_verified, physical_destination=physical_csv,
         files=event_files, hash_scope='Original closed CSV bytes at analysis time; no earlier digest inferred.')
     mac_observations = native_capture.get('shared_mac_observations', {})
     if not isinstance(mac_observations, dict):
@@ -1225,7 +1253,10 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
     run_dir = run_dir.resolve()
     output = (output_dir or run_dir).resolve()
     errors: list[str] = []
-    from bas import native_library_verification, coordination_journal_verification
+    from bas import native_library_verification, coordination_journal_verification, runtime_spool_verification
+    runtime_spool_proof = runtime_spool_verification(run_dir)
+    if runtime_spool_proof['passed'] is False:
+        errors.append('runtime RAM spool publication is not verified closed and complete')
     native_library_proof = native_library_verification(run_dir)
     if native_library_proof['passed'] is False:
         errors.append('native loaded library identity is not verified')
@@ -1646,8 +1677,9 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
         "censor_time_s", "restricted_horizon_s", "restricted_unrecovered_time_s", "leader_id", "epoch", "members"])
     result['native_library_verification'] = native_library_proof
     result['coordination_journal_verification'] = coordination_journal_proof
+    result['runtime_spool_verification'] = runtime_spool_proof
     result['refined_case'] = refined_case_evidence(run_dir, meta, stats, environment,
-        events, native, commands, payload, errors, native_capture)
+        events, native, commands, payload, errors, native_capture, runtime_spool_proof)
     if result['refined_case'].get('applicable'):
         native_sources = read_json(run_dir / 'logs/native_sources_actual.json')
         native_anchor = native_sources.get('anchor') if isinstance(native_sources, dict) else None
