@@ -731,12 +731,12 @@ WifiSignalArrival(uint32_t receiver, Ptr<const SpectrumSignalParameters> signal,
                   uint32_t sender, double powerDbm, Time duration)
 {
     if (g_eventLogging == "metrics_only") return;
-    std::ostringstream details;
-    details << "sender_node_id=" << sender << ";duration_s=" << std::setprecision(17)
-            << duration.GetSeconds() << ";source=SpectrumWifiPhy.SignalArrival"
-            << ";foreign_signal=" << bool(DynamicCast<WaveformGenerator>(signal->txPhy));
+    const auto details = fmt::format(
+        "sender_node_id={};duration_s={:.17g};source=SpectrumWifiPhy.SignalArrival;foreign_signal={}",
+        sender, duration.GetSeconds(),
+        static_cast<unsigned>(bool(DynamicCast<WaveformGenerator>(signal->txPhy))));
     LogEvent("spectrum_signal_arrival", g_nodeNames.at(receiver), std::to_string(sender),
-             0, powerDbm, details.str());
+             0, powerDbm, details);
 }
 
 void
