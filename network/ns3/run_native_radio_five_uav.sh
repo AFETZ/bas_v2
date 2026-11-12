@@ -254,11 +254,24 @@ run_in_container() {
       gui_args+=(-e XAUTHORITY=/tmp/bas-native-xauthority -v "$xauthority_file:/tmp/bas-native-xauthority:ro")
     fi
   fi
+  local -a storage_args=()
+  if [[ "$CAPTURE_STORAGE" == tmpfs ]]; then
+    [[ -n "${BAS_RUNTIME_SPOOL:-}" ]] || { printf 'tmpfs runtime requires the public BAS owned spool.\n' >&2; return 2; }
+    python3 "$ROOT_DIR/scripts/product/runtime_storage.py" --root "$ROOT_DIR" \
+      --run-id "$BAS_NATIVE_FIVE_RUN_ID" --spool "$BAS_RUNTIME_SPOOL" >/dev/null
+    storage_args=(--log-driver=none --cidfile "$BAS_RUNTIME_SPOOL/container.id"
+      --mount "type=bind,src=$BAS_RUNTIME_SPOOL,dst=$BAS_RUNTIME_SPOOL"
+      --mount "type=bind,src=$BAS_RUNTIME_SPOOL/caches/drjit,dst=/home/ubuntu/.drjit"
+      --mount "type=bind,src=$BAS_RUNTIME_SPOOL/caches/gz,dst=/home/ubuntu/.gz"
+      -e BAS_RUNTIME_SPOOL -e CUDA_CACHE_PATH="$BAS_RUNTIME_SPOOL/caches/cuda"
+      -e XDG_CACHE_HOME="$BAS_RUNTIME_SPOOL/caches/xdg")
+  fi
   docker run --rm \
     --name "$CONTAINER_NAME" \
     --label bas.product=native-radio-five-uav \
     --privileged --network=host --user 0:0 \
     --tmpfs "/tmp:rw,nosuid,size=$CONTAINER_TMPFS_SIZE,mode=1777" \
+    "${storage_args[@]}" \
     "${gpu_args[@]}" \
     "${gui_args[@]}" \
     -e BAS_SIMULATION_MODE -e BAS_LOCKSTEP_STEP_MS -e BAS_LOCKSTEP_TIMEOUT_S \
@@ -326,6 +339,7 @@ run_in_container() {
     -e BAS_NATIVE_FIVE_HOST_UID="$(id -u)" \
     -e BAS_NATIVE_FIVE_HOST_GID="$(id -g)" \
     -e XDG_RUNTIME_DIR=/tmp/bas-native-five-xdg \
+    -e PYTHONDONTWRITEBYTECODE=1 \
     -e PYTHONPATH=/home/ubuntu/.local/lib/python3.10/site-packages \
     -v "$ROOT_DIR":/workspace/multiagent_simulation \
     -v "$ROOT_DIR":/home/bas/bas_v2 \
@@ -426,7 +440,16 @@ for index in "${UAV_INDICES[@]}"; do
   TAP_ENDPOINTS+=("uav$index")
 done
 RUN_DIR="$ROOT_DIR/runs/native-radio-$BAS_SIMULATION_MODE/$RUN_ID"
-[[ ! -e "$RUN_DIR" ]] || { printf 'Run directory exists: %s\n' "$RUN_DIR" >&2; exit 2; }
+if [[ "$CAPTURE_STORAGE" == tmpfs ]]; then
+  python3 "$ROOT_DIR/scripts/product/runtime_storage.py" --root "$ROOT_DIR" \
+    --run-id "$RUN_ID" --spool "$BAS_RUNTIME_SPOOL" >/dev/null
+  RUN_DIR="$BAS_RUNTIME_SPOOL/raw/$RUN_ID"
+  export ROS_LOG_DIR="$RUN_DIR/ros-logs"
+  export GZ_LOG_PATH="$RUN_DIR/gazebo-logs"
+  mkdir -p "$ROS_LOG_DIR" "$GZ_LOG_PATH"
+else
+  [[ ! -e "$RUN_DIR" && ! -L "$RUN_DIR" ]] || { printf 'Run directory exists: %s\n' "$RUN_DIR" >&2; exit 2; }
+fi
 RUNTIME_DIR="/tmp/bas-native-five-$RUN_ID"
 NATIVE_CAPTURE_SPOOL=""
 NATIVE_EVENT_CSV="$RUN_DIR/logs/native_radio_events.csv"
@@ -717,6 +740,10 @@ PY
 [[ -x "$PYTHON_TOOLING/bin/cmake" ]] || { printf 'Pinned CMake tooling is absent.\n' >&2; exit 2; }
 
 mkdir -p "$RUN_DIR"/{logs,metrics,pcap,screenshots,plots} "$UART_DIR" "$WORK_DIR"
+if [[ "$CAPTURE_STORAGE" == tmpfs ]]; then
+  python3 "$ROOT_DIR/scripts/product/runtime_storage.py" --root "$ROOT_DIR" \
+    --run-id "$RUN_ID" --spool "$BAS_RUNTIME_SPOOL" > "$RUN_DIR/logs/runtime_storage_container.json"
+fi
 printf '%s\n' "$CPU_PARTITION_JSON" > "$RUN_DIR/logs/cpu_partition.json"
 printf '%s\n' "$NATIVE_SDK_VERIFICATION" > "$RUN_DIR/logs/native_sdk_source_verification.json"
 mkdir -p "$(dirname "$NATIVE_EVENT_CSV")" "$(dirname "$NATIVE_PCAP_PREFIX")"
@@ -738,7 +765,8 @@ if profile == "tmpfs" and (observed["filesystem"] != "tmpfs" or observed["total_
 value = dict(requested_profile=profile, effective_profile=profile,
     declared_container_tmpfs_limit_bytes=int(limit), observed_mount=observed,
     native_event_csv_path=events, native_pcap_prefix_path=pcap, spool_directory=spool,
-    scope="native ns-3 PCAPs and event CSV; TAP/sidecar logs remain separate disk writers",
+    scope=("native ns-3 PCAPs and event CSV on container tmpfs; the complete live run uses owned host tmpfs"
+           if profile == "tmpfs" else "native ns-3 PCAPs, event CSV and sidecars use explicit disk storage"),
     memory_accounting="tmpfs raw bytes are memory use outside native process RSS",
     publication=dict(status="pending" if profile == "tmpfs" else "direct_disk"))
 Path(manifest).write_text(json.dumps(value, indent=2) + "\n")
@@ -962,6 +990,9 @@ PY
   printf 'native_duration_s=%s\nservice_duration_s=%s\nruntime_duration_budget=%s\n' \
     "$NATIVE_DURATION_S" "$SERVICE_DURATION_S" "$RUNTIME_BUDGET_JSON"
   printf 'native_capture_storage_requested=%s\nnative_capture_storage_effective=%s\n' "$CAPTURE_STORAGE" "$CAPTURE_STORAGE"
+  if [[ "$CAPTURE_STORAGE" == tmpfs ]]; then
+    printf 'runtime_storage_mode=host_tmpfs_run_v1\n'
+  fi
   printf 'native_capture_tmpfs_limit_bytes=%s\nnative_capture_mount_fstype=%s\nnative_capture_mount_total_bytes=%s\n' \
     "$NATIVE_CAPTURE_TMPFS_LIMIT_BYTES" "${NATIVE_CAPTURE_MOUNT[0]}" "${NATIVE_CAPTURE_MOUNT[1]}"
   printf 'native_event_csv_path=%s\nnative_pcap_prefix_path=%s\nnative_capture_spool_path=%s\n' \
@@ -1108,6 +1139,7 @@ capture_effective_configuration() {
     --config "native_capture_storage=$RUN_DIR/logs/native_capture_storage.json"
     --config "native_library_expected=$RUN_DIR/logs/native_library_expected.json"
     --config "async_jsonl_writer=$ROOT_DIR/network/jsonl.py"
+    --config "runtime_storage_helper=$ROOT_DIR/scripts/product/runtime_storage.py"
     --config "cpu_partition=$RUN_DIR/logs/cpu_partition.json"
     --config "sionna_solver_budget_patch=$SOLVER_BUDGET_PATCH"
     --config "sionna_baseband_phase_patch=$BASEBAND_PHASE_PATCH"
@@ -1128,6 +1160,10 @@ capture_effective_configuration() {
     --config "native_log_phase_header=$ROOT_DIR/network/ns3/scratch/native-log-phase.h"
     --config "native_timing_distribution_header=$ROOT_DIR/network/ns3/scratch/native-timing-distribution.h"
   )
+  if [[ "$CAPTURE_STORAGE" == tmpfs ]]; then
+    config_args+=(--config "runtime_storage_initial=$RUN_DIR/logs/runtime_storage_initial.json"
+      --observed-params "runtime_storage_container=$RUN_DIR/logs/runtime_storage_container.json")
+  fi
   local scene_execution_settings="$(dirname "$LAUNCH_WORLD")/runtime-settings.json"
   if [[ -f "$scene_execution_settings" ]]; then
     config_args+=(--config "scene_execution=$scene_execution_settings")

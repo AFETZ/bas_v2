@@ -720,6 +720,11 @@ def native_library_verification(raw):
     return verify(raw)
 
 
+def runtime_spool_verification(raw):
+    from scripts.product.runtime_storage import verify
+    return verify(raw)
+
+
 def radio_bench_summary(raw, code, config, folder):
     """Qualify existing non-flight evidence, never physical hardware or flight success."""
     checks = dict(inputs=False, scenario=False, observation_window=False, native_radio=False,
@@ -880,6 +885,10 @@ def recorded_outcome(raw, code, summary, *, source_configured=False):
     if result['native_library_verification']['passed'] is False:
         verification_errors.append('native_library_identity_invalid')
         result['measurement_validity'] = 'invalid'
+    result['runtime_spool_verification'] = runtime_spool_verification(raw)
+    if result['runtime_spool_verification']['passed'] is False:
+        verification_errors.append('runtime_spool_publication_invalid')
+        result['measurement_validity'] = 'invalid'
     if (not verification_errors and result['runtime_status'] == 'completed'
             and result['measurement_validity'] == 'valid'):
         source_input = raw / 'logs/native_sources.json'
@@ -957,7 +966,7 @@ def run(config, run_id):
         except BlockingIOError:
             print('Another BAS runtime owns the host lock.', file=sys.stderr)
             return 75
-        if folder.exists() or raw.exists():
+        if folder.exists() or folder.is_symlink() or raw.exists() or raw.is_symlink():
             raise ValueError('run already exists; choose a new ID')
         for path in ['install/setup.bash', '.external/ns-3-sionna-native/build/scratch/ns3.48-upstream-sionna-tap-spike-default']:
             if not (ROOT / path).is_file():
@@ -966,6 +975,14 @@ def run(config, run_id):
                        check=True, stdout=subprocess.DEVNULL)
         folder.mkdir(parents=True)
         env = environment(config, run_id)
+        spool = None
+        runtime_log = folder / 'runtime.log'
+        if config['runtime'].get('capture_storage', 'tmpfs') == 'tmpfs':
+            from scripts.product import runtime_storage
+            spool = runtime_storage.prepare(ROOT, run_id, env['BAS_NATIVE_FIVE_CONTAINER_NAME'], image=config['runtime']['image'])
+            env['BAS_RUNTIME_SPOOL'] = spool['spool']
+            runtime_log = Path(spool['runtime_log_source'])
+        env['PYTHONDONTWRITEBYTECODE'] = '1'
         hashes = snapshot_inputs(config, folder, env)
         argv = ['./network/ns3/run_native_radio_five_uav.sh']
         record = dict(run_id=run_id, status='running', argv=argv,
@@ -983,18 +1000,27 @@ def run(config, run_id):
             previous[sig] = signal.signal(sig, on_stop)
         print(f'Run {run_id}: {folder / "runtime.log"}', flush=True)
         try:
-            with (folder / 'runtime.log').open('x') as log:
+            with runtime_log.open('x') as log:
                 child = subprocess.Popen(argv, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT,
                                          start_new_session=True, pass_fds=(lock.fileno(),))
                 code = child.wait()
+            record['controller_returncode'] = code
             summary_path = raw / 'metrics/relay_experiment_summary.json'
             summary = json.loads(summary_path.read_text()) if summary_path.exists() else {}
             if config.get('hitl') is not None:
                 summary = radio_bench_summary(raw, code, config, folder)
+            # The bench summary is the last parent raw writer. Publication must
+            # follow it as well as child/container exit and runtime-log closure.
+            if spool is not None:
+                try:
+                    runtime_storage.publish(ROOT, spool, code)
+                except Exception as error:
+                    record['runtime_spool_publication_error'] = str(error)
+                    code = code or 1
             status = summary.get('status', 'failed') if code == 0 or (
                 config.get('hitl') is not None and code == 130 and summary.get('status') == 'stopped') else 'failed'
             record.update(status=status, returncode=code, mission_error=summary.get('error'))
-            record.update(recorded_outcome(raw, code, summary,
+            record.update(recorded_outcome(raw, record['controller_returncode'], summary,
                 source_configured=config.get('interference', {}).get('sources') is not None))
         except Exception as error:
             record.update(status='failed', error=str(error))
