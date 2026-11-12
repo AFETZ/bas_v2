@@ -38,7 +38,8 @@ class RefinedEvidenceTests(unittest.TestCase):
                       runtime_verification_errors=[])
         self.write(self.control / 'run.json', record)
         self.meta = dict(record, measurement_window_completed=True, measurement_start_host_monotonic_ns=100,
-            measurement_end_host_monotonic_ns=300, uavs={str(i): dict(armed=True, takeoff=True, landed=True, auto_disarm=True) for i in range(1, 6)})
+            measurement_end_host_monotonic_ns=300, measurement_start_source_sim_time_s=0,
+            measurement_end_source_sim_time_s=60, uavs={str(i): dict(armed=True, takeoff=True, landed=True, auto_disarm=True) for i in range(1, 6)})
         self.stats = dict(stop_reason='duration', uav_count=5, radio_node_count=6, shared_spectrum_channel_count=1,
                           wifi_topology='adhoc', sionna_drives_rx_psd=True)
         self.events = []
@@ -52,12 +53,17 @@ class RefinedEvidenceTests(unittest.TestCase):
             invalid_trace_rows=0, orphan_receipts=0, trace_files=[dict(status='observed')],
             records=[dict(uav_id=i, direction='gcs_to_uav', outcome='timely') for i in range(1, 6)])
         self.nodes = [dict(id='cp', role='command_post', position_m=[0., 0., 2.])]
-        self.nodes += [dict(id=f'uav{i}', stale=False, source_sim_time_s=1, position_m=list(self.scenario.routes[i][0])) for i in range(1, 6)]
+        self.nodes += [dict(id=f'uav{i}', role='uav', stale=False, source_sim_time_s=1, position_m=list(self.scenario.routes[i][0])) for i in range(1, 6)]
+        self.write(self.raw / 'logs/node_state.json', dict(session_id='fixture'))
         self.positions()
-        self.capture = dict(sha256='abc', bytes=123, rows=3, stable=True)
+        self.capture = dict(sha256='abc', bytes=123, rows=3, malformed_rows=0, stable=True)
         self.write(self.raw / 'metrics/native_source_summary.json', dict(event_capture=dict(status='observed', sha256='abc', bytes=123)))
         self.segment = dict(id='source1', start_s=20, stop_s=40, pattern='tr38901', center_hz=2412000000., bandwidth_hz=20e6, power_w=1.)
         self.schedule = dict(actual_schedule_status='observed', actual_sources=dict(segments=[self.segment]))
+        for label in ('native_sources', 'native_sources_actual'):
+            self.write(self.raw / f'logs/{label}.json', self.schedule)
+            for stage in ('initial', 'final'):
+                self.write(self.raw / f'configuration/{stage}/inputs/{label}/value.json', self.schedule)
         params = 'pattern=tr38901;center_hz=2412000000;bandwidth_hz=20000000;power_w=1'
         self.native = [dict(node='source1', event=event, time_s=str(at), details=params) for event, at in [('jammer_on', 20), ('jammer_off', 40)]]
         self.native.append(dict(node='uav1', event='spectrum_signal_arrival', time_s='25', details='foreign_signal=1', value='-50'))
@@ -69,7 +75,7 @@ class RefinedEvidenceTests(unittest.TestCase):
 
     def positions(self):
         self.write(self.raw / 'logs/node_state.jsonl', dict(published_monotonic_ns=200, source='gazebo_odometry',
-            coordinate_frame='ENU', session_id='fixture', nodes=self.nodes))
+            type='node_state', schema_version=2, coordinate_frame='ENU', session_id='fixture', nodes=self.nodes))
 
     def evaluate(self):
         with patch('scripts.product.urban_mission.UrbanScenario.load', return_value=self.scenario), \
@@ -91,6 +97,7 @@ class RefinedEvidenceTests(unittest.TestCase):
             (lambda: self.events.pop(), 'five_uav_flight_lifecycle'),
             (lambda: self.stats.update(shared_spectrum_channel_count=2), 'one_shared_radio_channel'),
             (lambda: self.payload['records'].pop(), 'two_mavlink_uart_channels'),
+            (lambda: self.capture.update(malformed_rows=1), 'native_event_capture'),
             (lambda: self.capture.update(sha256='changed'), 'native_event_capture')]:
             with self.subTest(gate=gate):
                 saved = copy.deepcopy((self.events, self.stats, self.payload, self.capture))
@@ -145,6 +152,25 @@ class RefinedEvidenceTests(unittest.TestCase):
         self.write(self.raw / 'logs/urban_scenario.json', dict(scenario='legacy'))
         self.assertEqual(self.evaluate()['status'], 'not_applicable')
 
+    def test_changed_source_snapshot_and_old_pose_clock_cannot_supply_evidence(self):
+        path = self.raw / 'configuration/initial/inputs/native_sources/value.json'
+        self.write(path, dict(changed=True))
+        self.assertFalse(self.evaluate()['checks']['separate_em_source_observed'])
+        self.nodes[-1]['source_sim_time_s'] = -1
+        self.positions()
+        self.assertFalse(self.evaluate()['checks']['gazebo_positions_and_agl'])
+
+    def test_conflicting_duplicate_pose_or_unknown_schema_is_not_ignored(self):
+        path = self.raw / 'logs/node_state.jsonl'
+        first = path.read_text()
+        row = json.loads(first)
+        row['nodes'][-1]['position_m'][2] += 1
+        path.write_text(first + '\n' + json.dumps(row))
+        self.assertFalse(self.evaluate()['checks']['gazebo_positions_and_agl'])
+        row['schema_version'] = 3
+        self.write(path, row)
+        self.assertFalse(self.evaluate()['checks']['gazebo_positions_and_agl'])
+
     def test_csv_fingerprint_uses_original_bytes_including_quoted_linebreaks(self):
         path = self.root / 'trace.csv'
         data = b'event,details\r\njammer_on,"one\r\ntwo"\r\n'
@@ -152,7 +178,10 @@ class RefinedEvidenceTests(unittest.TestCase):
         evidence = {}
         rows = read_csv(path, evidence=evidence)
         self.assertEqual(rows, [dict(event='jammer_on', details='one\r\ntwo')])
-        self.assertEqual(evidence, dict(sha256=hashlib.sha256(data).hexdigest(), bytes=len(data), rows=1, stable=True))
+        self.assertEqual(evidence, dict(sha256=hashlib.sha256(data).hexdigest(), bytes=len(data), rows=1, malformed_rows=0, stable=True))
+        path.write_bytes(b'event,details\njammer_on\n')
+        read_csv(path, evidence=evidence)
+        self.assertEqual(evidence['malformed_rows'], 1)
 
 
 if __name__ == '__main__':

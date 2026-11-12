@@ -87,6 +87,7 @@ def read_csv(path: Path, *, evidence=None) -> list[dict[str, Any]]:
             records = list(csv.DictReader(lines()))
         after = path.stat()
         evidence.update(sha256=digest.hexdigest(), bytes=size, rows=len(records),
+            malformed_rows=sum(None in row or None in row.values() for row in records),
             stable=(before.st_size, before.st_mtime_ns) == (after.st_size, after.st_mtime_ns)
                 and size == after.st_size)
         return records
@@ -783,6 +784,7 @@ def refined_case_evidence(run_dir, meta, stats, environment, events, native, com
     capture = read_json(run_dir / 'metrics/native_source_summary.json').get('event_capture', {})
     native_capture = native_capture or {}
     checks['native_event_capture'] = (native_capture.get('stable') is True
+        and native_capture.get('malformed_rows') == 0
         and capture.get('status') == 'observed' and capture.get('bytes') == native_capture.get('bytes')
         and capture.get('sha256') == native_capture.get('sha256'))
     details['native_event_capture'] = native_capture
@@ -855,15 +857,25 @@ def refined_case_evidence(run_dir, meta, stats, environment, events, native, com
         start, stop = meta.get('measurement_start_host_monotonic_ns'), meta.get('measurement_end_host_monotonic_ns')
         if type(start) is not int or type(stop) is not int or not start < stop:
             raise ValueError('exact measurement host window is missing')
+        source_start = finite(meta.get('measurement_start_source_sim_time_s'))
+        source_stop = finite(meta.get('measurement_end_source_sim_time_s'))
+        if source_start is None or source_stop is None or not 0 <= source_start < source_stop:
+            raise ValueError('measurement source-clock window is missing')
+        session = read_json(run_dir / 'logs/node_state.json').get('session_id')
+        if not isinstance(session, str) or not session:
+            raise ValueError('verified position session identity is missing')
         agl = {i: [] for i in UAVS}
         seen, cp_samples, bad, collisions = {}, 0, 0, 0
+        last_source = {}
         with (run_dir / 'logs/node_state.jsonl').open(encoding='utf-8') as stream:
             for line in stream:
                 snapshot = json.loads(line)
                 stamp = snapshot.get('published_monotonic_ns')
                 if type(stamp) is not int or not start <= stamp <= stop:
                     continue
-                if snapshot.get('coordinate_frame') != 'ENU' or snapshot.get('source') != 'gazebo_odometry' or snapshot.get('fault'):
+                if (snapshot.get('type') != 'node_state' or snapshot.get('schema_version') != 2
+                        or snapshot.get('session_id') != session or snapshot.get('coordinate_frame') != 'ENU'
+                        or snapshot.get('source') != 'gazebo_odometry' or snapshot.get('fault')):
                     bad += 1
                     continue
                 nodes = snapshot.get('nodes', [])
@@ -881,11 +893,17 @@ def refined_case_evidence(run_dir, meta, stats, environment, events, native, com
                         bad += 1
                         continue
                     point, source_s = node.get('position_m'), finite(node.get('source_sim_time_s'))
-                    if (node.get('stale') is not False or node['id'] in snapshot.get('stale_nodes', [])
+                    if (node.get('role') != 'uav' or node.get('stale') is not False or node['id'] in snapshot.get('stale_nodes', [])
                             or source_s is None or not isinstance(point, list) or len(point) != 3
                             or any(finite(p) is None for p in point)):
                         bad += 1
                         continue
+                    if not source_start <= source_s < source_stop:
+                        continue  # A just-published row can still contain the preceding source sample.
+                    if uav in last_source and source_s < last_source[uav]:
+                        bad += 1
+                        continue
+                    last_source[uav] = source_s
                     identity = (snapshot.get('session_id'), uav, source_s)
                     if identity in seen:
                         if seen[identity] != point:
@@ -905,6 +923,12 @@ def refined_case_evidence(run_dir, meta, stats, environment, events, native, com
     try:
         schedule = _native_source_schedule(run_dir)
         segments = (schedule.get('actual_sources') or {}).get('segments', [])
+        if segments:
+            for stage, label in (('initial', 'native_sources'), ('final', 'native_sources'),
+                                 ('final', 'native_sources_actual')):
+                captured = run_dir / 'configuration' / stage / 'inputs' / label / 'value.json'
+                if captured.read_bytes() != (run_dir / 'logs' / (label + '.json')).read_bytes():
+                    raise ValueError(f'{stage} {label} differs from its runtime snapshot')
         source_rows = []
         for segment in segments:
             switches = [e for e in native if e.get('node') == segment['id']]
