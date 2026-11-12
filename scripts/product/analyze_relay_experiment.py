@@ -1225,10 +1225,13 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
     run_dir = run_dir.resolve()
     output = (output_dir or run_dir).resolve()
     errors: list[str] = []
-    from bas import native_library_verification
+    from bas import native_library_verification, coordination_journal_verification
     native_library_proof = native_library_verification(run_dir)
     if native_library_proof['passed'] is False:
         errors.append('native loaded library identity is not verified')
+    coordination_journal_proof = coordination_journal_verification(run_dir)
+    if coordination_journal_proof['passed'] is False:
+        errors.append('coordination journals are not verified closed and complete')
     meta = read_json(run_dir / "metrics/relay_experiment_summary.json")
     config = read_json(run_dir / "metrics/relay_experiment_config.json")
     stats = read_json(run_dir / "metrics/native_radio_stats.json")
@@ -1642,6 +1645,7 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
     write_csv(output / "metrics/relay_recovery.csv", recovery_rows, ["endpoint", "status", "recovered", "time_s",
         "censor_time_s", "restricted_horizon_s", "restricted_unrecovered_time_s", "leader_id", "epoch", "members"])
     result['native_library_verification'] = native_library_proof
+    result['coordination_journal_verification'] = coordination_journal_proof
     result['refined_case'] = refined_case_evidence(run_dir, meta, stats, environment,
         events, native, commands, payload, errors, native_capture)
     if result['refined_case'].get('applicable'):

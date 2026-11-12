@@ -617,6 +617,101 @@ def payload_journal_verification(raw):
     return result
 
 
+def coordination_journal_verification(raw):
+    """Verify every configured endpoint's closed producer ledger and raw bytes."""
+    raw = Path(raw)
+    result = dict(status='invalid_coordination_journals', passed=False, journals={})
+    try:
+        def read(path):
+            return json.loads(path.read_text(encoding='utf-8'), object_pairs_hook=unique_json_fields,
+                              parse_constant=reject_json_constant)
+        environment = raw / 'environment.txt'
+        text = environment.read_text(encoding='utf-8') if environment.is_file() else ''
+        declared = re.findall(r'^coordination_journal_mode=(.*)$', text, re.M)
+        paths = sorted((raw / 'logs').glob('coordination_*.jsonl'))
+        audits = sorted((raw / 'logs').glob('coordination_*.jsonl.writer.json'))
+        marked = bool(audits)
+        for path in paths:
+            with path.open('rb') as stream:
+                first = stream.readline(65537)
+            try:
+                row = json.loads(first)
+                marked = marked or (isinstance(row, dict) and 'journal_mode' in row)
+            except (ValueError, UnicodeError):
+                pass  # Legacy syntax remains the packet analyzer's responsibility.
+        if not declared and not marked:
+            return dict(status='not_requested_legacy', passed=None)
+        if declared and declared != ['bounded_async_jsonl_v1']:
+            raise ValueError('unsupported or duplicate advertised coordination journal mode')
+        counts = re.findall(r'^uav_count=(.*)$', text, re.M)
+        if len(counts) != 1 or counts[0] not in ('1', '2', '3', '4', '5'):
+            raise ValueError('coordination journal requires one explicit UAV count in 1..5')
+        count = int(counts[0])
+        names = ['coordination_gcs.jsonl', *(f'coordination_uav{i}.jsonl' for i in range(1, count+1))]
+        result['expected_node_ids'] = list(range(count+1))
+        if {p.name for p in paths} != set(names) or {p.name for p in audits} != {n+'.writer.json' for n in names}:
+            raise ValueError('configured coordination journals or writer audits are missing or unexpected')
+        for node_id, name in enumerate(names):
+            path = raw / 'logs' / name
+            audit_path = path.with_name(name + '.writer.json')
+            if any(not p.resolve().is_relative_to(raw.resolve()) for p in (path, audit_path)):
+                raise ValueError('coordination journal or audit is outside its run')
+            audit = read(audit_path)
+            if not isinstance(audit, dict):
+                raise ValueError('coordination writer audit must be an object')
+            producer, writer = audit.get('producer'), audit.get('writer')
+            if not isinstance(producer, dict) or not isinstance(writer, dict):
+                raise ValueError('coordination writer process and thread identity is missing')
+            parts = PurePosixPath(audit['path'].replace('\\', '/')).parts if isinstance(audit.get('path'), str) else ()
+            checks = dict(
+                metadata=(type(audit.get('schema')) is int and audit['schema'] == 1
+                    and audit.get('journal_mode') == 'bounded_async_jsonl_v1'
+                    and audit.get('run_id') == raw.name and type(audit.get('node_id')) is int
+                    and audit['node_id'] == node_id and type(audit.get('uav_id')) is int
+                    and audit['uav_id'] == node_id and audit.get('status') == 'closed'
+                    and all(key in audit and audit[key] is None for key in ('producer_error', 'close_error'))),
+                closed=(audit.get('closed') is True and audit.get('drained') is True and audit.get('listener_alive') is False
+                    and all(type(audit.get(key)) is int and audit[key] == 0 for key in ('queue_depth', 'failed', 'rejected', 'error_count'))
+                    and audit.get('first_exception') is None and audit.get('last_exception') is None
+                    and audit.get('unwritten_records') == [] and audit.get('in_progress_record') is None
+                    and audit.get('rejected_record') is None),
+                ledger=(all(type(audit.get(key)) is int and audit[key] > 0
+                    for key in ('accepted', 'written', 'accepted_bytes', 'written_bytes', 'capacity', 'max_record_bytes'))
+                    and audit['accepted'] == audit['written'] and audit['accepted_bytes'] == audit['written_bytes']
+                    and audit['capacity'] <= 512 and audit['max_record_bytes'] <= 65536
+                    and type(audit.get('max_queue')) is int and 0 <= audit['max_queue'] <= audit['capacity']),
+                identity=(all(type(item.get(key)) is int and item[key] > 0
+                    for item in (producer, writer) for key in ('pid', 'thread_id', 'native_thread_id'))
+                    and producer['pid'] == writer['pid'] and producer['native_thread_id'] != writer['native_thread_id']
+                    and '..' not in parts and parts[-3:] == (raw.name, 'logs', name)))
+            before = path.stat()
+            digest, rows, size, largest, row_identity = hashlib.sha256(), 0, 0, 0, True
+            with path.open('rb') as stream:
+                while line := stream.readline(65537):
+                    if len(line) > 65536 or not line.endswith(b'\n'):
+                        raise ValueError('coordination journal record is oversized or incomplete')
+                    row = json.loads(line, object_pairs_hook=unique_json_fields, parse_constant=reject_json_constant)
+                    row_identity = row_identity and (isinstance(row, dict)
+                        and row.get('journal_mode') == 'bounded_async_jsonl_v1' and row.get('run_id') == raw.name
+                        and type(row.get('node_id')) is int and row['node_id'] == node_id
+                        and type(row.get('host_monotonic_ns')) is int and row['host_monotonic_ns'] > 0
+                        and row.get('clock_domain') == 'host_monotonic')
+                    digest.update(line); rows += 1; size += len(line); largest = max(largest, len(line))
+            after = path.stat()
+            checks['file'] = (checks['ledger'] and row_identity and largest <= audit['max_record_bytes']
+                and rows == audit['written'] and size == audit['written_bytes'] and digest.hexdigest() == audit.get('sha256')
+                and (before.st_size, before.st_mtime_ns) == (after.st_size, after.st_mtime_ns) and size == after.st_size)
+            result['journals'][str(node_id)] = dict(passed=all(checks.values()), checks=checks,
+                rows=rows, bytes=size, sha256=digest.hexdigest(), path='logs/'+name,
+                audit_path='logs/'+audit_path.name,
+                audit_sha256=hashlib.sha256(audit_path.read_bytes()).hexdigest())
+        if all(row['passed'] for row in result['journals'].values()):
+            result.update(status='verified_closed_coordination_journals', passed=True)
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        result['error'] = str(error)
+    return result
+
+
 def native_library_verification(raw):
     from scripts.product.native_library_identity import verify
     return verify(raw)
@@ -773,6 +868,10 @@ def recorded_outcome(raw, code, summary, *, source_configured=False):
     result['payload_journal_verification'] = payload_journal_verification(raw)
     if result['payload_journal_verification']['passed'] is False:
         verification_errors.append('payload_journal_invalid')
+        result['measurement_validity'] = 'invalid'
+    result['coordination_journal_verification'] = coordination_journal_verification(raw)
+    if result['coordination_journal_verification']['passed'] is False:
+        verification_errors.append('coordination_journal_invalid')
         result['measurement_validity'] = 'invalid'
     result['native_library_verification'] = native_library_verification(raw)
     if result['native_library_verification']['passed'] is False:

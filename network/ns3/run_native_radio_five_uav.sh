@@ -904,6 +904,9 @@ PY
   printf 'git_head=%s\n' "${BAS_SOURCE_HEAD:-$(git -C "$ROOT_DIR" rev-parse HEAD)}"
   printf 'source_dirty_paths=%s\n' "${BAS_SOURCE_DIRTY:-unknown}"
   printf 'coordination_policy=%s\nactive_uart_channels=%s\n' "$COORDINATION_POLICY" "$ACTIVE_UART_CHANNELS"
+  if [[ "$COORDINATION_POLICY" != off ]]; then
+    printf 'coordination_journal_mode=bounded_async_jsonl_v1\n'
+  fi
   printf 'physics_profile=%s\n' "$PHYSICS_PROFILE"
   printf 'wifi_topology=%s\n' "$WIFI_TOPOLOGY"
   printf 'wifi_explicit_bar_after_missed_block_ack_requested=%s\n' "$WIFI_EXPLICIT_BAR"

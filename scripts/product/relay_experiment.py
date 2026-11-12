@@ -345,7 +345,11 @@ class RelayExperiment:
         service_args.radio_watchdog_file = args.radio_watchdog_file
         service_args.watchdog_s = args.watchdog_s
         self.emit = Events(service_args.event_log, args.run_id, 0)
-        self.gcs = GCSService(service_args, self.emit)
+        try:
+            self.gcs = GCSService(service_args, self.emit)
+        except BaseException:
+            self.emit.close()
+            raise
         self.reader = PoseReader(args.node_state, self.uav_ids)
         self.observer = GoalObserver(self.emit, args)
         self.tails = {i: EventTail(args.run_dir / f"logs/coordination_uav{i}.jsonl") for i in self.uav_ids}
@@ -1022,14 +1026,20 @@ class RelayExperiment:
         except StopRequested:
             stopped = True
             self.summary["stop_requested_source_sim_time_s"] = self.source_s
-            self.emit("stop_requested", source_sim_time_s=self.source_s)
+            try:
+                self.emit("stop_requested", source_sim_time_s=self.source_s)
+            except Exception as exc:
+                runtime_errors.append(f'coordination journal {type(exc).__name__}: {exc}')
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
             if isinstance(exc, MeasurementError):
                 self.summary.setdefault("measurement_errors", []).append(error)
             if not isinstance(exc, ScenarioError):
                 runtime_errors.append(error)
-            self.emit("experiment_failed", reason=error)
+            try:
+                self.emit("experiment_failed", reason=error)
+            except Exception as journal_error:
+                runtime_errors.append(f'coordination journal {type(journal_error).__name__}: {journal_error}')
         try:
             self.land()
             landed = True
@@ -1076,14 +1086,29 @@ class RelayExperiment:
         self.summary["criteria"]["all_uav_lifecycle"] = self.summary["criteria"]["five_uav_lifecycle"]
         if "payload_channel" in self.summary:
             self.summary["criteria"]["payload_bidirectional_all_uavs"] = self.summary["payload_channel"].get("measurement_window", {}).get("all_bidirectional_observed", False)
+        try:
+            self.phase("experiment_failed" if error else "experiment_stopped" if stopped else "experiment_done")
+        except Exception as exc:
+            runtime_errors.append(f'final phase {type(exc).__name__}: {exc}')
+        try:
+            self.gcs.close()
+        except Exception as exc:
+            runtime_errors.append(f'coordination close {type(exc).__name__}: {exc}')
+        finally:
+            try:
+                self.emit.close()
+            except Exception as exc:
+                runtime_errors.append(f'coordination journal close {type(exc).__name__}: {exc}')
+            finally:
+                self.csv_handle.close()
+        if runtime_errors:
+            error = (error + '; ' if error else '') + '; '.join(runtime_errors)
+            self.summary['error'] = error
+            self.summary['status'] = 'failed'
         self.summary.update(outcome_fields(self.summary, window_complete=window_complete,
                                           stopped=stopped, runtime_errors=runtime_errors))
-        self.phase("experiment_failed" if error else "experiment_stopped" if stopped else "experiment_done")
         output = self.args.run_dir / "metrics/relay_experiment_summary.json"
         output.write_text(json.dumps(self.summary, indent=2, allow_nan=False) + "\n")
-        self.csv_handle.close()
-        self.gcs.close()
-        self.emit.stream.close()
         if error:
             raise ScenarioError(error)
         return self.summary
