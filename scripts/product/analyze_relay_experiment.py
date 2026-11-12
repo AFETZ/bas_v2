@@ -71,9 +71,25 @@ def read_jsonl(path: Path, errors: list[str]) -> list[dict[str, Any]]:
     return result
 
 
-def read_csv(path: Path) -> list[dict[str, Any]]:
+def read_csv(path: Path, *, evidence=None) -> list[dict[str, Any]]:
     if not path.is_file():
         return []
+    if evidence is not None:
+        before = path.stat()
+        digest, size = hashlib.sha256(), 0
+        with path.open('rb') as stream:
+            def lines():
+                nonlocal size
+                for line in stream:
+                    digest.update(line)
+                    size += len(line)
+                    yield line.decode('utf-8')
+            records = list(csv.DictReader(lines()))
+        after = path.stat()
+        evidence.update(sha256=digest.hexdigest(), bytes=size, rows=len(records),
+            stable=(before.st_size, before.st_mtime_ns) == (after.st_size, after.st_mtime_ns)
+                and size == after.st_size)
+        return records
     with path.open(newline="") as stream:
         return list(csv.DictReader(stream))
 
@@ -729,6 +745,198 @@ def analyze_payload_lineage(run_dir: Path, start_ns=None, end_ns=None, *, comple
     return result
 
 
+def refined_case_evidence(run_dir, meta, stats, environment, events, native, commands, payload, errors,
+                          native_capture=None):
+    """Observe the refined flight case without importing the separate SLA limits.
+
+    Only frozen run geometry is usable. A successful process/mission summary is
+    necessary but never sufficient; missing observations remain a failed gate.
+    HitL remains a separate bench, even when all flight gates are satisfied.
+    """
+    run_dir = Path(run_dir).resolve()
+    root = run_dir.parents[2]
+    control_dir = root / 'runs/control' / run_dir.name
+    frozen = run_dir / 'logs/urban_scenario.json'
+    raw_scene = read_json(frozen)
+    config = read_json(control_dir / 'config.json')
+    if (raw_scene.get('scenario') != 'terrain_10km_five_uav_refined_case_v1'
+            and Path(config.get('environment', {}).get('scene', '')).name != 'terrain_10km_refined_mission.json'):
+        return dict(schema_version=1, status='not_applicable', applicable=False)
+    import bas
+    from scripts.product.urban_mission import UrbanScenario
+    from scripts.product.prepare_terrain_scene import terrain_height
+    from scripts.product.summarize_native_radio_five_uav import _native_source_schedule
+    checks, details, failures = {}, {}, []
+    result = dict(schema_version=1, applicable=True, status='incomplete', flight_case_passed=False,
+        checks=checks, observations=details, evidence_errors=failures,
+        hitl='separate_bench_required',
+        scope='Frozen refined-case input, recorded Gazebo samples and audited packet delivery; no physical hardware or statistical SLA certification.',
+        sampling_limit='AGL and collision checks describe recorded Gazebo positions, not continuous motion between samples or the whole map.')
+    record = read_json(control_dir / 'run.json')
+    checks['runtime_and_complete_window'] = (
+        record.get('run_id') == run_dir.name and record.get('runtime_status') == 'completed'
+        and record.get('mission_outcome') == 'succeeded' and record.get('measurement_validity') == 'valid'
+        and not record.get('runtime_verification_errors') and not errors
+        and meta.get('runtime_status') == 'completed' and meta.get('mission_outcome') == 'succeeded'
+        and meta.get('measurement_validity') == 'valid' and meta.get('measurement_window_completed') is True
+        and stats.get('stop_reason') in ('duration', 'sionna_ns3_process_stopped'))
+    capture = read_json(run_dir / 'metrics/native_source_summary.json').get('event_capture', {})
+    native_capture = native_capture or {}
+    checks['native_event_capture'] = (native_capture.get('stable') is True
+        and capture.get('status') == 'observed' and capture.get('bytes') == native_capture.get('bytes')
+        and capture.get('sha256') == native_capture.get('sha256'))
+    details['native_event_capture'] = native_capture
+    checks['one_shared_radio_channel'] = (
+        type(stats.get('uav_count')) is int and stats['uav_count'] == 5
+        and type(stats.get('radio_node_count')) is int and stats['radio_node_count'] == 6
+        and type(stats.get('shared_spectrum_channel_count')) is int and stats['shared_spectrum_channel_count'] == 1
+        and stats.get('wifi_topology') == 'adhoc' and stats.get('sionna_drives_rx_psd') is True)
+    valid_commands = Counter(row['uav_id'] for row in commands if row.get('lease_status') == 'valid'
+        and row.get('lineage_status') == 'valid' and row.get('application_chain_complete') is True
+        and row.get('policy_allowed') is True and finite(row.get('admitted_ns')) is not None)
+    delivered_payload = Counter(row.get('uav_id') for row in payload.get('records', [])
+        if row.get('outcome') in ('timely', 'late') and row.get('direction') == 'gcs_to_uav')
+    checks['two_mavlink_uart_channels'] = (
+        environment.get('active_uart_channels') == 'control,payload'
+        and payload.get('status') == 'recorded' and not payload.get('audit_errors')
+        and payload.get('invalid_trace_rows') == 0 and payload.get('orphan_receipts') == 0
+        and bool(payload.get('trace_files')) and all(f.get('status') == 'observed' for f in payload['trace_files'])
+        and all(valid_commands[i] > 0 and delivered_payload[i] > 0 for i in UAVS))
+    details['delivered_control_by_uav'] = dict(valid_commands)
+    details['delivered_payload_by_uav'] = dict(delivered_payload)
+    checks['frozen_terrain'] = False
+    checks['five_uav_flight_lifecycle'] = False
+    checks['gazebo_positions_and_agl'] = False
+    try:
+        bundle = (root / raw_scene['terrain_bundle']).resolve()
+        if bundle != (control_dir / 'generated/terrain').resolve():
+            raise ValueError('terrain is not the frozen bundle of this run')
+        # The initial/final simulator snapshots bind the run-local bundle and
+        # mission. Never fall back to the mutable checkout .external assets.
+        manifest_path = bundle / 'scene-manifest.json'
+        for stage in ('initial', 'final'):
+            inputs = run_dir / 'configuration' / stage / 'inputs'
+            for label, path in (('geometry_source', frozen), ('sionna_geometry_manifest', manifest_path)):
+                captured = inputs / label / 'value.json'
+                if captured.read_bytes() != path.read_bytes():
+                    raise ValueError(f'{stage} {label} differs from frozen runtime input')
+        scenario = UrbanScenario.load(frozen, root=root)  # Verifies every terrain asset hash.
+        manifest = scenario.terrain_manifest
+        details['terrain_manifest_sha256'] = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        floors = [b['storeys'] for b in manifest['building_bounds'].values()]
+        checks['frozen_terrain'] = (manifest['extent_m'] == [10000, 10000]
+            and 0 < manifest['relief_m'] <= 200 and bool(floors) and max(floors) == 15
+            and scenario.uav_ids == UAVS)
+        observed_events = defaultdict(set)
+        reached = defaultdict(set)
+        for row in events:
+            uav, stage = row.get('uav_id'), row.get('stage', row.get('event'))
+            if uav not in UAVS:
+                continue
+            observed_events[uav].add(stage)
+            index = row.get('waypoint_index')
+            position = row.get('target_position_m')
+            if (stage == 'waypoint_reached_telemetry' and type(index) is int
+                    and row.get('progression_source') == 'radio_delivered_LOCAL_POSITION_NED'
+                    and 0 <= index < len(scenario.routes[uav]) and isinstance(position, (list, tuple))
+                    and len(position) == 3 and all(finite(p) is not None for p in position)
+                    and math.dist(position, scenario.routes[uav][index]) <= 1e-6):
+                reached[uav].add(index)
+        checks['five_uav_flight_lifecycle'] = all(
+            {'takeoff_observed', 'landing_disarm_observed'} <= observed_events[i]
+            and reached[i] == set(range(len(scenario.routes[i])))
+            and all(meta.get('uavs', {}).get(str(i), {}).get(k) is True
+                    for k in ('armed', 'takeoff', 'landed', 'auto_disarm')) for i in UAVS)
+        details['waypoints_observed_by_uav'] = {str(i): sorted(reached[i]) for i in UAVS}
+        journal = bas.node_state_journal_verification(run_dir)
+        details['position_journal_verification'] = journal
+        if journal.get('passed') is not True:
+            raise ValueError('closed position journal is not hash verified')
+        start, stop = meta.get('measurement_start_host_monotonic_ns'), meta.get('measurement_end_host_monotonic_ns')
+        if type(start) is not int or type(stop) is not int or not start < stop:
+            raise ValueError('exact measurement host window is missing')
+        agl = {i: [] for i in UAVS}
+        seen, cp_samples, bad, collisions = {}, 0, 0, 0
+        with (run_dir / 'logs/node_state.jsonl').open(encoding='utf-8') as stream:
+            for line in stream:
+                snapshot = json.loads(line)
+                stamp = snapshot.get('published_monotonic_ns')
+                if type(stamp) is not int or not start <= stamp <= stop:
+                    continue
+                if snapshot.get('coordinate_frame') != 'ENU' or snapshot.get('source') != 'gazebo_odometry' or snapshot.get('fault'):
+                    bad += 1
+                    continue
+                nodes = snapshot.get('nodes', [])
+                if ({n.get('id') for n in nodes} != {'cp', *(f'uav{i}' for i in UAVS)}
+                        or len(nodes) != 6):
+                    bad += 1
+                    continue
+                for node in nodes:
+                    if node.get('id') == 'cp':
+                        if node.get('role') == 'command_post' and node.get('position_m') == raw_scene['gcs']:
+                            cp_samples += 1
+                        continue
+                    uav = identifier(node.get('id'))
+                    if uav is None:
+                        bad += 1
+                        continue
+                    point, source_s = node.get('position_m'), finite(node.get('source_sim_time_s'))
+                    if (node.get('stale') is not False or node['id'] in snapshot.get('stale_nodes', [])
+                            or source_s is None or not isinstance(point, list) or len(point) != 3
+                            or any(finite(p) is None for p in point)):
+                        bad += 1
+                        continue
+                    identity = (snapshot.get('session_id'), uav, source_s)
+                    if identity in seen:
+                        if seen[identity] != point:
+                            bad += 1
+                        continue
+                    seen[identity] = point
+                    agl[uav].append(point[2] - terrain_height(scenario.terrain_grid, *point[:2]))
+                    collisions += sum(all(low <= value <= high for value, low, high in zip(
+                        point, b['bounds_m'][0], b['bounds_m'][1])) for b in manifest['building_bounds'].values())
+        details.update(agl_m_by_uav={str(i): distribution(values) for i, values in agl.items()},
+            cp_samples=cp_samples, invalid_position_samples=bad, sampled_building_intersections=collisions)
+        checks['gazebo_positions_and_agl'] = (cp_samples > 0 and not bad and not collisions
+            and all(values and min(values) > 0 and max(values) >= 20 for values in agl.values()))
+    except (ValueError, OSError, KeyError, TypeError, ImportError) as error:
+        failures.append(f'geometry_or_pose: {type(error).__name__}: {error}')
+    checks['separate_em_source_observed'] = False
+    try:
+        schedule = _native_source_schedule(run_dir)
+        segments = (schedule.get('actual_sources') or {}).get('segments', [])
+        source_rows = []
+        for segment in segments:
+            switches = [e for e in native if e.get('node') == segment['id']]
+            observed = {}
+            for event, at in (('jammer_on', segment['start_s']), ('jammer_off', segment['stop_s'])):
+                observed[event] = False
+                for row in switches:
+                    params = dict(part.split('=', 1) for part in row.get('details', '').split(';') if '=' in part)
+                    if (row.get('event') == event and finite(row.get('time_s')) is not None
+                            and abs(float(row['time_s']) - at) < 1e-6 and params.get('pattern') == segment['pattern']
+                            and all(finite(params.get(key)) is not None and math.isclose(float(params[key]), segment[key], rel_tol=0, abs_tol=1e-6)
+                                    for key in ('center_hz', 'bandwidth_hz', 'power_w'))):
+                        observed[event] = True
+            arrivals = sum(e.get('event') == 'spectrum_signal_arrival'
+                and 'foreign_signal=1' in e.get('details', '') and finite(e.get('value')) is not None
+                and e.get('node') in {'cp', *(f'uav{i}' for i in UAVS)}
+                and finite(e.get('time_s')) is not None and segment['start_s'] <= float(e['time_s']) < segment['stop_s']
+                for e in native)
+            source_rows.append(dict(id=segment['id'], center_hz=segment['center_hz'], pattern=segment['pattern'],
+                switches=observed, foreign_signal_arrivals=arrivals,
+                passed=all(observed.values()) and arrivals > 0))
+        details['sources'] = source_rows
+        checks['separate_em_source_observed'] = (schedule['actual_schedule_status'] == 'observed'
+            and len(source_rows) == 1 and source_rows[0]['passed'])
+    except (ValueError, OSError, KeyError, TypeError) as error:
+        failures.append(f'source_observation: {type(error).__name__}: {error}')
+    result['flight_case_passed'] = bool(checks) and all(checks.values()) and not failures
+    result['status'] = ('flight_case_observed' if result['flight_case_passed'] else
+        'runtime_or_mission_failed' if not checks['runtime_and_complete_window'] else 'incomplete')
+    return result
+
+
 def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: float = 250.,
                 restricted_s: float = 30., plots: bool = True, live_export: bool = True) -> dict[str, Any]:
     run_dir = run_dir.resolve()
@@ -768,7 +976,8 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
     inside = lambda at: at is not None and (start is None or at >= start) and (end is None or at <= end)
     condition = str(meta.get("fault_profile", config.get("fault_profile", stats.get("fault_profile", "none"))))
     policy = str(meta.get("policy", config.get("policy", "not_recorded")))
-    native = read_csv(run_dir / "logs/native_radio_events.csv")
+    native_capture = {}
+    native = read_csv(run_dir / "logs/native_radio_events.csv", evidence=native_capture)
     fault_events = [row for row in native if row.get("event") in ("fault_start", "fault_end")
                     and inside(finite(row.get("wall_monotonic_ns")))]
     fault_starts = [finite(row["wall_monotonic_ns"]) for row in fault_events if row["event"] == "fault_start"]
@@ -1142,6 +1351,8 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
     recovery_rows += [dict(endpoint=name, **row) for name, row in control.items()]
     write_csv(output / "metrics/relay_recovery.csv", recovery_rows, ["endpoint", "status", "recovered", "time_s",
         "censor_time_s", "restricted_horizon_s", "restricted_unrecovered_time_s", "leader_id", "epoch", "members"])
+    result['refined_case'] = refined_case_evidence(run_dir, meta, stats, environment,
+        events, native, commands, payload, errors, native_capture)
     write_json(output / "metrics/relay_analysis.json", result)
     if plots:
         plot_run(output, result, commands, events)
