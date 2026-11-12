@@ -71,7 +71,7 @@ def read_jsonl(path: Path, errors: list[str]) -> list[dict[str, Any]]:
     return result
 
 
-def read_csv(path: Path, *, evidence=None) -> list[dict[str, Any]]:
+def read_csv(path: Path, *, evidence=None, keep=None) -> list[dict[str, Any]]:
     if not path.is_file():
         return []
     if evidence is not None:
@@ -84,15 +84,31 @@ def read_csv(path: Path, *, evidence=None) -> list[dict[str, Any]]:
                     digest.update(line)
                     size += len(line)
                     yield line.decode('utf-8')
-            records = list(csv.DictReader(lines()))
+            records, rows, malformed = [], 0, 0
+            for row in csv.DictReader(lines()):
+                rows += 1
+                malformed += None in row or None in row.values()
+                if keep is None or keep(row):
+                    records.append(row)
         after = path.stat()
-        evidence.update(sha256=digest.hexdigest(), bytes=size, rows=len(records),
-            malformed_rows=sum(None in row or None in row.values() for row in records),
+        evidence.update(sha256=digest.hexdigest(), bytes=size, rows=rows, retained_rows=len(records),
+            malformed_rows=malformed,
             stable=(before.st_size, before.st_mtime_ns) == (after.st_size, after.st_mtime_ns)
                 and size == after.st_size)
         return records
     with path.open(newline="") as stream:
-        return list(csv.DictReader(stream))
+        return [row for row in csv.DictReader(stream) if keep is None or keep(row)]
+
+
+def native_analysis_event(row):
+    """Only these native observations enter relay timing, faults or refined gates.
+
+    Filtering changes memory use only: the reader still hashes/counts/validates
+    every original CSV row, including unretained PHY/MAC traffic.
+    """
+    return (row.get('event') in {'fault_start', 'fault_end', 'realtime_lag', 'jammer_on', 'jammer_off'}
+        or row.get('event') == 'spectrum_signal_arrival'
+        and 'foreign_signal=1' in str(row.get('details', '')).split(';'))
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None:
@@ -943,7 +959,7 @@ def refined_case_evidence(run_dir, meta, stats, environment, events, native, com
                                     for key in ('center_hz', 'bandwidth_hz', 'power_w'))):
                         observed[event] = True
             arrivals = sum(e.get('event') == 'spectrum_signal_arrival'
-                and 'foreign_signal=1' in e.get('details', '') and finite(e.get('value')) is not None
+                and 'foreign_signal=1' in str(e.get('details', '')).split(';') and finite(e.get('value')) is not None
                 and e.get('node') in {'cp', *(f'uav{i}' for i in UAVS)}
                 and finite(e.get('time_s')) is not None and segment['start_s'] <= float(e['time_s']) < segment['stop_s']
                 for e in native)
@@ -1001,7 +1017,7 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
     condition = str(meta.get("fault_profile", config.get("fault_profile", stats.get("fault_profile", "none"))))
     policy = str(meta.get("policy", config.get("policy", "not_recorded")))
     native_capture = {}
-    native = read_csv(run_dir / "logs/native_radio_events.csv", evidence=native_capture)
+    native = read_csv(run_dir / "logs/native_radio_events.csv", evidence=native_capture, keep=native_analysis_event)
     fault_events = [row for row in native if row.get("event") in ("fault_start", "fault_end")
                     and inside(finite(row.get("wall_monotonic_ns")))]
     fault_starts = [finite(row["wall_monotonic_ns"]) for row in fault_events if row["event"] == "fault_start"]

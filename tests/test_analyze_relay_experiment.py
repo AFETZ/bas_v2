@@ -5,6 +5,9 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
+
+from scripts.product import analyze_relay_experiment as analyzer
 
 from scripts.product.analyze_relay_experiment import (
     ENGINEERING_DELIVERY_V1, MISSION_FIELDS, SERVICE_FIELDS,
@@ -36,6 +39,39 @@ def timing_samples(start=10**18 + 13, duration_s=1):
 
 
 class DeliveryAnalysisTests(unittest.TestCase):
+    def test_selected_native_rows_preserve_full_analysis(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            raw, output = Path(temporary) / 'raw', Path(temporary) / 'derived'
+            (raw / 'logs').mkdir(parents=True)
+            (raw / 'metrics').mkdir()
+            meta, rows = timing_samples(10**9)
+            meta.update(run_id='selection-fixture', status='completed', policy='fixed',
+                        fault_profile='none', uav_ids=[1], measurement_validity='valid',
+                        measurement_duration_source_s=1)
+            (raw / 'metrics/relay_experiment_summary.json').write_text(json.dumps(meta))
+            (raw / 'metrics/relay_experiment_config.json').write_text(json.dumps(dict(
+                initial_master=1, duration_s=1, command_period_s=1,
+                effective_service_args=dict(command_max_age_ms=250))))
+            rows.extend(dict(event=event, wall_monotonic_ns=str(1_500_000_000),
+                             time_s='10.5', value='1', details=details) for event, details in (
+                ('phy_rx_ok', ''), ('fault_start', ''), ('fault_end', ''),
+                ('jammer_on', 'pattern=iso'), ('jammer_off', 'pattern=iso'),
+                ('spectrum_signal_arrival', 'foreign_signal=0'),
+                ('spectrum_signal_arrival', 'foreign_signal=1')))
+            with (raw / 'logs/native_radio_events.csv').open('w', newline='') as stream:
+                writer = csv.DictWriter(stream, fieldnames=['event', 'wall_monotonic_ns', 'time_s', 'value', 'details'])
+                writer.writeheader()
+                writer.writerows(rows)
+            selected = analyze_run(raw, output, plots=False, live_export=False)
+            original_reader = analyzer.read_csv
+            def full_reader(path, *, evidence=None, keep=None):
+                return original_reader(path, evidence=evidence)
+            with patch.object(analyzer, 'read_csv', side_effect=full_reader):
+                full = analyze_run(raw, output, plots=False, live_export=False)
+            self.assertEqual(selected, full)
+            self.assertEqual(selected['engineering_delivery_v1']['runtime_timing']['lag_ms']['samples'], 20)
+            self.assertIn('no-fault run contains actual native fault_start', selected['data_quality_errors'])
+
     def test_missing_unavailable_late_and_invalid_are_retained_and_break_jitter(self):
         offers, commands = samples([50, 70, None, 90, 100, 'unavailable', 300, 20])
         commands[-1]['lineage_status'] = 'unverifiable_or_mismatched'

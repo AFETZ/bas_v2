@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from scripts.product.analyze_relay_experiment import read_csv, refined_case_evidence
+from scripts.product.analyze_relay_experiment import native_analysis_event, read_csv, refined_case_evidence
 
 
 class RefinedEvidenceTests(unittest.TestCase):
@@ -178,10 +178,36 @@ class RefinedEvidenceTests(unittest.TestCase):
         evidence = {}
         rows = read_csv(path, evidence=evidence)
         self.assertEqual(rows, [dict(event='jammer_on', details='one\r\ntwo')])
-        self.assertEqual(evidence, dict(sha256=hashlib.sha256(data).hexdigest(), bytes=len(data), rows=1, malformed_rows=0, stable=True))
+        self.assertEqual(evidence, dict(sha256=hashlib.sha256(data).hexdigest(), bytes=len(data), rows=1, retained_rows=1, malformed_rows=0, stable=True))
         path.write_bytes(b'event,details\njammer_on\n')
         read_csv(path, evidence=evidence)
         self.assertEqual(evidence['malformed_rows'], 1)
+
+    def test_streaming_selection_hashes_and_counts_even_discarded_malformed_rows(self):
+        path = self.root / 'mixed.csv'
+        data = (b'event,details\nrealtime_lag,value=1\nphy_rx_ok,ordinary\n'
+                b'spectrum_signal_arrival,foreign_signal=0\n'
+                b'spectrum_signal_arrival,foreign_signal=10\n'
+                b'spectrum_signal_arrival,foreign_signal=1\njammer_on,source=ns3\n'
+                b'phy_rx_ok\n')
+        path.write_bytes(data)
+        full_evidence, selected_evidence = {}, {}
+        full = read_csv(path, evidence=full_evidence)
+        selected = read_csv(path, evidence=selected_evidence, keep=native_analysis_event)
+        self.assertEqual(selected, [row for row in full if native_analysis_event(row)])
+        self.assertEqual([row['event'] for row in selected], ['realtime_lag', 'spectrum_signal_arrival', 'jammer_on'])
+        self.assertEqual(selected_evidence['rows'], 7)
+        self.assertEqual(selected_evidence['retained_rows'], 3)
+        self.assertEqual(selected_evidence['malformed_rows'], 1)
+        self.assertEqual(selected_evidence['sha256'], hashlib.sha256(data).hexdigest())
+        self.assertEqual({k: v for k, v in selected_evidence.items() if k != 'retained_rows'},
+                         {k: v for k, v in full_evidence.items() if k != 'retained_rows'})
+        self.capture = selected_evidence
+        self.write(self.raw / 'metrics/native_source_summary.json', dict(event_capture=dict(
+            status='observed', sha256=selected_evidence['sha256'], bytes=selected_evidence['bytes'])))
+        result = self.evaluate()
+        self.assertFalse(result['checks']['native_event_capture'])
+        self.assertFalse(result['flight_case_passed'])
 
 
 if __name__ == '__main__':
