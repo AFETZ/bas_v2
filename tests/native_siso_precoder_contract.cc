@@ -94,9 +94,15 @@ int main()
                     auto explicitIdentity = calculate();
                     for (size_t rb = 0; rb < bins; ++rb)
                     {
+                        if (!Same((*implicit->psd)[rb], (*explicitIdentity->psd)[rb]))
+                            std::cerr << "PSD case=" << cases << " bin=" << rb << " values="
+                                      << (*implicit->psd)[rb] << "," << (*explicitIdentity->psd)[rb] << '\n';
                         Check(Same((*implicit->psd)[rb], (*explicitIdentity->psd)[rb]));
                         const auto a = (*implicit->spectrumChannelMatrix)(0, 0, rb);
                         const auto b = (*explicitIdentity->spectrumChannelMatrix)(0, 0, rb);
+                        if (!(Same(a.real(), b.real()) && Same(a.imag(), b.imag())))
+                            std::cerr << "CFR case=" << cases << " bin=" << rb << " values="
+                                      << a << "," << b << '\n';
                         Check(Same(a.real(), b.real()) && Same(a.imag(), b.imag()));
                     }
                     ++cases;

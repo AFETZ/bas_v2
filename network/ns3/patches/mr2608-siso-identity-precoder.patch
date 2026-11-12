@@ -1,6 +1,6 @@
 --- a/src/spectrum/model/sionna-rt-spectrum-propagation-loss-model.cc
 +++ b/src/spectrum/model/sionna-rt-spectrum-propagation-loss-model.cc
-@@ -266,6 +266,21 @@
+@@ -266,6 +266,32 @@
                    "Unexpected mismatch in the number of RBs and channel matrix and precoding "
                    "matrix. MultiModelSpectrumChannel conversion is not yet supported.");
  
@@ -9,14 +9,25 @@
 +    // while avoiding the replicated precoder and intermediate matrix arrays.
 +    if (!rxParams->precodingMatrix && numTxPorts == 1 && numRxPorts == 1)
 +    {
++        bool finiteChannel = true;
 +        for (uint32_t rbIdx = 0; rbIdx < rxParams->psd->GetValuesN(); ++rbIdx)
 +        {
-+            const auto hP = (*rxParams->spectrumChannelMatrix)(0, 0, rbIdx) *
-+                            std::complex<double>(1.0, 0.0);
++            const auto h = (*rxParams->spectrumChannelMatrix)(0, 0, rbIdx);
++            if (!std::isfinite(h.real()) || !std::isfinite(h.imag()))
++            {
++                finiteChannel = false;
++                break;
++            }
++            const auto hP = h * std::complex<double>(1.0, 0.0);
 +            (*rxParams->psd)[rbIdx] = 0.0;
 +            (*rxParams->psd)[rbIdx] += std::real(std::conj(hP) * hP);
 +        }
-+        return rxParams;
++        if (finiteChannel)
++        {
++            return rxParams;
++        }
++        // Eigen's matrix product has distinct nonfinite behavior. Preserve it
++        // with the original path, which overwrites every PSD bin below.
 +    }
 +
      // Calculate RX PSD from the spectrum channel matrix H and
