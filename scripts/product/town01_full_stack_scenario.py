@@ -217,11 +217,13 @@ class FlightHarness:
                  uav_ids: tuple[int, ...] = UAV_IDS,
                  observer: Callable[[str, int, Any, int], None] | None = None,
                  frame_observer: Callable | None = None,
-                 send_observer: Callable | None = None) -> None:
+                 send_observer: Callable | None = None,
+                 event_sink: Callable[[dict[str, Any]], None] | None = None) -> None:
         self.channels = tuple(channels)
         self.uav_ids = tuple(uav_ids)
         self.message_observer = observer
         self.frame_observer, self.send_observer = frame_observer, send_observer
+        self.event_sink = event_sink
         self.stream_provenance = defaultdict(deque)
         if (not self.channels or len(set(self.channels)) != len(self.channels)
                 or not set(self.channels) <= {"control", "payload", "additional_data"}):
@@ -345,7 +347,11 @@ class FlightHarness:
         }
         self.flight_writer.writerow(row)
         self.flight_handle.flush()
-        append_jsonl(self.events_path, {**row, "monotonic_ns": clock.monotonic_ns()})
+        value = {**row, "monotonic_ns": clock.monotonic_ns()}
+        if self.event_sink is None:
+            append_jsonl(self.events_path, value)
+        else:
+            self.event_sink(value)
         print(f"SCENARIO {name} uav={row['uav']} {detail}", flush=True)
 
     def positions(self) -> dict[str, list[float]]:
