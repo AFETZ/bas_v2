@@ -59,6 +59,15 @@ class RefinedCaseTests(unittest.TestCase):
         self.assertEqual(self.geometry['relief_m'], 200)
         self.assertEqual(max(b['storeys'] for b in self.geometry['buildings']), 15)
 
+    def test_refined_radio_only_increases_candidate_allocation(self):
+        original = yaml.safe_load((ROOT / 'network/config/native_wifi_fullmesh_100ms.yaml').read_text())
+        refined = yaml.safe_load((ROOT / self.source['propagation']['radio_config']).read_text())
+        # Failed frozen job 6499 reached 5000 candidates/TX; route/yaw replay peaked at 6933.
+        # Keep the sampling, path physics, retained-path capacity and 100 ms guards exact.
+        self.assertEqual(refined['sionna']['max_num_paths_per_src'], 2000)
+        refined['sionna']['max_num_paths_per_src'] = original['sionna']['max_num_paths_per_src']
+        self.assertEqual(refined, original)
+
     def test_source_leaves_baseline_and_recovery_windows_available(self):
         sources = yaml.safe_load((ROOT / self.source['interference']['sources']).read_text())
         self.assertEqual(sources['time_reference'], 'measurement_start')

@@ -9,7 +9,7 @@
   },
   "propagation": {
     "model": "sionna",
-    "radio_config": "network/config/native_wifi_fullmesh_100ms.yaml",
+    "radio_config": "network/config/native_wifi_refined_fullmesh_100ms.yaml",
     "ground_material": "medium_dry_ground",
     "building_material": "concrete",
     "thickness_m": 0.2
