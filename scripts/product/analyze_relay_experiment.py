@@ -768,7 +768,7 @@ def analyze_payload_lineage(run_dir: Path, start_ns=None, end_ns=None, *, comple
     return result
 
 
-def refined_phase_observations(meta, config, native, offers, commands, payload):
+def refined_phase_observations(meta, config, native, offers, commands, payload, *, native_source_anchor=None):
     """Predeclared source/off comparison cohorts; no acceptance or SLA threshold."""
     def ns(value):
         if type(value) is int:
@@ -780,10 +780,12 @@ def refined_phase_observations(meta, config, native, offers, commands, payload):
         return None
     start, observed_end = ns(meta.get('measurement_start_host_monotonic_ns')), ns(meta.get('measurement_end_host_monotonic_ns'))
     duration = finite(config.get('duration_s'))
-    source_start = finite(meta.get('measurement_start_source_sim_time_s'))
-    if start is None or observed_end is None or duration is None or duration <= 40 or source_start is None:
+    if start is None or observed_end is None or duration is None or duration <= 40:
         return dict(status='not_evaluated_missing_measurement_bounds')
-    source_start_ns = round(source_start * 1e9)
+    anchor = native_source_anchor if isinstance(native_source_anchor, dict) else {}
+    source_start_ns = ns(anchor.get('simulation_ns'))
+    foreign = [row for row in native if row.get('event') == 'spectrum_signal_arrival'
+               and 'foreign_signal=1' in str(row.get('details', '')).split(';')]
     index = {str(row['command_id']): row for row in commands}
     age_limit = finite(config.get('effective_service_args', {}).get('command_max_age_ms'))
     result = dict(status='observed', qualification='not_evaluated', windows={},
@@ -793,6 +795,10 @@ def refined_phase_observations(meta, config, native, offers, commands, payload):
         delivery_basis='Outcome follows the offered packet across a phase boundary; delivered_inside_same_phase is a separate count. Missing/censored/unverifiable outcomes are not asserted RF losses.',
         delay_scope='Control creation to UART write end. Payload GCS creation to UART write end, or UAV UART ingress to GCS CRC release; no sensor creation or physical-wire delay.',
         payload_generator_eligible=payload.get('offered_load', {}).get('generator_eligible'),
+        native_source_anchor=anchor or None,
+        rf_phase_status=('observed' if source_start_ns is not None else
+                         'unavailable_native_clock_anchor' if foreign else 'no_foreign_signals_recorded'),
+        foreign_signal_arrivals_total=len(foreign),
         source_switches=[{key: row.get(key) for key in ('event','node','time_s','wall_monotonic_ns','details')}
                          for row in native if row.get('event') in ('jammer_on','jammer_off')])
     for name, low_s, high_s in (('before', 0, 20), ('source_window', 20, 40), ('after', 40, duration)):
@@ -835,9 +841,8 @@ def refined_phase_observations(meta, config, native, offers, commands, payload):
                     synthetic_load_delivered=sum(row.get('load_id') is not None for row in delivered),
                     delay_ms=distribution([value for row in delivered if (value := finite(row.get('latency_ms'))) is not None]))
         for node in ('cp', *(f'uav{i}' for i in UAVS)):
-            phase['foreign_power_dbm_by_receiver'][node] = distribution([finite(row.get('value')) for row in native
-                if row.get('event') == 'spectrum_signal_arrival' and row.get('node') == node
-                and 'foreign_signal=1' in str(row.get('details', '')).split(';')
+            phase['foreign_power_dbm_by_receiver'][node] = distribution([finite(row.get('value')) for row in foreign
+                if source_start_ns is not None and row.get('node') == node
                 and finite(row.get('value')) is not None and finite(row.get('time_s')) is not None
                 and round(low_s * 1e9) <= round(float(row['time_s']) * 1e9) - source_start_ns < round(high_s * 1e9)])
         result['windows'][name] = phase
@@ -1505,7 +1510,10 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
     result['refined_case'] = refined_case_evidence(run_dir, meta, stats, environment,
         events, native, commands, payload, errors, native_capture)
     if result['refined_case'].get('applicable'):
-        result['refined_case']['phase_observations'] = refined_phase_observations(meta, config, native, offers, commands, payload)
+        native_sources = read_json(run_dir / 'logs/native_sources_actual.json')
+        native_anchor = native_sources.get('anchor') if isinstance(native_sources, dict) else None
+        result['refined_case']['phase_observations'] = refined_phase_observations(meta, config, native, offers, commands, payload,
+            native_source_anchor=native_anchor)
         source_summary = read_json(run_dir / 'metrics/native_source_summary.json')
         source_summary = source_summary if isinstance(source_summary, dict) else {}
         result['refined_case']['source_rf_summary'] = {key: source_summary.get(key) for key in

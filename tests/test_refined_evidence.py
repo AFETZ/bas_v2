@@ -18,7 +18,7 @@ class RefinedEvidenceTests(unittest.TestCase):
         start = 10**15 + 7
         stamp = lambda seconds: start + round(seconds * 10**9)
         meta = dict(measurement_start_host_monotonic_ns=start,
-            measurement_end_host_monotonic_ns=stamp(90), measurement_start_source_sim_time_s=100)
+            measurement_end_host_monotonic_ns=stamp(90), measurement_start_source_sim_time_s=1000)
         config = dict(duration_s=90, effective_service_args=dict(command_max_age_ms=250))
         offers = [dict(uav_id=1, command_id=str(i), scheduled_host_monotonic_ns=str(stamp(at)))
                   for i, at in enumerate((19.99, 20, 89.9))]
@@ -32,7 +32,8 @@ class RefinedEvidenceTests(unittest.TestCase):
                  accepted_host_monotonic_ns=None, outcome='right_censored', latency_ms=None)])
         native = [dict(event='spectrum_signal_arrival', node='uav1', time_s=str(at),
             value='-50', details='foreign_signal=1') for at in (120, 140)]
-        result = refined_phase_observations(meta, config, native, offers, commands, payload)
+        result = refined_phase_observations(meta, config, native, offers, commands, payload,
+                                           native_source_anchor=dict(simulation_ns=100_000_000_000))
         before, active, after = (result['windows'][key] for key in ('before', 'source_window', 'after'))
         self.assertEqual(before['control']['1']['offered'], 1)
         self.assertEqual(before['control']['1']['admitted'], 1)
@@ -47,6 +48,10 @@ class RefinedEvidenceTests(unittest.TestCase):
         self.assertEqual(after['foreign_power_dbm_by_receiver']['uav1']['samples'], 1)
         self.assertEqual(result['source_switches'], [])  # No manufactured fault on source-off.
         self.assertEqual(result['qualification'], 'not_evaluated')
+        # Gazebo source time has a different origin and cannot replace a missing native anchor.
+        unanchored = refined_phase_observations(meta, config, native, offers, commands, payload)
+        self.assertEqual(unanchored['rf_phase_status'], 'unavailable_native_clock_anchor')
+        self.assertEqual(unanchored['foreign_signal_arrivals_total'], 2)
 
     def test_incomplete_phase_window_is_observed_as_partial(self):
         self.assertEqual(refined_phase_observations({}, {}, [], [], [], {})['status'],
