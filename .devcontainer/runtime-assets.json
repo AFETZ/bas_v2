@@ -42,7 +42,7 @@
     }
   },
   "native_wheels": {
-    "repository": "HSE-Intelligent-Unmanned-Systems-Lab/UAVcosim",
+    "repository": "AFETZ/bas_v2",
     "release": "runtime-dependencies-20261110",
     "name": "native-runtime-wheels-20261110.tar",
     "bytes": 889845760,
