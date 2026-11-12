@@ -12,6 +12,7 @@ import importlib.util
 import itertools
 import json
 import math
+import re
 from pathlib import Path
 import random
 import statistics
@@ -797,13 +798,42 @@ def refined_case_evidence(run_dir, meta, stats, environment, events, native, com
         and meta.get('runtime_status') == 'completed' and meta.get('mission_outcome') == 'succeeded'
         and meta.get('measurement_validity') == 'valid' and meta.get('measurement_window_completed') is True
         and stats.get('stop_reason') in ('duration', 'sionna_ns3_process_stopped'))
-    capture = read_json(run_dir / 'metrics/native_source_summary.json').get('event_capture', {})
+    source_summary_path = run_dir / 'metrics/native_source_summary.json'
+    source_summary = read_json(source_summary_path)
+    capture = source_summary.get('event_capture', {}) if isinstance(source_summary, dict) else {}
+    capture = capture if isinstance(capture, dict) else {}
     native_capture = native_capture or {}
+    storage = read_json(run_dir / 'logs/native_capture_storage.json')
+    storage = storage if isinstance(storage, dict) else {}
+    publication = storage.get('publication', {})
+    publication = publication if isinstance(publication, dict) else {}
+    expected_destinations = {str(run_dir / 'logs/native_radio_events.csv'),
+        '/workspace/multiagent_simulation/' + (run_dir / 'logs/native_radio_events.csv').relative_to(root).as_posix()}
+    published_files = publication.get('files', [])
+    event_files = [item for item in published_files if isinstance(item, dict)
+        and isinstance(item.get('destination'), str) and item['destination'] in expected_destinations
+        ] if isinstance(published_files, list) else []
+    publication_verified = (publication.get('status') in ('copied', 'direct_disk')
+        and publication.get('errors') == [] and len(event_files) == 1
+        and isinstance(storage.get('native_event_csv_path'), str) and bool(storage['native_event_csv_path'])
+        and event_files[0].get('source') == storage['native_event_csv_path']
+        and type(event_files[0].get('bytes')) is int and event_files[0]['bytes'] == native_capture.get('bytes'))
+    # The source exporter is optional for source-off runs. Publication is the
+    # runner's closed-writer receipt; this pass hashes and validates the original
+    # bytes. If a source summary exists, it must bind to those same bytes too.
+    source_capture_verified = (not source_summary_path.exists() or (
+        capture.get('status') == 'observed' and capture.get('bytes') == native_capture.get('bytes')
+        and capture.get('sha256') == native_capture.get('sha256')))
     checks['native_event_capture'] = (native_capture.get('stable') is True
         and native_capture.get('malformed_rows') == 0
-        and capture.get('status') == 'observed' and capture.get('bytes') == native_capture.get('bytes')
-        and capture.get('sha256') == native_capture.get('sha256'))
+        and type(native_capture.get('rows')) is int and native_capture['rows'] > 0
+        and type(native_capture.get('bytes')) is int and native_capture['bytes'] > 0
+        and re.fullmatch('[0-9a-f]{64}', str(native_capture.get('sha256', ''))) is not None
+        and publication_verified and source_capture_verified)
     details['native_event_capture'] = native_capture
+    details['native_event_capture_publication'] = dict(verified=publication_verified,
+        source_summary_present=source_summary_path.exists(), source_summary_matches=source_capture_verified,
+        files=event_files, hash_scope='Original closed CSV bytes at analysis time; no earlier digest inferred.')
     checks['one_shared_radio_channel'] = (
         type(stats.get('uav_count')) is int and stats['uav_count'] == 5
         and type(stats.get('radio_node_count')) is int and stats['radio_node_count'] == 6

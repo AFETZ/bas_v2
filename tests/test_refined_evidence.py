@@ -56,8 +56,14 @@ class RefinedEvidenceTests(unittest.TestCase):
         self.nodes += [dict(id=f'uav{i}', role='uav', stale=False, source_sim_time_s=1, position_m=list(self.scenario.routes[i][0])) for i in range(1, 6)]
         self.write(self.raw / 'logs/node_state.json', dict(session_id='fixture'))
         self.positions()
-        self.capture = dict(sha256='abc', bytes=123, rows=3, malformed_rows=0, stable=True)
-        self.write(self.raw / 'metrics/native_source_summary.json', dict(event_capture=dict(status='observed', sha256='abc', bytes=123)))
+        self.capture = dict(sha256='a' * 64, bytes=123, rows=3, malformed_rows=0, stable=True)
+        self.write(self.raw / 'metrics/native_source_summary.json', dict(event_capture=dict(status='observed', sha256='a' * 64, bytes=123)))
+        self.publication = dict(native_event_csv_path='/tmp/refined-fixture/native_radio_events.csv',
+            publication=dict(status='copied', errors=[], files=[dict(
+                source='/tmp/refined-fixture/native_radio_events.csv',
+                destination='/workspace/multiagent_simulation/runs/native-radio-realtime/refined-fixture/logs/native_radio_events.csv',
+                bytes=123)]))
+        self.write(self.raw / 'logs/native_capture_storage.json', self.publication)
         self.segment = dict(id='source1', start_s=20, stop_s=40, pattern='tr38901', center_hz=2412000000., bandwidth_hz=20e6, power_w=1.)
         self.schedule = dict(actual_schedule_status='observed', actual_sources=dict(segments=[self.segment]))
         for label in ('native_sources', 'native_sources_actual'):
@@ -115,6 +121,24 @@ class RefinedEvidenceTests(unittest.TestCase):
         result = self.evaluate()
         self.assertFalse(result['checks']['frozen_terrain'])
         self.assertTrue(result['evidence_errors'])
+
+    def test_closed_publication_is_required_without_optional_source_export(self):
+        (self.raw / 'metrics/native_source_summary.json').unlink()
+        self.assertTrue(self.evaluate()['checks']['native_event_capture'])
+        publication_path = self.raw / 'logs/native_capture_storage.json'
+        for mutate in (lambda value: value.pop('publication'),
+                       lambda value: value.update(publication=None),
+                       lambda value: value['publication']['files'][0].update(destination='/wrong/run/native_radio_events.csv'),
+                       lambda value: value['publication']['files'][0].update(destination=[]),
+                       lambda value: value['publication']['files'][0].update(bytes=124),
+                       lambda value: value['publication']['files'][0].update(source='/tmp/other.csv'),
+                       lambda value: value['publication'].update(errors=['copy failed'])):
+            value = copy.deepcopy(self.publication)
+            mutate(value)
+            self.write(publication_path, value)
+            self.assertFalse(self.evaluate()['checks']['native_event_capture'])
+        publication_path.unlink()
+        self.assertFalse(self.evaluate()['checks']['native_event_capture'])
 
     def test_mutable_geometry_fallback_is_rejected(self):
         path = self.raw / 'logs/urban_scenario.json'
