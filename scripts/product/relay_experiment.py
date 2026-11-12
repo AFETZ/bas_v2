@@ -773,7 +773,10 @@ class RelayExperiment:
             pose = self.telemetry_pose(i)
             hold = self.urban_holds[i]
             if pose is None:
-                hold.started_s = None
+                # An unavailable host poll cannot advance a route, but is not
+                # an autopilot observation. The next fresh sample determines
+                # continuity: RegionHold still resets on source gaps >0.5 s or
+                # an outside sample. Receive jitter must not invent a gap.
                 continue
             previous = self.urban_last_sample.get(i)
             if previous is not None and pose.sample_ns <= previous.sample_ns:
