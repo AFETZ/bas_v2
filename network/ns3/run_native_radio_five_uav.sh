@@ -461,6 +461,7 @@ EMITTER_BATCH_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-emitter-batch.patch"
 FIXED_PATH_STORAGE_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-fixed-path-storage.patch"
 PROMISC_QOS_RECEIVE_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-promisc-qos-receive-context.patch"
 DOPPLER_FACTORIZATION_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-cfr-doppler-factorization.patch"
+EXPIRED_PREAMBLE_EVENTS_PATCH="$ROOT_DIR/network/ns3/patches/ns3-expired-preamble-events.patch"
 TAP_QUEUE_SELECTION_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-tap-device-queue-selection.patch"
 if [[ "$SCENARIO_KEY" == urban ]]; then
   SCENARIO="$URBAN_OUTPUT/scenario.yaml"
@@ -536,7 +537,7 @@ MAP_ID="${SCENARIO_VALUES[5]}"
 
 for required_file in "$ROOT_DIR/scripts/product/capture_effective_config.py" \
   "$PROJECT_SOURCE" "$PATCH_FILE" "$REALTIME_CACHE_PATCH" \
-    "$PHASED_ARRAY_ADAPTER_PATCH" "$LOCKSTEP_TAP_PATCH" "$SOLVER_BUDGET_PATCH" "$BASEBAND_PHASE_PATCH" "$DOPPLER_EPOCH_PATCH" "$RECEIVER_BATCH_PATCH" "$DYNAMIC_RT_INPUTS_PATCH" "$FULL_MESH_PATCH" "$EMITTER_BATCH_PATCH" "$FIXED_PATH_STORAGE_PATCH" "$PROMISC_QOS_RECEIVE_PATCH" "$DOPPLER_FACTORIZATION_PATCH" "$TAP_QUEUE_SELECTION_PATCH" "$RADIO_CONFIG" "$WORLD" "$CAMERA_FRAGMENT" "$SITL_DEFAULTS"; do
+    "$PHASED_ARRAY_ADAPTER_PATCH" "$LOCKSTEP_TAP_PATCH" "$SOLVER_BUDGET_PATCH" "$BASEBAND_PHASE_PATCH" "$DOPPLER_EPOCH_PATCH" "$RECEIVER_BATCH_PATCH" "$DYNAMIC_RT_INPUTS_PATCH" "$FULL_MESH_PATCH" "$EMITTER_BATCH_PATCH" "$FIXED_PATH_STORAGE_PATCH" "$PROMISC_QOS_RECEIVE_PATCH" "$DOPPLER_FACTORIZATION_PATCH" "$EXPIRED_PREAMBLE_EVENTS_PATCH" "$TAP_QUEUE_SELECTION_PATCH" "$RADIO_CONFIG" "$WORLD" "$CAMERA_FRAGMENT" "$SITL_DEFAULTS"; do
   [[ -f "$required_file" ]] || { printf 'Missing input: %s\n' "$required_file" >&2; exit 2; }
 done
 if [[ "$REQUIRES_RT" == 1 && ! -f "$SCENE" ]]; then
@@ -829,6 +830,9 @@ if [[ "${BAS_NATIVE_FIVE_SKIP_BUILD:-0}" == 1 ]]; then
   [[ -s "$WIFI_LIBRARY" && "$WIFI_LIBRARY" -nt "$PROMISC_QOS_RECEIVE_PATCH" ]] || {
     printf 'Wi-Fi library predates promiscuous QoS receive context fix.\n' >&2; exit 2;
   }
+  [[ "$WIFI_LIBRARY" -nt "$EXPIRED_PREAMBLE_EVENTS_PATCH" ]] || {
+    printf 'Wi-Fi library predates expired preamble callback release.\n' >&2; exit 2;
+  }
   [[ "$SPECTRUM_LIBRARY" -nt "$DYNAMIC_RT_INPUTS_PATCH" ]] || {
     printf 'Spectrum library predates dynamic RT input storage fix.\n' >&2; exit 2;
   }
@@ -879,6 +883,10 @@ import sys
 print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())
 PYBINARYSHA
 )"
+python3 "$ROOT_DIR/scripts/product/native_library_identity.py" prepare \
+  --run-dir "$RUN_DIR" --executable "$BINARY" \
+  --wifi "$NS3_DIR/build/lib/libns3.48-wifi-default.so" \
+  > "$RUN_DIR/logs/native_library_prepare.log" 2>&1
 
 mapfile -t DEPENDENCIES < <(PYTHONPATH="$PYTHON_DEPS" python3 - <<'PY'
 from importlib.metadata import PackageNotFoundError, version
@@ -907,6 +915,7 @@ PY
   printf 'ns3_rng_seed=%s\nns3_rng_run=%s\n' "$RNG_SEED" "$RNG_RUN"
   printf 'ns3_exact_sha=%s\n' "$(git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" rev-parse HEAD)"
   printf 'native_binary_sha256=%s\n' "$NATIVE_BINARY_SHA256"
+  printf 'native_library_identity_mode=proc_maps_sha256_v1\n'
   printf 'ns3_compatibility_patch=true\n'
   printf 'python_version=%s\n' "$(python3 --version | awk '{print $2}')"
   printf '%s\n' "${DEPENDENCIES[@]}"
@@ -1089,6 +1098,7 @@ capture_effective_configuration() {
     --config "native_routes=$RUN_DIR/logs/native_routes.txt"
     --config "native_neighbors=$RUN_DIR/logs/static_neighbors.txt"
     --config "native_capture_storage=$RUN_DIR/logs/native_capture_storage.json"
+    --config "native_library_expected=$RUN_DIR/logs/native_library_expected.json"
     --config "async_jsonl_writer=$ROOT_DIR/network/jsonl.py"
     --config "cpu_partition=$RUN_DIR/logs/cpu_partition.json"
     --config "sionna_solver_budget_patch=$SOLVER_BUDGET_PATCH"
@@ -1101,6 +1111,7 @@ capture_effective_configuration() {
     --config "sionna_fixed_path_storage_patch=$FIXED_PATH_STORAGE_PATCH"
     --config "promisc_qos_receive_context_patch=$PROMISC_QOS_RECEIVE_PATCH"
     --config "sionna_doppler_factorization_patch=$DOPPLER_FACTORIZATION_PATCH"
+    --config "expired_preamble_events_patch=$EXPIRED_PREAMBLE_EVENTS_PATCH"
     --observed-params "native_sdk_sources=$RUN_DIR/logs/native_sdk_source_verification.json"
     --config "tap_queue_selection_patch=$TAP_QUEUE_SELECTION_PATCH"
     --config "native_rt_pool_source=$ROOT_DIR/network/ns3/scratch/native-rt-pool.h"
@@ -1148,6 +1159,8 @@ capture_effective_configuration() {
   done
   if [[ "$stage" == final ]]; then
     config_args+=(--dataflash-params
+      --observed-params "native_library_observed=$RUN_DIR/logs/native_library_observed.json"
+      --observed-params "native_library_closed=$RUN_DIR/logs/native_library_closed.json"
       --observed-params "ns3_attributes=$RUN_DIR/logs/ns3_attributes.txt"
       --observed-params "ros_topics=$RUN_DIR/logs/ros_topics.txt"
       --observed-params "ros_qos=$RUN_DIR/logs/ros_qos.json")
@@ -1171,6 +1184,11 @@ cleanup() {
     stop_pid "${managed_pids[$pid_index]}"
   done
   [[ -n "$NS3_LOGGER_PID" ]] && wait "$NS3_LOGGER_PID" 2>/dev/null || true
+  if ! python3 "$ROOT_DIR/scripts/product/native_library_identity.py" close \
+    --run-dir "$RUN_DIR" > "$RUN_DIR/logs/native_library_close.log" 2>&1; then
+    printf 'Native library closure verification failed; inspect logs/native_library_close.log.\n' >&2
+    ((status != 0)) || status=1
+  fi
   # Every native writer is closed before copying, including on ns-3 hard abort.
   # Use the same upstream PCAP bytes; this changes storage, never capture scope.
   if ! python3 - "$RUN_DIR" "$NATIVE_EVENT_CSV" "$NATIVE_PCAP_PREFIX" <<'PYPUBLISH' \
@@ -1660,6 +1678,9 @@ setsid ip netns exec ams-ns3 env \
   --readinessConsecutiveSamples="$READINESS_CONSECUTIVE_SAMPLES" \
   > "$NS3_FIFO" 2>&1 &
 NS3_PID=$!
+taskset -c "$STACK_CPUSET" python3 "$ROOT_DIR/scripts/product/native_library_identity.py" observe \
+  --run-dir "$RUN_DIR" --pid "$NS3_PID" --timeout-s 15 \
+  > "$RUN_DIR/logs/native_library_observe.log" 2>&1
 for _ in $(seq 1 1800); do
   [[ -s "$NS3_READY" ]] && break
   if [[ -n "$LOCKSTEP_PID" ]] && ! kill -0 "$LOCKSTEP_PID" 2>/dev/null; then
