@@ -192,6 +192,39 @@ class RuntimeStorageTests(unittest.TestCase):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 storage.validate_descriptor(dict(self.value, **changes), self.run_id)
 
+    def test_new_sdformat_log_is_owned_raw_evidence_and_cannot_be_omitted_or_redirected(self):
+        self.assertEqual(self.value['schema'], 2)
+        location = self.value['live_paths']['sdformat_log']
+        self.assertEqual(location['path'], str(self.source/'logs/sdformat'))
+        self.assertEqual(location['mount']['filesystem'], 'tmpfs')
+        content = b'actual sdformat diagnostics\n\x00\xff\n'
+        (Path(location['path'])/'sdformat.log').write_bytes(content)
+        for change in ('missing', 'escaped'):
+            changed = json.loads(json.dumps(self.value))
+            if change == 'missing':
+                changed['live_paths'].pop('sdformat_log')
+            else:
+                changed['live_paths']['sdformat_log']['path'] = '/home/ubuntu/.sdformat'
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                storage.validate_descriptor(changed, self.run_id)
+        proof = self.publish()
+        self.assertEqual(proof['descriptor_schema'], 2)
+        self.assertEqual((self.raw/'logs/sdformat/sdformat.log').read_bytes(), content)
+        self.assertEqual(proof['members']['logs/sdformat/sdformat.log']['sha256'],
+                         storage.sha(self.raw/'logs/sdformat/sdformat.log'))
+        self.assertFalse(self.spool.exists())
+
+    def test_historical_seven_path_schema_retains_its_original_verification_shape(self):
+        self.value['schema'] = 1
+        self.value['live_paths'].pop('sdformat_log')
+        for path in (self.spool/'owner.json', self.control/'runtime_spool.json', self.source/storage.INITIAL):
+            storage.write(path, self.value)
+        storage.validate_descriptor(self.value, self.run_id)
+        proof = self.publish()
+        self.assertTrue(proof['passed'])
+        self.assertNotIn('descriptor_schema', proof)
+        self.assertEqual(storage.verify(self.raw), proof)
+
     def test_malformed_or_nonfinite_storage_metadata_returns_invalid_instead_of_crashing(self):
         self.publish()
         receipt = self.raw/storage.RECEIPT
