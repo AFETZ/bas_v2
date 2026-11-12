@@ -474,7 +474,7 @@ class ControlUartPtyTests(unittest.TestCase):
             '--event-log',str(run/'events.jsonl')])
         events = []
         log = Events(args.event_log,args.run_id,1)
-        self.addCleanup(log.stream.close)
+        self.addCleanup(log.close)
         def emit(event, **fields):
             log(event,**fields)
             events.append((event,fields))
