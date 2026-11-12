@@ -2,6 +2,7 @@ import copy
 import hashlib
 import json
 import os
+import signal
 from pathlib import Path
 import socket
 import subprocess
@@ -172,7 +173,7 @@ class RadioHitlSoftwarePairTests(unittest.TestCase):
         self.folder = Path(temporary.name)
         self.catalog = json.loads(CATALOG.read_text())
 
-    def start(self, channels, *, duration=1.2, readiness=2):
+    def start(self, channels, *, duration=1.2, readiness=2, start_new_session=False):
         request = dict(controller='pixhawk_6c', radio_device='microhard_pmddl2450', uav_id=2,
                        channels=channels, queues=dict(packets=256, bytes=1048576, deadline_s=2), reconnect_s=.05)
         profiles = self.folder / 'profiles.json'
@@ -184,7 +185,8 @@ class RadioHitlSoftwarePairTests(unittest.TestCase):
         output = self.folder / 'run'
         process = subprocess.Popen([sys.executable, str(ROOT / 'scripts/product/test_radio_hitl.py'),
             '--config', str(path), '--profiles', str(profiles), '--run-adapters', '--output', str(output), '--duration-s', str(duration),
-            '--readiness-timeout-s', str(readiness)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            '--readiness-timeout-s', str(readiness)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=start_new_session)
         self.addCleanup(self.stop, process)
         return process, output
 
@@ -214,6 +216,26 @@ class RadioHitlSoftwarePairTests(unittest.TestCase):
         for frame in Encoder(channel=channel, uav_id=2, direction='gcs_to_uart').encode(reply):
             radio.sendto(frame, address)
         return reply
+
+    @unittest.skipUnless(os.name == 'posix', 'actual process-group SIGTERM contract')
+    def test_native_group_stop_and_supervisor_stop_close_children_cleanly(self):
+        with udp_socket() as peer:
+            channels = {channel: dict(endpoint=dict(kind='udp', bind=free_udp_address(), peer=peer.getsockname()),
+                radio=dict(bind=free_udp_address(), peer=peer.getsockname())) for channel in ('control', 'payload')}
+            process, output = self.start(channels, duration=30, start_new_session=True)
+            self.ready(process, output)
+            os.killpg(process.pid, signal.SIGTERM)
+            stdout, stderr = process.communicate(timeout=5)
+            self.assertEqual(process.returncode, 130, stdout + stderr)
+            summary = json.loads((output / 'result.json').read_text())
+            self.assertEqual(summary['status'], 'stopped')
+            self.assertEqual(summary['child_returncodes'], dict(control=0, payload=0))
+            for channel in ('control', 'payload'):
+                metrics = json.loads((output / channel / 'metrics.json').read_text())
+                self.assertFalse(metrics['connected'])
+                events = [json.loads(line) for line in (output / channel / 'events.jsonl').read_text().splitlines()]
+                self.assertEqual(events[-1]['event'], 'disconnected')
+                self.assertEqual(events[-1]['reason'], 'shutdown')
 
     def test_two_real_udp_tcp_adapters_exchange_both_streams(self):
         self.catalog['radios']['microhard_pmddl2450']['notes'] = 'Frozen software interface test profile; no hardware claim.'

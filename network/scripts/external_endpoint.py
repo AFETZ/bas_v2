@@ -179,6 +179,11 @@ def run(config, output, duration=None):
     def stop(*_):
         nonlocal running
         running = False
+        # The native runner signals the whole session, then the pair owner
+        # also signals its children. Ignore repeats through interpreter exit;
+        # otherwise a second TERM can turn a flushed shutdown into status -15.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     log = (output/"events.jsonl").open("w", buffering=65536)
