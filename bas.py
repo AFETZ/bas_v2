@@ -373,8 +373,10 @@ def load_config(path, root=ROOT):
     return config
 
 
-def environment(config, run_id, inherited=None):
+def environment(config, run_id, inherited=None, *, gui=False):
     validate_capture_storage(config)
+    if type(gui) is not bool:
+        raise ValueError('gui must be boolean')
     # Do not let an old terminal session silently activate faults, GUI or another backend.
     env = {k: v for k, v in (os.environ if inherited is None else inherited).items()
            if not k.startswith(('BAS_', 'ROS_', 'GZ_', 'IGN_', 'RMW_'))}
@@ -388,7 +390,7 @@ def environment(config, run_id, inherited=None):
         'NATIVE_EXPERIMENT_DURATION_S': config['experiment']['duration_s'],
         'NATIVE_RNG_SEED': config['experiment']['seed'], 'NATIVE_RNG_RUN': config['experiment']['run'],
         'NATIVE_LAND_TIMEOUT_S': config['runtime']['land_timeout_s'],
-        'NATIVE_UAV_COUNT': config['drone']['count'], 'NATIVE_FIVE_GUI': 0, 'NATIVE_CAPTURE_IMAGES': 0,
+        'NATIVE_UAV_COUNT': config['drone']['count'], 'NATIVE_FIVE_GUI': int(gui), 'NATIVE_CAPTURE_IMAGES': 0,
         'NATIVE_CAPTURE_STORAGE': config['runtime'].get('capture_storage', 'tmpfs'),
         'NATIVE_EVENT_LOGGING': config['runtime'].get('event_logging', 'metrics_only'),
         'NATIVE_FIVE_SKIP_BUILD': 1, 'NATIVE_PHYSICS_PROFILE': 'stock',
@@ -953,10 +955,12 @@ def request_stop(run_id):
         print('Stop requested; the mission will attempt LAND through ns-3. Check status for the outcome.')
 
 
-def run(config, run_id):
+def run(config, run_id, *, gui=False):
     validate_capture_storage(config)
     if sys.platform != 'linux':
         raise ValueError('simulation runtime requires Linux; inspect, status and events are available on this host')
+    if gui and not os.environ.get('DISPLAY'):
+        raise ValueError('--gui requires DISPLAY; run from the PC4 graphical desktop or supply its authorized X11 session')
     import fcntl  # Host preparation and observation do not require the Linux runtime.
     folder, raw = control_dir(run_id), raw_dir(run_id)
     LOCK.parent.mkdir(parents=True, exist_ok=True)
@@ -974,7 +978,7 @@ def run(config, run_id):
         subprocess.run(['docker', 'image', 'inspect', config['runtime']['image']],
                        check=True, stdout=subprocess.DEVNULL)
         folder.mkdir(parents=True)
-        env = environment(config, run_id)
+        env = environment(config, run_id, gui=gui)
         spool = None
         runtime_log = folder / 'runtime.log'
         if config['runtime'].get('capture_storage', 'tmpfs') == 'tmpfs':
@@ -1330,6 +1334,7 @@ def main():
         p.add_argument('--config', type=Path, default=ROOT / 'runtime.json')
         p.add_argument('--run-id', default='core-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
         p.add_argument('--duration', type=float)
+        p.add_argument('--gui', action='store_true', help='Open the existing Gazebo GUI on DISPLAY; rendering adds load and is recorded in the run environment')
     for name in ('status', 'stop', 'events'):
         p = commands.add_parser(name)
         p.add_argument('run_id')
@@ -1346,8 +1351,8 @@ def main():
             config['experiment']['duration_s'] = validate_duration(args.duration)
             validate_capture_storage(config)
         if args.command == 'run':
-            return run(config, args.run_id)
-        print(json.dumps({'config': config, 'environment': {k: v for k, v in environment(config, args.run_id).items()
+            return run(config, args.run_id, gui=args.gui)
+        print(json.dumps({'config': config, 'environment': {k: v for k, v in environment(config, args.run_id, gui=args.gui).items()
                                                           if k.startswith('BAS_')}}, indent=2))
     elif args.command == 'maps':
         return maps(args.config, args.output_dir, service_map_from=args.service_map_from,

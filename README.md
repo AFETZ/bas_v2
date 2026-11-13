@@ -54,6 +54,16 @@ RT seed. Они не заменяют статистическую квалиф�
 определяется из пакетных наблюдений; наличие источника не означает заданную потерю.
 `bas.py analyze <run-id> --output-dir runs/analysis/<run-id>` раскрывает отдельный опыт.
 
+Для визуального наблюдения из терминала графического сеанса ПК4 добавьте `--gui`:
+`python3 bas.py run --config runtime-refined-source.json --run-id <new-id> --gui`.
+Откроется штатное окно Gazebo на `DISPLAY`; X11 cookie передаётся через существующий
+`XAUTHORITY`, без изменения прав X-сервера. `inspect --gui` показывает эффективный
+флаг, а запуск сохраняет его в `run.json.environment.BAS_NATIVE_FIVE_GUI`.
+Без `--gui` рендеринг остаётся выключенным. GUI создаёт дополнительную нагрузку;
+успешность визуального прогона определяется его собственными итогами, отдельно
+от ранее проверенных запусков без GUI. Логи Gazebo/SITL и ns-3 находятся в
+`runs/native-radio-realtime/<run-id>/logs/gazebo_sitl.log` и `ns3_sionna.log`.
+
 ## Установка UAVcosim и проверенный вход
 
 Репозиторий: `https://github.com/HSE-Intelligent-Unmanned-Systems-Lab/UAVcosim` (приватный).

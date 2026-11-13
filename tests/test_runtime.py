@@ -55,6 +55,22 @@ class RuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'requires explicit hitl'):
             self.load()
 
+    def test_gui_is_explicit_and_inspect_exposes_the_recorded_launch_flag(self):
+        config = self.load()
+        inherited = {'BAS_NATIVE_FIVE_GUI': '1', 'DISPLAY': ':0'}
+        self.assertEqual(bas.environment(config, 'headless', inherited)['BAS_NATIVE_FIVE_GUI'], '0')
+        shown = bas.environment(config, 'visible', inherited, gui=True)
+        self.assertEqual(shown['BAS_NATIVE_FIVE_GUI'], '1')
+        self.assertEqual(shown['DISPLAY'], ':0')
+        with self.assertRaisesRegex(ValueError, 'gui must be boolean'):
+            bas.environment(config, 'invalid', gui='1')
+        result = subprocess.run([sys.executable, str(bas.ROOT / 'bas.py'), 'inspect', '--config',
+                                 str(bas.ROOT / 'runtime.json'), '--run-id', 'gui-preview', '--gui'],
+                                cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['environment']['BAS_NATIVE_FIVE_GUI'], '1')
+        self.assertFalse((bas.ROOT / 'runs/control/gui-preview').exists())
+
     def test_hitl_native_binding_and_owned_bench_environment_for_every_owner(self):
         for owner in range(1, 6):
             with self.subTest(owner=owner):
