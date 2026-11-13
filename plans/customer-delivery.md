@@ -1,4 +1,4 @@
-**BAS: план доведения до поставки заказчику — 10.11.2026**
+**BAS: план доведения до поставки заказчику — 11.11.2026**
 
 Статус: план работ и предлагаемая программа приёмки, не отчёт о готовности.
 Основание: пересланные итоги созвона 16.06, уточнения модема и ответ пользователя «до 5 дронов».
@@ -7,6 +7,398 @@
 Исходная проверенная ревизия — `46e1a522c6026f8138ce0354a5082e1b871bd27a`;
 текущая реализация ведётся в `delivery/integration-20261107`, результаты привязаны к ревизиям запусков.
 07.11 доступ к ПК4 восстановлен; новые результаты ниже отмечены отдельно от измерений 05.11.
+
+**Текущее продолжение поставки — 11.11.2026**
+
+Работа начата с чистого `a6285c8` на ПК4. Исторические результаты `0ec5f67` ниже
+не подменяют проверки новых ревизий. Код, исходные данные и все неудачные попытки сохранены.
+Единственный действующий план — этот файл. Старый `network/STATUS.md` перенесён
+в исключённые артефакты; его содержание также остаётся в истории Git.
+
+**Опубликованное программное состояние**
+
+В приватный [UAVcosim/main](https://github.com/HSE-Intelligent-Unmanned-Systems-Lab/UAVcosim)
+без force push отправлены `247f338`, `68b5845`, `7373a38` и
+`25d5ae5`, `849734c`, `37313aa`, `cbaaf26` и
+`8b910e6087557e1d61746ef4ed8de3816ade1444`.
+Добавлен отдельный remote `UAVcosim`; существующих remotes не было.
+Это инженерная публикация с известными отказами свежести, а не завершённая приёмка.
+
+Release `runtime-dependencies-20261110` содержит закреплённые 75 wheels:
+889845760 байт, SHA-256 `7a5be95a6036296f32193dc55bc99ae320b94ba0b695d68e8ecdd2b26cf34dd5`.
+Поставочный `runtime-terrain.json` теперь задаёт исходные 10 Кбит/с на каждый БАС.
+Сохранены исходный JSON геометрии, manifests ресурсов и сведения о лицензиях.
+Штатный helper получает ресурсы и проверяет SHA. Рельеф воспроизведён побитово.
+Выявленная скрытая зависимость NumPy устранена: используется 1.26.4 из закреплённого bundle.
+Gitleaks 8.30.1 проверил подготовленные файлы и отправляемую историю: секретов не найдено.
+
+**Новые попытки, без исключения отказов**
+
+| Серия / ревизия | Заранее заданный объём | Фактический результат |
+|---|---|---|
+| `qualification-short-20261110-a`, 247f338 | 20 повторов | Первый preflight отказал: Spectrum library старее Doppler patch; 19 не запускались. Затронутые исходники и targets реально пересобраны. Timestamps библиотек для обхода guards не менялись. |
+| `qualification-short-20261110-b`, 247f338 | 20 повторов | Три completed / succeeded / valid; четвёртый failed / invalid; 16 не запускались. |
+| `github-clone-247f338-20261110-01` | Один контрольный E2E | failed / failed / invalid: один `host_sample_expired` cache miss, окно и посадки не завершены. Повтора не было. |
+| `rt-stage-diagnostic-20261110-a`, 68b5845, trace=true | До пяти повторов, остановка на первом runtime-отказе | Четыре completed / succeeded / valid; пятый failed / failed / invalid. Все пять сохранены. |
+| `gazebo-wait-diagnostic-20261110-a`, 7373a38 | До пяти, остановка на первом отказе | Первая failed / invalid: emitter SDK не завершился через 62,264 мс. Четыре не запускались. BPF не успел подключиться; это отдельный незакрытый источник задержки. |
+| `gazebo-wait-diagnostic-20261111-b`, 7373a38 | До пяти, остановка на первом отказе | Первая completed / succeeded / valid; вторая failed / invalid, физическая пауза 99,124 мс; три не запускались. BPF второй попытки подключился поздно из-за повторной компиляции helper. |
+| `gazebo-wait-diagnostic-20261111-c`, 25d5ae5 | Ровно пять, остановка на первом отказе | Все пять completed / succeeded / valid. Возраст применённой позы: 97,645 / 93,175 / 90,488 / 89,122 / 90,047 мс. Guards не менялись. |
+| `clone849-interframe-20261111-a`, чистый GitHub clone849 | 20 попыток, остановка на первом runtime-invalid | Первая failed / failed / invalid: native applied pose stale/future; 19 не запускались. Новых повторов этой серии нет. |
+| `pickup500-joint-20261111-a`, 8b910e6 | Ровно одна интеграционная попытка после production rebuild | exit0; completed / succeeded / valid. Все пять маршрутов, посадок и disarm; radio landing5/5; applied pose max84,178мс; 858725cache hits /0miss. Не квалификация20повторов. |
+| `hybrid5-5f62c59-20261111-a`, 5f62c59, UI | Первая из двух заранее заданных разных конфигураций; stop-on-first-invalid | exit1; runtime completed / mission failed / measurement invalid. Preflight120с не получил control HEARTBEAT/GPS. Не взлетел ни один БАС; окно не начато. Payload bidirectional5/5, CIR694290hits/0miss, pose max65,245мс. Вторая canonical конфигурация не запускалась. |
+
+
+Это повторы исполнения seed 1 / RngRun 1 / Sionna seed 42, а не независимая статистика RT.
+Смена RngRun изменяет подстримы ns-3; RT имеет отдельный seed. Явных AssignStreams нет.
+Во время части серии B работал отдельный CPU0 benchmark постобработки.
+В диагностической серии ошибка scoped-audit запустила `rg` между командами
+20:11:13.265–20:12:14.734 UTC. Завершены только его PID. Это зарегистрированные
+условия фоновой нагрузки, а не доказанная причина отказов и не строго пустой хост.
+
+В первой успешной B-попытке повторно проверены сценарий, cache, journals и capture SHA:
+максимальный возраст 93,814 мс, ноль cache misses, окно 20 с, RTF 0,999945.
+Первый новый диагностический опыт: максимум возраста 86,621 мс.
+Ни один из этих успехов не закрывает обнаруженные ниже дефекты повторяемости.
+
+**Установленные цепочки и незакрытые причины**
+
+- Посадка 09/10: финальный HEARTBEAT UAV5 прошёл UART и оба радиоперехода и был принят PHY НПУ
+  на 11,081555 / 0,564647 мс после `experiment_done`. В 11 приём был на 1,960639 мс раньше.
+  Это окончание наблюдения; RF loss не доказан. Новый итог сохраняет точную границу,
+  `radio_confirmation_status` и времена. Исходный boolean, timeout и критерий не менялись.
+- B4: последняя применённая поза достигла 102,675803 мс. Tracker оставался свежим (12,685 мс),
+  native lag был около 0,05–0,07 мс; desired job готов за 20,368 мс, обязательный emitter job
+  не готов через 64,734 мс. Исходная причина внутри незавершённого job не доказана.
+- Точный frozen-geometry replay на 68b5845 выполнил 200 пар с тремя workers и 200 с двумя.
+  Все завершены; первые задания новых процессов пересекли 100 мс, последующие — нет.
+  Терминальная задержка B4 не воспроизведена; оснований выбирать два workers нет.
+- Диагностический case 5: независимые Gazebo world stats подтвердили паузу продвижения физики
+  на 91,303279 мс около sim time 61,932. Clock / odometry перестали продвигаться вместе.
+  Tracker корректно увеличивал возраст; новая одометрия пришла после cache expiry.
+  Emitter тогда не требовался, предыдущий desired SDK job занял 17,549 мс.
+  Причина внутри Gazebo / SITL ещё отделяется от scheduler и вычисления физики.
+- В фактическом ArduPilotPlugin `cc0290d964dfa373531963a8fc39093a0836af0a` lockstep
+  может повторять 10-мс ожидание servo UDP; при текущем count=5 SendState повторяется после
+  шестого timeout. Наличие механизма ещё не доказывает его участие в конкретной паузе.
+  Подготовлена штатная BPF-диагностика; timeout, lockstep и предел 100 мс не изменены.
+
+В серии C BPF подключился до preflight каждого опыта. Ни в одной из пяти попыток
+не зарегистрированы вернувшиеся ожидания ≥10 мс или незавершённые ожидания в END maps.
+Потеря ring-buffer не сообщалась; CPU stack profiles частичны из-за ограничений maps.
+Это отрицательный диагностический результат: прежние physics / SDK отказы не исправлены.
+Выявлен пробел наблюдения: scheduler учитывался только внутри PreUpdate.
+Отдельное расширение helper измеряет межкадровые интервалы и scheduler для собственных TID
+также вне callback. Оно ещё не участвовало в полётах; следующая серия заранее фиксируется.
+
+**Проверенные изменения новой программной версии**
+
+Полный Python suite на 68b5845: 541 tests PASS, один существующий платформенный skip. После strict scene validation —550tests, после профилей и class-map attachment — 581 tests PASS с тем же skip.
+После пакетного сравнения и переносимого анализа: 606 tests PASS, один тот же skip.
+Оба native targets реально пересобраны. Дополнительно: 24 clock tests на скоростях 0/3/30 м/с,
+yaw 0/±90/180° и задержках до/за 100 мс; native history contract — 354 проверки движения.
+Свежий Doppler replay: 203 CIR, 3248 случаев, 626864 bin-наблюдения, подписанный Doppler
+и времена 0/1/25/99 мс; численное отличие мощности от прежнего порядка около 2,33e-15.
+
+`runtime.rt_stage_trace` — bool, default false, только worker_pool. Значение фактически
+прошло в worker readiness. Шесть этапов содержат host/thread CPU clocks и fingerprints,
+последние записи незавершённого job ограничены по памяти и сохраняются при закрытии.
+Native отдельно публикует bounded histograms возраста когорт и lag. Наблюдаемые spans между
+превышениями не выдаются за непрерывную длительность, последний эпизод цензурирован.
+
+Source-only export переведён на streaming и стандартный SQLite. На capture 09/11 summary
+побитово совпал с прежним, peak RSS около 32 МиБ вместо 12,1 ГиБ на 09.
+Raw capture и его SHA сохранены. Есть явный дисковый бюджет spill и очистка собственных
+временных файлов при исключении. Полный графический экспорт длинных трасс не квалифицирован.
+
+Объединённый RT через common antenna basis не интегрируется: LoS совпал, terrain дал
+различия до 1,92667 дБ на действующем канале. Небольшое ускорение не закрывает корректность.
+Все четыре попытки технической пробы, включая ошибки окружения, сохранены.
+
+Аудит сцены выявил молчаливое принятие NED, ground offset, неизвестных physics/failsafe и version.
+В текущем рабочем дереве общая проверка UrbanScenario отклоняет неподдержанные поля,
+дубли JSON и неверные типы; легитимные metadata и legacy defaults сохранены.
+Общий suite после этой проверки: 550 tests PASS, один существующий платформенный skip. Это проверка достоверности настроек; ниже зафиксировано последующее узкое расширение поддержанных physics/failsafe.
+
+Сцена теперь поддерживает только новые-run параметры physics.max_step_size_s
+(0,25 / 0,5 / 1 мс) и GCS failsafe action disabled / rtl / land, timeout 2–120 с.
+Использованы существующие SDF и последний SITL --defaults, без новой подсистемы.
+Defaults сохранены; FS_OPTIONS не переопределяется, актуальные MAV_GCS_SYSID / HI
+не подменены устаревшим SYSID_MYGCS. runtime-settings.json различает configured input
+и ещё не выполненный runtime readback и входит в effective capture.
+
+После этого изменения: 612 tests PASS, один прежний skip. Stock Gazebo подтвердил
+три точных шага через δsim/δiterations. Pinned SITL PARAM_VALUE подтвердили action
+0/1/5, timeout 2/5/120 и MAV identity. Отдельный тест использовал настоящие generator-produced
+.parm и два TCP MAVLink канала с system255: при потере control 10,1 с AP-time с живым
+payload сохранялись GUIDED / armed; после потери обоих наблюдались LAND / RTL через
+3100 / 3000 мс от последнего heartbeat при timeout 3 с. Использован forcearm в
+изолированном stock SITL 10×; отметки реакции опираются на GLOBAL_POSITION_INT с периодом 100 мс.
+Полные посадка / disarm и совместная Gazebo / ns-3 реакция здесь не проверялись.
+Доказательства: runs/control/publication-physics-failsafe-20261111/analysis.json
+и отдельный worktree runs/control/physics-failsafe-probe-20261111/gcs-loss-01/results.json.
+
+**Установка, оборудование и критерии**
+
+Отдельный GitHub clone `247f338` получен в новый каталог. Старые SDK, среды и build не копировались.
+Ресурсы получены из Release, SDK заново скачан из официального GitLab, 15 patches проверены.
+ROS и оба native targets собраны заново за 260,53 с; check-only: ready=true, gaps=[].
+Единственный E2E этой копии отказал, как указано в таблице. Новые ревизии требуют своей проверки.
+
+Новый независимый GitHub clone `849734c` создан в отдельном каталоге
+UAVcosim-github-verify-849734c-20261111. Из Release заново получены wheels,
+официальный SDK клонирован и пропатчен; private environments, ROS и native targets
+собраны заново за 267,06 с. Ни SDK, ни environments, ни build из прежнего каталога
+не копировались. Проверки bootstrap (ready=true, gaps=[]), assets и inspect terrain прошли.
+Закреплённый Docker image уже был на хосте и проверен по digest.
+Первая попытка фиксированной серии clone849-interframe-20261111-a отказала:
+failed / failed / invalid; 19 не запускались. Это новая доказанная неустойчивость,
+не успешный E2E и не завершённая проверка воспроизведения.
+SDK job занял 20,395 мс, новый кадр был готов. Receiver enqueue→native poll занял
+1,026 мс, decode — 88,826 мкс; held-поза достигла 100,194 мс до замены новым кадром.
+Межкадровые паузы Gazebo <2,048 мс; SDK-tail и physics-freeze здесь не подтверждены.
+Простое снятие pre-commit guard отклонено: прежний verifier требует maximum_applied_pose_age≤100 мс.
+Внесён более частый pickup готовых результатов: 500 вместо 1000 мкс. Те же guards,
+строгий verifier и max/hist сохранены; прежний 1-мс response forecast margin выделен
+отдельно, не уменьшен. Native RED старой cadence провалил новую independent-deadline
+проверку, GREEN прошёл: bundle887/cache340/live354/prefetch45. Дополнительно 187 Python
+native-interface tests PASS. Все девять компонентных CPU samples сохранены; медианная
+добавка 1,524 мс CPU на model-second (~0,1524% одного CPU этого компонента), без claim
+о полной real-time производительности. Production main/worker действительно пересобраны,
+байты/mtime Spectrum, Wifi и TAP библиотек не менялись. Единственный новый совместный
+запуск на чистом8b910e6 прошёл, как записано в таблице. Native poll_period_ns=500000,
+response_forecast_margin_ns=1000000; maxlag31,845мс. Queue-enqueue→post-poll proxy
+p99=0,962мс / max1,438мс включает decode и scheduler: это не C2latency и не wall-clock
+гарантия500мкс. Были1129queue drops/6863retries при помехе; это модельные исходы,
+а не CIRcache misses. BPFv6 подключён до active phase, ENOENT flood0, normalEND;
+CPU profile частичен (stack collisions/map-full), timinghelper ошибок не сообщил.
+Во время preflight был250-мс readonly scan39КБ nice19CPU0; хост не объявляется пустым.
+Все собственные runtime PIDs/containers завершены, GPU освобождён.
+Квитанция: runs/control/pickup500-integration-20261111-a/verification.json,
+SHA2567b98adda8fc41c5ece463d94c7f3d537dbd4f2a604a7ccb679390a55b8e43a0f.
+
+Наблюдатель C1 дал 170,7 МБ ожидаемых ENOENT от delete отсутствующих BPF map keys.
+Это зарегистрированное вмешательство диагностического инструмента, не пустой хост.
+Timing histograms сохранились, CPU profile частичен. Новая версия v6 сохраняет -k,
+guards для delete и исходные ownership checks. Настоящий attach к собственному
+синтетическому callback binary: stderr=0, 512 событий, 209 suppressed, END/pending
+и retirement проверены. Это kernel-harness test, не новый полёт.
+
+[Компактные доказательства на GitHub](https://github.com/HSE-Intelligent-Unmanned-Systems-Lab/UAVcosim/releases/tag/engineering-evidence-20261111-849734c):
+166 исходных сводок и команд, включая отказы, 878628 байт,
+SHA-256 7b8e078ee65794e7504e044f4168c0bc262f3833dda02c6a3a9fd032afa9f78c.
+Архив скачан обратно, SHA подтверждён; Gitleaks не нашёл секретов.
+Эта публикация предшествует новой сборке849 и physics/failsafe tests; новые результаты
+в неё задним числом не добавляются.
+
+Владелец подтвердил: оборудование пока не подключено. Нужны реальные два UART и Ethernet,
+модем/контроллер и их фактические версии. Инвентаризация не нашла ttyUSB/ttyACM.
+16 software HitL tests и подготовка профилей не заменяют аппаратные испытания.
+Подготовлены интерфейсные references китайских плат/модемов; native Wi-Fi
+остаётся инженерной моделью, эквивалентность произвольному устройству не заявляется.
+
+Решение владельца: выбрать и реализовать рабочие SLA / hybrid profiles по опубликованным
+практикам, без ожидания отдельного согласования. Документ заказчика задаёт шесть скоростей,
+но не численные задержки и потери. Проектные пороги реализованы в service_profiles_v1.json:250/250/500/1000/1000/5000мс и99,9/99,9/99/99/99,9/99% для шести классов; минимум и rolling window60с. Наблюдаемая оценка отделена от10независимых ns-3(seed,RngRun) репликаций и10000записей. Профиль содержит источники и границу UART OS-write; договорная сертификация не заявляется. Карты дополнены строгой привязкой реальных packet windows к клеткам/условиям RF; пока без60-секундных bindings клетки не получают pass.
+
+Установка host теперь воспроизводится через отдельный venv и requirements-host.txt:
+NumPy 1.26.4 / PyYAML 6.0.2 с официальными wheel SHA для Linux x86-64 CPython 3.10–3.12.
+На ПК4 создана новая .venv-host; hash-checked install и inspect terrain прошли.
+Проверены CPython 3.10 / 3.12 environments, для 3.11 проверены wheels, не запуск интерпретатора.
+
+`bas.py analyze` запускает существующий анализатор в записанном Docker-образе:
+код и raw read-only, новый каталог анализа writable, без сети / GPU / host pymavlink.
+Реальный новый успешный C1 проанализирован с сохранением completed / valid.
+`--service-batch` пересчитал все 20 плановых B-попыток: три insufficient_evidence,
+одна invalid, 16 not_started. Оценка not_qualified; отказы и неподнятые попытки не исчезли.
+Повторы seed/RngRun не добавляют независимости. Сводка привязывает профиль, исходные
+packet lineage и условия каждого опыта; новый анализ не становится новым полётом.
+
+Добавлен документированный китайский serial reference Holybro SiK V3 100mW.
+Это один UART, point-to-point TDM/FHSS, RF default 64 Кбит/с; он не закрывает автоматически
+два UART, многоточечность или эквивалентность Wi-Fi. Модель устройства владельца
+по-прежнему неизвестна, физические устройства не подключены.
+
+Переносимый maps entry в рабочем дереве использует тот же pinned container:
+RF через общий lease, CPU overlay без GPU, единственный writable runs/maps output.
+Реальные CUDA / LLVM RF point-grid и PNG прошли за 8,09 / 6,35 с; все четыре
+клетки рассчитаны, point_cells выбирает дополнительные контрольные сравнения, не область
+основного расчёта. Различие RSS backend на этих четырёх клетках — до 0,42 дБ при 20k samples
+и одинаковом seed; общая сходимость из четырёх точек не заявляется. CPU overlay сохранил 54 not_measured.
+Добавлен поставочный radio_map_terrain.json: baseline CP→iso/V, полный квадрат 10×10 км,
+100 ячеек, ENU Z=230 м, источники выключены. Все параметры CP / радио взяты из фактического
+каноничного frozen input. Новая подготовка из tracked terrain config и настоящий CUDA
+расчёт этого preset (менялись только три input paths) прошли за 8,51 с; PNG визуально проверен.
+Белый J/S означает J=0, серый — sampled-zero / отсутствие данных, не доказанный outage.
+Исправлены найденные при review внешние sidecar symlinks и перенаправление runs/maps
+в source tree. После границ файлов и SIGTERM cleanup — 624 Python tests PASS,
+один прежний skip. Реальный cancellation harness01 не достиг условия отправки сигнала
+за своё короткое окно; вычисление завершилось успешно, это не проверка отмены.
+Квитанция сохранена. Исправленный bounded harness02 послал настоящий SIGTERM работающему
+map CLI: exit143 / attempt cancelled, только его Docker container удалён; raw входы сохранены.
+Следующий LLVM compute прошёл с новым output, lease / ресурсы освобождены.
+
+Hybrid R3 подготовлен изолированно: qualified-hybrid-r3.patch,
+SHA 50d80bc45d5014c28ed6a0576c43d495eadcf877debbcca48c3b7c53e355c6b2.
+Закрыты review-дефекты public shell gates и body orientation; нулевой RT-reference
+не заменяется положительной Friis-мощностью. 95 Python / native boundary checks прошли.
+UI Save + hybridR3 интегрированы в рабочее дерево после8b910e6. Full Python:
+635 проверок:634 PASS и один прежний skip (python-suite-06-command.json). Skip —
+ветка сообщения об ошибке для non-Linux; на ПК4 Linux она не выполнялась. Он не
+считается успешной проверкой. Ранее указанные размеры suite — числа unittest Ran,
+которые также включали этот skip. R4 очищает hybrid
+Python callback под существующим GIL: реальный native refcount/deleter regression
+проверяет повторное clear и уничтожение после interpreter finalize. Production build /
+joint этой интеграции ещё не выполнены. Domain только static iso/V SISO empty scene
+2,412 ГГц; для прочих условий видимый fullRT fallback. Parent extra CUDA context при
+explicit hybrid — известный ресурсный риск, ускорение не заявляется.
+
+UI Save замораживает копии входов без runtime_started; duplicate ID не перезаписывается,
+ошибки валидации не создают draft. Настоящий браузер подтвердил Save→reload→validate,
+изменения duration/speed/physics/failsafe и видимые неизвестные параметры. Закрытый
+неуспешный clone849 показан с раздельными Error/Error/Invalid и причиной. Runtime не
+запускался этим браузерным тестом. Доказательства: publication-ui-e2e-20261111/analysis-save.json.
+
+Fresh-process audit выявил отдельный host gap: config/UI импорт NumPy создавал32BLAS
+threads на всех ядрах, хотя runtime child masks уже делились. Отдельный per-process
+OPENBLAS1 probe устранил pool, без OS/global environment изменений. Прошлые runtime
+отказы этому не приписываются. Минимальный entrypoint fix интегрирован: existing
+stdlib runtime-monitor helper вызывается из bas/UI/batch main до NumPy. Host affinity
+не меняется, повторного деления нет. 6 tests плюс actual fresh CLI/batch/оба HTTP UI:
+NumPy1.26.4/1native thread, inherited stack mask сохранена. Production runner partition
+не менялся. После mode-validation вместе прошли31 targeted tests.
+
+Найден конкретный preflight gap: любые непустые data/control mode имена принимались
+до ns-3 abort. Actual pinned ConstantRateWifiManager Set/Get и PHY rate API подтвердили
+HtMcs0..7/NSS1 и восемь ERP modes; HtMcs8 требуетNSS2. Добавлена минимальная whitelist
+в существующий radio validator, defaults неизменны. Regression RED:10 subcases
+показывали поздний/неименованный отказ; GREEN:31 radio+host tests PASS.
+Review нашёл обход direct town01 shell: inner RADIO_VALUES читал YAML напрямую.
+Один общий mode-validator теперь используется обоими входами; тест выполняет
+настоящий inner heredoc, проверяет36baseline values и ранний отказ неверных modes. Это API/конфиг
+совместимость, не квалификация пакетной ёмкости65Мбит/с. Proof publication-radio-modes-20261111.
+
+Практическое расширение hybrid на физическую землю проверяется отдельно: область
+выбрана до RT по официальному lossy-slab API medium_dry_ground, без собственной
+формулы распространения и без замены на неподходящий TwoRayGround. Frozen inputs /
+seeds / budgets: publication-hybrid-ground-20261111. Full-01 завершён:17010/17010
+RT-вызовов,546/546 ожидаемых групп по1000unique links,447,99с. Все положительные
+static/dynamic numerical и reference группы прошли: max|bias|0,06616дБ, p95abs0,43893дБ,
+p99abs0,46953дБ; top-budget convergence p99≤2,05e-6дБ. Negative angle/wall/metal/crosspol
+сохранили большие ошибки и требуют RT. >100мс не даёт большой численной RSSошибки
+автоматически: это invalid по временному контракту, native rejection проверяется отдельно.
+Независимый review отметил ограничение постоянной attitude в пробе при существующем
+cache допуске5°. Поэтому выбран минимальный onlineguard: actualRTPSD один раз плюс
+штатная Friis один раз, единственный выходPSD; все positiveinput bins finiteRT>0 и
+ошибка≤1дБ, иначе видимый RT. NonfinitePSD failclosed. Это новый явный hybridконтракт,
+без собственного CIR/Doppler/cache и без обещания ускорения; реализация в изоляции.
+
+R5 и два review fixes R5b интегрированы: numerical ground evidence дополнена
+actual RT PSD≤1дБ onlineguard. Registered sources используют собственный RT,
+невозможные fallback counts отклоняются. Native compile/link/cache contracts/main
+syntax прошли на точных afterSHA;73 targeted Python в изоляции прошли. Независимый
+review R5b PASS: ac2421678bd665006376612342b6b70a4a7b8196f68bead6f3e50b8750b5ece7.
+В core общий suite после R5:646 всего,645 PASS/1non-Linux skip; после R5b —87
+затронутых Python PASS и5 UI discovery PASS. Первая попытка адресного набора
+сохранила ImportError test fixture при package invocation; исправлен только import
+существующей fixture, оба способа запуска теперь проходят. Product code этой
+ошибкой не затрагивался.
+
+Поставлен отдельный runtime-hybrid.json / hybrid_flat_ground.json:40с,5БАС,
+5×10Кбит/с, общий RT fullmesh100мс, без помехи. Existing generator создал XML
+905807072f010dbca786a3842919de50d1d3988656bb08400cb428c1166acdde, actual pinned
+LLVM loader подтвердил qualified_flat_ground_scene=true. Routes разнесены минимум
+62,032м, ENUZ20,2м, углы74,491–75,367°. Input/domain review PASS, не полёт.
+Дополнительная заранее замороженная emptyвыборка содержит ровно1000links внутри
+2–10000м:567RTcalls exit0, p99abs0,114725дБ, convergence0. Прежние962inside-domain
+более широкой выборки не выдаются за1000.
+
+Read-only аудит coldworkers исключил гипотезу first-ever idleworker activation:
+во всех4отказах и source8 worker2 idle/completed0; worker0/1 прогреты при native0.
+B4 emitter имел168completed,737 —165 и предыдущийSDK16,754мс. Дополнительный
+arbitraryidleprewarm не обоснован; SDK-tail/JIT/GPUwake причина не объявлена закрытой.
+Proof publication-final-build-20261111/worker-first-call-audit.json.
+
+Следующая fixed20 diagnostic series —qualification-short-20261111-d, setupv2:
+immutable runtime-terrain copy отличается только rt_stage_trace=true;1/1/42
+повторы исполнения. V1 сохраняется unused. Оценка по source8 —около87мин/40–65ГБ;
+per-run tmpfs≤4ГиБ последовательно. V6 drycheck переиспользуется, actual BPF
+LLVMcompile остаётся на каждый PIDattach; это явно инструментированная серия.
+До запуска source freeze и настоящий production rebuild; пока не запускалась.
+
+Source5f62c59 зафиксирован чистым;23подготовленных файла и вся отправляемая
+история133коммита прошли Gitleaks8.30.1:0findings. Source5 ещё не отправлен как
+проверенный совместный вариант. Первую production build попытку остановила ошибка
+вспомогательного wrapper: он требовал отсутствующий в старом SDK Gitindex. Это
+произошло до копирования/сборки. V2 сохраняет отсутствие index; build02 действительно
+пересобрал main/worker за36,803с, source copy и исходники совпали, Spectrum/Wifi/TAP
+байты/mtime и indexabsence сохранены. Фальшивый bootstrap receipt не создавался.
+
+Первый E2E5f выполнен настоящим browser Save→Start→Observe→export на отдельном UI
+port40911; исходный UI8765 не трогался. Source5clean, savedscene/radio SHA совпали,
+readiness5SITL/5models/5odometry healthy. Первый nominalhybrid не начался из-за
+связности на земле:337 reports UAV1 всегда missing3, ни один из1600GCSreports
+не имел всех4peer echoes. available()/initialmaster policy не выдала ниодного grant;
+localUART наблюдала126–127HEARTBEAT, ноtelemetry return безgrant не разрешён. Payload
+получил120HEARTBEAT/598–599ATTITUDE на каждый БАС; это не измерительное окно.
+Watchdogtracebacks появились43,9–53,1мс ПОСЛЕ missiontimeout; это cleanupследствие.
+Ни UI configcorruption, ни пропущенный hybridgate, ни RTcachefault не найдены.
+
+Причина отсутствующих peer links подтверждена по всему nativeCSV863МБ/SHA,
+прочитанному один раз existingstreamparser (48,3с, peakRSS42,6МиБ). Для восьми
+направлений149,69–164м:0successful intended control MPDU из32977PHY attempts;
+31503(95,53%) drops PREAMBLE_DETECT_FAILURE. Все их signal arrivals ниже actual
+readbackMinimumRssi−82дБм, примерно−83,65…−85,51. Это другой параметр, чем
+RxSensitivity−101дБм; параметры не менялись. FullRT54calls/270rows на actualclosed
+poses по3seeds/3budgets дал160м→−84,9403дБм,114,56м→−79,2345,62,77м→−68,8836;
+coherentmultipath cancellation подтверждена. SNRfar≈9дБ выше4дБ, ноRSSниже−82.
+Это результат инженерной модели, не калибровка физического модема. Неверный
+номинальный стартовый input5f и весь отказ сохранены, не подменены новым успехом.
+
+Для следующей версии принят новый вход: пять radial3м маршрутов на дуге82м
+с углами−30/−15/0/15/30°, cruise20,2м; minimum separation21,406м, maximum async
+peer span85м. ActualgeneratorXML9058 неизменён; cruiseуглы74,851–75,363° в прежнем
+qualifieddomain. Контрфактический RT54calls/270rows дал worstpeer−73,4887дБм,
+запас8,5113дБ до ТОГОЖЕ−82. Это numericalprediction, не полёт. Policy/PHY/ARQ,
+100мс,120с timeout и определение success не менялись.
+
+Закрыт выявленный пробел объяснения: read-only selection_diagnostics snapshot
+сохраняется при прежнем timeout; UI показывает mission error/отсутствующих соседей
+и отдельно native diagnostic. Independent AST review подтверждает неизменность
+available/update_role/dispatch/telemetryeligibility и wait predicate. Source patch
+6a4a162b5bc32e1d57d830dee60d481cede80cd30a1f2315e036f6e4009a740a;39 targeted PASS
+и realChromium closedfailureCOPY rendering прошли, исходные результаты не правились.
+Общий suite после этого изменения:652всего,651PASS/1non-Linux skip. Новая версия с этим объяснением и новым input требует нового E2E; пока не запускалась.
+
+Ключевые proof: publication-final-joint-5f62c59-20261111-a/ui-hybrid-first/
+native-packet-rf-01/{correlation,threshold-identity,selection-diagnostics-review}.json;
+publication-hybrid-ground-startup-rf-20261111/evaluation.json;
+publication-hybrid-ground-startup-rf-candidate-20261111/evaluation.json.
+
+**Следующая ступень и доказательства**
+
+Инженерная лестница: 20 коротких попыток; затем реальные полётные маршруты 600/900 с,
+3600 с и 28800 с после успешных предыдущих ступеней. Длинные ступени не запускались:
+короткая пока не пройдена. Подготовлены прямоугольные маршруты 240×120 м, 3 м/с,
+1440/2160/8640/69840 м на БАС, высоты по общему рельефу, disk capture.
+Они покрывают юго-западную часть рельефа; городское затенение проверяется отдельно.
+
+Следующий непосредственный опыт — 20 заранее заданных коротких попыток с расширенной
+scoped BPF-диагностикой после завершения hybrid probe и фиксации чистой ревизии.
+Серия останавливается на первом runtime-invalid; это не повтор до удобного числа успехов.
+Hybrid и physics/failsafe теперь реализованы и проверены компонентно; совместные проверки привязываются к следующей чистой ревизии.
+
+Артефакты относительно рабочего корня:
+
+- `runs/control/publication-integration-20261110/`: команды, exit codes, сборки, тесты, push.
+- `runs/control/publication-integration-20261111/`: 606 tests, host install, portable single/batch analysis.
+- `runs/control/gazebo-wait-trace-20261111-{b,c}/analysis.json`: все BPF попытки и ограничения наблюдения.
+- `runs/control/publication-clean-clone-20261110/`: независимые установка и неуспешный E2E.
+- `runs/control/publication-landing-20261110/analysis.json`: точная landing chain и пять прежних отказов.
+- `runs/control/publication-contracts-20261110/`: regression, hardware inventory, RNG, RT replay, case 5.
+- `runs/control/publication-20261110/`: scanner, dependency manifests и ресурсные пробы.
+- `runs/control/publication-config-audit-20261110/`: контрпримеры, schema patch и условия нагрузки.
+- `runs/control/common-pattern-probe-20261110/`: отклонённая RT-проба.
+- `runs/control/qualification-duration-inputs-20261110/inputs.json`: входы длинных ступеней.
 
 **Проверка совместного сценария — 10.11.2026**
 

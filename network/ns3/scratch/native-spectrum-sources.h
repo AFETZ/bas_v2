@@ -74,7 +74,8 @@ struct SourceBinding
 };
 
 // Select exactly one upstream propagation model per transmission. No loss formula,
-// packet-error decision, or fallback is implemented in this dispatcher.
+// packet-error decision is implemented here. Hybrid uses a fixed qualified domain
+// and an explicit RT fallback; it retains the existing RT cache/pose guards.
 class SourcePropagation : public PhasedArraySpectrumPropagationLossModel
 {
   public:
@@ -87,6 +88,9 @@ class SourcePropagation : public PhasedArraySpectrumPropagationLossModel
     }
     Ptr<SionnaRtSpectrumPropagationLossModel> reference;
     std::string profile{"sionna"};
+    // Set by the existing run owner from its immutable CP/UAV roster.
+    // Coordinates alone never assign an endpoint the command-post role.
+    Ptr<const MobilityModel> hybridCommandPost;
     Ptr<FriisSpectrumPropagationLossModel> freeSpace{CreateObject<FriisSpectrumPropagationLossModel>()};
     std::map<Ptr<SpectrumPhy>, Ptr<SionnaRtSpectrumPropagationLossModel>> sources;
     std::map<Ptr<SpectrumPhy>, Ptr<SpectrumValue>> sourcePsds;
@@ -94,11 +98,69 @@ class SourcePropagation : public PhasedArraySpectrumPropagationLossModel
 
     static void ValidateProfile(const std::string& value)
     {
-        if (value == "hybrid")
-            throw std::invalid_argument("hybrid propagation is not qualified: the coordinate-only Friis "
-                                        "gate did not check shared geometry or Fresnel clearance");
-        if (value != "sionna" && value != "friis")
-            throw std::invalid_argument("source propagation profile must be sionna or friis");
+        if (value != "sionna" && value != "friis" && value != "hybrid")
+            throw std::invalid_argument("source propagation profile must be sionna, friis or hybrid");
+    }
+
+
+    // Fixed policy, loaded once before Simulator::Run. It is never inferred
+    // from endpoint coordinates or from one under-sampled RT path.
+    void ConfigureHybridScene(const std::string& scene, EventSink emit = {})
+    {
+        if (m_hybridConfigured) throw std::logic_error("hybrid scene is immutable for one run");
+        pybind11::gil_scoped_acquire gil;
+        auto evidence = pybind11::module_::import("scripts.product.hybrid_policy")
+            .attr("scene_evidence")(scene).cast<pybind11::dict>();
+        if (evidence["policy_id"].cast<std::string>() != "qualified_siso_psd_2412_v2")
+            throw std::runtime_error("unknown hybrid qualification policy");
+        m_hybridSceneSha = evidence["scene_sha256"].cast<std::string>();
+        m_hybridShapeCount = evidence["shape_count"].cast<size_t>();
+        m_hybridObjectCount = evidence["object_count"].cast<size_t>();
+        m_hybridEmpty = evidence["qualified_empty_scene"].cast<bool>();
+        m_hybridFlat = evidence["qualified_flat_ground_scene"].cast<bool>();
+        if (m_hybridSceneSha.size() != 64 ||
+            m_hybridSceneSha.find_first_not_of("0123456789abcdef") != std::string::npos ||
+            (m_hybridEmpty && (m_hybridShapeCount || m_hybridObjectCount)) ||
+            (m_hybridFlat && (m_hybridEmpty || m_hybridShapeCount!=1 || m_hybridObjectCount!=1 ||
+                m_hybridSceneSha!="905807072f010dbca786a3842919de50d1d3988656bb08400cb428c1166acdde")))
+            throw std::runtime_error("invalid parsed hybrid geometry evidence");
+        m_hybridEmit = std::move(emit);
+        m_hybridConfigured = true;
+    }
+
+    uint64_t HybridRtEvaluations() const { return m_hybridRt; }
+    uint64_t HybridFriisEvaluations() const { return m_hybridFriis; }
+    std::string HybridSnapshotJson() const
+    {
+        if (!m_hybridConfigured) return "null";
+        std::ostringstream out;
+        out << "{\"policy_id\":\"qualified_siso_psd_2412_v2\","
+            << "\"scope\":\"SISO_PSD_only;empty_static_or_exact_flat_ground_online_guard;RT_producer_and_freshness_retained;no_speedup_claim\","
+            << "\"selection_cache\":\"none;inspect_current_pair_antennas_spectrum_velocity_each_signal\","
+            << "\"scene_sha256\":\"" << m_hybridSceneSha << "\","
+            << "\"actual_shape_count\":" << m_hybridShapeCount << ",\"actual_object_count\":" << m_hybridObjectCount
+            << ",\"qualified_empty_scene\":" << (m_hybridEmpty ? "true" : "false")
+            << ",\"qualified_flat_ground_scene\":" << (m_hybridFlat ? "true" : "false")
+            << ",\"online_guard_limit_db\":1.0,\"ground_reference_psd_evaluations\":" << m_hybridGroundReferences
+            << ",\"ground_guard_passes\":" << m_hybridGroundPasses
+            << ",\"ground_guard_fallbacks\":" << m_hybridGroundFallbacks
+            << ",\"ground_max_observed_abs_error_db\":" << m_hybridGroundMaxErrorDb
+            << ",\"ground_max_admitted_abs_error_db\":" << m_hybridGroundMaxAdmittedErrorDb
+            << ",\"rt_producer_retained\":true,\"rt_psd_evaluations\":" << m_hybridRt
+            << ",\"friis_psd_evaluations\":" << m_hybridFriis
+            << ",\"guarded_friis_evaluations\":" << m_hybridGuarded
+            << ",\"reference_guard_failures\":" << m_hybridFailures << ",\"links\":[";
+        bool first = true;
+        for (const auto& [key, link] : m_hybridLinks)
+        {
+            if (!first) out << ',';
+            first = false;
+            out << "{\"tx_node_id\":" << key.first << ",\"rx_node_id\":" << key.second
+                << ",\"rt_psd_evaluations\":" << link.rt << ",\"friis_psd_evaluations\":" << link.friis
+                << ",\"selection_transitions\":" << link.transitions << ",\"last_native_ns\":" << link.lastNs
+                << ",\"last_model\":\"" << link.model << "\",\"last_reason\":\"" << link.reason << "\"}";
+        }
+        out << "]}"; return out.str();
     }
 
     ~SourcePropagation() override { ClearSourceSchedule(); }
@@ -182,11 +244,189 @@ class SourcePropagation : public PhasedArraySpectrumPropagationLossModel
             m_python.reset();
             m_phaseProvider = {};
             m_emit = {};
+            m_hybridEmit = {};
         }
         m_schedule.clear();
     }
 
   private:
+
+    struct HybridLink
+    {
+        uint64_t rt{0}, friis{0}, transitions{0};
+        int64_t lastNs{0};
+        std::string model, reason;
+    };
+    bool m_hybridConfigured{false}, m_hybridEmpty{false}, m_hybridFlat{false};
+    size_t m_hybridShapeCount{0}, m_hybridObjectCount{0};
+    std::string m_hybridSceneSha;
+    EventSink m_hybridEmit;
+    mutable uint64_t m_hybridRt{0}, m_hybridFriis{0}, m_hybridGuarded{0}, m_hybridFailures{0};
+    mutable std::map<std::pair<uint32_t,uint32_t>,HybridLink> m_hybridLinks;
+    mutable uint64_t m_hybridGroundReferences{0}, m_hybridGroundPasses{0}, m_hybridGroundFallbacks{0};
+    mutable double m_hybridGroundMaxErrorDb{0}, m_hybridGroundMaxAdmittedErrorDb{0};
+
+    static bool QualifiedHybridArray(Ptr<const PhasedArrayModel> array)
+    {
+        auto upa = DynamicCast<const UniformPlanarArray>(array);
+        auto iso = upa ? DynamicCast<const IsotropicAntennaModel>(upa->GetAntennaElement()) : nullptr;
+        if (!upa || !iso || upa->GetNumRows()!=1 || upa->GetNumColumns()!=1 ||
+            upa->GetNumPorts()!=1 || upa->GetNumElems()!=1 || upa->GetNumPols()!=1 ||
+            upa->GetPolSlant()!=0 || upa->GetAlpha()!=0 || upa->GetBeta()!=0) return false;
+        DoubleValue gain; iso->GetAttribute("Gain",gain);
+        if (gain.Get()!=0) return false;
+        const auto& weights = upa->GetBeamformingVectorRef();
+        return weights.GetSize()==1 && weights[0]==std::complex<double>(1.0,0.0);
+    }
+    std::string HybridReason(Ptr<const SpectrumSignalParameters> params,
+        Ptr<const MobilityModel> a, Ptr<const MobilityModel> b,
+        Ptr<const PhasedArrayModel> aa, Ptr<const PhasedArrayModel> ba,
+        Ptr<SionnaRtSpectrumPropagationLossModel> selected) const
+    {
+        if (!m_hybridConfigured) throw std::logic_error("hybrid scene qualification was not configured");
+        if (!selected || !selected->GetChannelModel())
+            throw std::runtime_error("hybrid requires an available explicit RT reference");
+        if (!m_hybridEmpty && !m_hybridFlat) return "unqualified_geometry";
+        if (m_hybridFlat)
+        {
+            if (!QualifiedHybridArray(aa) || !QualifiedHybridArray(ba)) return "unqualified_antenna";
+            DoubleValue carrier; selected->GetChannelModel()->GetAttribute("Frequency",carrier);
+            if (carrier.Get()!=2412000000.0) return "unqualified_carrier";
+            for (auto band=params->psd->ConstBandsBegin(); band!=params->psd->ConstBandsEnd(); ++band)
+                if (!std::isfinite(band->fc) || std::abs(band->fc-carrier.Get())>30000000.0)
+                    return "unqualified_spectrum_bins";
+            // External source STAR endpoints are not the run's UAV cohort.
+            if (sources.find(params->txPhy)!=sources.end()) return "unqualified_ground_endpoint_role";
+            if (!hybridCommandPost || (a!=hybridCommandPost && b!=hybridCommandPost))
+                return "unqualified_ground_endpoint_role";
+            const auto cp=a==hybridCommandPost ? a : b;
+            const auto uav=a==hybridCommandPost ? b : a;
+            const auto orientation=[](Ptr<const MobilityModel> endpoint) {
+                VectorValue value;
+                return endpoint->GetAttributeFailSafe("Orientation",value) ? value.Get() : Vector{};
+            };
+            const auto c=cp->GetPosition(), u=uav->GetPosition();
+            const auto co=orientation(cp), uo=orientation(uav);
+            const auto finite=[](const Vector& v) {
+                return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+            };
+            if (!finite(c) || !finite(u) || !finite(co) || !finite(uo) ||
+                c!=Vector(0,0,2) || co!=Vector{} || u.z<19.5 || u.z>20.5 ||
+                std::abs(uo.y)>2*M_PI/180 || std::abs(uo.z)>2*M_PI/180)
+                return "unqualified_ground_pose";
+            if (!finite(cp->GetVelocity()) || !finite(uav->GetVelocity()) ||
+                cp->GetVelocity()!=Vector{} || uav->GetVelocity().GetLength()>3)
+                return "unqualified_ground_velocity";
+            const double theta=std::atan2(std::hypot(u.x,u.y),c.z+u.z)*180/M_PI;
+            if (theta<73.90006776148272 || theta>75.90006776148272)
+                return "unqualified_ground_pose";
+            // Current pose is sampled, not proof of continuous attitude or
+            // angular speed. Actual RT PSD must additionally admit every signal.
+            return "ground_candidate_online_guard";
+        }
+        // The production pool/cache uses a measured body Orientation attribute
+        // before the UPA bearing/downtilt fallback. Do not silently substitute
+        // co-polar Friis for a rolled/pitched or otherwise unqualified RT array.
+        for (const auto& endpoint : {a,b})
+        {
+            VectorValue orientation;
+            if (endpoint->GetAttributeFailSafe("Orientation",orientation))
+            {
+                const auto value=orientation.Get();
+                if (value.x!=0 || value.y!=0 || value.z!=0) return "unqualified_orientation";
+            }
+        }
+        if (!QualifiedHybridArray(aa) || !QualifiedHybridArray(ba)) return "unqualified_antenna";
+        if (a->GetVelocity().GetLength()!=0 || b->GetVelocity().GetLength()!=0) return "moving_endpoint";
+        const double distance = CalculateDistance(a->GetPosition(),b->GetPosition());
+        if (!std::isfinite(distance) || distance<2 || distance>10000) return "unqualified_distance";
+        DoubleValue carrier; selected->GetChannelModel()->GetAttribute("Frequency",carrier);
+        if (carrier.Get()!=2412000000.0) return "unqualified_carrier";
+        for (auto band=params->psd->ConstBandsBegin(); band!=params->psd->ConstBandsEnd(); ++band)
+            if (!std::isfinite(band->fc) || std::abs(band->fc-carrier.Get())>30000000.0)
+                return "unqualified_spectrum_bins";
+        // Query the existing model/cache before the approximation. Missing,
+        // aged or mismatched CIR/pose epochs fail exactly as in the RT path.
+        Ptr<const MatrixBasedChannelModel::ChannelMatrix> matrix;
+        try { matrix=selected->GetChannelModel()->GetChannel(a,b,aa,ba); }
+        catch (...) { ++m_hybridFailures; throw; }
+        if (!matrix) { ++m_hybridFailures; throw std::runtime_error("hybrid RT reference returned no matrix"); }
+        if (matrix->m_channel.GetNumRows()!=1 || matrix->m_channel.GetNumCols()!=1 ||
+            matrix->m_channel.GetNumPages()!=1 || matrix->m_channel(0,0,0)==std::complex<double>(0,0))
+            return "reference_not_single_nonzero_path";
+        return "qualified_empty_static_siso_psd";
+    }
+    Ptr<SpectrumSignalParameters> GroundHybridPsd(
+        Ptr<const SpectrumSignalParameters> params, Ptr<const MobilityModel> a,
+        Ptr<const MobilityModel> b, Ptr<const PhasedArrayModel> aa,
+        Ptr<const PhasedArrayModel> ba, Ptr<SionnaRtSpectrumPropagationLossModel> selected) const
+    {
+        // Reuse native RT's coherent paths, Doppler, cached delay phases and
+        // original epoch guards. No CIR formula or second attenuation is added.
+        Ptr<SpectrumSignalParameters> rt;
+        ++m_hybridGroundReferences;
+        try { rt=selected->CalcRxPowerSpectralDensity(params,a,b,aa,ba); }
+        catch (...) { ++m_hybridFailures; throw; }
+        auto candidate=params->Copy();
+        candidate->psd=freeSpace->CalcRxPowerSpectralDensity(params,a,b);
+        const auto invalidReference=[this](const std::string& why) {
+            ++m_hybridFailures;
+            throw std::runtime_error("hybrid RT PSD unavailable: "+why);
+        };
+        if (!rt || !rt->psd || !candidate->psd ||
+            rt->psd->GetSpectrumModel()!=params->psd->GetSpectrumModel() ||
+            candidate->psd->GetSpectrumModel()!=params->psd->GetSpectrumModel())
+            invalidReference("missing_or_mismatched_spectrum");
+        auto r=rt->psd->ConstValuesBegin(), f=candidate->psd->ConstValuesBegin();
+        bool positive=false;
+        double comparisonMaximumDb=0;
+        std::string fallback;
+        for (auto input=params->psd->ConstValuesBegin();input!=params->psd->ConstValuesEnd();++input,++r,++f)
+        {
+            if (!std::isfinite(*input) || *input<0 || !std::isfinite(*r) || *r<0)
+                invalidReference("nonfinite_or_negative_power");
+            if (!std::isfinite(*f) || *f<0)
+            { if (fallback.empty()) fallback="ground_candidate_invalid"; continue; }
+            if (*input==0) continue;
+            positive=true;
+            if (*r==0) { if (fallback.empty()) fallback="ground_reference_zero"; continue; }
+            if (*f==0) { if (fallback.empty()) fallback="ground_candidate_invalid"; continue; }
+            // Separate logs avoid ratio overflow while keeping the same dB test.
+            const double difference=10*std::abs(std::log10(*f)-std::log10(*r));
+            m_hybridGroundMaxErrorDb=std::max(m_hybridGroundMaxErrorDb,difference);
+            comparisonMaximumDb=std::max(comparisonMaximumDb,difference);
+            if (difference>1 && fallback.empty()) fallback="ground_rss_budget_exceeded";
+        }
+        if (!positive && fallback.empty()) fallback="ground_no_positive_input";
+        if (!fallback.empty())
+        {
+            ++m_hybridGroundFallbacks;
+            RecordHybrid(a,b,"sionna",fallback);
+            return rt;
+        }
+        ++m_hybridGroundPasses;
+        m_hybridGroundMaxAdmittedErrorDb=std::max(m_hybridGroundMaxAdmittedErrorDb,comparisonMaximumDb);
+        RecordHybrid(a,b,"friis","qualified_flat_ground_online_guard");
+        return candidate;
+    }
+    void RecordHybrid(Ptr<const MobilityModel> a, Ptr<const MobilityModel> b,
+                      const std::string& model, const std::string& reason) const
+    {
+        const auto tx=a->GetObject<Node>(), rx=b->GetObject<Node>();
+        if (!tx || !rx) throw std::runtime_error("hybrid links require actual registered ns-3 nodes");
+        auto& link=m_hybridLinks[{tx->GetId(),rx->GetId()}];
+        if (link.model!=model || link.reason!=reason)
+        {
+            ++link.transitions;
+            if (m_hybridEmit) m_hybridEmit("hybrid_model_selection",
+                "tx"+std::to_string(tx->GetId())+"_rx"+std::to_string(rx->GetId()),0,
+                "selected_model="+model+";reason="+reason+";policy=qualified_siso_psd_2412_v2");
+        }
+        link.model=model; link.reason=reason; link.lastNs=Simulator::Now().GetNanoSeconds();
+        if (model=="friis") { ++link.friis; ++m_hybridFriis; ++m_hybridGuarded; }
+        else { ++link.rt; ++m_hybridRt; }
+    }
+
     struct PythonSchedule
     {
         pybind11::dict resolved;
@@ -338,6 +578,23 @@ class SourcePropagation : public PhasedArraySpectrumPropagationLossModel
         }
         auto entry = sources.find(params->txPhy);
         auto selected = entry == sources.end() ? reference : entry->second;
+        if (profile == "hybrid")
+        {
+            const auto reason = HybridReason(params,a,b,aa,ba,selected);
+            if (reason == "ground_candidate_online_guard")
+                return GroundHybridPsd(params,a,b,aa,ba,selected);
+            if (reason == "qualified_empty_static_siso_psd")
+            {
+                auto result = params->Copy();
+                result->psd = freeSpace->CalcRxPowerSpectralDensity(params,a,b);
+                RecordHybrid(a,b,"friis",reason);
+                return result;
+            }
+            auto result = selected->CalcRxPowerSpectralDensity(params,a,b,aa,ba);
+            RecordHybrid(a,b,"sionna",reason);
+            return result;
+        }
+        if (!selected) throw std::runtime_error("explicit RT propagation model is unavailable");
         return selected->CalcRxPowerSpectralDensity(params, a, b, aa, ba);
     }
     void DoDispose() override
@@ -347,6 +604,7 @@ class SourcePropagation : public PhasedArraySpectrumPropagationLossModel
         sourcePsds.clear();
         sourceTimes.clear();
         reference = nullptr;
+        hybridCommandPost = nullptr;
         PhasedArraySpectrumPropagationLossModel::DoDispose();
     }
 };
@@ -365,6 +623,7 @@ inline Ptr<SourcePropagation> InstallSpectrumSources(
     auto router = CreateObject<SourcePropagation>();
     router->reference = reference;
     router->profile = profile;
+    if (profile == "hybrid") router->ConfigureHybridScene(scene,emit);
     auto text = py::module_::import("pathlib").attr("Path")(config).attr("read_text")();
     auto json = py::module_::import("json");
     py::dict resolved = json.attr("loads")(text);

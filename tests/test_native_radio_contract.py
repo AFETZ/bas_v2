@@ -731,6 +731,31 @@ class NativeRadioContractTests(unittest.TestCase):
             sample_host_monotonic_ns=snapshot['cache_snapshot_host_monotonic_ns']-1_000_000_000)
         self.assertTrue(native_rt_worker_contract(stats, scenario)['passed'])
 
+    def test_hybrid_preserves_worker_proof_and_binds_selection_to_the_same_actual_scene(self):
+        from scripts.product.hybrid_policy import POLICY_ID
+        for rt_count,friis_count in [(100,0),(0,100)]:
+            stats,scenario=self.evidence(pool=True)
+            stats.update(selected_propagation_profile="hybrid",sionna_drives_rx_psd=rt_count>0,
+                rx_psd_propagation_model="bas::QualifiedSionnaFriisSelection",state_max_age_s=.1,
+                channel_state_max_age_s=.1)
+            scenario["sionna"]["channel_state_max_age_s"]=.1
+            stats["hybrid_selection"]=dict(policy_id=POLICY_ID,rt_producer_retained=True,
+                scene_sha256=hashlib.sha256(self.scene.read_bytes()).hexdigest(),
+                qualified_empty_scene=True,actual_shape_count=0,actual_object_count=0,
+                rt_psd_evaluations=rt_count,friis_psd_evaluations=friis_count,
+                guarded_friis_evaluations=friis_count,reference_guard_failures=0,
+                links=[dict(tx_node_id=0,rx_node_id=1,rt_psd_evaluations=rt_count,
+                    friis_psd_evaluations=friis_count,last_model="sionna" if rt_count else "friis",
+                    last_reason="unqualified_geometry" if rt_count else "qualified_empty_static_siso_psd")])
+            proof=native_product_runtime_contract(stats,scenario)
+            self.assertTrue(proof["passed"],proof)
+            stats["hybrid_selection"]["scene_sha256"]="f"*64
+            proof=native_rt_worker_contract(stats,scenario)
+            self.assertIn("hybrid_uses_actual_rt_scene",proof["rejection_reasons"])
+            stats["hybrid_selection"]["scene_sha256"]=hashlib.sha256(self.scene.read_bytes()).hexdigest()
+            stats["sionna_rt_workers"]["cache"]["misses"]=1
+            self.assertFalse(native_rt_worker_contract(stats,scenario)["passed"])
+
     def test_in_process_and_legacy_flags_still_require_consistent_actual_mode(self):
         stats, scenario = self.evidence()
         self.assertTrue(native_product_runtime_contract(stats, scenario)['passed'])

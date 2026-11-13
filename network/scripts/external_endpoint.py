@@ -28,6 +28,34 @@ def stream_read_capacity(queue, max_payload, maximum=4096):
     return max(0, min(maximum, slots * max_payload, payload))
 
 
+def serial_baud_readback(device):
+    """Read the opened UART's OS speeds; pySerial.baudrate is only a request."""
+    result = dict(serial_baud_observed=None,
+                  serial_baud_observed_reason='unsupported_os_termios_unavailable',
+                  serial_termios=None, serial_baud_readback_host_monotonic_ns=None)
+    if os.name != 'posix':
+        return result
+    import termios
+    try:
+        attributes = termios.tcgetattr(device.fileno())
+    except (OSError, ValueError, termios.error) as error:
+        result['serial_baud_observed_reason'] = 'termios_readback_error:' + type(error).__name__
+        return result
+    incoming, outgoing = attributes[4:6]
+    result.update(serial_termios=dict(input_speed=incoming, output_speed=outgoing, cflag=attributes[2]),
+                  serial_baud_readback_host_monotonic_ns=time.monotonic_ns())
+    if incoming != outgoing:
+        result['serial_baud_observed_reason'] = 'termios_input_output_speed_mismatch'
+        return result
+    # BOTHER/custom speeds and aliases are not evidence of a numeric baud rate.
+    rates = {getattr(termios, name): int(name[1:]) for name in dir(termios)
+             if name.startswith('B') and name[1:].isdecimal() and int(name[1:]) > 0}
+    rate = rates.get(incoming)
+    result.update(serial_baud_observed=rate, serial_baud_observed_reason=(
+        'standard_termios_input_output_match' if rate is not None else 'custom_zero_or_unrecognized_termios_speed'))
+    return result
+
+
 def open_radio_socket(config):
     """Bind only the modeled socket in its namespace; physical I/O stays on host."""
     radio = config['radio']
@@ -141,12 +169,21 @@ def run(config, output, duration=None):
                    radio_tos=udp.getsockopt(socket.IPPROTO_IP, socket.IP_TOS), pid=os.getpid(),
                    uav_id=int(config['uav_id']), channel=config['channel'],
                    controller_kind=kind, hardware_validation="not_performed",
+                   serial_baud_requested=endpoint['baud'] if kind == 'serial' else None,
+                   serial_baud_reported_by_pyserial=None, serial_baud_observed=None,
+                   serial_baud_observed_reason='not_connected' if kind == 'serial' else None,
+                   serial_termios=None, serial_baud_readback_host_monotonic_ns=None,
                    serial_exclusive=None, serial_device_identity=None,
                    framing="BSF1; unchanged endpoint bytes", clock="host_monotonic")
     output.mkdir(parents=True, exist_ok=True)
     def stop(*_):
         nonlocal running
         running = False
+        # The native runner signals the whole session, then the pair owner
+        # also signals its children. Ignore repeats through interpreter exit;
+        # otherwise a second TERM can turn a flushed shutdown into status -15.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     log = (output/"events.jsonl").open("w", buffering=65536)
@@ -189,6 +226,12 @@ def run(config, output, duration=None):
                             stopbits=endpoint["stopbits"], timeout=0, write_timeout=0,
                             **({'exclusive': True} if os.name == 'posix' else {}),
                             **{key: endpoint[key] for key in ("xonxoff", "rtscts", "dsrdtr") if key in endpoint})
+                        metrics['serial_baud_reported_by_pyserial'] = device.baudrate
+                        metrics.update(serial_baud_readback(device))
+                        if os.name == 'posix' and metrics['serial_baud_observed'] != endpoint['baud']:
+                            raise OSError(f"UART baud mismatch: requested {endpoint['baud']}, "
+                                          f"observed {metrics['serial_baud_observed']} "
+                                          f"({metrics['serial_baud_observed_reason']})")
                         if os.name == 'posix':
                             # pySerial's cooperative flock protects these BAS
                             # owners; it is not a kernel ban on unrelated readers.

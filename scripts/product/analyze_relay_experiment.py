@@ -6,15 +6,22 @@ from __future__ import annotations
 import argparse
 from collections import Counter, defaultdict
 import csv
+import copy
 import hashlib
 import importlib.util
 import itertools
 import json
 import math
+import re
 from pathlib import Path
 import random
 import statistics
+import sys
 from typing import Any
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 UAVS = tuple(range(1, 6))
 CONDITIONS = ("none", "selective", "total_GCS")
@@ -65,11 +72,163 @@ def read_jsonl(path: Path, errors: list[str]) -> list[dict[str, Any]]:
     return result
 
 
-def read_csv(path: Path) -> list[dict[str, Any]]:
+def read_csv(path: Path, *, evidence=None, keep=None, observe=None) -> list[dict[str, Any]]:
     if not path.is_file():
         return []
+    if evidence is not None:
+        before = path.stat()
+        digest, size = hashlib.sha256(), 0
+        with path.open('rb') as stream:
+            def lines():
+                nonlocal size
+                for line in stream:
+                    digest.update(line)
+                    size += len(line)
+                    yield line.decode('utf-8')
+            records, rows, malformed = [], 0, 0
+            for row in csv.DictReader(lines()):
+                rows += 1
+                malformed += None in row or None in row.values()
+                if observe is not None:
+                    observe(row, rows)
+                if keep is None or keep(row):
+                    records.append(row)
+        after = path.stat()
+        evidence.update(sha256=digest.hexdigest(), bytes=size, rows=rows, retained_rows=len(records),
+            malformed_rows=malformed,
+            stable=(before.st_size, before.st_mtime_ns) == (after.st_size, after.st_mtime_ns)
+                and size == after.st_size)
+        return records
     with path.open(newline="") as stream:
-        return list(csv.DictReader(stream))
+        records = []
+        for index, row in enumerate(csv.DictReader(stream), 1):
+            if observe is not None:
+                observe(row, index)
+            if keep is None or keep(row):
+                records.append(row)
+        return records
+
+
+def native_analysis_event(row):
+    """Only these native observations enter relay timing, faults or refined gates.
+
+    Filtering changes memory use only: the reader still hashes/counts/validates
+    every original CSV row, including unretained PHY/MAC traffic.
+    """
+    return (row.get('event') in {'fault_start', 'fault_end', 'realtime_lag', 'jammer_on', 'jammer_off'}
+        or row.get('event') == 'spectrum_signal_arrival'
+        and 'foreign_signal=1' in str(row.get('details', '')).split(';'))
+
+
+class NativeMacObservations:
+    """Constant-size evidence of the six native radios, not a packet-loss model.
+
+    MonitorSnifferRx's peer is the actual MPDU Addr2. The src_mac/dst_mac
+    strings in PacketTraceDetails are derived from IP and are not MAC proof.
+    Keep one decoded, addressed UDP sample per CP/UAV direction; duplicates
+    cannot cover another link. No unbounded set of packet UIDs is retained.
+    """
+    ADDRESSES = {'cp': ('02:71:ff:00:00:01', '10.71.0.10'),
+        **{f'uav{i}': (f'02:71:{i:02x}:00:10:10', f'10.71.{i}.10') for i in UAVS}}
+    EVENTS = {'mac_tx', 'wifi_mac_queue_enqueue', 'wifi_mac_queue_dequeue',
+              'wifi_mac_queue_drop', 'wifi_data_retry', 'wifi_monitor_rx'}
+
+    def __init__(self, meta, stats):
+        self.start = self.integer(meta.get('measurement_start_host_monotonic_ns'))
+        self.end = self.integer(meta.get('measurement_end_host_monotonic_ns'))
+        self.frequency_mhz = finite(stats.get('wifi_actual_center_frequency_hz'))
+        if self.frequency_mhz is not None:
+            self.frequency_mhz /= 1e6
+        self.by_mac = {mac: node for node, (mac, _) in self.ADDRESSES.items()}
+        self.counters = {node: Counter() for node in self.ADDRESSES}
+        self.queue_depths = {node: 0 for node in self.ADDRESSES}
+        self.links, self.excluded = {}, Counter()
+        self.max_queued_nodes = self.overlapping_queue_observations = 0
+
+    @staticmethod
+    def integer(value):
+        text = str(value)
+        return int(text) if re.fullmatch(r'[0-9]+', text) else None
+
+    def observe(self, row, index):
+        event, node = row.get('event'), row.get('node')
+        if event not in self.EVENTS:
+            return
+        at = self.integer(row.get('wall_monotonic_ns'))
+        if node not in self.counters or at is None or None in row or None in row.values():
+            self.excluded['invalid_node_time_or_csv'] += 1
+            return
+        inside = self.start is not None and self.end is not None and self.start <= at <= self.end
+        if event in ('mac_tx', 'wifi_data_retry'):
+            if inside:
+                self.counters[node][event] += 1
+            return
+        parts = [part.split('=', 1) for part in str(row.get('details', '')).split(';') if '=' in part]
+        fields = dict(parts)
+        if len(fields) != len(parts):
+            self.excluded['duplicate_detail_keys'] += 1
+            return
+        if event.startswith('wifi_mac_queue_'):
+            action = event.removeprefix('wifi_mac_queue_')
+            depth = self.integer(fields.get('node_all_ac_queue_packets'))
+            ac = self.integer(fields.get('ac'))
+            if fields.get('source') != f'WifiMacQueue.{action}' or depth is None or ac not in range(4):
+                self.excluded['invalid_queue_observation'] += 1
+                return
+            self.queue_depths[node] = depth
+            if inside:
+                self.counters[node][event] += 1
+                queued = sum(value > 0 for value in self.queue_depths.values())
+                self.max_queued_nodes = max(self.max_queued_nodes, queued)
+                self.overlapping_queue_observations += queued > 1
+            return
+        if not inside:
+            return
+        self.counters[node]['wifi_monitor_rx_rows'] += 1
+        sender = self.by_mac.get(row.get('peer'))
+        uid, sequence = self.integer(fields.get('packet_uid')), self.integer(fields.get('mac_sequence'))
+        frequency = finite(fields.get('frequency_mhz'))
+        # ACKs, overheard unicast, foreign radios and IP-derived MAC strings do
+        # not demonstrate addressed CP <-> UAV data reception.
+        if (sender is None or sender == node or (sender != 'cp' and node != 'cp')
+                or fields.get('source') != 'WifiPhy.MonitorSnifferRx.SignalNoiseDbm'
+                or fields.get('sampling') != 'successfully_received_mpdu'
+                or fields.get('foreign_signal', '0') != '0'
+                or fields.get('src_ip') != self.ADDRESSES[sender][1]
+                or fields.get('dst_ip') != self.ADDRESSES[node][1]
+                or fields.get('ip_protocol') != '17' or uid is None
+                or sequence is None or not 0 <= sequence <= 4095
+                or fields.get('mac_retry') not in ('0', '1')
+                or self.frequency_mhz is None or frequency != self.frequency_mhz
+                or finite(fields.get('signal_dbm')) is None
+                or finite(fields.get('noise_interference_dbm')) is None):
+            self.excluded['not_addressed_cp_uav_data_mpdu'] += 1
+            return
+        self.counters[node]['addressed_mpdu_observations_including_retries'] += 1
+        key = f'{sender}->{node}'
+        if key not in self.links:
+            self.links[key] = dict(csv_record=index, wall_monotonic_ns=at,
+                receiver=node, transmitter=sender, mpdu_transmitter_mac=row['peer'],
+                src_ip=fields['src_ip'], dst_ip=fields['dst_ip'], packet_uid=uid,
+                mac_sequence=sequence, mac_retry=int(fields['mac_retry']), frequency_mhz=frequency)
+
+    def snapshot(self):
+        required = {f'{a}->{b}' for i in UAVS for a, b in (('cp', f'uav{i}'), (f'uav{i}', 'cp'))}
+        checks = dict(explicit_measurement_bounds=self.start is not None and self.end is not None
+                and self.start < self.end,
+            all_six_native_mac_transmitters=all(c['mac_tx'] > 0 for c in self.counters.values()),
+            all_six_native_mac_queues=all(c['wifi_mac_queue_enqueue'] > 0 for c in self.counters.values()),
+            bidirectional_cp_five_uav_mpdu=set(self.links) == required)
+        return dict(schema_version=1, passed=all(checks.values()), checks=checks,
+            scope='Native CSV measurement-window observations; one retained sample per addressed direction.',
+            limits='Row counters include retries and duplicate observations, not unique packets. Queue overlap is descriptive; it does not establish arbitration or collision outcomes. No all-pairs delivery or SLA claim.',
+            arbitration_implementation='ns-3 native WifiMac/QosTxop; Sionna RT supplies propagation.',
+            measurement_start_host_monotonic_ns=self.start, measurement_end_host_monotonic_ns=self.end,
+            node_addresses={node: dict(mac=mac, ip=ip) for node, (mac, ip) in self.ADDRESSES.items()},
+            event_rows_by_node={node: dict(counts) for node, counts in self.counters.items()},
+            addressed_link_count=len(self.links), first_addressed_mpdu_by_link=self.links,
+            excluded_observations=dict(self.excluded), max_simultaneously_queued_nodes=self.max_queued_nodes,
+            overlapping_queue_observations=self.overlapping_queue_observations)
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None:
@@ -512,6 +671,10 @@ def analyze_payload_lineage(run_dir: Path, start_ns=None, end_ns=None, *, comple
     """Audit existing BSF1/MAVLink observations; never substitute ACKs or RF power."""
     run_dir = Path(run_dir)
     errors = []
+    from bas import payload_journal_verification
+    writer_proof = payload_journal_verification(run_dir)
+    if writer_proof['passed'] is False:
+        errors.append('payload async writer journal is not verified closed')
     ground = run_dir / 'payload/logs/scenario_events.jsonl'
     paths = [ground, *sorted((run_dir / 'logs').glob('payload_uart_uav*.jsonl'))]
     initial_files={path:(path.stat().st_size,path.stat().st_mtime_ns) for path in paths if path.is_file()}
@@ -529,6 +692,7 @@ def analyze_payload_lineage(run_dir: Path, start_ns=None, end_ns=None, *, comple
         minimum_distinct_seeds=ENGINEERING_DELIVERY_V1['minimum_distinct_rng_seeds'],
         minimum_samples_per_stream=ENGINEERING_DELIVERY_V1['minimum_samples_per_uav'],
         records=[], per_stream={}, audit_errors=errors,trace_files=[])
+    result['writer_verification'] = writer_proof
     if not any(path == ground.relative_to(run_dir).as_posix() for path, _epoch in sessions):
         logging=read_json(run_dir/'metrics/payload_channel.json').get('application_lineage',{})
         if isinstance(logging,dict) and logging.get('event_logging')=='metrics_only':
@@ -723,11 +887,382 @@ def analyze_payload_lineage(run_dir: Path, start_ns=None, end_ns=None, *, comple
     return result
 
 
+def refined_phase_observations(meta, config, native, offers, commands, payload, *, native_source_anchor=None):
+    """Predeclared source/off comparison cohorts; no acceptance or SLA threshold."""
+    def ns(value):
+        if type(value) is int:
+            return value
+        if isinstance(value, str) and value.isdecimal():
+            return int(value)
+        if type(value) is float and math.isfinite(value) and value.is_integer():
+            return int(value)
+        return None
+    start, observed_end = ns(meta.get('measurement_start_host_monotonic_ns')), ns(meta.get('measurement_end_host_monotonic_ns'))
+    duration = finite(config.get('duration_s'))
+    if start is None or observed_end is None or duration is None or duration <= 40:
+        return dict(status='not_evaluated_missing_measurement_bounds')
+    anchor = native_source_anchor if isinstance(native_source_anchor, dict) else {}
+    source_start_ns = ns(anchor.get('simulation_ns'))
+    foreign = [row for row in native if row.get('event') == 'spectrum_signal_arrival'
+               and 'foreign_signal=1' in str(row.get('details', '')).split(';')]
+    index = {str(row['command_id']): row for row in commands}
+    age_limit = finite(config.get('effective_service_args', {}).get('command_max_age_ms'))
+    result = dict(status='observed', qualification='not_evaluated', windows={},
+        window_basis='Predeclared refined-case comparator: [0,20), [20,40), [40,duration). Source-off has no artificial fault.',
+        clock_basis='Packet cohorts use host elapsed time; RF arrivals use ns-3 elapsed time. Actual source switch clocks are retained separately.',
+        denominator='Control: unique scheduled refresh offers. Payload: actual CRC/BSF1-audited created frames per direction, including ancillary MAVLink; synthetic load is an explicit subset.',
+        delivery_basis='Outcome follows the offered packet across a phase boundary; delivered_inside_same_phase is a separate count. Missing/censored/unverifiable outcomes are not asserted RF losses.',
+        delay_scope='Control creation to UART write end. Payload GCS creation to UART write end, or UAV UART ingress to GCS CRC release; no sensor creation or physical-wire delay.',
+        payload_generator_eligible=payload.get('offered_load', {}).get('generator_eligible'),
+        native_source_anchor=anchor or None,
+        rf_phase_status=('observed' if source_start_ns is not None else
+                         'unavailable_native_clock_anchor' if foreign else 'no_foreign_signals_recorded'),
+        foreign_signal_arrivals_total=len(foreign),
+        source_switches=[{key: row.get(key) for key in ('event','node','time_s','wall_monotonic_ns','details')}
+                         for row in native if row.get('event') in ('jammer_on','jammer_off')])
+    for name, low_s, high_s in (('before', 0, 20), ('source_window', 20, 40), ('after', 40, duration)):
+        low, high = start + round(low_s * 1e9), start + round(high_s * 1e9)
+        inside = lambda value: (stamp := ns(value)) is not None and low <= stamp < min(high, observed_end)
+        phase = dict(elapsed_s=[low_s, high_s], host_window_ns=[low, high],
+            window_fully_observed=observed_end >= high, control={}, payload={}, foreign_power_dbm_by_receiver={})
+        for uav in UAVS:
+            cohort = [row for row in offers if identifier(row.get('uav_id')) == uav
+                      and inside(row.get('scheduled_host_monotonic_ns', row.get('host_monotonic_ns')))]
+            counts = Counter(dict(admitted=0, unavailable=0, missing=0, right_censored=0, unverifiable=0))
+            latencies, same_phase = [], 0
+            for offer in cohort:
+                command = index.get(str(offer.get('command_id')))
+                if command is None:
+                    counts['unavailable'] += 1
+                    continue
+                admitted, created = ns(command.get('admitted_ns')), ns(command.get('created_ns'))
+                if admitted is None:
+                    counts['right_censored' if created is not None and age_limit is not None
+                        and created + age_limit * 1e6 > observed_end else 'missing'] += 1
+                    continue
+                delay = finite(command.get('latency_ms'))
+                valid = (command.get('uav_id') == uav and command.get('lease_status') == 'valid'
+                    and command.get('lineage_status') == 'valid' and command.get('application_chain_complete') is True
+                    and command.get('policy_allowed') is True and delay is not None and delay >= 0)
+                counts['admitted' if valid else 'unverifiable'] += 1
+                if valid:
+                    latencies.append(delay); same_phase += inside(admitted)
+            phase['control'][str(uav)] = dict(offered=len(cohort), **counts,
+                delivered_inside_same_phase=same_phase, delay_ms=distribution(latencies))
+            for direction in ('gcs_to_uav', 'uav_to_gcs'):
+                cohort = [row for row in payload.get('records', []) if row.get('uav_id') == uav
+                          and row.get('direction') == direction and inside(row.get('created_host_monotonic_ns'))]
+                delivered = [row for row in cohort if row.get('outcome') in ('timely', 'late')]
+                phase['payload'][f'{uav}:{direction}'] = dict(offered=len(cohort),
+                    outcomes=dict(Counter(row.get('outcome') for row in cohort)), delivered=len(delivered),
+                    delivered_inside_same_phase=sum(inside(row.get('accepted_host_monotonic_ns')) for row in delivered),
+                    synthetic_load_offered=sum(row.get('load_id') is not None for row in cohort),
+                    synthetic_load_delivered=sum(row.get('load_id') is not None for row in delivered),
+                    delay_ms=distribution([value for row in delivered if (value := finite(row.get('latency_ms'))) is not None]))
+        for node in ('cp', *(f'uav{i}' for i in UAVS)):
+            phase['foreign_power_dbm_by_receiver'][node] = distribution([finite(row.get('value')) for row in foreign
+                if source_start_ns is not None and row.get('node') == node
+                and finite(row.get('value')) is not None and finite(row.get('time_s')) is not None
+                and round(low_s * 1e9) <= round(float(row['time_s']) * 1e9) - source_start_ns < round(high_s * 1e9)])
+        result['windows'][name] = phase
+    return result
+
+
+def refined_case_evidence(run_dir, meta, stats, environment, events, native, commands, payload, errors,
+                          native_capture=None, runtime_spool_proof=None):
+    """Observe the refined flight case without importing the separate SLA limits.
+
+    Only frozen run geometry is usable. A successful process/mission summary is
+    necessary but never sufficient; missing observations remain a failed gate.
+    HitL remains a separate bench, even when all flight gates are satisfied.
+    """
+    run_dir = Path(run_dir).resolve()
+    root = run_dir.parents[2]
+    control_dir = root / 'runs/control' / run_dir.name
+    frozen = run_dir / 'logs/urban_scenario.json'
+    raw_scene = read_json(frozen)
+    config = read_json(control_dir / 'config.json')
+    if (raw_scene.get('scenario') != 'terrain_10km_five_uav_refined_case_v1'
+            and Path(config.get('environment', {}).get('scene', '')).name != 'terrain_10km_refined_mission.json'):
+        return dict(schema_version=1, status='not_applicable', applicable=False)
+    import bas
+    from scripts.product.urban_mission import UrbanScenario
+    from scripts.product.prepare_terrain_scene import terrain_height
+    from scripts.product.summarize_native_radio_five_uav import _native_source_schedule
+    checks, details, failures = {}, {}, []
+    result = dict(schema_version=1, applicable=True, status='incomplete', flight_case_passed=False,
+        checks=checks, observations=details, evidence_errors=failures,
+        hitl='separate_bench_required',
+        scope='Frozen refined-case input, recorded Gazebo samples and audited packet delivery; no physical hardware or statistical SLA certification.',
+        sampling_limit='AGL and collision checks describe recorded Gazebo positions, not continuous motion between samples or the whole map.')
+    record = read_json(control_dir / 'run.json')
+    runtime_spool_proof = runtime_spool_proof or {}
+    checks['runtime_and_complete_window'] = (
+        record.get('run_id') == run_dir.name and record.get('runtime_status') == 'completed'
+        and record.get('mission_outcome') == 'succeeded' and record.get('measurement_validity') == 'valid'
+        and not record.get('runtime_verification_errors') and not errors
+        and runtime_spool_proof.get('passed') is not False
+        and meta.get('runtime_status') == 'completed' and meta.get('mission_outcome') == 'succeeded'
+        and meta.get('measurement_validity') == 'valid' and meta.get('measurement_window_completed') is True
+        and stats.get('stop_reason') in ('duration', 'sionna_ns3_process_stopped'))
+    source_summary_path = run_dir / 'metrics/native_source_summary.json'
+    source_summary = read_json(source_summary_path)
+    capture = source_summary.get('event_capture', {}) if isinstance(source_summary, dict) else {}
+    capture = capture if isinstance(capture, dict) else {}
+    native_capture = native_capture or {}
+    storage = read_json(run_dir / 'logs/native_capture_storage.json')
+    storage = storage if isinstance(storage, dict) else {}
+    publication = storage.get('publication', {})
+    publication = publication if isinstance(publication, dict) else {}
+    expected_destinations = {str(run_dir / 'logs/native_radio_events.csv'),
+        '/workspace/multiagent_simulation/' + (run_dir / 'logs/native_radio_events.csv').relative_to(root).as_posix()}
+    # A staged run records its actual RAM destination. Authorize that exact
+    # member only through the fresh, closed whole-run publication proof, whose
+    # original CSV digest must also agree with this parser's byte audit.
+    relative_csv = 'logs/native_radio_events.csv'
+    members = runtime_spool_proof.get('members', {})
+    member = members.get(relative_csv, {}) if isinstance(members, dict) else {}
+    source_run_dir = runtime_spool_proof.get('source_run_dir')
+    destination_run_dir = runtime_spool_proof.get('destination_run_dir')
+    spool_capture_verified = (
+        runtime_spool_proof.get('passed') is True
+        and runtime_spool_proof.get('status') == 'verified_closed_runtime_spool'
+        and runtime_spool_proof.get('mode') == 'host_tmpfs_run_v1'
+        and runtime_spool_proof.get('run_id') == run_dir.name
+        and isinstance(source_run_dir, str) and source_run_dir.startswith('/')
+        and source_run_dir.split('/')[-2:] == ['raw', run_dir.name]
+        and '..' not in source_run_dir.split('/')
+        and isinstance(destination_run_dir, str)
+        and destination_run_dir.split('/')[-3:] == ['runs', 'native-radio-realtime', run_dir.name]
+        and '..' not in destination_run_dir.split('/')
+        and isinstance(member, dict) and member.get('kind') == 'file'
+        and type(member.get('bytes')) is int and member['bytes'] == native_capture.get('bytes')
+        and member.get('sha256') == native_capture.get('sha256'))
+    physical_csv = source_run_dir + '/' + relative_csv if spool_capture_verified else None
+    if physical_csv is not None:
+        expected_destinations.add(physical_csv)
+    published_files = publication.get('files', [])
+    event_files = [item for item in published_files if isinstance(item, dict)
+        and isinstance(item.get('destination'), str) and item['destination'] in expected_destinations
+        ] if isinstance(published_files, list) else []
+    publication_verified = (publication.get('status') in ('copied', 'direct_disk')
+        and publication.get('errors') == [] and len(event_files) == 1
+        and isinstance(storage.get('native_event_csv_path'), str) and bool(storage['native_event_csv_path'])
+        and event_files[0].get('source') == storage['native_event_csv_path']
+        and type(event_files[0].get('bytes')) is int and event_files[0]['bytes'] == native_capture.get('bytes'))
+    # The source exporter is optional for source-off runs. Publication is the
+    # runner's closed-writer receipt; this pass hashes and validates the original
+    # bytes. If a source summary exists, it must bind to those same bytes too.
+    source_capture_verified = (not source_summary_path.exists() or (
+        capture.get('status') == 'observed' and capture.get('bytes') == native_capture.get('bytes')
+        and capture.get('sha256') == native_capture.get('sha256')))
+    checks['native_event_capture'] = (native_capture.get('stable') is True
+        and native_capture.get('malformed_rows') == 0
+        and type(native_capture.get('rows')) is int and native_capture['rows'] > 0
+        and type(native_capture.get('bytes')) is int and native_capture['bytes'] > 0
+        and re.fullmatch('[0-9a-f]{64}', str(native_capture.get('sha256', ''))) is not None
+        and publication_verified and source_capture_verified)
+    details['native_event_capture'] = native_capture
+    details['native_event_capture_publication'] = dict(verified=publication_verified,
+        source_summary_present=source_summary_path.exists(), source_summary_matches=source_capture_verified,
+        runtime_spool_mapping_verified=spool_capture_verified, physical_destination=physical_csv,
+        files=event_files, hash_scope='Original closed CSV bytes at analysis time; no earlier digest inferred.')
+    mac_observations = native_capture.get('shared_mac_observations', {})
+    if not isinstance(mac_observations, dict):
+        mac_observations = {}
+    checks['one_shared_radio_channel'] = (
+        type(stats.get('uav_count')) is int and stats['uav_count'] == 5
+        and type(stats.get('radio_node_count')) is int and stats['radio_node_count'] == 6
+        and type(stats.get('shared_spectrum_channel_count')) is int and stats['shared_spectrum_channel_count'] == 1
+        and stats.get('wifi_topology') == 'adhoc' and stats.get('sionna_drives_rx_psd') is True
+        and stats.get('radio_backend') == 'wifi' and stats.get('native_ns3_phy') is True
+        and stats.get('native_ns3_mac') is True
+        and mac_observations.get('schema_version') == 1 and mac_observations.get('passed') is True)
+    details['native_mac_multipoint'] = dict(mac_observations,
+        source='logs/native_radio_events.csv', source_sha256=native_capture.get('sha256'))
+    valid_commands = Counter(row['uav_id'] for row in commands if row.get('lease_status') == 'valid'
+        and row.get('lineage_status') == 'valid' and row.get('application_chain_complete') is True
+        and row.get('policy_allowed') is True and finite(row.get('admitted_ns')) is not None)
+    delivered_payload = Counter(row.get('uav_id') for row in payload.get('records', [])
+        if row.get('outcome') in ('timely', 'late') and row.get('direction') == 'gcs_to_uav')
+    checks['two_mavlink_uart_channels'] = (
+        environment.get('active_uart_channels') == 'control,payload'
+        and payload.get('status') == 'recorded' and not payload.get('audit_errors')
+        and payload.get('invalid_trace_rows') == 0 and payload.get('orphan_receipts') == 0
+        and bool(payload.get('trace_files')) and all(f.get('status') == 'observed' for f in payload['trace_files'])
+        and all(valid_commands[i] > 0 and delivered_payload[i] > 0 for i in UAVS))
+    details['delivered_control_by_uav'] = dict(valid_commands)
+    details['delivered_payload_by_uav'] = dict(delivered_payload)
+    checks['frozen_terrain'] = False
+    checks['five_uav_flight_lifecycle'] = False
+    checks['gazebo_positions_and_agl'] = False
+    try:
+        bundle = (root / raw_scene['terrain_bundle']).resolve()
+        if bundle != (control_dir / 'generated/terrain').resolve():
+            raise ValueError('terrain is not the frozen bundle of this run')
+        # The initial/final simulator snapshots bind the run-local bundle and
+        # mission. Never fall back to the mutable checkout .external assets.
+        manifest_path = bundle / 'scene-manifest.json'
+        for stage in ('initial', 'final'):
+            inputs = run_dir / 'configuration' / stage / 'inputs'
+            for label, path in (('geometry_source', frozen), ('sionna_geometry_manifest', manifest_path)):
+                captured = inputs / label / 'value.json'
+                if captured.read_bytes() != path.read_bytes():
+                    raise ValueError(f'{stage} {label} differs from frozen runtime input')
+        scenario = UrbanScenario.load(frozen, root=root)  # Verifies every terrain asset hash.
+        manifest = scenario.terrain_manifest
+        details['terrain_manifest_sha256'] = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        floors = [b['storeys'] for b in manifest['building_bounds'].values()]
+        checks['frozen_terrain'] = (manifest['extent_m'] == [10000, 10000]
+            and 0 < manifest['relief_m'] <= 200 and bool(floors) and max(floors) == 15
+            and scenario.uav_ids == UAVS)
+        observed_events = defaultdict(set)
+        reached = defaultdict(set)
+        for row in events:
+            uav, stage = row.get('uav_id'), row.get('stage', row.get('event'))
+            if uav not in UAVS:
+                continue
+            observed_events[uav].add(stage)
+            index = row.get('waypoint_index')
+            position = row.get('target_position_m')
+            if (stage == 'waypoint_reached_telemetry' and type(index) is int
+                    and row.get('progression_source') == 'radio_delivered_LOCAL_POSITION_NED'
+                    and 0 <= index < len(scenario.routes[uav]) and isinstance(position, (list, tuple))
+                    and len(position) == 3 and all(finite(p) is not None for p in position)
+                    and math.dist(position, scenario.routes[uav][index]) <= 1e-6):
+                reached[uav].add(index)
+        checks['five_uav_flight_lifecycle'] = all(
+            {'takeoff_observed', 'landing_disarm_observed'} <= observed_events[i]
+            and reached[i] == set(range(len(scenario.routes[i])))
+            and all(meta.get('uavs', {}).get(str(i), {}).get(k) is True
+                    for k in ('armed', 'takeoff', 'landed', 'auto_disarm')) for i in UAVS)
+        details['waypoints_observed_by_uav'] = {str(i): sorted(reached[i]) for i in UAVS}
+        journal = bas.node_state_journal_verification(run_dir)
+        details['position_journal_verification'] = journal
+        if journal.get('passed') is not True:
+            raise ValueError('closed position journal is not hash verified')
+        start, stop = meta.get('measurement_start_host_monotonic_ns'), meta.get('measurement_end_host_monotonic_ns')
+        if type(start) is not int or type(stop) is not int or not start < stop:
+            raise ValueError('exact measurement host window is missing')
+        source_start = finite(meta.get('measurement_start_source_sim_time_s'))
+        source_stop = finite(meta.get('measurement_end_source_sim_time_s'))
+        if source_start is None or source_stop is None or not 0 <= source_start < source_stop:
+            raise ValueError('measurement source-clock window is missing')
+        session = read_json(run_dir / 'logs/node_state.json').get('session_id')
+        if not isinstance(session, str) or not session:
+            raise ValueError('verified position session identity is missing')
+        agl = {i: [] for i in UAVS}
+        seen, cp_samples, bad, collisions = {}, 0, 0, 0
+        last_source = {}
+        with (run_dir / 'logs/node_state.jsonl').open(encoding='utf-8') as stream:
+            for line in stream:
+                snapshot = json.loads(line)
+                stamp = snapshot.get('published_monotonic_ns')
+                if type(stamp) is not int or not start <= stamp <= stop:
+                    continue
+                if (snapshot.get('type') != 'node_state' or snapshot.get('schema_version') != 2
+                        or snapshot.get('session_id') != session or snapshot.get('coordinate_frame') != 'ENU'
+                        or snapshot.get('source') != 'gazebo_odometry' or snapshot.get('fault')):
+                    bad += 1
+                    continue
+                nodes = snapshot.get('nodes', [])
+                if ({n.get('id') for n in nodes} != {'cp', *(f'uav{i}' for i in UAVS)}
+                        or len(nodes) != 6):
+                    bad += 1
+                    continue
+                for node in nodes:
+                    if node.get('id') == 'cp':
+                        if node.get('role') == 'command_post' and node.get('position_m') == raw_scene['gcs']:
+                            cp_samples += 1
+                        continue
+                    uav = identifier(node.get('id'))
+                    if uav is None:
+                        bad += 1
+                        continue
+                    point, source_s = node.get('position_m'), finite(node.get('source_sim_time_s'))
+                    if (node.get('role') != 'uav' or node.get('stale') is not False or node['id'] in snapshot.get('stale_nodes', [])
+                            or source_s is None or not isinstance(point, list) or len(point) != 3
+                            or any(finite(p) is None for p in point)):
+                        bad += 1
+                        continue
+                    if not source_start <= source_s < source_stop:
+                        continue  # A just-published row can still contain the preceding source sample.
+                    if uav in last_source and source_s < last_source[uav]:
+                        bad += 1
+                        continue
+                    last_source[uav] = source_s
+                    identity = (snapshot.get('session_id'), uav, source_s)
+                    if identity in seen:
+                        if seen[identity] != point:
+                            bad += 1
+                        continue
+                    seen[identity] = point
+                    agl[uav].append(point[2] - terrain_height(scenario.terrain_grid, *point[:2]))
+                    collisions += sum(all(low <= value <= high for value, low, high in zip(
+                        point, b['bounds_m'][0], b['bounds_m'][1])) for b in manifest['building_bounds'].values())
+        details.update(agl_m_by_uav={str(i): distribution(values) for i, values in agl.items()},
+            cp_samples=cp_samples, invalid_position_samples=bad, sampled_building_intersections=collisions)
+        checks['gazebo_positions_and_agl'] = (cp_samples > 0 and not bad and not collisions
+            and all(values and min(values) > 0 and max(values) >= 20 for values in agl.values()))
+    except (ValueError, OSError, KeyError, TypeError, ImportError) as error:
+        failures.append(f'geometry_or_pose: {type(error).__name__}: {error}')
+    checks['separate_em_source_observed'] = False
+    try:
+        schedule = _native_source_schedule(run_dir)
+        segments = (schedule.get('actual_sources') or {}).get('segments', [])
+        if segments:
+            for stage, label in (('initial', 'native_sources'), ('final', 'native_sources'),
+                                 ('final', 'native_sources_actual')):
+                captured = run_dir / 'configuration' / stage / 'inputs' / label / 'value.json'
+                if captured.read_bytes() != (run_dir / 'logs' / (label + '.json')).read_bytes():
+                    raise ValueError(f'{stage} {label} differs from its runtime snapshot')
+        source_rows = []
+        for segment in segments:
+            switches = [e for e in native if e.get('node') == segment['id']]
+            observed = {}
+            for event, at in (('jammer_on', segment['start_s']), ('jammer_off', segment['stop_s'])):
+                observed[event] = False
+                for row in switches:
+                    params = dict(part.split('=', 1) for part in row.get('details', '').split(';') if '=' in part)
+                    if (row.get('event') == event and finite(row.get('time_s')) is not None
+                            and abs(float(row['time_s']) - at) < 1e-6 and params.get('pattern') == segment['pattern']
+                            and all(finite(params.get(key)) is not None and math.isclose(float(params[key]), segment[key], rel_tol=0, abs_tol=1e-6)
+                                    for key in ('center_hz', 'bandwidth_hz', 'power_w'))):
+                        observed[event] = True
+            arrivals = sum(e.get('event') == 'spectrum_signal_arrival'
+                and 'foreign_signal=1' in str(e.get('details', '')).split(';') and finite(e.get('value')) is not None
+                and e.get('node') in {'cp', *(f'uav{i}' for i in UAVS)}
+                and finite(e.get('time_s')) is not None and segment['start_s'] <= float(e['time_s']) < segment['stop_s']
+                for e in native)
+            source_rows.append(dict(id=segment['id'], center_hz=segment['center_hz'], pattern=segment['pattern'],
+                switches=observed, foreign_signal_arrivals=arrivals,
+                passed=all(observed.values()) and arrivals > 0))
+        details['sources'] = source_rows
+        checks['separate_em_source_observed'] = (schedule['actual_schedule_status'] == 'observed'
+            and len(source_rows) == 1 and source_rows[0]['passed'])
+    except (ValueError, OSError, KeyError, TypeError) as error:
+        failures.append(f'source_observation: {type(error).__name__}: {error}')
+    result['flight_case_passed'] = bool(checks) and all(checks.values()) and not failures
+    result['status'] = ('flight_case_observed' if result['flight_case_passed'] else
+        'runtime_or_mission_failed' if not checks['runtime_and_complete_window'] else 'incomplete')
+    return result
+
+
 def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: float = 250.,
                 restricted_s: float = 30., plots: bool = True, live_export: bool = True) -> dict[str, Any]:
     run_dir = run_dir.resolve()
     output = (output_dir or run_dir).resolve()
     errors: list[str] = []
+    from bas import native_library_verification, coordination_journal_verification, runtime_spool_verification
+    runtime_spool_proof = runtime_spool_verification(run_dir)
+    if runtime_spool_proof['passed'] is False:
+        errors.append('runtime RAM spool publication is not verified closed and complete')
+    native_library_proof = native_library_verification(run_dir)
+    if native_library_proof['passed'] is False:
+        errors.append('native loaded library identity is not verified')
+    coordination_journal_proof = coordination_journal_verification(run_dir)
+    if coordination_journal_proof['passed'] is False:
+        errors.append('coordination journals are not verified closed and complete')
     meta = read_json(run_dir / "metrics/relay_experiment_summary.json")
     config = read_json(run_dir / "metrics/relay_experiment_config.json")
     stats = read_json(run_dir / "metrics/native_radio_stats.json")
@@ -762,7 +1297,11 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
     inside = lambda at: at is not None and (start is None or at >= start) and (end is None or at <= end)
     condition = str(meta.get("fault_profile", config.get("fault_profile", stats.get("fault_profile", "none"))))
     policy = str(meta.get("policy", config.get("policy", "not_recorded")))
-    native = read_csv(run_dir / "logs/native_radio_events.csv")
+    native_capture = {}
+    native_mac = NativeMacObservations(meta, stats)
+    native = read_csv(run_dir / "logs/native_radio_events.csv", evidence=native_capture,
+                      keep=native_analysis_event, observe=native_mac.observe)
+    native_capture['shared_mac_observations'] = native_mac.snapshot()
     fault_events = [row for row in native if row.get("event") in ("fault_start", "fault_end")
                     and inside(finite(row.get("wall_monotonic_ns")))]
     fault_starts = [finite(row["wall_monotonic_ns"]) for row in fault_events if row["event"] == "fault_start"]
@@ -1086,6 +1625,20 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
     payload = result['payload_lineage'] = analyze_payload_lineage(run_dir,
         payload_window['start_host_monotonic_ns'], payload_window['end_host_monotonic_ns'],
         complete=bool(full_window and meta.get('measurement_validity')=='valid' and timing['eligible']))
+    from network.coordination.service_profiles import qualify_payload_services
+    service_metadata_files = [run_dir / name for name in
+        ('metrics/relay_experiment_summary.json', 'metrics/relay_experiment_config.json',
+         'metrics/native_radio_stats.json', 'environment.txt')]
+    rt_solver_metadata = stats.get('sionna_solver')
+    service_metadata = dict(run_id=expected_run, rng_seed=stats.get('rng_seed'), rng_run=stats.get('rng_run'),
+        rt_solver_seed=rt_solver_metadata.get('seed') if isinstance(rt_solver_metadata, dict) else None,
+        source_commit=environment.get('git_head'),
+        source_dirty_paths=environment.get('source_dirty_paths'),
+        source_files=[dict(path=path.relative_to(run_dir).as_posix(), bytes=path.stat().st_size,
+                           sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+                      for path in service_metadata_files if path.is_file()])
+    result['service_class_qualification'] = qualify_payload_services(payload, run_metadata=service_metadata)
+    write_json(output / 'metrics/service_class_qualification.json', result['service_class_qualification'])
     write_csv(output / 'metrics/payload_records.csv',payload['records'],
         ['frame_uid','uav_id','direction','process_epoch','message_type','mavlink_body_bytes',
          'load_id','load_sequence','application_useful_bytes','application_useful_sha256','scheduled_host_monotonic_ns',
@@ -1122,6 +1675,20 @@ def analyze_run(run_dir: Path, output_dir: Path | None = None, *, deadline_ms: f
     recovery_rows += [dict(endpoint=name, **row) for name, row in control.items()]
     write_csv(output / "metrics/relay_recovery.csv", recovery_rows, ["endpoint", "status", "recovered", "time_s",
         "censor_time_s", "restricted_horizon_s", "restricted_unrecovered_time_s", "leader_id", "epoch", "members"])
+    result['native_library_verification'] = native_library_proof
+    result['coordination_journal_verification'] = coordination_journal_proof
+    result['runtime_spool_verification'] = runtime_spool_proof
+    result['refined_case'] = refined_case_evidence(run_dir, meta, stats, environment,
+        events, native, commands, payload, errors, native_capture, runtime_spool_proof)
+    if result['refined_case'].get('applicable'):
+        native_sources = read_json(run_dir / 'logs/native_sources_actual.json')
+        native_anchor = native_sources.get('anchor') if isinstance(native_sources, dict) else None
+        result['refined_case']['phase_observations'] = refined_phase_observations(meta, config, native, offers, commands, payload,
+            native_source_anchor=native_anchor)
+        source_summary = read_json(run_dir / 'metrics/native_source_summary.json')
+        source_summary = source_summary if isinstance(source_summary, dict) else {}
+        result['refined_case']['source_rf_summary'] = {key: source_summary.get(key) for key in
+            ('units', 'measurement_scope', 'window_availability', 'windows', 'event_capture')}
     write_json(output / "metrics/relay_analysis.json", result)
     if plots:
         plot_run(output, result, commands, events)
@@ -1471,10 +2038,289 @@ def analyze_campaign(plan_path: Path, runs_root: Path, output: Path, *, plots: b
     return result
 
 
+def _service_file_binding(path, base):
+    before = path.stat()
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(block)
+    after = path.stat()
+    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        raise ValueError(f"input changed during service analysis: {path}")
+    return dict(path=path.relative_to(base).as_posix(), bytes=after.st_size, sha256=digest.hexdigest())
+
+
+def _service_small_snapshot(path, base):
+    before = path.stat()
+    raw = path.read_bytes()
+    after = path.stat()
+    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        raise ValueError(f"input changed during service analysis: {path}")
+    return raw, dict(path=path.relative_to(base).as_posix(), bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+
+
+def _service_attempt(run_dir, profiles, order, planned=None):
+    """Rebuild delivery observations from raw files, never cached pass reports."""
+    from network.coordination.service_profiles import qualify_payload_services
+    run_dir = Path(run_dir).resolve()
+    attempt = dict(order=order, run_id=run_dir.name, run_dir=str(run_dir),
+        planned_case=copy.deepcopy(planned), input_binding_errors=[], source_files=[],
+        conditions=None, condition_sha256=None, record_counts={}, qualification=None,
+        runtime_status="not_recorded", mission_outcome="not_recorded", measurement_validity="not_recorded")
+    control_dir = run_dir.parents[1] / "control" / run_dir.name
+    try:
+        if not run_dir.is_dir():
+            attempt["status"] = "not_started" if planned and planned.get("status") == "not_started" else "missing_attempt_artifacts"
+            return attempt
+        from bas import unique_json_fields
+        def frozen_json(path, base):
+            raw, binding = _service_small_snapshot(path, base)
+            value = json.loads(raw, object_pairs_hook=unique_json_fields)
+            if not isinstance(value, dict):
+                raise ValueError(f"frozen metadata must be a JSON object: {path}")
+            return value, binding
+        control, control_binding = frozen_json(control_dir / "run.json", run_dir.parents[1])
+        config, config_binding = frozen_json(control_dir / "config.json", run_dir.parents[1])
+        summary, summary_binding = frozen_json(run_dir / "metrics/relay_experiment_summary.json", run_dir)
+        stats, stats_binding = frozen_json(run_dir / "metrics/native_radio_stats.json", run_dir)
+        _, load_binding = frozen_json(run_dir / "metrics/relay_experiment_config.json", run_dir)
+        raw_environment, environment_binding = _service_small_snapshot(run_dir / "environment.txt", run_dir)
+        environment = dict(line.split("=", 1) for line in raw_environment.decode().splitlines() if "=" in line)
+        attempt["source_files"] += [control_binding, config_binding]
+        source_files = [summary_binding, load_binding, stats_binding, environment_binding]
+        errors = attempt["input_binding_errors"]
+        if control.get("run_id") != run_dir.name or summary.get("run_id") != run_dir.name:
+            errors.append("run_identity_disagrees")
+        source = control.get("source_commit")
+        if (not isinstance(source, str) or len(source) != 40 or any(c not in "0123456789abcdef" for c in source)
+                or environment.get("git_head") != source or control.get("source_dirty") is not False
+                or environment.get("source_dirty_paths") != "0"):
+            errors.append("source_revision_not_clean_or_bound")
+        for name, length in (("ns3_exact_sha", 40), ("native_binary_sha256", 64)):
+            value = environment.get(name)
+            if not isinstance(value, str) or len(value) != length or any(c not in "0123456789abcdef" for c in value):
+                errors.append(name + "_identity_missing")
+        labels = {"scene"}
+        if config["propagation"]["model"] in ("sionna", "hybrid"):
+            labels.add("radio")
+        if config.get("interference", {}).get("sources") is not None:
+            labels.add("sources")
+        input_sha = {}
+        for label in ("scene", "radio", "sources"):
+            digest = None
+            if label in labels:
+                suffix = ".json" if label == "scene" else ".yaml"
+                binding = _service_file_binding(control_dir / (label + suffix), run_dir.parents[1])
+                attempt["source_files"].append(binding)
+                digest = binding["sha256"]
+                if control.get(label + "_sha256") != digest:
+                    errors.append(label + "_frozen_input_hash_disagrees")
+            elif control.get(label + "_sha256") is not None:
+                errors.append(label + "_unexpected_recorded_input")
+            input_sha[label] = digest
+        solver = stats.get("sionna_solver")
+        metadata = dict(run_id=run_dir.name, source_commit=source,
+            source_dirty_paths=environment.get("source_dirty_paths"), rng_seed=stats.get("rng_seed"),
+            rng_run=stats.get("rng_run"), rt_solver_seed=solver.get("seed") if isinstance(solver, dict) else None,
+            source_files=source_files)
+        if (metadata["rng_seed"] != config["experiment"]["seed"] or metadata["rng_run"] != config["experiment"]["run"]):
+            errors.append("declared_and_actual_rng_identity_disagree")
+        if planned and (planned.get("seed") != metadata["rng_seed"] or planned.get("rng_run") != metadata["rng_run"]):
+            errors.append("planned_and_actual_rng_identity_disagree")
+        attempt.update({key: control.get(key, "not_recorded") for key in
+                        ("runtime_status", "mission_outcome", "measurement_validity")})
+        for field in ("runtime_status", "measurement_validity"):
+            if control.get(field) != summary.get(field):
+                errors.append(field + "_control_summary_disagrees")
+        start, stop = summary.get("measurement_start_host_monotonic_ns"), summary.get("measurement_end_host_monotonic_ns")
+        runtime_valid = (attempt["runtime_status"] == "completed" and attempt["measurement_validity"] == "valid"
+            and summary.get("measurement_window_completed") is True
+            and stats.get("stop_reason") in ("duration", "sionna_ns3_process_stopped") and not errors)
+        lineage = analyze_payload_lineage(run_dir, start, stop, complete=runtime_valid)
+        if errors:
+            lineage["measurement_eligible"] = False
+        load = lineage.get("offered_load", {}).get("profile")
+        if load != config.get("flows", {}).get("payload_load"):
+            errors.append("audited_load_profile_missing" if load is None else "control_and_audited_load_profile_disagree")
+            lineage["measurement_eligible"] = False
+        if lineage.get("offered_load", {}).get("config_sha256") not in (None, load_binding["sha256"]):
+            errors.append("offered_configuration_changed_during_analysis")
+            lineage["measurement_eligible"] = False
+        qualification = qualify_payload_services(lineage, profiles, run_metadata=metadata)
+        counts = Counter()
+        for row in lineage.get("records", []):
+            if row.get("load_id") is not None:
+                counts[f'{row["uav_id"]}|{row["direction"]}'] += 1
+        fixed_config = copy.deepcopy(config)
+        fixed_config["experiment"].pop("run", None)
+        conditions = dict(effective_config_except_rng_run=fixed_config, service_profile_sha256=profiles["sha256"], source_commit=source,
+            image=config["runtime"]["image"], propagation_model=config["propagation"]["model"],
+            scene_sha256=input_sha["scene"], radio_sha256=input_sha["radio"], sources_sha256=input_sha["sources"],
+            uav_ids=list(range(1, config["drone"]["count"] + 1)), load_profile=config.get("flows", {}).get("payload_load"),
+            ns3_seed=metadata["rng_seed"], rt_solver_seed=metadata["rt_solver_seed"],
+            observation_duration_s=config["experiment"]["duration_s"],
+            runtime_implementation={key: environment.get(key) for key in (
+                "ns3_version", "ns3_exact_sha", "native_binary_sha256", "sionna", "sionna-rt",
+                "mitsuba", "drjit", "pybind11", "cppyy", "physics_profile", "state_transport",
+                "stack_cpuset", "radio_cpuset", "pose_publication_rate_hz", "sionna_worker_count")})
+        attempt.update(qualification=qualification, metadata=metadata, conditions=conditions,
+            condition_sha256=hashlib.sha256(json.dumps(conditions, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest(),
+            record_counts=dict(counts), runtime_valid=runtime_valid and not errors,
+            status="invalid" if errors else qualification["status"], source_files=attempt["source_files"] + source_files,
+            evaluation_origin="fresh_raw_payload_lineage",
+            runtime_gate_scope="Recorded runtime/measurement gates plus actual native stop reason; this service comparison does not rehash the full RF-event capture.")
+    except (ValueError, TypeError, KeyError, OSError, ImportError) as error:
+        attempt.update(status="invalid", runtime_valid=False)
+        attempt["input_binding_errors"].append(f"{type(error).__name__}: {error}")
+    return attempt
+
+
+def _aggregate_service_attempts(attempts, profiles):
+    """All attempts stay visible; no best repeat or rolling-window double count."""
+    from network.coordination.service_profiles import _combined_status
+    config = profiles["config"]
+    grouped, ungrouped = defaultdict(list), []
+    for attempt in attempts:
+        if attempt.get("condition_sha256") is None:
+            ungrouped.append(attempt["order"])
+        else:
+            grouped[attempt["condition_sha256"]].append(attempt)
+    groups = []
+    for fingerprint, members in grouped.items():
+        pairs, unknown = defaultdict(list), []
+        for attempt in members:
+            identity = attempt.get("qualification", {}).get("replication_qualification", {}).get("identity", {}).get("key")
+            if (not isinstance(identity, list) or len(identity) != 2 or any(type(x) is not int for x in identity)):
+                unknown.append(attempt["order"])
+            else:
+                pairs[tuple(identity)].append(attempt)
+        counted = Counter()
+        pair_rows = []
+        for pair, repeats in sorted(pairs.items()):
+            statuses = [a["status"] for a in repeats]
+            measurable = all(a.get("runtime_valid") is True and a["status"] in ("measured_pass", "measured_fail")
+                             and not a.get("input_binding_errors") for a in repeats)
+            streams = set().union(*(set(a["record_counts"]) for a in repeats))
+            minimum = {key: min(a["record_counts"].get(key, 0) for a in repeats) for key in streams}
+            if measurable:
+                counted.update(minimum)
+            pair_rows.append(dict(key=list(pair), attempt_orders=[a["order"] for a in repeats],
+                repeat_count=len(repeats), observed_service_status=_combined_status(statuses),
+                measurement_eligible=measurable, independent_counted_records=minimum if measurable else {},
+                record_count_rule="Count the smallest observed offer count across repeats once; retain every repeat's outcome."))
+        eligible_pairs = sum(pair["measurement_eligible"] for pair in pair_rows)
+        statuses = [a["status"] for a in members]
+        observed = _combined_status(statuses)
+        stream_names = {f'{uav}|{members[0]["conditions"]["load_profile"]["direction"]}'
+                        for uav in (members[0]["conditions"].get("load_profile") or {}).get("uav_ids", [])}
+        checks = dict(all_attempts_valid=all(a.get("runtime_valid") is True and not a.get("input_binding_errors") for a in members),
+            all_observed_service_windows_pass=all(s == "measured_pass" for s in statuses),
+            rng_identity_complete=not unknown,
+            independent_replications=eligible_pairs >= config["minimum_independent_replications"],
+            independent_records_per_stream=bool(stream_names) and all(counted[name] >= config["minimum_records_per_stream"] for name in stream_names))
+        grade = ("qualified_observed_transport_series" if all(checks.values()) else
+                 "invalid_or_incomplete_attempts" if not checks["all_attempts_valid"] else
+                 "observed_service_limits_failed" if "measured_fail" in statuses else "insufficient_replication_evidence")
+        groups.append(dict(condition_sha256=fingerprint, conditions=members[0]["conditions"],
+            attempt_orders=[a["order"] for a in members], observed_service_status=observed,
+            configured_rng_pairs=len(pairs), eligible_independent_replications=eligible_pairs,
+            unknown_rng_attempt_orders=unknown, independent_counted_records=dict(counted), pairs=pair_rows,
+            replication_qualification=grade, checks=checks,
+            all_missions_succeeded=all(a.get("mission_outcome") == "succeeded" for a in members),
+            scope="Fixed ns3 seed with different RngRun substreams; fixed RT seed and all listed inputs. This is transport-load evidence, not semantic application or hardware certification."))
+    qualified = bool(groups) and not ungrouped and all(g["replication_qualification"] == "qualified_observed_transport_series" for g in groups)
+    return dict(schema_version=1, profile_id=config["profile_id"], service_profile_sha256=profiles["sha256"],
+        service_profile_path=profiles["path"], profile_planning_defaults=dict(
+            minimum_independent_replications=config["minimum_independent_replications"],
+            minimum_records_per_stream=config["minimum_records_per_stream"]),
+        status="qualified_observed_transport_series" if qualified else "not_qualified",
+        supplied_attempts=len(attempts), attempt_status_counts=dict(Counter(a["status"] for a in attempts)),
+        ungrouped_attempt_orders=ungrouped, groups=groups, attempts=attempts,
+        retention_policy="Every supplied/planned attempt is retained, including failed, missing, not-started and repeated executions; no best-of selection.",
+        independence_policy="Group by fixed ns3 seed and fixed RT seed/inputs; deduplicate(seed,RngRun) within each group. Repeated execution is not another independent replication.",
+        interpretation="A valid mission failure remains separately visible; service grade does not rewrite runtime, mission or measurement outcomes.")
+
+
+def analyze_service_series(run_dirs, output_dir=None, *, profile_path=None, planned_cases=None):
+    from network.coordination.service_profiles import load_service_profiles
+    profiles = load_service_profiles(profile_path)
+    plans = planned_cases or [None] * len(run_dirs)
+    if len(plans) != len(run_dirs):
+        raise ValueError("one planned case is required for every service-series input")
+    attempts = [_service_attempt(path, profiles, order, planned)
+                for order, (path, planned) in enumerate(zip(run_dirs, plans), 1)]
+    result = _aggregate_service_attempts(attempts, profiles)
+    if output_dir is not None:
+        target = Path(output_dir) / "metrics/service_series_analysis.json"
+        if target.exists():
+            raise ValueError("service-series report exists; use a fresh output directory")
+        write_json(target, result)
+    return result
+
+
+def analyze_service_batch(plan_path, runs_root, output_dir=None, *, profile_path=None):
+    """Consume the existing run_batch.py ledger, retaining unstarted cases."""
+    from bas import identifier, unique_json_fields
+    from network.coordination.service_profiles import load_service_profiles
+    plan_path = Path(plan_path).resolve()
+    raw_plan, plan_binding = _service_small_snapshot(plan_path, plan_path.parent)
+    plan = json.loads(raw_plan, object_pairs_hook=unique_json_fields)
+    if not isinstance(plan, dict):
+        raise ValueError("batch ledger must be an object")
+    cases = plan.get("cases")
+    if (type(plan.get("schema_version")) is not int or plan["schema_version"] != 1
+            or not isinstance(cases, list) or not cases or plan.get("planned_cases") != len(cases)):
+        raise ValueError("service batch requires an existing schema1 batch ledger and all planned cases")
+    ids = []
+    for case in cases:
+        if not isinstance(case, dict):
+            raise ValueError("batch cases must be objects")
+        run_id = identifier(case.get("run_id"))
+        if case.get("run_record") != f"runs/control/{run_id}/run.json" or run_id in ids:
+            raise ValueError("batch case IDs/paths must be unique and match the existing run controller")
+        ids.append(run_id)
+    result = analyze_service_series([Path(runs_root) / run_id for run_id in ids], None,
+                                   profile_path=profile_path, planned_cases=cases)
+    # Cross-check declared batch expectations, retaining any mismatched attempt.
+    for attempt, case in zip(result["attempts"], cases):
+        if attempt.get("conditions") is None:
+            continue
+        expected_config = copy.deepcopy(plan.get("config"))
+        if not isinstance(expected_config, dict) or not isinstance(expected_config.get("experiment"), dict):
+            raise ValueError("batch ledger must retain its effective config")
+        expected_config["experiment"].update(seed=case["seed"])
+        expected_config["experiment"].pop("run", None)
+        errors = attempt["input_binding_errors"]
+        if attempt["conditions"]["effective_config_except_rng_run"] != expected_config:
+            errors.append("attempt_config_disagrees_with_batch_plan")
+        for label, entry in plan.get("input_sha256", {}).items():
+            if label in ("scene", "radio", "sources") and (not isinstance(entry, dict) or
+                    attempt["conditions"].get(label + "_sha256") != entry.get("sha256")):
+                errors.append(label + "_disagrees_with_batch_plan")
+        if errors:
+            attempt.update(status="invalid", runtime_valid=False)
+    profiles = load_service_profiles(profile_path)
+    if profiles["sha256"] != result["service_profile_sha256"]:
+        raise ValueError("service profile changed during batch analysis")
+    if _service_file_binding(plan_path, plan_path.parent) != plan_binding:
+        raise ValueError("batch ledger changed during analysis")
+    result = _aggregate_service_attempts(result["attempts"], profiles)
+    result["batch_source"] = dict(path=str(plan_path), sha256=plan_binding["sha256"],
+                                batch_id=plan.get("batch_id"), recorded_status=plan.get("status"))
+    if output_dir is not None:
+        target = Path(output_dir) / "metrics/service_series_analysis.json"
+        if target.exists():
+            raise ValueError("service-series report exists; use a fresh output directory")
+        write_json(target, result)
+    return result
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--run-dir", type=Path)
+    mode.add_argument("--service-series", type=Path, nargs="+", help="Recompute and compare all raw service attempts")
+    mode.add_argument("--service-batch", type=Path, help="Compare every case in an existing run_batch.py batch.json")
     mode.add_argument("--write-plan", type=Path, help="Write the randomized 30-row plan; no simulator is launched")
     mode.add_argument("--campaign-plan", type=Path, help="Analyze all rows of an existing frozen plan")
     parser.add_argument("--output-dir", type=Path)
@@ -1483,9 +2329,21 @@ def main(argv=None):
     parser.add_argument("--no-plots", action="store_true")
     parser.add_argument("--skip-live-export", action="store_true")
     parser.add_argument("--runs-root", type=Path)
+    parser.add_argument("--service-profile", type=Path)
     args = parser.parse_args(argv)
     if not args.deadline_ms > 0 or not math.isfinite(args.deadline_ms) or not args.restricted_horizon_s > 0 or not math.isfinite(args.restricted_horizon_s):
         parser.error("finite positive deadline and restricted horizon required")
+    if args.service_series or args.service_batch:
+        if args.output_dir is None or args.service_batch and args.runs_root is None:
+            parser.error("service comparison requires --output-dir; --service-batch also requires --runs-root")
+        if args.service_batch:
+            result = analyze_service_batch(args.service_batch, args.runs_root, args.output_dir,
+                                           profile_path=args.service_profile)
+        else:
+            result = analyze_service_series(args.service_series, args.output_dir, profile_path=args.service_profile)
+        print(json.dumps(dict(status=result["status"], supplied_attempts=result["supplied_attempts"],
+                              attempt_status_counts=result["attempt_status_counts"], conditions=len(result["groups"]))))
+        return 0
     if args.write_plan:
         rows = campaign_plan()
         fields = list(rows[0])

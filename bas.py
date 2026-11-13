@@ -12,6 +12,7 @@ import re
 import signal
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 import time
 
 ROOT = Path(__file__).resolve().parent
@@ -20,7 +21,7 @@ SHAPE = {
     'environment': {'engine', 'scene'}, 'drone': {'autopilot', 'count'},
     'propagation': {'model'}, 'network': {'engine', 'topology'},
     'experiment': {'policy', 'duration_s', 'seed', 'run'},
-    'runtime': {'clock', 'image', 'land_timeout_s', 'sionna_log_level', 'event_logging', 'capture_storage'},
+    'runtime': {'clock', 'image', 'land_timeout_s', 'sionna_log_level', 'event_logging', 'capture_storage', 'rt_stage_trace'},
     'flows': {'channels', 'payload_attitude_interval_s', 'payload_load'},
     'interference': {'sources'},
     'hitl': {'mode', 'request', 'request_sha256', 'profiles_sha256'},
@@ -28,6 +29,7 @@ SHAPE = {
 PROPAGATION_FIELDS = {
     'geometry_logdistance': {'model'},
     'sionna': {'model', 'radio_config', 'ground_material', 'building_material', 'thickness_m'},
+    'hybrid': {'model', 'radio_config', 'ground_material', 'building_material', 'thickness_m'},
 }
 MILESTONES = {'service_started', 'phase_requested', 'takeoff_observed',
               'waypoint_reached_telemetry', 'barrier_released', 'experiment_failed',
@@ -137,8 +139,8 @@ def _interference_input(config, root, radio_profile=None):
     name = config.get('interference', {}).get('sources')
     if name is None:
         return None, None
-    if config['propagation']['model'] != 'sionna':
-        raise ValueError('interference.sources requires propagation.model=sionna')
+    if config['propagation']['model'] not in ('sionna', 'hybrid'):
+        raise ValueError('interference.sources requires propagation.model=sionna or hybrid')
     if not isinstance(name, str) or not name or ':' in name:
         raise ValueError('interference.sources must be null or a workspace-relative YAML path')
     relative = Path(name.replace('\\', '/'))
@@ -228,6 +230,7 @@ def load_config(path, root=ROOT):
         config['runtime'].setdefault('sionna_log_level', 'info')
         config['runtime'].setdefault('event_logging', 'metrics_only')
         config['runtime'].setdefault('capture_storage', 'tmpfs')
+        config['runtime'].setdefault('rt_stage_trace', False)
     if isinstance(config['flows'], dict):
         config['flows'].setdefault('payload_load', None)
     for section, keys in SHAPE.items():
@@ -239,7 +242,7 @@ def load_config(path, root=ROOT):
         if section == 'propagation' and isinstance(config[section], dict):
             model = config[section].get('model')
             if not isinstance(model, str) or model not in PROPAGATION_FIELDS:
-                raise ValueError('propagation.model must be geometry_logdistance or sionna; hybrid is not qualified')
+                raise ValueError('propagation.model must be geometry_logdistance, sionna or qualified hybrid')
             keys = PROPAGATION_FIELDS[model]
         if not isinstance(config[section], dict) or set(config[section]) != keys:
             raise ValueError(f'expected {section} fields: {sorted(keys)}')
@@ -254,6 +257,10 @@ def load_config(path, root=ROOT):
         raise ValueError('runtime.sionna_log_level must be info or debug')
     if config['runtime']['event_logging'] not in ('metrics_only', 'batched_trace'):
         raise ValueError('runtime.event_logging must be metrics_only or batched_trace')
+    if type(config['runtime']['rt_stage_trace']) is not bool:
+        raise ValueError('runtime.rt_stage_trace must be boolean')
+    if config['runtime']['rt_stage_trace'] and config['propagation']['model'] not in ('sionna', 'hybrid'):
+        raise ValueError('runtime.rt_stage_trace requires Sionna worker_pool')
     if type(count) is not int or not 1 <= count <= 5:
         raise ValueError('drone.count must be an integer from 1 to 5')
     channels = config['flows']['channels']
@@ -304,11 +311,18 @@ def load_config(path, root=ROOT):
     config['environment']['scene'] = scene.relative_to(root).as_posix()
     from scripts.product.urban_mission import UrbanScenario
     scenario = UrbanScenario.load(scene, root=root)
+    if set(scenario.raw) & {'physics', 'failsafe'}:
+        from scripts.product.urban_mission import EXECUTION_SETTINGS_IMAGE
+        if image != EXECUTION_SETTINGS_IMAGE:
+            raise ValueError('explicit scene physics/failsafe settings require the pinned qualified runtime image')
+    if (config['hitl'] is not None
+            and scenario.raw.get('failsafe', {}).get('gcs_action', 'disabled') != 'disabled'):
+        raise ValueError('GCS failsafe actions require the virtual relay GCS; radio_bench does not configure a physical controller')
     if tuple(sorted(scenario.spawns)) != tuple(range(1, count + 1)):
         raise ValueError('scene UAV roster must match drone.count exactly')
-    if scenario.terrain_bundle_path is not None and config['propagation']['model'] != 'sionna':
+    if scenario.terrain_bundle_path is not None and config['propagation']['model'] not in ('sionna', 'hybrid'):
         raise ValueError('terrain_bundle requires Sionna; flat geometry propagation cannot represent terrain')
-    if config['propagation']['model'] == 'sionna':
+    if config['propagation']['model'] in ('sionna', 'hybrid'):
         propagation = config['propagation']
         radio_name = propagation['radio_config']
         if not isinstance(radio_name, str) or not radio_name:
@@ -328,6 +342,11 @@ def load_config(path, root=ROOT):
                 and config.get('interference', {}).get('sources') is not None
                 and radio_profile['sionna']['receiver_batch_mode'] != 'full_mesh'):
             raise ValueError('worker_pool with directed sources requires receiver_batch_mode=full_mesh')
+        if config['runtime']['rt_stage_trace'] and radio_profile['sionna']['execution_mode'] != 'worker_pool':
+            raise ValueError('runtime.rt_stage_trace requires Sionna worker_pool')
+        if config['propagation']['model'] == 'hybrid':
+            from scripts.product.hybrid_policy import validate_radio_profile
+            validate_radio_profile(radio_profile)
         thickness = propagation['thickness_m']
         if type(thickness) not in (int, float) or not 0 < thickness <= sys.float_info.max:
             raise ValueError('propagation.thickness_m must be finite and positive')
@@ -343,7 +362,7 @@ def load_config(path, root=ROOT):
             raise ValueError('RT profile materials/thickness must match the shared terrain bundle')
         propagation['radio_config'] = radio_file.relative_to(root).as_posix()
     source_path, _ = _interference_input(config, root,
-        radio_profile if config['propagation']['model'] == 'sionna' else None)
+        radio_profile if config['propagation']['model'] in ('sionna', 'hybrid') else None)
     if source_path is not None:
         config['interference']['sources'] = source_path.relative_to(root).as_posix()
     hitl_input = _hitl_input(config, root)
@@ -381,8 +400,9 @@ def environment(config, run_id, inherited=None):
         'NATIVE_EXPERIMENT_PILOT': 1, 'NATIVE_PARAMETER_SNAPSHOTS': 0,
         'NATIVE_COMMAND_PERIOD_S': 1, 'NATIVE_TASK_PERIOD_S': 20,
         'NATIVE_SIONNA_LOG_LEVEL': config['runtime'].get('sionna_log_level', 'info'),
+        'NATIVE_RT_STAGE_TRACE': int(config['runtime'].get('rt_stage_trace', False)),
     }
-    if config['propagation']['model'] == 'sionna':
+    if config['propagation']['model'] in ('sionna', 'hybrid'):
         propagation = config['propagation']
         settings.update(NATIVE_RADIO_CONFIG=propagation['radio_config'],
                         NATIVE_RT_GROUND_MATERIAL=propagation['ground_material'],
@@ -406,38 +426,39 @@ def raw_dir(run_id):
     return ROOT / 'runs/native-radio-realtime' / identifier(run_id)
 
 
-def snapshot_inputs(config, folder, env):
+def snapshot_inputs(config, folder, env, *, root=None):
     """Freeze the exact input files consumed by both host preparation and Docker."""
+    root = ROOT if root is None else Path(root)
     write_json(folder / 'config.json', config)
-    scene_bytes = (ROOT / config['environment']['scene']).read_bytes()
+    scene_bytes = (root / config['environment']['scene']).read_bytes()
     (folder / 'scene.json').write_bytes(scene_bytes)
-    env['BAS_NATIVE_URBAN_CONFIG'] = (folder / 'scene.json').relative_to(ROOT).as_posix()
+    env['BAS_NATIVE_URBAN_CONFIG'] = (folder / 'scene.json').relative_to(root).as_posix()
     hashes = dict(scene_sha256=hashlib.sha256(scene_bytes).hexdigest(), radio_sha256=None, sources_sha256=None)
-    if config['propagation']['model'] == 'sionna':
-        radio_bytes = (ROOT / config['propagation']['radio_config']).read_bytes()
+    if config['propagation']['model'] in ('sionna', 'hybrid'):
+        radio_bytes = (root / config['propagation']['radio_config']).read_bytes()
         (folder / 'radio.yaml').write_bytes(radio_bytes)
-        env['BAS_NATIVE_RADIO_CONFIG'] = (folder / 'radio.yaml').relative_to(ROOT).as_posix()
+        env['BAS_NATIVE_RADIO_CONFIG'] = (folder / 'radio.yaml').relative_to(root).as_posix()
         hashes['radio_sha256'] = hashlib.sha256(radio_bytes).hexdigest()
     # Source bytes can change after UI validation. Revalidate the exact bytes
     # being frozen and forward only this owned snapshot, never ambient BAS_*.
     env.pop('BAS_NATIVE_SOURCES', None)
-    source_path, source_bytes = _interference_input(config, ROOT.resolve())
+    source_path, source_bytes = _interference_input(config, root.resolve())
     if source_path is not None:
         snapshot = folder / 'sources.yaml'
         snapshot.write_bytes(source_bytes)
-        env['BAS_NATIVE_SOURCES'] = snapshot.relative_to(ROOT).as_posix()
+        env['BAS_NATIVE_SOURCES'] = snapshot.relative_to(root).as_posix()
         hashes['sources_sha256'] = hashlib.sha256(source_bytes).hexdigest()
     env.pop('BAS_NATIVE_EXTERNAL_BUNDLE', None)
     env.pop('BAS_NATIVE_EXTERNAL_PROFILES', None)
-    hitl_input = _hitl_input(config, ROOT.resolve())
+    hitl_input = _hitl_input(config, root.resolve())
     if hitl_input is not None:
         _, request_bytes, profiles_bytes, bundle = hitl_input
         (folder / 'hitl-request.json').write_bytes(request_bytes)
         (folder / 'hitl-reference-profiles.json').write_bytes(profiles_bytes)
         path = folder / 'hitl-bundle.json'
         write_json(path, bundle)
-        env['BAS_NATIVE_EXTERNAL_BUNDLE'] = path.relative_to(ROOT).as_posix()
-        env['BAS_NATIVE_EXTERNAL_PROFILES'] = (folder / 'hitl-reference-profiles.json').relative_to(ROOT).as_posix()
+        env['BAS_NATIVE_EXTERNAL_BUNDLE'] = path.relative_to(root).as_posix()
+        env['BAS_NATIVE_EXTERNAL_PROFILES'] = (folder / 'hitl-reference-profiles.json').relative_to(root).as_posix()
         hashes.update(hitl_request_sha256=hashlib.sha256(request_bytes).hexdigest(),
                       hitl_profiles_sha256=hashlib.sha256(profiles_bytes).hexdigest(),
                       hitl_bundle_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
@@ -509,6 +530,199 @@ def node_state_journal_verification(raw):
     except (OSError, ValueError, TypeError, KeyError) as error:
         result['error'] = str(error)
     return result
+
+
+def payload_journal_verification(raw):
+    """Bind the optional async payload writer's closed ledger to its original file."""
+    raw = Path(raw)
+    metadata_path, path = raw / 'metrics/payload_channel.json', raw / 'payload/logs/scenario_events.jsonl'
+    result = dict(status='invalid_payload_journal', passed=False)
+    try:
+        def read(path):
+            return json.loads(path.read_text(encoding='utf-8'), object_pairs_hook=unique_json_fields,
+                              parse_constant=reject_json_constant)
+        environment = raw / 'environment.txt'
+        declared = re.search(r'^payload_journal_mode=(.+)$',
+            environment.read_text(encoding='utf-8') if environment.exists() else '', re.M)
+        metadata = read(metadata_path) if metadata_path.is_file() else {}
+        if not isinstance(metadata, dict):
+            raise ValueError('payload channel metadata must be an object')
+        lineage = metadata.get('application_lineage', {})
+        if not isinstance(lineage, dict):
+            raise ValueError('payload lineage metadata must be an object')
+        raw_mode = None
+        if path.is_file():
+            with path.open('rb') as stream:
+                first = stream.readline(65537)
+            if len(first) <= 65536:
+                try:
+                    row = json.loads(first)
+                    raw_mode = row.get('journal_mode') if isinstance(row, dict) else None
+                except (ValueError, UnicodeError):
+                    pass  # Legacy raw syntax is audited by the packet analyzer.
+        if not declared and 'journal_mode' not in lineage and raw_mode is None:
+            return dict(status='not_requested_legacy', passed=None)
+        if declared and declared.group(1).strip() != 'bounded_async_jsonl_v1':
+            raise ValueError('unsupported advertised payload journal mode')
+        audit = lineage.get('writer')
+        if not isinstance(audit, dict):
+            raise ValueError('payload writer audit is missing')
+        producer, writer = audit.get('producer'), audit.get('writer')
+        if not isinstance(producer, dict) or not isinstance(writer, dict):
+            raise ValueError('payload writer process and thread identity is missing')
+        parts = PurePosixPath(audit['path'].replace('\\', '/')).parts if isinstance(audit.get('path'), str) else ()
+        checks = dict(
+            metadata=(type(metadata.get('schema_version')) is int and metadata['schema_version'] == 1
+                and metadata.get('channel') == 'payload' and metadata.get('status') == 'closed'
+                and metadata.get('close_error') is None
+                and lineage.get('journal_mode') == 'bounded_async_jsonl_v1'
+                and raw_mode in (None, 'bounded_async_jsonl_v1')
+                and lineage.get('event_logging') == 'batched_trace'
+                and lineage.get('status') == 'gcs_boundary_trace_closed'
+                and lineage.get('path') == 'payload/logs/scenario_events.jsonl'),
+            closed=(audit.get('closed') is True and audit.get('drained') is True and audit.get('listener_alive') is False
+                and all(type(audit.get(key)) is int and audit[key] == 0 for key in ('queue_depth', 'failed', 'rejected', 'error_count'))
+                and audit.get('first_exception') is None and audit.get('last_exception') is None
+                and audit.get('unwritten_records') == [] and audit.get('in_progress_record') is None
+                and audit.get('rejected_record') is None),
+            ledger=(all(type(audit.get(key)) is int and audit[key] > 0
+                for key in ('accepted', 'written', 'accepted_bytes', 'written_bytes', 'capacity', 'max_record_bytes'))
+                and audit.get('accepted') == audit.get('written') and audit.get('accepted_bytes') == audit.get('written_bytes')
+                and audit['capacity'] <= 512 and audit['max_record_bytes'] <= 65536
+                and type(audit.get('max_queue')) is int and 0 <= audit['max_queue'] <= audit['capacity']),
+            identity=(all(type(item.get(key)) is int and item[key] > 0
+                for item in (producer, writer) for key in ('pid', 'thread_id', 'native_thread_id'))
+                and producer['pid'] == writer['pid'] and producer['native_thread_id'] != writer['native_thread_id']
+                and '..' not in parts and parts[-4:] == (raw.name, 'payload', 'logs', 'scenario_events.jsonl')))
+        if not path.resolve().is_relative_to(raw.resolve()):
+            raise ValueError('payload journal is outside its run')
+        before = path.stat()
+        digest, count, size, largest = hashlib.sha256(), 0, 0, 0
+        with path.open('rb') as stream:
+            while line := stream.readline(65537):
+                if len(line) > 65536 or not line.endswith(b'\n'):
+                    raise ValueError('payload journal record is oversized or incomplete')
+                digest.update(line); count += 1; size += len(line); largest = max(largest, len(line))
+        after = path.stat()
+        checks['file'] = (checks['ledger'] and largest <= audit['max_record_bytes']
+            and count == audit.get('written') and size == audit.get('written_bytes')
+            and digest.hexdigest() == audit.get('sha256')
+            and (before.st_size, before.st_mtime_ns) == (after.st_size, after.st_mtime_ns) and size == after.st_size)
+        result.update(checks=checks, rows=count, bytes=size, sha256=digest.hexdigest(),
+                      path='payload/logs/scenario_events.jsonl', audit_path='metrics/payload_channel.json')
+        if all(checks.values()):
+            result.update(status='verified_closed_payload_journal', passed=True)
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        result['error'] = str(error)
+    return result
+
+
+def coordination_journal_verification(raw):
+    """Verify every configured endpoint's closed producer ledger and raw bytes."""
+    raw = Path(raw)
+    result = dict(status='invalid_coordination_journals', passed=False, journals={})
+    try:
+        def read(path):
+            return json.loads(path.read_text(encoding='utf-8'), object_pairs_hook=unique_json_fields,
+                              parse_constant=reject_json_constant)
+        environment = raw / 'environment.txt'
+        text = environment.read_text(encoding='utf-8') if environment.is_file() else ''
+        declared = re.findall(r'^coordination_journal_mode=(.*)$', text, re.M)
+        paths = sorted((raw / 'logs').glob('coordination_*.jsonl'))
+        audits = sorted((raw / 'logs').glob('coordination_*.jsonl.writer.json'))
+        marked = bool(audits)
+        for path in paths:
+            with path.open('rb') as stream:
+                first = stream.readline(65537)
+            try:
+                row = json.loads(first)
+                marked = marked or (isinstance(row, dict) and 'journal_mode' in row)
+            except (ValueError, UnicodeError):
+                pass  # Legacy syntax remains the packet analyzer's responsibility.
+        if not declared and not marked:
+            return dict(status='not_requested_legacy', passed=None)
+        if declared and declared != ['bounded_async_jsonl_v1']:
+            raise ValueError('unsupported or duplicate advertised coordination journal mode')
+        counts = re.findall(r'^uav_count=(.*)$', text, re.M)
+        if len(counts) != 1 or counts[0] not in ('1', '2', '3', '4', '5'):
+            raise ValueError('coordination journal requires one explicit UAV count in 1..5')
+        count = int(counts[0])
+        names = ['coordination_gcs.jsonl', *(f'coordination_uav{i}.jsonl' for i in range(1, count+1))]
+        result['expected_node_ids'] = list(range(count+1))
+        if {p.name for p in paths} != set(names) or {p.name for p in audits} != {n+'.writer.json' for n in names}:
+            raise ValueError('configured coordination journals or writer audits are missing or unexpected')
+        for node_id, name in enumerate(names):
+            path = raw / 'logs' / name
+            audit_path = path.with_name(name + '.writer.json')
+            if any(not p.resolve().is_relative_to(raw.resolve()) for p in (path, audit_path)):
+                raise ValueError('coordination journal or audit is outside its run')
+            audit = read(audit_path)
+            if not isinstance(audit, dict):
+                raise ValueError('coordination writer audit must be an object')
+            producer, writer = audit.get('producer'), audit.get('writer')
+            if not isinstance(producer, dict) or not isinstance(writer, dict):
+                raise ValueError('coordination writer process and thread identity is missing')
+            parts = PurePosixPath(audit['path'].replace('\\', '/')).parts if isinstance(audit.get('path'), str) else ()
+            checks = dict(
+                metadata=(type(audit.get('schema')) is int and audit['schema'] == 1
+                    and audit.get('journal_mode') == 'bounded_async_jsonl_v1'
+                    and audit.get('journal_clock_domain') == 'host_monotonic'
+                    and audit.get('run_id') == raw.name and type(audit.get('node_id')) is int
+                    and audit['node_id'] == node_id and type(audit.get('uav_id')) is int
+                    and audit['uav_id'] == node_id and audit.get('status') == 'closed'
+                    and all(key in audit and audit[key] is None for key in ('producer_error', 'close_error'))),
+                closed=(audit.get('closed') is True and audit.get('drained') is True and audit.get('listener_alive') is False
+                    and all(type(audit.get(key)) is int and audit[key] == 0 for key in ('queue_depth', 'failed', 'rejected', 'error_count'))
+                    and audit.get('first_exception') is None and audit.get('last_exception') is None
+                    and audit.get('unwritten_records') == [] and audit.get('in_progress_record') is None
+                    and audit.get('rejected_record') is None),
+                ledger=(all(type(audit.get(key)) is int and audit[key] > 0
+                    for key in ('accepted', 'written', 'accepted_bytes', 'written_bytes', 'capacity', 'max_record_bytes'))
+                    and audit['accepted'] == audit['written'] and audit['accepted_bytes'] == audit['written_bytes']
+                    and audit['capacity'] <= 512 and audit['max_record_bytes'] <= 65536
+                    and type(audit.get('max_queue')) is int and 0 <= audit['max_queue'] <= audit['capacity']),
+                identity=(all(type(item.get(key)) is int and item[key] > 0
+                    for item in (producer, writer) for key in ('pid', 'thread_id', 'native_thread_id'))
+                    and producer['pid'] == writer['pid'] and producer['native_thread_id'] != writer['native_thread_id']
+                    and '..' not in parts and parts[-3:] == (raw.name, 'logs', name)))
+            before = path.stat()
+            digest, rows, size, largest, row_identity = hashlib.sha256(), 0, 0, 0, True
+            with path.open('rb') as stream:
+                while line := stream.readline(65537):
+                    if len(line) > 65536 or not line.endswith(b'\n'):
+                        raise ValueError('coordination journal record is oversized or incomplete')
+                    row = json.loads(line, object_pairs_hook=unique_json_fields, parse_constant=reject_json_constant)
+                    row_identity = row_identity and (isinstance(row, dict)
+                        and row.get('journal_mode') == 'bounded_async_jsonl_v1' and row.get('run_id') == raw.name
+                        and type(row.get('node_id')) is int and row['node_id'] == node_id
+                        and type(row.get('host_monotonic_ns')) is int and row['host_monotonic_ns'] > 0
+                        and row.get('journal_clock_domain') == 'host_monotonic'
+                        and type(row.get('journal_host_monotonic_ns')) is int
+                        and row['journal_host_monotonic_ns'] > 0)
+                    digest.update(line); rows += 1; size += len(line); largest = max(largest, len(line))
+            after = path.stat()
+            checks['file'] = (checks['ledger'] and row_identity and largest <= audit['max_record_bytes']
+                and rows == audit['written'] and size == audit['written_bytes'] and digest.hexdigest() == audit.get('sha256')
+                and (before.st_size, before.st_mtime_ns) == (after.st_size, after.st_mtime_ns) and size == after.st_size)
+            result['journals'][str(node_id)] = dict(passed=all(checks.values()), checks=checks,
+                rows=rows, bytes=size, sha256=digest.hexdigest(), path='logs/'+name,
+                audit_path='logs/'+audit_path.name,
+                audit_sha256=hashlib.sha256(audit_path.read_bytes()).hexdigest())
+        if all(row['passed'] for row in result['journals'].values()):
+            result.update(status='verified_closed_coordination_journals', passed=True)
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        result['error'] = str(error)
+    return result
+
+
+def native_library_verification(raw):
+    from scripts.product.native_library_identity import verify
+    return verify(raw)
+
+
+def runtime_spool_verification(raw):
+    from scripts.product.runtime_storage import verify
+    return verify(raw)
 
 
 def radio_bench_summary(raw, code, config, folder):
@@ -659,6 +873,22 @@ def recorded_outcome(raw, code, summary, *, source_configured=False):
     if result['node_state_journal_verification']['passed'] is False:
         verification_errors.append('node_state_journal_invalid')
         result['measurement_validity'] = 'invalid'
+    result['payload_journal_verification'] = payload_journal_verification(raw)
+    if result['payload_journal_verification']['passed'] is False:
+        verification_errors.append('payload_journal_invalid')
+        result['measurement_validity'] = 'invalid'
+    result['coordination_journal_verification'] = coordination_journal_verification(raw)
+    if result['coordination_journal_verification']['passed'] is False:
+        verification_errors.append('coordination_journal_invalid')
+        result['measurement_validity'] = 'invalid'
+    result['native_library_verification'] = native_library_verification(raw)
+    if result['native_library_verification']['passed'] is False:
+        verification_errors.append('native_library_identity_invalid')
+        result['measurement_validity'] = 'invalid'
+    result['runtime_spool_verification'] = runtime_spool_verification(raw)
+    if result['runtime_spool_verification']['passed'] is False:
+        verification_errors.append('runtime_spool_publication_invalid')
+        result['measurement_validity'] = 'invalid'
     if (not verification_errors and result['runtime_status'] == 'completed'
             and result['measurement_validity'] == 'valid'):
         source_input = raw / 'logs/native_sources.json'
@@ -736,7 +966,7 @@ def run(config, run_id):
         except BlockingIOError:
             print('Another BAS runtime owns the host lock.', file=sys.stderr)
             return 75
-        if folder.exists() or raw.exists():
+        if folder.exists() or folder.is_symlink() or raw.exists() or raw.is_symlink():
             raise ValueError('run already exists; choose a new ID')
         for path in ['install/setup.bash', '.external/ns-3-sionna-native/build/scratch/ns3.48-upstream-sionna-tap-spike-default']:
             if not (ROOT / path).is_file():
@@ -745,6 +975,14 @@ def run(config, run_id):
                        check=True, stdout=subprocess.DEVNULL)
         folder.mkdir(parents=True)
         env = environment(config, run_id)
+        spool = None
+        runtime_log = folder / 'runtime.log'
+        if config['runtime'].get('capture_storage', 'tmpfs') == 'tmpfs':
+            from scripts.product import runtime_storage
+            spool = runtime_storage.prepare(ROOT, run_id, env['BAS_NATIVE_FIVE_CONTAINER_NAME'], image=config['runtime']['image'])
+            env['BAS_RUNTIME_SPOOL'] = spool['spool']
+            runtime_log = Path(spool['runtime_log_source'])
+        env['PYTHONDONTWRITEBYTECODE'] = '1'
         hashes = snapshot_inputs(config, folder, env)
         argv = ['./network/ns3/run_native_radio_five_uav.sh']
         record = dict(run_id=run_id, status='running', argv=argv,
@@ -762,18 +1000,27 @@ def run(config, run_id):
             previous[sig] = signal.signal(sig, on_stop)
         print(f'Run {run_id}: {folder / "runtime.log"}', flush=True)
         try:
-            with (folder / 'runtime.log').open('x') as log:
+            with runtime_log.open('x') as log:
                 child = subprocess.Popen(argv, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT,
                                          start_new_session=True, pass_fds=(lock.fileno(),))
                 code = child.wait()
+            record['controller_returncode'] = code
             summary_path = raw / 'metrics/relay_experiment_summary.json'
             summary = json.loads(summary_path.read_text()) if summary_path.exists() else {}
             if config.get('hitl') is not None:
                 summary = radio_bench_summary(raw, code, config, folder)
+            # The bench summary is the last parent raw writer. Publication must
+            # follow it as well as child/container exit and runtime-log closure.
+            if spool is not None:
+                try:
+                    runtime_storage.publish(ROOT, spool, code)
+                except Exception as error:
+                    record['runtime_spool_publication_error'] = str(error)
+                    code = code or 1
             status = summary.get('status', 'failed') if code == 0 or (
                 config.get('hitl') is not None and code == 130 and summary.get('status') == 'stopped') else 'failed'
             record.update(status=status, returncode=code, mission_error=summary.get('error'))
-            record.update(recorded_outcome(raw, code, summary,
+            record.update(recorded_outcome(raw, record['controller_returncode'], summary,
                 source_configured=config.get('interference', {}).get('sources') is not None))
         except Exception as error:
             record.update(status='failed', error=str(error))
@@ -817,7 +1064,244 @@ def events(paths, command_id=None, event=None, limit=50):
     return [row for _, _, row in sorted(latest)]
 
 
+def analyze(run_id, output, *, service_batch=False):
+    """Analyze closed raw evidence inside its existing pinned runtime image."""
+    from scripts.product import bootstrap_native_runtime as native
+    if sys.platform != 'linux':
+        raise ValueError('container analysis requires a Linux Docker host')
+    run_id = identifier(run_id)
+    folder, raw = control_dir(run_id), raw_dir(run_id)
+    record_path, config_path = folder / ('batch.json' if service_batch else 'run.json'), folder / 'config.json'
+    record = json.loads(record_path.read_text(encoding='utf-8'),
+                        object_pairs_hook=unique_json_fields, parse_constant=reject_json_constant)
+    start, end = record.get('started_host_monotonic_ns'), record.get('ended_host_monotonic_ns')
+    terminal = ('completed', 'completed_with_failures', 'failed', 'cancelled', 'stopped_on_failure') if service_batch else ('completed', 'failed', 'stopped')
+    identity_field = 'batch_id' if service_batch else 'run_id'
+    if (record.get(identity_field) != run_id or record.get('status') not in terminal
+            or (not service_batch and record.get('runtime_status') not in terminal)
+            or type(start) is not int or type(end) is not int or not 0 <= start < end
+            or type(record.get('returncode')) is not int):
+        raise ValueError('analysis requires a closed terminal run record, including failed attempts')
+    if not service_batch and not raw.is_dir():
+        raise ValueError('closed run has no preserved raw directory')
+    config = record.get('config', {}) if service_batch else json.loads(
+        config_path.read_text(encoding='utf-8'),
+        object_pairs_hook=unique_json_fields, parse_constant=reject_json_constant)
+    bindings = (record_path,) if service_batch else (record_path, config_path)
+    image = config.get('runtime', {}).get('image')
+    if not isinstance(image, str) or not re.fullmatch(r'sha256:[a-f0-9]{64}', image):
+        raise ValueError('closed run requires its recorded immutable runtime image')
+    output = (ROOT / output).resolve()
+    output.relative_to(ROOT.resolve())
+    if any(output.is_relative_to(protected.resolve()) for protected in (raw, folder)):
+        raise ValueError('analysis output must not overlap raw or control evidence')
+    output.relative_to((ROOT / 'runs/analysis').resolve())
+    if output == (ROOT / 'runs/analysis').resolve() or output.exists():
+        raise ValueError('analysis requires a new directory below runs/analysis')
+    output.mkdir(parents=True, exist_ok=False)
+    attempt = dict(schema_version=1, run_id=run_id, status='running', image=image,
+        source_commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
+        source_dirty=bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT)),
+        analysis_mode='service_batch' if service_batch else 'single_run',
+        analyzed_batch_status=record['status'] if service_batch else None,
+        analyzed_runtime_status=record.get('runtime_status'),
+        analyzed_measurement_validity=record.get('measurement_validity'),
+        analyzer_sha256=native.sha256(ROOT / 'scripts/product/analyze_relay_experiment.py'),
+        adapter_sha256=native.sha256(Path(__file__)),
+        container_helper_sha256=native.sha256(Path(native.__file__)),
+        source_bindings=[dict(path=path.relative_to(ROOT).as_posix(), sha256=native.sha256(path),
+                              bytes=path.stat().st_size) for path in bindings],
+        started_host_monotonic_ns=time.monotonic_ns(),
+        scope='Existing CPU analyzer; full original captures read-only; no new simulation, GPU, or host pymavlink.',
+        options=dict(plots=False,live_export=False),
+        container_permissions=dict(user=f'{os.getuid()}:{os.getgid()}', supplementary_groups=[1000],
+            basis='Pinned image ubuntu home0750/group1000 contains existing pymavlink; output retains caller UID.'))
+    receipt = output / 'analysis-attempt.json'
+    write_json(receipt, attempt)
+    # Run IDs have already passed identifier(); script contains no user shell text.
+    analyzer_arguments = (
+        f'--service-batch {native.MOUNT}/runs/control/{run_id}/batch.json '
+        f'--runs-root {native.MOUNT}/runs/native-radio-realtime --output-dir /bas-analysis-output'
+        if service_batch else
+        f'--run-dir {native.MOUNT}/runs/native-radio-realtime/{run_id} '
+        '--output-dir /bas-analysis-output --no-plots --skip-live-export')
+    script = (
+        'export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1\n'
+        'export MPLCONFIGDIR=/tmp/bas-analysis-mpl\n'
+        'SDK="$PWD/.external/ns-3-sionna-native"\n'
+        'export PYTHONPATH="$SDK/.tooling-py310:$SDK/.python-deps-py310:/home/ubuntu/.local/lib/python3.10/site-packages:$PWD"\n'
+        'python3 - <<\'PY\'\n'
+        'import sys,numpy,yaml,pymavlink\n'
+        'assert sys.version_info[:2] == (3,10), "pinned analysis image requires Python3.10"\n'
+        'assert (numpy.__version__,yaml.__version__,pymavlink.__version__) == '
+        '("1.26.4","6.0.2","2.4.49"), "analysis dependency versions differ"\n'
+        'PY\n'
+        'python3 scripts/product/analyze_relay_experiment.py '
+        + analyzer_arguments + '\n')
+    try:
+        native.image_id(image)
+        native.container(ROOT, image, script, readonly=True, output=output,
+                         supplementary_groups=(1000,), log=output / 'analysis-runtime.log')
+        for item in attempt['source_bindings']:
+            if native.sha256(ROOT / item['path']) != item['sha256']:
+                raise ValueError('closed run metadata changed during analysis')
+        report = 'service_series_analysis.json' if service_batch else 'relay_analysis.json'
+        if not (output / 'metrics' / report).is_file():
+            raise ValueError(f'analyzer did not produce {report}')
+        attempt['status'] = 'completed'
+    except BaseException as error:
+        attempt.update(status='cancelled' if isinstance(error, KeyboardInterrupt) else 'failed',
+                       error=f'{type(error).__name__}: {error}')
+        raise
+    finally:
+        attempt['ended_host_monotonic_ns'] = time.monotonic_ns()
+        write_json(receipt, attempt)
+    print(json.dumps(dict(identity=run_id, analysis_status=attempt['status'],
+                          batch_status=record['status'] if service_batch else None,
+                          runtime_status=record.get('runtime_status'),
+                          measurement_validity=record.get('measurement_validity'),
+                          output=output.relative_to(ROOT).as_posix())))
+    return 0
+
+
+def maps(config, output, *, service_map_from=None, service_evidence=None,
+         service_profile=None, validate_only=False, plot=False,
+         variant='cuda_ad_mono_polarized'):
+    """Run the existing map tool with one owned writable directory."""
+    from contextlib import nullcontext
+    from scripts.product import bootstrap_native_runtime as native
+    os.environ['OPENBLAS_NUM_THREADS'] = '1'
+    from scripts.product import compute_radio_maps as mapper
+    if sys.platform != 'linux':
+        raise ValueError('container maps require a Linux Docker host')
+    if variant not in ('cuda_ad_mono_polarized', 'llvm_ad_mono_polarized'):
+        raise ValueError('unsupported existing map runtime variant')
+    if validate_only and plot:
+        raise ValueError('--plot excludes --validate-only')
+    overlay = service_map_from is not None
+    if (overlay and (config is not None or validate_only or service_evidence is None)
+            or not overlay and (config is None or service_evidence is not None or service_profile is not None)):
+        raise ValueError('choose RF --config or CPU --service-map-from with --service-evidence')
+    def inside(value, *, directory=False):
+        path = (ROOT / value).resolve()
+        path.relative_to(ROOT.resolve())
+        if not (path.is_dir() if directory else path.is_file()):
+            raise ValueError(f'map input is missing: {value}')
+        return path
+    manifest_path = inside('.devcontainer/runtime-assets.json')
+    manifest = mapper.load_json(manifest_path)
+    image = manifest['image_id']
+    bindings = [manifest_path]
+    for relative in (native.RECEIPT, '.external/native-runtime-wheels/manifest.json'):
+        candidate = ROOT / relative
+        if candidate.is_file():
+            bindings.append(inside(candidate))
+    arguments = []
+    if overlay:
+        snapshot = inside(service_map_from, directory=True)
+        evidence = inside(service_evidence)
+        profile = inside(service_profile or 'network/config/service_profiles_v1.json')
+        metadata = inside(snapshot / 'metadata.json')
+        if mapper.load_json(metadata).get('status') != 'completed':
+            raise ValueError('maps overlay requires a closed completed RF snapshot')
+        bindings += [metadata, inside(snapshot / 'maps.npz'), evidence, profile]
+        for option, path in (('--service-map-from', snapshot), ('--service-evidence', evidence),
+                             ('--service-profile', profile)):
+            arguments += [option, str(Path(native.MOUNT) / path.relative_to(ROOT))]
+    else:
+        config = inside(config)
+        paths, mission, _, _ = mapper.validate(mapper.load_json(config), root=ROOT)
+        bindings += [config, *paths.values(), inside(paths['scene_xml'].parent / 'scene-manifest.json')]
+        if mission.terrain_manifest is not None:
+            bindings += [inside(mission.terrain_bundle_path / name) for name in mission.terrain_manifest['files']]
+        for element in ET.parse(paths['scene_xml']).findall('.//string[@name="filename"]'):
+            bindings.append(inside(paths['scene_xml'].parent / element.get('value')))
+        arguments += ['--config', str(Path(native.MOUNT) / config.relative_to(ROOT)), '--variant', variant]
+    maps_root = ROOT / 'runs/maps'
+    if maps_root.resolve() != maps_root:
+        raise ValueError('maps require the canonical runs/maps directory without symlink redirection')
+    output = (ROOT / output).resolve()
+    output.relative_to(maps_root)
+    if output == (ROOT / 'runs/maps').resolve() or output.exists():
+        raise ValueError('maps require a new directory below runs/maps')
+    if overlay and output.is_relative_to(snapshot):
+        raise ValueError('map output must not overlap the input snapshot')
+    destination = Path(native.MOUNT) / output.relative_to(ROOT)
+    arguments += ['--output', str(destination / 'data')]
+    if validate_only:
+        arguments += ['--validate-only']
+    if plot:
+        arguments += ['--plot']
+    gpu = not overlay and not validate_only and variant.startswith('cuda_')
+    # Same non-blocking lease as simulation/bootstrap, before creating an attempt.
+    with (native.runtime_lock() if not overlay and not validate_only else nullcontext()):
+        input_bindings = [dict(path=path.relative_to(ROOT).as_posix(), bytes=path.stat().st_size,
+                               sha256=native.sha256(path)) for path in sorted(set(bindings))]
+        native.image_id(image)
+        output.mkdir(parents=True, exist_ok=False)
+        attempt = dict(schema_version=1, status='running', mode='service_overlay' if overlay else 'rf',
+            validation_only=validate_only, gpu_requested=gpu, image=image, variant=None if overlay else variant,
+            source_commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
+            source_dirty=bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT)),
+            adapter_sha256=native.sha256(Path(__file__)),
+            mapper_sha256=native.sha256(ROOT / 'scripts/product/compute_radio_maps.py'),
+            container_helper_sha256=native.sha256(Path(native.__file__)),
+            source_bindings=input_bindings, started_host_monotonic_ns=time.monotonic_ns(),
+            container_permissions=dict(user=f'{os.getuid()}:{os.getgid()}', supplementary_groups=[1000],
+                source='read_only', output='single_owned_workspace_directory', network='none'),
+            scope='Existing RF solver or transport overlay; no new channel model, packet simulation, or hardware claim.',
+            dependency_scope='Available pinned-image/SDK package versions; service overlays and validation do not execute RT packages. RF computation independently enforces the existing solver versions.')
+        receipt = output / 'maps-attempt.json'
+        write_json(receipt, attempt)
+        dependency_path = destination / 'maps-dependencies.json'
+        program = (
+            'import importlib.metadata,json,pathlib,runpy,sys\n'
+            'import numpy,yaml\n'
+            'assert sys.version_info[:2] == (3,10), "pinned map image requires Python3.10"\n'
+            'assert (numpy.__version__,yaml.__version__) == ("1.26.4","6.0.2"), "map dependency versions differ"\n'
+            'versions={}\n'
+            'for name in ("numpy","PyYAML","pymavlink","matplotlib","sionna-rt","mitsuba","drjit"):\n'
+            ' try: versions[name]=importlib.metadata.version(name)\n'
+            ' except importlib.metadata.PackageNotFoundError: versions[name]=None\n'
+            + f'pathlib.Path({str(dependency_path)!r}).write_text(json.dumps(versions,indent=2)+"\\n")\n'
+            + f'sys.argv=["compute_radio_maps.py"]+{arguments!r}\n'
+            'runpy.run_path("scripts/product/compute_radio_maps.py",run_name="__main__")\n')
+        script = (
+            'export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1\n'
+            'export MPLCONFIGDIR=/tmp/bas-maps-mpl\n'
+            'SDK="$PWD/.external/ns-3-sionna-native"\n'
+            'export PYTHONPATH="$SDK/.tooling-py310:$SDK/.python-deps-py310:/home/ubuntu/.local/lib/python3.10/site-packages:$PWD"\n'
+            "python3 - <<'BAS_MAPS_PY'\n" + program + 'BAS_MAPS_PY\n')
+        try:
+            native.container(ROOT, image, script, readonly=True, output=output,
+                workspace_output=True, gpu=gpu, supplementary_groups=(1000,), log=output / 'maps-runtime.log')
+            for item in input_bindings:
+                if native.sha256(ROOT / item['path']) != item['sha256']:
+                    raise ValueError('map input changed during computation')
+            if not validate_only:
+                name = 'service_metadata.json' if overlay else 'metadata.json'
+                if mapper.load_json(output / 'data' / name).get('status') != 'completed':
+                    raise ValueError('existing map tool did not report completed output')
+            attempt['dependencies'] = mapper.load_json(output / 'maps-dependencies.json')
+            attempt['output_files'] = [dict(path=path.relative_to(output).as_posix(),
+                bytes=path.stat().st_size, sha256=native.sha256(path))
+                for path in sorted((output / 'data').rglob('*')) if path.is_file()]
+            attempt['status'] = 'completed'
+        except BaseException as error:
+            attempt.update(status='cancelled' if isinstance(error, KeyboardInterrupt) else 'failed',
+                       error=f'{type(error).__name__}: {error}')
+            raise
+        finally:
+            attempt['ended_host_monotonic_ns'] = time.monotonic_ns()
+            write_json(receipt, attempt)
+    print(json.dumps(dict(status=attempt['status'], validation_only=validate_only,
+        output=output.relative_to(ROOT).as_posix(), data=None if validate_only else (output / 'data').relative_to(ROOT).as_posix())))
+    return 0
+
+
 def main():
+    from scripts.product.town01_runtime_monitor import limit_host_math_threads
+    limit_host_math_threads()
     if len(sys.argv) > 1 and sys.argv[1] == 'ui':
         from scripts.product.operator_ui import main as ui_main
         return ui_main(['--serve', *sys.argv[2:]])
@@ -828,6 +1312,19 @@ def main():
     commands = parser.add_subparsers(dest='command', required=True)
     commands.add_parser('batch', help='sequential parameter/seed runs; use batch --help')
     commands.add_parser('ui', help='local operator interface on 127.0.0.1; use ui --help')
+    analysis = commands.add_parser('analyze', help='CPU analysis of a closed run inside its pinned image')
+    analysis.add_argument('run_id', help='Closed run ID, or batch ID with --service-batch')
+    analysis.add_argument('--service-batch', action='store_true', help='Compare all attempts in a closed batch using original packet lineage')
+    analysis.add_argument('--output-dir', required=True, type=Path, help='New directory below runs/analysis; raw evidence remains read-only')
+    map_command = commands.add_parser('maps', help='Existing RF snapshots or observed service overlays in the pinned image')
+    map_command.add_argument('--config', type=Path)
+    map_command.add_argument('--output-dir', required=True, type=Path)
+    map_command.add_argument('--service-map-from', type=Path)
+    map_command.add_argument('--service-evidence', type=Path)
+    map_command.add_argument('--service-profile', type=Path)
+    map_command.add_argument('--validate-only', action='store_true')
+    map_command.add_argument('--plot', action='store_true')
+    map_command.add_argument('--variant', choices=('cuda_ad_mono_polarized','llvm_ad_mono_polarized'), default='cuda_ad_mono_polarized')
     for name in ('inspect', 'run'):
         p = commands.add_parser(name)
         p.add_argument('--config', type=Path, default=ROOT / 'runtime.json')
@@ -841,7 +1338,8 @@ def main():
             p.add_argument('--event')
             p.add_argument('--limit', type=int, default=50)
     args = parser.parse_args()
-    identifier(args.run_id)
+    if args.command != 'maps':
+        identifier(args.run_id)
     if args.command in ('inspect', 'run'):
         config = load_config(args.config)
         if args.duration is not None:
@@ -851,6 +1349,12 @@ def main():
             return run(config, args.run_id)
         print(json.dumps({'config': config, 'environment': {k: v for k, v in environment(config, args.run_id).items()
                                                           if k.startswith('BAS_')}}, indent=2))
+    elif args.command == 'maps':
+        return maps(args.config, args.output_dir, service_map_from=args.service_map_from,
+                    service_evidence=args.service_evidence, service_profile=args.service_profile,
+                    validate_only=args.validate_only, plot=args.plot, variant=args.variant)
+    elif args.command == 'analyze':
+        return analyze(args.run_id, args.output_dir, service_batch=args.service_batch)
     elif args.command == 'stop':
         request_stop(args.run_id)
     elif args.command == 'status':
@@ -874,6 +1378,10 @@ def main():
 if __name__ == '__main__':
     try:
         sys.exit(main())
-    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
+    except KeyboardInterrupt as exc:
+        signum = exc.args[0] if exc.args and exc.args[0] in (signal.SIGINT, signal.SIGTERM) else signal.SIGINT
+        print(f'BAS: cancelled by signal {int(signum)}', file=sys.stderr)
+        sys.exit(128 + int(signum))
+    except (ValueError, OSError, subprocess.CalledProcessError, RuntimeError) as exc:
         print(f'BAS: {exc}', file=sys.stderr)
         sys.exit(2)

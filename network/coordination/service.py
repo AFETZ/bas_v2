@@ -22,6 +22,7 @@ import sys
 import time
 from typing import Any
 
+from network.jsonl import AsyncJsonlWriter
 from .policy import (AdmissionGate, Authority, Command, Grant, MAX_DATAGRAM_BYTES,
                      ProtocolError, UARTAdmission, decode, encode, make_command)
 from network.scripts.serial_transport import (Encoder, Reassembler, decode_chunk, radio_is_live,
@@ -47,13 +48,42 @@ def endpoint_ip(index: int) -> str:
 class Events:
     def __init__(self, path: Path, run_id: str, uav_id: int):
         path.parent.mkdir(parents=True, exist_ok=True)
-        self.stream = path.open("a", buffering=1, encoding="utf-8")
+        self.path = path
+        self.audit_path = path.with_name(path.name + '.writer.json')
+        self.writer = AsyncJsonlWriter(path)
         self.run_id, self.uav_id = run_id, uav_id
+        self.producer_error = None
+
+    def check(self):
+        self.writer.check()
+
+    def close(self, timeout_s=5):
+        error = None
+        try:
+            self.writer.close(timeout_s)
+        except BaseException as exc:
+            error = exc
+        audit = dict(self.writer.snapshot(), schema=1, journal_mode='bounded_async_jsonl_v1',
+                     journal_clock_domain='host_monotonic',
+                     run_id=self.run_id, node_id=self.uav_id, uav_id=self.uav_id,
+                     status='failed' if error or self.producer_error else 'closed',
+                     producer_error=self.producer_error,
+                     close_error=f'{type(error).__name__}: {error}' if error else None)
+        # Final audit I/O occurs only after stopping the producer. An incomplete
+        # drain remains visible even when close raises; never append a new run.
+        temporary = self.audit_path.with_name(self.audit_path.name + '.tmp')
+        temporary.write_text(json.dumps(audit, indent=2, allow_nan=False) + '\n', encoding='utf-8')
+        temporary.replace(self.audit_path)
+        if error is not None:
+            raise error
+        return audit
 
     def __call__(self, event: str, *, command: Command | None = None, **fields):
+        journal_ns = time.monotonic_ns()
         value = dict(run_id=self.run_id, event=event, stage=event,
-                     host_monotonic_ns=time.monotonic_ns(), clock_domain="host_monotonic",
-                     source_sim_time_s=None, uav_id=self.uav_id, node_id=self.uav_id)
+                     host_monotonic_ns=journal_ns, clock_domain="host_monotonic",
+                     source_sim_time_s=None, uav_id=self.uav_id, node_id=self.uav_id,
+                     journal_mode='bounded_async_jsonl_v1')
         if command is not None:
             value.update(leader_id=command.leader_id, epoch=command.epoch,
                          grant_sequence=command.grant_sequence,
@@ -66,7 +96,19 @@ class Events:
                          target_position_m=command.target_position_m,
                          target_frame=command.target_frame)
         value.update(fields)
-        self.stream.write(json.dumps(value, separators=(",", ":"), allow_nan=False) + "\n")
+        try:
+            if {'journal_clock_domain', 'journal_host_monotonic_ns'} & fields.keys():
+                raise ValueError('journal clock fields are producer-owned')
+            # Event clock/time fields may describe an earlier observation or
+            # autopilot time. Keep their meaning separate from emission time.
+            value.update(journal_clock_domain='host_monotonic', journal_host_monotonic_ns=journal_ns)
+            # Encode now: the queue owns immutable producer-time bytes, never a
+            # mutable fields dictionary or a timestamp assigned on disk write.
+            self.writer.write(json.dumps(value, separators=(",", ":"), allow_nan=False))
+        except BaseException as error:
+            if self.producer_error is None:
+                self.producer_error = f'{type(error).__name__}: {error}'
+            raise
 
 
 class Network:
@@ -95,6 +137,7 @@ class Network:
 
     def guard_radio(self):
         """After native readiness, missing heartbeat is a failure too."""
+        self.check_journal()
         path = self.args.radio_watchdog_file
         if path is None:
             return
@@ -103,6 +146,11 @@ class Network:
             self.watchdog_seen_healthy = True
         elif self.watchdog_seen_healthy:
             raise RuntimeError("native radio watchdog expired or disappeared after readiness")
+
+    def check_journal(self):
+        check = getattr(getattr(self, 'emit', None), 'check', None)
+        if check is not None:
+            check()
 
     def send(self, kind, body, destination: int):
         if destination not in (0, *self.uav_ids):
@@ -120,6 +168,7 @@ class Network:
         return True
 
     def periodic(self, now: int):
+        self.check_journal()
         if now - self.last_probe_ns < int(self.args.heartbeat_s * 1e9):
             return
         self.last_probe_ns = now
@@ -615,6 +664,22 @@ class GCSService(Network):
                 candidates.append(i)
         return sorted(candidates, key=lambda i: (self.peer_rtt_ns.get(i, 1 << 63), i))
 
+    def selection_diagnostics(self, now=None):
+        """Read-only explanation of the current selection inputs and policy."""
+        now = time.monotonic_ns() if now is None else now
+        deadline, reports = int(self.args.detection_s * 1e9), {}
+        for i in self.uav_ids:
+            report = self.heartbeat.get(i)
+            peer = report[1].get("peer_echo_ns", {}) if report else {}
+            others = [j for j in self.uav_ids if j != i]
+            reports[str(i)] = dict(direct_available=self.direct_available(i, now),
+                missing_or_invalid_peer_ids=[j for j in others if type(peer.get(str(j))) is not int],
+                stale_or_future_peer_ids=[j for j in others if type(peer.get(str(j))) is int
+                                         and not 0 <= now - peer[str(j)] <= deadline])
+        return dict(observed_host_monotonic_ns=now, initial_master=self.args.initial_master,
+                    leader_id=self.authority.leader_id, available_candidates=self.available(now),
+                    peer_reports=reports)
+
     def update_role(self, now: int):
         candidates = self.available(now)
         leader = self.authority.leader_id
@@ -910,10 +975,14 @@ def main(argv=None):
         emit("service_failed", reason=f"{type(exc).__name__}: {exc}")
         raise
     finally:
-        if service:
-            service.close()
-        emit("service_stopped")
-        emit.stream.close()
+        try:
+            try:
+                if service:
+                    service.close()
+            finally:
+                emit("service_stopped")
+        finally:
+            emit.close()
     return 0
 
 

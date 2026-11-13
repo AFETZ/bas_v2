@@ -276,13 +276,15 @@ class NativeBootstrapTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'sionna-rt-spectrum-propagation-loss-model'):
             bootstrap.verify_cache(self.root)
 
-    def test_all_fifteen_runtime_patches_and_both_native_targets_are_prepared(self):
-        self.assertEqual(len(bootstrap.PATCH_NAMES), 15)
-        self.assertEqual(len(set(bootstrap.PATCH_NAMES)), 15)
-        self.assertEqual(bootstrap.PATCH_NAMES[-5:], ('mr2608-fullmesh.patch', 'mr2608-emitter-batch.patch',
+    def test_all_seventeen_runtime_patches_and_both_native_targets_are_prepared(self):
+        self.assertEqual(len(bootstrap.PATCH_NAMES), 17)
+        self.assertEqual(len(set(bootstrap.PATCH_NAMES)), 17)
+        self.assertEqual(bootstrap.PATCH_NAMES[-7:], ('mr2608-fullmesh.patch', 'mr2608-emitter-batch.patch',
                                                     'mr2608-fixed-path-storage.patch',
                                                     'mr2608-promisc-qos-receive-context.patch',
-                                                    'mr2608-cfr-doppler-factorization.patch'))
+                                                    'mr2608-cfr-doppler-factorization.patch',
+                                                    'ns3-expired-preamble-events.patch',
+                                                    'mr2608-siso-identity-precoder.patch'))
         runner = (bootstrap.ROOT / 'network/ns3/run_native_radio_five_uav.sh').read_text()
         for name in bootstrap.PATCH_NAMES + bootstrap.SCRATCH_FILES:
             self.assertTrue(name in runner, f'Runner does not include {name}')

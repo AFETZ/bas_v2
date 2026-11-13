@@ -1,0 +1,141 @@
+{
+  "schema_version": 1,
+  "scenario": "flat_ground_hybrid_arc_bootstrap_v2",
+  "status": "engineering_reference_not_device_calibrated",
+  "frame": {
+    "coordinate_frame": "ENU",
+    "ground_surface_z_m": 0.0,
+    "spherical_heading_deg": 0,
+    "origin_latitude_deg": 46.607213,
+    "origin_longitude_deg": 14.278461,
+    "origin_elevation_m": 446.0,
+    "datum": "Exact generated2km flatground cube; same Gazebo/Sionna geometry; not surveyed terrain.",
+    "world_enu_to_local_ned": "N=y,E=x,D=-z per iris_radio_headless gazeboXYZToNED"
+  },
+  "gcs": [
+    0,
+    0,
+    2
+  ],
+  "buildings": [],
+  "spawns": {
+    "1": [
+      71.01408311032398,
+      -40.99999999999999,
+      2.0
+    ],
+    "2": [
+      79.2059177557036,
+      -21.2231616984067,
+      2.0
+    ],
+    "3": [
+      82.0,
+      0.0,
+      2.0
+    ],
+    "4": [
+      79.2059177557036,
+      21.2231616984067,
+      2.0
+    ],
+    "5": [
+      71.01408311032398,
+      40.99999999999999,
+      2.0
+    ]
+  },
+  "routes": {
+    "1": [
+      [
+        71.01408311032398,
+        -40.99999999999999,
+        20.2
+      ],
+      [
+        73.6121593216773,
+        -42.49999999999999,
+        20.2
+      ]
+    ],
+    "2": [
+      [
+        79.2059177557036,
+        -21.2231616984067,
+        20.2
+      ],
+      [
+        82.10369523457081,
+        -21.999618833714262,
+        20.2
+      ]
+    ],
+    "3": [
+      [
+        82.0,
+        0.0,
+        20.2
+      ],
+      [
+        85.0,
+        0.0,
+        20.2
+      ]
+    ],
+    "4": [
+      [
+        79.2059177557036,
+        21.2231616984067,
+        20.2
+      ],
+      [
+        82.10369523457081,
+        21.999618833714262,
+        20.2
+      ]
+    ],
+    "5": [
+      [
+        71.01408311032398,
+        40.99999999999999,
+        20.2
+      ],
+      [
+        73.6121593216773,
+        42.49999999999999,
+        20.2
+      ]
+    ]
+  },
+  "mission": {
+    "telemetry_max_age_s": 0.5,
+    "speed_mps": 1.5,
+    "waypoint_dwell_s": 3.0,
+    "world_ground_reference_z_m": 0.195,
+    "ground_reference_source": "iris/model.sdf base_collision poseZ=-.08 minus box halfheight .115; ground topZ=0, contact residual not corrected",
+    "route_design_reason": "Five declared3m radial routes at82m on angles[-30,-15,0,15,30]degrees, cruise20.2m. The on-ground peer span is bounded85m instead of164m. The prior circular startup failure, actual RT power and PREAMBLE_DETECT_FAILURE evidence are retained at5f62c59. Radio, thresholds, grant policy and timeouts are unchanged; this is a new nominal input, not mission optimization.",
+    "waypoint_dwell_reason": "3s dwell reuses the existing mission completion contract. This configuration is not a flight acceptance result.",
+    "barriers": {}
+  },
+  "radio": {
+    "parameter_set": "flat_ground_hybrid_reference_v1",
+    "calibration": "uncalibrated_parametric_study",
+    "mode": "geometry",
+    "frequency_hz": 2412000000,
+    "los": {
+      "exponent": 2.0,
+      "reference_distance_m": 1.0,
+      "reference_loss_db": 40.09532929124565
+    },
+    "nlos": {
+      "exponent": 2.7,
+      "reference_distance_m": 1.0,
+      "reference_loss_db": 40.09532929124565
+    },
+    "sensitivity_exponents": [
+      2.7,
+      3.3
+    ],
+    "parameters_source": "Legacy simple-profile fields remain schema-compatible; runtime-hybrid selects full Sionna/native Friis online guarded at1dB. Not a calibrated modem model."
+  }
+}

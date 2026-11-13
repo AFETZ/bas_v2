@@ -22,6 +22,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import zipfile
 
@@ -42,11 +43,13 @@ PATCH_NAMES = (
     'mr2608-fixed-path-storage.patch',
     'mr2608-promisc-qos-receive-context.patch',
     'mr2608-cfr-doppler-factorization.patch',
+    'ns3-expired-preamble-events.patch',
+    'mr2608-siso-identity-precoder.patch',
 )
 SCRATCH_FILES = (
     'upstream-sionna-tap-spike.cc', 'native-geometry-loss.h', 'native-spectrum-sources.h',
     'native-live-state.h', 'native-lockstep.h', 'native-rt-cache.h',
-    'native-rt-pool.h', 'native-rt-worker.cc', 'native-log-phase.h',
+    'native-rt-pool.h', 'native-rt-worker.cc', 'native-log-phase.h', 'native-timing-distribution.h',
 )
 INPUTS = ('.devcontainer/requirements-native.in', '.devcontainer/requirements-native-tooling.in')
 LOCK_NAMES = ('requirements-native.lock', 'requirements-native-tooling.lock')
@@ -141,14 +144,36 @@ def command(argv, *, cwd=None, env=None, input=None, log=None, check=True):
     return stdout.strip()
 
 
-def docker_command(root, image, script, *, network=False, readonly=False, cidfile=None):
+def docker_command(root, image, script, *, network=False, readonly=False, cidfile=None, output=None, supplementary_groups=(), workspace_output=False, gpu=False):
     args = ['docker', 'run', '--rm', '-i', '--network', 'bridge' if network else 'none']
     if cidfile is not None:
         args += ['--cidfile', str(cidfile)]
     if hasattr(os, 'getuid'):
         args += ['--user', f'{os.getuid()}:{os.getgid()}']
+    for group in supplementary_groups:
+        if type(group) is not int or group < 0:
+            raise ValueError('supplementary groups must be nonnegative numeric GIDs')
+        args += ['--group-add', str(group)]
     if readonly:
         args += ['--read-only', '--tmpfs', '/tmp:rw,nosuid,mode=1777']
+    if type(gpu) is not bool or type(workspace_output) is not bool:
+        raise ValueError('GPU and workspace output switches must be boolean')
+    if gpu:
+        args += ['--gpus', 'all', '-e', 'NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics']
+    if workspace_output and output is None:
+        raise ValueError('workspace output requires an explicit owned output directory')
+    if output is not None:
+        if not readonly or not Path(output).is_dir():
+            raise ValueError('analysis output mount requires an existing directory and read-only workspace')
+        if ',' in str(Path(output).resolve()):
+            raise ValueError('Docker output bind path must not contain a comma')
+        destination = '/bas-analysis-output'
+        if workspace_output:
+            relative = Path(output).resolve().relative_to(root.resolve())
+            if len(relative.parts) < 2 or relative.parts[0] != 'runs':
+                raise ValueError('workspace output must be strictly below the run artifact directory')
+            destination = str(Path(MOUNT) / relative)
+        args += ['--mount', f'type=bind,src={Path(output).resolve()},dst={destination}']
     args += ['-e', 'HOME=/tmp/bas-native-build-home', '-e', 'PYTHONDONTWRITEBYTECODE=1',
              '-e', 'PIP_DISABLE_PIP_VERSION_CHECK=1', '-e', 'PIP_NO_CACHE_DIR=1',
              '-v', f'{root.resolve()}:{MOUNT}' + (':ro' if readonly else ''),
@@ -156,12 +181,30 @@ def docker_command(root, image, script, *, network=False, readonly=False, cidfil
     return args
 
 
-def container(root, image, script, *, network=False, readonly=False, log=None):
-    with tempfile.TemporaryDirectory(prefix='bas-native-docker-') as temporary:
+@contextmanager
+def container_interrupts():
+    # Unwind the owned cidfile cleanup on SIGTERM; preserve an enclosing runner's
+    # signal policy and avoid installing handlers from a background Python thread.
+    previous = signal.getsignal(signal.SIGTERM)
+    manage = threading.current_thread() is threading.main_thread() and previous == signal.SIG_DFL
+    def interrupted(signum, frame):
+        raise KeyboardInterrupt(signum)
+    if manage:
+        signal.signal(signal.SIGTERM, interrupted)
+    try:
+        yield
+    finally:
+        if manage:
+            signal.signal(signal.SIGTERM, previous)
+
+
+def container(root, image, script, *, network=False, readonly=False, log=None, output=None, supplementary_groups=(), workspace_output=False, gpu=False):
+    with container_interrupts(), tempfile.TemporaryDirectory(prefix='bas-native-docker-') as temporary:
         cidfile = Path(temporary) / 'container.cid'
         try:
             return command(docker_command(root, image, 'mkdir -p "$HOME"\n' + script,
-                           network=network, readonly=readonly, cidfile=cidfile), log=log)
+                           network=network, readonly=readonly, cidfile=cidfile, output=output,
+                           supplementary_groups=supplementary_groups, workspace_output=workspace_output, gpu=gpu), log=log)
         finally:
             if cidfile.exists():
                 cid = cidfile.read_text().strip()

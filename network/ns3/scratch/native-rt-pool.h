@@ -23,9 +23,11 @@ using namespace pybind11::literals;
 class NativeRtPrefetch
 {
   public:
-    // A ready result must be drained before an independent 5ms pose check.
-    // The measured N5 failure had only 2.95ms between receipt and expiry.
-    static constexpr int64_t kPollPeriodNs = 1000000;
+    // Ready results can arrive with less than 1 ms before a held-frame deadline.
+    // Faster pickup never extends the measured-state or CIR freshness limits.
+    static constexpr int64_t kPollPeriodNs = 500000;
+    // Preserve the prior conservative forecast margin independently of pickup.
+    static constexpr int64_t kResponseMarginNs = 1000000;
     static constexpr int64_t kMinimumLeadNs = 100000000;
     static constexpr size_t kWindow = 64;
     static constexpr double kGrowthFactor = 2;
@@ -62,8 +64,8 @@ class NativeRtPrefetch
     int64_t LeadNs() const
     {
         const auto p95 = ResponseP95Ns();
-        return std::max(kMinimumLeadNs, p95 > INT64_MAX - kPollPeriodNs
-            ? INT64_MAX : p95 + kPollPeriodNs);
+        return std::max(kMinimumLeadNs, p95 > INT64_MAX - kResponseMarginNs
+            ? INT64_MAX : p95 + kResponseMarginNs);
     }
     static Forecast Predict(const NativeRtCache::PairStatus& state,
                             const NativeRtCache::Limits& limits, int64_t leadNs)
@@ -928,7 +930,8 @@ class NativeRtPool
                 "stats_encode_wall"_a=encoded.first-decoded.first,"stats_encode_cpu"_a=encoded.second-decoded.second,
                 "stage_wall"_a=staged.first-encoded.first,"stage_cpu"_a=staged.second-encoded.second);
             for(const auto* field:{"producer_thread_cpu_ns","producer_gc_wall_ns","producer_gc_collections",
-                                   "worker_started_host_monotonic_ns","worker_completed_host_monotonic_ns"})
+                                   "worker_started_host_monotonic_ns","worker_completed_host_monotonic_ns",
+                                   "job_stage_trace"})
                 if(value.contains(field))log[field]=value[field];
             if (value.contains("receiver_enqueued_host_monotonic_ns"))
                 log["receiver_enqueued_host_monotonic_ns"]=value["receiver_enqueued_host_monotonic_ns"];
@@ -1173,6 +1176,7 @@ class NativeRtPool
             "published_results"_a=m_publishedResults,"published_pairs"_a=m_publishedPairs,
             "discarded_pairs"_a=m_discarded,"discard_reasons"_a=m_discardReasons,
             "poll_calls"_a=m_pollCalls,"poll_period_ns"_a=kPollPeriodNs,
+            "response_forecast_margin_ns"_a=NativeRtPrefetch::kResponseMarginNs,
             "result_log_timing"_a=py::dict("writes"_a=m_resultLogWrites,"total_wall_ns"_a=m_resultLogWallNs,
                 "scope"_a="json_encode_and_bounded_enqueue_main_thread",
                 "slowest_request_id"_a=m_slowestLogRequest,"slowest_stage"_a=m_slowestLogStage,

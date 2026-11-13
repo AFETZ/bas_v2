@@ -1,6 +1,12 @@
 {
-  "environment": {"engine": "gazebo", "scene": "network/config/terrain_10km_mission.json"},
-  "drone": {"autopilot": "ardupilot_sitl", "count": 5},
+  "environment": {
+    "engine": "gazebo",
+    "scene": "network/config/terrain_10km_mission.json"
+  },
+  "drone": {
+    "autopilot": "ardupilot_sitl",
+    "count": 5
+  },
   "propagation": {
     "model": "sionna",
     "radio_config": "network/config/native_wifi_fullmesh_100ms.yaml",
@@ -8,10 +14,39 @@
     "building_material": "concrete",
     "thickness_m": 0.2
   },
-  "network": {"engine": "ns3", "topology": "adhoc"},
-  "flows": {"channels": ["control", "payload"], "payload_attitude_interval_s": 0.2},
-  "interference": {"sources": "network/config/terrain_directional_source.yaml"},
-  "experiment": {"policy": "failover", "duration_s": 20, "seed": 1, "run": 1},
+  "network": {
+    "engine": "ns3",
+    "topology": "adhoc"
+  },
+  "flows": {
+    "channels": [
+      "control",
+      "payload"
+    ],
+    "payload_attitude_interval_s": 0.2,
+    "payload_load": {
+      "class": "10kbps",
+      "uav_ids": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "direction": "gcs_to_uav",
+      "useful_bytes": 64,
+      "useful_bitrate_bps": 10000
+    }
+  },
+  "interference": {
+    "sources": "network/config/terrain_directional_source.yaml"
+  },
+  "experiment": {
+    "policy": "failover",
+    "duration_s": 20,
+    "seed": 1,
+    "run": 1
+  },
   "runtime": {
     "clock": "realtime",
     "image": "sha256:89d78eff9914b1644a1b01b793612e9ee8b19916c5a7bf5f578ba6d8bfbfafe5",

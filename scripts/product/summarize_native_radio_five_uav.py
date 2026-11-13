@@ -11,6 +11,8 @@ import math
 import os
 import re
 import statistics
+import sqlite3
+import tempfile
 import struct
 import sys
 from bisect import bisect_right
@@ -25,6 +27,8 @@ UAVS = tuple(f"uav{index}" for index in range(1, 6))
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+from scripts.product.hybrid_policy import native_dispatch_valid
+
 RUNTIME_PHASE_ALIASES = {
     "pre_no_bypass": "no_bypass_test",
     "no_bypass_stop": "no_bypass_test",
@@ -310,65 +314,78 @@ def distribution(values: Iterable[float]) -> dict[str, Any]:
 
 
 def native_events(
-    path: Path, phase_aliases: dict[str, str] | None = None
+    path: Path, phase_aliases: dict[str, str] | None = None, *,
+    event_names: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     try:
-        with path.open(encoding="utf-8", newline="") as stream:
-            rows = list(csv.DictReader(stream))
+        return list(iter_native_events(path, phase_aliases, event_names=event_names))
     except OSError:
         return []
-    result: list[dict[str, Any]] = []
-    for row in rows:
-        try:
-            row["time_s"] = float(row["time_s"])
-            row["wall_monotonic_ns"] = int(row["wall_monotonic_ns"])
-            row["bytes"] = int(row["bytes"])
-            row["x"] = float(row["x"])
-            row["y"] = float(row["y"])
-            row["z"] = float(row["z"])
-            row["value"] = float(row["value"]) if row.get("value") else None
-        except (KeyError, TypeError, ValueError):
-            continue
-        raw_event = str(row.get("event", ""))
-        raw_phase = str(row.get("phase", ""))
-        row["raw_event"] = raw_event
-        row["event"] = NATIVE_EVENT_ALIASES.get(raw_event, raw_event)
-        row["raw_phase"] = raw_phase
-        row["phase"] = canonical_phase(raw_phase, phase_aliases)
-        match = re.search(r"packet_uid=(\d+)", str(row.get("details", "")))
-        row["packet_uid"] = int(match.group(1)) if match else None
-        for key in ("src_ip", "dst_ip", "flow", "sample", "scope", "source", "verdict"):
-            match = re.search(rf"(?:^|;){key}=([^;]+)", str(row.get("details", "")))
-            row[key] = match.group(1) if match else None
-        for key in ("ip_protocol", "src_port", "dst_port", "reason_code"):
-            match = re.search(rf"(?:^|;){key}=(\d+)", str(row.get("details", "")))
-            row[key] = int(match.group(1)) if match else None
-        for key in ("rx_power_w", "channel_generation_time_s", "signal_dbm", "noise_interference_dbm", "sinr_db", "frequency_mhz"):
-            match = re.search(rf"(?:^|;){key}=([-+0-9.eE]+)", str(row.get("details", "")))
+
+
+def iter_native_events(
+    path: Path, phase_aliases: dict[str, str] | None = None, *,
+    event_names: set[str] | None = None,
+) -> Iterable[dict[str, Any]]:
+    """Use the same CSV conversion/alias contract without retaining each row."""
+    try:
+        stream = path.open(encoding="utf-8", newline="")
+    except OSError:
+        return
+    with stream:
+        for row in csv.DictReader(stream):
+            if event_names is not None and NATIVE_EVENT_ALIASES.get(
+                    str(row.get("event", "")), str(row.get("event", ""))) not in event_names:
+                continue
             try:
-                row[key] = float(match.group(1)) if match else None
-            except ValueError:
-                row[key] = None
-        row["rx_power_dbm"] = (
-            float(row["value"])
-            if row["event"] == "wifi_rx_power" and row.get("value") is not None
-            else None
-        )
-        row["decoder_snr_linear"] = (
-            float(row["value"])
-            if row["event"] in {"phy_rx_ok", "phy_rx_error"}
-            and isinstance(row.get("value"), float)
-            and math.isfinite(float(row["value"]))
-            and float(row["value"]) > 0.0
-            else None
-        )
-        row["decoder_snr_db"] = (
-            10.0 * math.log10(row["decoder_snr_linear"])
-            if row["decoder_snr_linear"] is not None
-            else None
-        )
-        result.append(row)
-    return result
+                row["time_s"] = float(row["time_s"])
+                row["wall_monotonic_ns"] = int(row["wall_monotonic_ns"])
+                row["bytes"] = int(row["bytes"])
+                row["x"] = float(row["x"])
+                row["y"] = float(row["y"])
+                row["z"] = float(row["z"])
+                row["value"] = float(row["value"]) if row.get("value") else None
+            except (KeyError, TypeError, ValueError):
+                continue
+            raw_event = str(row.get("event", ""))
+            raw_phase = str(row.get("phase", ""))
+            row["raw_event"] = raw_event
+            row["event"] = NATIVE_EVENT_ALIASES.get(raw_event, raw_event)
+            row["raw_phase"] = raw_phase
+            row["phase"] = canonical_phase(raw_phase, phase_aliases)
+            match = re.search(r"packet_uid=(\d+)", str(row.get("details", "")))
+            row["packet_uid"] = int(match.group(1)) if match else None
+            for key in ("src_ip", "dst_ip", "flow", "sample", "scope", "source", "verdict"):
+                match = re.search(rf"(?:^|;){key}=([^;]+)", str(row.get("details", "")))
+                row[key] = match.group(1) if match else None
+            for key in ("ip_protocol", "src_port", "dst_port", "reason_code"):
+                match = re.search(rf"(?:^|;){key}=(\d+)", str(row.get("details", "")))
+                row[key] = int(match.group(1)) if match else None
+            for key in ("rx_power_w", "channel_generation_time_s", "signal_dbm", "noise_interference_dbm", "sinr_db", "frequency_mhz"):
+                match = re.search(rf"(?:^|;){key}=([-+0-9.eE]+)", str(row.get("details", "")))
+                try:
+                    row[key] = float(match.group(1)) if match else None
+                except ValueError:
+                    row[key] = None
+            row["rx_power_dbm"] = (
+                float(row["value"])
+                if row["event"] == "wifi_rx_power" and row.get("value") is not None
+                else None
+            )
+            row["decoder_snr_linear"] = (
+                float(row["value"])
+                if row["event"] in {"phy_rx_ok", "phy_rx_error"}
+                and isinstance(row.get("value"), float)
+                and math.isfinite(float(row["value"]))
+                and float(row["value"]) > 0.0
+                else None
+            )
+            row["decoder_snr_db"] = (
+                10.0 * math.log10(row["decoder_snr_linear"])
+                if row["decoder_snr_linear"] is not None
+                else None
+            )
+            yield row
 
 
 def _contract_mapping(value):
@@ -921,8 +938,9 @@ def native_rt_worker_contract(stats: dict[str, Any], scenario_config: dict[str, 
         "worker_cache_drives_native_psd": integer(cache.get("hits"), 1) and type(cache.get("misses")) is int
             and cache["misses"] == 0 and integer(cache.get("accepted"), 1)
             and cache["accepted"] == snapshot.get("published_pairs")
-            and stats.get("selected_propagation_profile") == "sionna"
-            and stats.get("sionna_drives_rx_psd") is True and stats.get("packet_outcome_affected") is True
+            and (stats.get("selected_propagation_profile") == "sionna" and stats.get("sionna_drives_rx_psd") is True
+                 or native_dispatch_valid(stats))
+            and stats.get("packet_outcome_affected") is True
             and stats.get("native_ns3_phy") is True and stats.get("native_ns3_mac") is True
             and same(stats.get("carrier_hz"), radio.get("carrier_hz"))
             and same(stats.get("wifi_actual_center_frequency_hz"), radio.get("carrier_hz"))
@@ -930,10 +948,14 @@ def native_rt_worker_contract(stats: dict[str, Any], scenario_config: dict[str, 
             and type(stats.get("shared_spectrum_channel_count")) is int and stats["shared_spectrum_channel_count"] == 1
             and type(stats.get("scalar_base_propagation_model_count")) is int and stats["scalar_base_propagation_model_count"] == 0
             and type(stats.get("phased_array_spectrum_propagation_model_count")) is int and stats["phased_array_spectrum_propagation_model_count"] == 1
-            and stats.get("rx_psd_propagation_model") == "ns3::SionnaRtSpectrumPropagationLossModel",
+            and (stats.get("rx_psd_propagation_model") == "ns3::SionnaRtSpectrumPropagationLossModel"
+                 or native_dispatch_valid(stats)),
         "worker_cache_hit_ages_within_budget": maximum_age_ns is not None
             and all(integer(cache.get(key)) and cache[key] <= maximum_age_ns for key in
                 ("maximum_hit_native_age_ns", "maximum_hit_host_age_ns")),
+        "hybrid_uses_actual_rt_scene": stats.get("selected_propagation_profile") != "hybrid"
+            or (native_dispatch_valid(stats) and scene_hash is not None
+                and stats["hybrid_selection"].get("scene_sha256")==scene_hash),
         "worker_profiles_match": False,
         "worker_cache_pair_provenance": False,
         "worker_desired_mode": snapshot.get("desired_mode", "receiver_batch") == desired_mode
@@ -1269,6 +1291,19 @@ def native_product_runtime_contract(
             exact["sionna_out_of_process"] = stats.get("sionna_in_process") is False
             workers = native_rt_worker_contract(stats, scenario_config, run_dir=run_dir)
             exact["worker_pool_runtime_contract"] = workers["passed"]
+    if stats.get("selected_propagation_profile") == "hybrid":
+        exact.pop("single_sionna_rx_psd_model")
+        exact.pop("sionna_drives_rx_psd")
+        exact["single_qualified_hybrid_rx_psd_model"] = (
+            stats.get("phased_array_spectrum_propagation_model_count")==1
+            and stats.get("scalar_base_propagation_model_count")==0
+            and native_dispatch_valid(stats))
+        exact["hybrid_requires_bounded_worker_pool"] = (
+            requested_mode==observed_mode=="worker_pool"
+            and type(stats.get("state_max_age_s")) in (int,float)
+            and 0<stats["state_max_age_s"]<=.1
+            and type(stats.get("channel_state_max_age_s")) in (int,float)
+            and 0<stats["channel_state_max_age_s"]<=.1)
     return {"passed": all(exact.values()), "checks": exact,
             "propagation_profile": stats.get("selected_propagation_profile", "sionna"),
             "sionna_rt_execution_mode": observed_mode if not geometry else None,
@@ -4327,15 +4362,30 @@ def _native_source_report_lines(summary, *, raw_prefix='.'):
     return lines
 
 
-def _source_trace_groups(logging, events):
-    groups = {
-        'decoder': sum(e['event'] in ('phy_rx_ok', 'phy_rx_error') for e in events),
-        'decoded_mpdu': sum(e['event'] == 'wifi_monitor_rx' for e in events),
-        'foreign_signal': sum(e['event'] == 'spectrum_signal_arrival' and
-                              'foreign_signal=1' in str(e.get('details')) for e in events),
-    }
+def _source_count_event(counts, event):
+    kind = event['event']
+    counts['decoder'] += kind in ('phy_rx_ok', 'phy_rx_error')
+    counts['decoded_mpdu'] += kind == 'wifi_monitor_rx'
+    counts['foreign_signal'] += kind == 'spectrum_signal_arrival' and 'foreign_signal=1' in str(event.get('details'))
+    counts['packet'] += kind in ('phy_rx_ok', 'phy_rx_error', 'wifi_phy_rx_drop',
+                                 'wifi_monitor_rx', 'spectrum_signal_arrival')
+    counts['ok'] += kind == 'phy_rx_ok'
+    counts['error'] += kind == 'phy_rx_error'
+    counts['drops'] += kind == 'wifi_phy_rx_drop'
+
+
+def _source_event_counts(events):
+    counts = Counter()
+    for event in events:
+        _source_count_event(counts, event)
+    return counts
+
+
+def _source_trace_groups(logging, events=(), *, counts=None):
+    groups = _source_event_counts(events) if counts is None else counts
     result = {}
-    for name, count in groups.items():
+    for name in ('decoder', 'decoded_mpdu', 'foreign_signal'):
+        count = groups[name]
         mode = logging['event_logging']
         status = ('unavailable_logging_metadata_conflict' if logging['metadata_status'] == 'conflict' else
                   'unavailable_logging_disabled' if mode == 'metrics_only' else
@@ -4346,7 +4396,8 @@ def _source_trace_groups(logging, events):
     return result
 
 
-def _native_source_trace_observations(run_dir, events):
+def _native_source_trace_observations(run_dir, events=(), *, counts=None):
+    counts = _source_event_counts(events) if counts is None else counts
     stats = read_json(run_dir / 'metrics/native_radio_stats.json', {})
     native = stats.get('event_logging') if isinstance(stats, dict) else None
     path = run_dir / 'environment.txt'
@@ -4360,27 +4411,107 @@ def _native_source_trace_observations(run_dir, events):
                   mode_source='metrics/native_radio_stats.json:event_logging' if native is not None else
                               'environment.txt:event_logging' if configured is not None else 'unrecorded')
     result['packet_trace_available'] = (not conflict and (mode == 'batched_trace' or
-        mode == 'unrecorded' and any(e['event'] in ('phy_rx_ok', 'phy_rx_error', 'wifi_phy_rx_drop',
-                                                  'wifi_monitor_rx', 'spectrum_signal_arrival') for e in events)))
-    result.update(_source_trace_groups(result, events))
+        mode == 'unrecorded' and counts['packet'] > 0))
+    result.update(_source_trace_groups(result, counts=counts))
     return result
 
 
+class _SourceDistributions:
+    """Reuse exact distribution definitions with an optional disk-backed order."""
+    def __init__(self, directory=None, max_bytes=4 * 1024**3):
+        if (type(max_bytes) is not int or not 1024**2 <= max_bytes <= 4294967294 * 4096
+                or max_bytes % 4096):
+            raise ValueError("source spill bytes must be a 4096-byte multiple from 1 MiB to SQLite's page limit")
+        self.max_bytes = max_bytes
+        self.directory = directory
+        self.memory = defaultdict(list)
+        self.counts = Counter()
+        self.temporary = self.connection = None
+
+    def __enter__(self):
+        if self.directory is not None:
+            self.directory.mkdir(parents=True, exist_ok=True)
+            self.temporary = tempfile.TemporaryDirectory(prefix=".native-source-", dir=self.directory)
+            try:
+                self.connection = sqlite3.connect(Path(self.temporary.name) / "samples.sqlite")
+                # This disposable derived store must not grow a process with the
+                # packet trace. Disk exhaustion is an explicit export failure.
+                self.connection.executescript("""
+                    PRAGMA page_size=4096;
+                    PRAGMA cache_size=-8192;
+                    PRAGMA mmap_size=0;
+                    PRAGMA temp_store=FILE;
+                    PRAGMA journal_mode=OFF;
+                    CREATE TABLE samples(id INTEGER PRIMARY KEY, name TEXT, value REAL, bits BLOB);
+                    CREATE INDEX value_order ON samples(name,value,id);
+                    CREATE INDEX arrival_order ON samples(name,id);
+                """)
+                self.connection.execute(f"PRAGMA max_page_count={self.max_bytes // 4096}")
+                if self.connection.execute("PRAGMA max_page_count").fetchone()[0] != self.max_bytes // 4096:
+                    raise RuntimeError("SQLite did not apply the declared source spill budget")
+            except Exception:
+                self.__exit__(None, None, None)
+                raise
+        return self
+
+    def __exit__(self, *exception):
+        if self.connection is not None:
+            self.connection.close()
+        if self.temporary is not None:
+            self.temporary.cleanup()
+
+    def add(self, name, value):
+        value = float(value)
+        if not math.isfinite(value):
+            return
+        self.counts[name] += 1
+        if self.connection is None:
+            self.memory[name].append(value)
+        else:
+            # REAL provides numeric sorting; the original IEEE bits preserve
+            # signed zero and stable equal-value ordering from Python sorted().
+            self.connection.execute("INSERT INTO samples(name,value,bits) VALUES(?,?,?)",
+                                    (name, value, struct.pack("!d", value)))
+
+    def distribution(self, name):
+        if self.connection is None:
+            return distribution(self.memory[name])
+        count = self.counts[name]
+        if not count:
+            return distribution([])
+        def at(index, order="value,id"):
+            raw = self.connection.execute(
+                "SELECT bits FROM samples WHERE name=? ORDER BY " + order + " LIMIT 1 OFFSET ?",
+                (name, index)).fetchone()[0]
+            return struct.unpack("!d", raw)[0]
+        def percentile_at(percent):
+            rank = (count - 1) * percent / 100.0
+            lower, upper = math.floor(rank), math.ceil(rank)
+            left = at(lower)
+            return left if lower == upper else left + (at(upper) - left) * (rank - lower)
+        mean = statistics.fmean(struct.unpack("!d", row[0])[0] for row in
+            self.connection.execute("SELECT bits FROM samples WHERE name=? ORDER BY id", (name,)))
+        return dict(samples=count, p50=percentile_at(50), p95=percentile_at(95),
+                    max=struct.unpack("!d", self.connection.execute(
+                        "SELECT bits FROM samples WHERE name=? AND value="
+                        "(SELECT MAX(value) FROM samples WHERE name=?) ORDER BY id LIMIT 1",
+                        (name, name)).fetchone()[0])[0], min=at(0), mean=mean)
+
+
 def summarize_native_sources(run_dir: Path, events: list[dict[str, Any]], *,
-                             output_dir: Path | None = None) -> dict[str, Any]:
-    switches=[dict(e, x=None, y=None, z=None, coordinate_reason="source switch has no mobility trace; position is configured in logs/native_sources.json") for e in events if e["event"] in {"jammer_on","jammer_off"}]
+                             output_dir: Path | None = None, source_switches=None,
+                             spill_samples=False, source_spill_max_bytes=4 * 1024**3) -> dict[str, Any]:
+    if source_switches is None:
+        if not isinstance(events, list):
+            events = list(events)
+        source_switches = [e for e in events if e["event"] in {"jammer_on", "jammer_off"}]
+    switches=[dict(e, x=None, y=None, z=None, coordinate_reason="source switch has no mobility trace; position is configured in logs/native_sources.json") for e in source_switches]
     result={"sources":switches, **_native_source_schedule(run_dir),"event_capture":_native_source_capture(run_dir),"windows":{},"measurement_scope":"native decoder/SignalArrival samples; application PDR needs distinct application offers",
         "units":{"time":"ns-3 seconds","foreign_power":"dBm, native SpectrumWifiPhy.SignalArrival","noise_interference":"dBm, native decoded MPDU sample","sinr":"dB, derived S/(I+N) on decoded samples"}}
-    trace = result['trace_observations'] = _native_source_trace_observations(run_dir, events)
     stats = read_json(run_dir / 'metrics/native_radio_stats.json', {})
     count = stats.get('uav_count') if isinstance(stats, dict) else None
-    if type(count) is int and 1 <= count <= 5:
-        receivers = ['cp', *(f'uav{i}' for i in range(1, count + 1))]
-        result['receiver_roster_source'] = 'native_radio_stats:uav_count'
-    else:
-        receivers = sorted({e.get('node') for e in events if e.get('node') in ('cp', *UAVS)})
-        result['receiver_roster_source'] = 'observed_nodes_only; configured roster unavailable'
-    result['receiver_roster'] = receivers
+    configured_receivers = (['cp', *(f'uav{i}' for i in range(1, count + 1))]
+                            if type(count) is int and 1 <= count <= 5 else None)
     configured = result['configured_sources']
     relative = isinstance(configured, dict) and configured.get('clock') == 'measurement_elapsed_seconds'
     anchor = result['time_anchor']
@@ -4399,26 +4530,54 @@ def summarize_native_sources(run_dir: Path, events: list[dict[str, Any]], *,
         "unavailable_schedule_or_measurement_anchor" if unavailable else "observed_switch_boundaries" if complete_window else
         "unavailable_incomplete_switch_boundaries" if switches else "no_switch_events"
     )
+    windows = {}
     if complete_window:
-        on = min(on_times)
-        off = max(off_times)
+        on, off = min(on_times), max(off_times)
         result['active_window_definition'] = 'earliest observed on to latest observed off envelope; gaps, pulses and overlaps may occur'
-        for name,low,high in (("baseline",max(anchor_s,on-10),on),("active",on,off),("recovery",off,off+10)):
-            selected=[e for e in events if low<=e["time_s"]<high]
-            observed = selected if trace['packet_trace_available'] else []
-            decoded=[e for e in observed if e["event"]=="wifi_monitor_rx"]
-            ok=sum(e["event"]=="phy_rx_ok" for e in observed) if trace['packet_trace_available'] else None
-            error=sum(e["event"]=="phy_rx_error" for e in observed) if trace['packet_trace_available'] else None
-            result["windows"][name]={"start_sim_s":low,"stop_sim_s":high,
-                "trace_observations":_source_trace_groups(trace, selected),
-                "decoded_mpdu_samples":len(decoded) if trace['packet_trace_available'] else None,
-                "noise_interference_dbm":distribution([e["noise_interference_dbm"] for e in decoded if e.get("noise_interference_dbm") is not None]),
-                "sinr_db":distribution([e["sinr_db"] for e in decoded if e.get("sinr_db") is not None]),
-                "foreign_power_dbm_by_receiver":{node:distribution([e["value"] for e in observed if e["event"]=="spectrum_signal_arrival" and e["node"]==node and "foreign_signal=1" in str(e.get("details")) and e.get("value") is not None and math.isfinite(e["value"])]) for node in receivers},
-                "decoder_success_attempts":ok,"decoder_failure_attempts":error,"decoder_attempt_per":error/(ok+error) if ok is not None and error is not None and ok+error else None,
-                "decoder_per_denominator":"all RxOk + RxError callbacks in window, retries retained; preamble/CCA drops excluded",
-                "other_phy_drops":sum(e["event"]=="wifi_phy_rx_drop" for e in observed) if trace['packet_trace_available'] else None,
-                "application_pdr":None,"application_pdr_reason":"no phase-specific offered-unique-message set; see separate source campaign"}
+        windows = dict(baseline=(max(anchor_s, on-10), on), active=(on, off), recovery=(off, off+10))
+    totals, observed_nodes = Counter(), set()
+    window_counts = {name: Counter() for name in windows}
+    with _SourceDistributions((output_dir or run_dir) if spill_samples else None,
+                              max_bytes=source_spill_max_bytes) as samples:
+        for event in events:
+            _source_count_event(totals, event)
+            if event.get('node') in ('cp', *UAVS):
+                observed_nodes.add(event['node'])
+            for name, (low, high) in windows.items():
+                if not low <= event['time_s'] < high:
+                    continue
+                _source_count_event(window_counts[name], event)
+                if event['event'] == 'wifi_monitor_rx':
+                    for metric in ('noise_interference_dbm', 'sinr_db'):
+                        if event.get(metric) is not None:
+                            samples.add(name + ':' + metric, event[metric])
+                if (event['event'] == 'spectrum_signal_arrival'
+                        and 'foreign_signal=1' in str(event.get('details'))
+                        and event.get('node') in ('cp', *UAVS) and event.get('value') is not None):
+                    samples.add(name + ':foreign:' + event['node'], event['value'])
+        trace = result['trace_observations'] = _native_source_trace_observations(run_dir, counts=totals)
+        receivers = configured_receivers if configured_receivers is not None else sorted(observed_nodes)
+        result['receiver_roster_source'] = ('native_radio_stats:uav_count' if configured_receivers is not None
+                                            else 'observed_nodes_only; configured roster unavailable')
+        result['receiver_roster'] = receivers
+        available = trace['packet_trace_available']
+        for name, (low, high) in windows.items():
+            counts = window_counts[name]
+            ok, error = (counts['ok'], counts['error']) if available else (None, None)
+            result["windows"][name] = {
+                "start_sim_s": low, "stop_sim_s": high,
+                "trace_observations": _source_trace_groups(trace, counts=counts),
+                "decoded_mpdu_samples": counts['decoded_mpdu'] if available else None,
+                "noise_interference_dbm": samples.distribution(name + ':noise_interference_dbm') if available else distribution([]),
+                "sinr_db": samples.distribution(name + ':sinr_db') if available else distribution([]),
+                "foreign_power_dbm_by_receiver": {node: samples.distribution(name + ':foreign:' + node)
+                    if available else distribution([]) for node in receivers},
+                "decoder_success_attempts": ok, "decoder_failure_attempts": error,
+                "decoder_attempt_per": error/(ok+error) if ok is not None and error is not None and ok+error else None,
+                "decoder_per_denominator": "all RxOk + RxError callbacks in window, retries retained; preamble/CCA drops excluded",
+                "other_phy_drops": counts['drops'] if available else None,
+                "application_pdr": None,
+                "application_pdr_reason": "no phase-specific offered-unique-message set; see separate source campaign"}
     write_json((output_dir or run_dir)/"metrics/native_source_summary.json",result)
     return result
 
@@ -4442,6 +4601,9 @@ def main() -> int:
                         help="Export observed trajectories/timing without requiring a completed scenario")
     export.add_argument("--native-sources-only", action="store_true",
                         help="Export source clocks and native packet observations without a mission report")
+    parser.add_argument("--source-spill-max-bytes", type=int,
+                        help="Source-only exact sample spill disk budget in bytes; 4096-byte multiple, "
+                             "minimum 1 MiB, default 4 GiB. Exhaustion fails export without losing raw capture.")
     parser.add_argument("--output-dir", type=Path,
                         help="Separate directory for a live/source export; raw input is read-only")
     window = parser.add_mutually_exclusive_group()
@@ -4450,6 +4612,12 @@ def main() -> int:
     window.add_argument("--live-start-phase",
                         help="Start at a recorded scenario phase with an explicit clock domain")
     args = parser.parse_args()
+    if args.source_spill_max_bytes is not None:
+        if not args.native_sources_only:
+            parser.error("--source-spill-max-bytes requires --native-sources-only")
+        if (not 1024**2 <= args.source_spill_max_bytes <= 4294967294 * 4096
+                or args.source_spill_max_bytes % 4096):
+            parser.error("--source-spill-max-bytes must be a 4096-byte multiple from 1 MiB to SQLite's page limit")
     run_dir = args.run_dir.resolve()
     if args.native_sources_only:
         if (args.latency_diagnostic or args.one_uav_run or args.observer_reference_run or
@@ -4458,8 +4626,18 @@ def main() -> int:
         if not (run_dir / "logs/native_radio_events.csv").is_file():
             parser.error("publish the closed native event capture before exporting source observations")
         output = args.output_dir.resolve() if args.output_dir else run_dir
-        summary = summarize_native_sources(run_dir, native_events(run_dir / "logs/native_radio_events.csv"),
-                                           output_dir=output)
+        stats = read_json(run_dir / "metrics/native_radio_stats.json", {})
+        count = stats.get("uav_count") if isinstance(stats, dict) else None
+        # Without a configured roster the summary derives receivers from every
+        # observed node, including unrelated events. Keep that legacy path.
+        source_events = ({"jammer_on", "jammer_off", "phy_rx_ok", "phy_rx_error",
+                          "wifi_monitor_rx", "spectrum_signal_arrival", "wifi_phy_rx_drop"}
+                         if type(count) is int and 1 <= count <= 5 else None)
+        path = run_dir / "logs/native_radio_events.csv"
+        switches = native_events(path, event_names={"jammer_on", "jammer_off"})
+        summary = summarize_native_sources(run_dir, iter_native_events(path, event_names=source_events),
+            output_dir=output, source_switches=switches, spill_samples=True,
+            source_spill_max_bytes=args.source_spill_max_bytes if args.source_spill_max_bytes is not None else 4 * 1024**3)
         print(json.dumps({"raw_run_dir": str(run_dir), "output_dir": str(output),
                           "actual_schedule_status": summary["actual_schedule_status"],
                           "source_activity_status": summary["source_activity_status"]}, sort_keys=True))

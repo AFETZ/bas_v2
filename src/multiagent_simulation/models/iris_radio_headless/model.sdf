@@ -199,7 +199,9 @@
       filename="ArduPilotPlugin">
       <fdm_addr>127.0.0.1</fdm_addr>
       <fdm_port_in>9002</fdm_port_in>
-      <connectionTimeoutMaxCount>5</connectionTimeoutMaxCount>
+      <!-- In lockstep, repeat the unchanged state after the first 10 ms
+           receive timeout. Physics still waits for a new valid servo frame. -->
+      <connectionTimeoutMaxCount>0</connectionTimeoutMaxCount>
       <lock_step>1</lock_step>
 
       <!-- Frame conventions

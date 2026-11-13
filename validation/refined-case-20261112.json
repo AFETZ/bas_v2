@@ -1,0 +1,618 @@
+{
+  "schema_version": 3,
+  "status": "software_refined_case_verified_publication_pending",
+  "runtime_commit": "cb439d1274aefe6f9bad0217ffb79efb8986be68",
+  "scope": "Five simulated UAVs and one GCS; 10x10 km terrain; two MAVLink UART channels; one native radio channel; separate directional EM source; software Serial and Ethernet radio-HitL.",
+  "hardware_validation": "not_performed",
+  "full_original_project_specification": "not_claimed; this record covers the mandatory clarified case",
+  "statistical_service_qualification": "not_claimed",
+  "acceptance_checks": {
+    "predeclared_runtime_writable_fd_observation_verified": true,
+    "runtime_storage_regressions_verified": true,
+    "all_eight_ram_spools_and_publications_verified": true,
+    "coordination_clock_regression_verified": true,
+    "installed_siso_precoder_verified": true,
+    "coordination_writer_regression_verified": true,
+    "all_six_coordination_journals_verified": true,
+    "lockstep_retry_fix_verified": true,
+    "payload_writer_regression_verified": true,
+    "route_history_fix_verified": true,
+    "preamble_event_lifecycle_verified": true,
+    "preamble_retention_trace_and_build_verified": true,
+    "all_six_runs_closed_valid": true,
+    "all_eight_actual_native_libraries_verified": true,
+    "one_frozen_runtime_revision": true,
+    "six_independent_reviews_passed": true,
+    "current_raw_analysis_and_independent_evidence": true,
+    "serial_and_ethernet_software_hitl": true,
+    "full_python_suite_passed": true,
+    "paired_comparison_present": true,
+    "raw_evidence_published_and_verified": false
+  },
+  "medium_access": {
+    "propagation": "Sionna RT received spectral power",
+    "arbitration": "native ns-3 Wi-Fi DCF/EDCAF",
+    "custom_packet_scheduler": false
+  },
+  "refined_series": {
+    "series": "k",
+    "duration_s": 90,
+    "seed": 1,
+    "rng_runs": [
+      1,
+      2,
+      3
+    ],
+    "expected_runs": [
+      "refined-baseline-20261112-k-c0001",
+      "refined-baseline-20261112-k-c0002",
+      "refined-baseline-20261112-k-c0003",
+      "refined-source-20261112-k-c0001",
+      "refined-source-20261112-k-c0002",
+      "refined-source-20261112-k-c0003"
+    ],
+    "fail_fast": true
+  },
+  "flights": [
+    {
+      "run_id": "refined-baseline-20261112-k-c0001",
+      "status": "passed",
+      "checks": {
+        "recorded_complete_ram_spool_publication": true,
+        "recorded_spool_proof_matches_small_artifacts": true,
+        "fresh_full_spool_verification_matches_runtime": true,
+        "successful_closed_runtime_and_mission": true,
+        "measurement_valid": true,
+        "clean_frozen_source_revision": true,
+        "actual_rebuilt_native_binary_identity": true,
+        "preamble_fix_rebuilt_and_physically_qualified": true,
+        "frozen_preamble_fix_is_qualified_patch": true,
+        "actual_loaded_wifi_matches_qualified_build": true,
+        "runtime_storage_matches_predeclared_policy": true,
+        "qualified_ram_spool_and_persisted_verifiers": true,
+        "actual_sdformat_log_bound_and_published": true,
+        "ram_spool_qualification_predeclared": true,
+        "matches_predeclared_series_build": true,
+        "actual_spectrum_matches_qualified_build": true,
+        "installed_spectrum_exact_numeric_contract": true,
+        "frozen_siso_fix_is_qualified_patch": true,
+        "predeclared_spectrum_qualification": true,
+        "qualified_route_fix_without_age_or_dwell_relaxation": true,
+        "frozen_radio_identity": true,
+        "frozen_model_lockstep_first_timeout_recovery": true,
+        "unchanged_ray_physics_and_expanded_allocation": true,
+        "one_native_sionna_channel_without_fallback": true,
+        "unchanged_age_guards": true,
+        "measured_pose_age_at_most_100ms": true,
+        "closed_full_mesh_no_clipping": true,
+        "no_expired_or_rejected_rt_channel": true,
+        "closed_primary_journal_ledgers": true,
+        "native_worker_journal_full_verification": true,
+        "all_coordination_journals_closed_and_verified": true,
+        "closed_bounded_payload_writer": true,
+        "payload_trace_matches_closed_writer": true,
+        "source_batches_no_clipping": true,
+        "measurement90s_complete": true,
+        "five_actual_flight_lifecycles": true,
+        "every_route_point_delivered_and_reached": true,
+        "both_mavlink_channels_observed": true,
+        "expected_source_condition": true,
+        "actual_rng_matches_frozen_input": true,
+        "closed_raw_analysis_refined_case": true,
+        "raw_expected_source_condition": true,
+        "raw_controls_and_payload_by_all_uavs": true,
+        "raw_route_identity": true,
+        "raw_native_capture_and_position_journal": true,
+        "analyzed_payload_writer_matches_runtime": true,
+        "analyzed_loaded_wifi_matches_runtime": true,
+        "analyzed_coordination_writer_matches_runtime": true,
+        "analyzed_spool_matches_runtime": true
+      },
+      "maximum_applied_pose_age_ms": 76.942324
+    },
+    {
+      "run_id": "refined-baseline-20261112-k-c0002",
+      "status": "passed",
+      "checks": {
+        "recorded_complete_ram_spool_publication": true,
+        "recorded_spool_proof_matches_small_artifacts": true,
+        "fresh_full_spool_verification_matches_runtime": true,
+        "successful_closed_runtime_and_mission": true,
+        "measurement_valid": true,
+        "clean_frozen_source_revision": true,
+        "actual_rebuilt_native_binary_identity": true,
+        "preamble_fix_rebuilt_and_physically_qualified": true,
+        "frozen_preamble_fix_is_qualified_patch": true,
+        "actual_loaded_wifi_matches_qualified_build": true,
+        "runtime_storage_matches_predeclared_policy": true,
+        "qualified_ram_spool_and_persisted_verifiers": true,
+        "actual_sdformat_log_bound_and_published": true,
+        "ram_spool_qualification_predeclared": true,
+        "matches_predeclared_series_build": true,
+        "actual_spectrum_matches_qualified_build": true,
+        "installed_spectrum_exact_numeric_contract": true,
+        "frozen_siso_fix_is_qualified_patch": true,
+        "predeclared_spectrum_qualification": true,
+        "qualified_route_fix_without_age_or_dwell_relaxation": true,
+        "frozen_radio_identity": true,
+        "frozen_model_lockstep_first_timeout_recovery": true,
+        "unchanged_ray_physics_and_expanded_allocation": true,
+        "one_native_sionna_channel_without_fallback": true,
+        "unchanged_age_guards": true,
+        "measured_pose_age_at_most_100ms": true,
+        "closed_full_mesh_no_clipping": true,
+        "no_expired_or_rejected_rt_channel": true,
+        "closed_primary_journal_ledgers": true,
+        "native_worker_journal_full_verification": true,
+        "all_coordination_journals_closed_and_verified": true,
+        "closed_bounded_payload_writer": true,
+        "payload_trace_matches_closed_writer": true,
+        "source_batches_no_clipping": true,
+        "measurement90s_complete": true,
+        "five_actual_flight_lifecycles": true,
+        "every_route_point_delivered_and_reached": true,
+        "both_mavlink_channels_observed": true,
+        "expected_source_condition": true,
+        "actual_rng_matches_frozen_input": true,
+        "closed_raw_analysis_refined_case": true,
+        "raw_expected_source_condition": true,
+        "raw_controls_and_payload_by_all_uavs": true,
+        "raw_route_identity": true,
+        "raw_native_capture_and_position_journal": true,
+        "analyzed_payload_writer_matches_runtime": true,
+        "analyzed_loaded_wifi_matches_runtime": true,
+        "analyzed_coordination_writer_matches_runtime": true,
+        "analyzed_spool_matches_runtime": true
+      },
+      "maximum_applied_pose_age_ms": 73.173084
+    },
+    {
+      "run_id": "refined-baseline-20261112-k-c0003",
+      "status": "passed",
+      "checks": {
+        "recorded_complete_ram_spool_publication": true,
+        "recorded_spool_proof_matches_small_artifacts": true,
+        "fresh_full_spool_verification_matches_runtime": true,
+        "successful_closed_runtime_and_mission": true,
+        "measurement_valid": true,
+        "clean_frozen_source_revision": true,
+        "actual_rebuilt_native_binary_identity": true,
+        "preamble_fix_rebuilt_and_physically_qualified": true,
+        "frozen_preamble_fix_is_qualified_patch": true,
+        "actual_loaded_wifi_matches_qualified_build": true,
+        "runtime_storage_matches_predeclared_policy": true,
+        "qualified_ram_spool_and_persisted_verifiers": true,
+        "actual_sdformat_log_bound_and_published": true,
+        "ram_spool_qualification_predeclared": true,
+        "matches_predeclared_series_build": true,
+        "actual_spectrum_matches_qualified_build": true,
+        "installed_spectrum_exact_numeric_contract": true,
+        "frozen_siso_fix_is_qualified_patch": true,
+        "predeclared_spectrum_qualification": true,
+        "qualified_route_fix_without_age_or_dwell_relaxation": true,
+        "frozen_radio_identity": true,
+        "frozen_model_lockstep_first_timeout_recovery": true,
+        "unchanged_ray_physics_and_expanded_allocation": true,
+        "one_native_sionna_channel_without_fallback": true,
+        "unchanged_age_guards": true,
+        "measured_pose_age_at_most_100ms": true,
+        "closed_full_mesh_no_clipping": true,
+        "no_expired_or_rejected_rt_channel": true,
+        "closed_primary_journal_ledgers": true,
+        "native_worker_journal_full_verification": true,
+        "all_coordination_journals_closed_and_verified": true,
+        "closed_bounded_payload_writer": true,
+        "payload_trace_matches_closed_writer": true,
+        "source_batches_no_clipping": true,
+        "measurement90s_complete": true,
+        "five_actual_flight_lifecycles": true,
+        "every_route_point_delivered_and_reached": true,
+        "both_mavlink_channels_observed": true,
+        "expected_source_condition": true,
+        "actual_rng_matches_frozen_input": true,
+        "closed_raw_analysis_refined_case": true,
+        "raw_expected_source_condition": true,
+        "raw_controls_and_payload_by_all_uavs": true,
+        "raw_route_identity": true,
+        "raw_native_capture_and_position_journal": true,
+        "analyzed_payload_writer_matches_runtime": true,
+        "analyzed_loaded_wifi_matches_runtime": true,
+        "analyzed_coordination_writer_matches_runtime": true,
+        "analyzed_spool_matches_runtime": true
+      },
+      "maximum_applied_pose_age_ms": 77.6709
+    },
+    {
+      "run_id": "refined-source-20261112-k-c0001",
+      "status": "passed",
+      "checks": {
+        "recorded_complete_ram_spool_publication": true,
+        "recorded_spool_proof_matches_small_artifacts": true,
+        "fresh_full_spool_verification_matches_runtime": true,
+        "successful_closed_runtime_and_mission": true,
+        "measurement_valid": true,
+        "clean_frozen_source_revision": true,
+        "actual_rebuilt_native_binary_identity": true,
+        "preamble_fix_rebuilt_and_physically_qualified": true,
+        "frozen_preamble_fix_is_qualified_patch": true,
+        "actual_loaded_wifi_matches_qualified_build": true,
+        "runtime_storage_matches_predeclared_policy": true,
+        "qualified_ram_spool_and_persisted_verifiers": true,
+        "actual_sdformat_log_bound_and_published": true,
+        "ram_spool_qualification_predeclared": true,
+        "matches_predeclared_series_build": true,
+        "actual_spectrum_matches_qualified_build": true,
+        "installed_spectrum_exact_numeric_contract": true,
+        "frozen_siso_fix_is_qualified_patch": true,
+        "predeclared_spectrum_qualification": true,
+        "qualified_route_fix_without_age_or_dwell_relaxation": true,
+        "frozen_radio_identity": true,
+        "frozen_model_lockstep_first_timeout_recovery": true,
+        "unchanged_ray_physics_and_expanded_allocation": true,
+        "one_native_sionna_channel_without_fallback": true,
+        "unchanged_age_guards": true,
+        "measured_pose_age_at_most_100ms": true,
+        "closed_full_mesh_no_clipping": true,
+        "no_expired_or_rejected_rt_channel": true,
+        "closed_primary_journal_ledgers": true,
+        "native_worker_journal_full_verification": true,
+        "all_coordination_journals_closed_and_verified": true,
+        "closed_bounded_payload_writer": true,
+        "payload_trace_matches_closed_writer": true,
+        "source_batches_no_clipping": true,
+        "measurement90s_complete": true,
+        "five_actual_flight_lifecycles": true,
+        "every_route_point_delivered_and_reached": true,
+        "both_mavlink_channels_observed": true,
+        "expected_source_condition": true,
+        "actual_rng_matches_frozen_input": true,
+        "closed_raw_analysis_refined_case": true,
+        "raw_expected_source_condition": true,
+        "raw_controls_and_payload_by_all_uavs": true,
+        "raw_route_identity": true,
+        "raw_native_capture_and_position_journal": true,
+        "analyzed_payload_writer_matches_runtime": true,
+        "analyzed_loaded_wifi_matches_runtime": true,
+        "analyzed_coordination_writer_matches_runtime": true,
+        "analyzed_spool_matches_runtime": true
+      },
+      "maximum_applied_pose_age_ms": 85.703747
+    },
+    {
+      "run_id": "refined-source-20261112-k-c0002",
+      "status": "passed",
+      "checks": {
+        "recorded_complete_ram_spool_publication": true,
+        "recorded_spool_proof_matches_small_artifacts": true,
+        "fresh_full_spool_verification_matches_runtime": true,
+        "successful_closed_runtime_and_mission": true,
+        "measurement_valid": true,
+        "clean_frozen_source_revision": true,
+        "actual_rebuilt_native_binary_identity": true,
+        "preamble_fix_rebuilt_and_physically_qualified": true,
+        "frozen_preamble_fix_is_qualified_patch": true,
+        "actual_loaded_wifi_matches_qualified_build": true,
+        "runtime_storage_matches_predeclared_policy": true,
+        "qualified_ram_spool_and_persisted_verifiers": true,
+        "actual_sdformat_log_bound_and_published": true,
+        "ram_spool_qualification_predeclared": true,
+        "matches_predeclared_series_build": true,
+        "actual_spectrum_matches_qualified_build": true,
+        "installed_spectrum_exact_numeric_contract": true,
+        "frozen_siso_fix_is_qualified_patch": true,
+        "predeclared_spectrum_qualification": true,
+        "qualified_route_fix_without_age_or_dwell_relaxation": true,
+        "frozen_radio_identity": true,
+        "frozen_model_lockstep_first_timeout_recovery": true,
+        "unchanged_ray_physics_and_expanded_allocation": true,
+        "one_native_sionna_channel_without_fallback": true,
+        "unchanged_age_guards": true,
+        "measured_pose_age_at_most_100ms": true,
+        "closed_full_mesh_no_clipping": true,
+        "no_expired_or_rejected_rt_channel": true,
+        "closed_primary_journal_ledgers": true,
+        "native_worker_journal_full_verification": true,
+        "all_coordination_journals_closed_and_verified": true,
+        "closed_bounded_payload_writer": true,
+        "payload_trace_matches_closed_writer": true,
+        "source_batches_no_clipping": true,
+        "measurement90s_complete": true,
+        "five_actual_flight_lifecycles": true,
+        "every_route_point_delivered_and_reached": true,
+        "both_mavlink_channels_observed": true,
+        "expected_source_condition": true,
+        "actual_rng_matches_frozen_input": true,
+        "closed_raw_analysis_refined_case": true,
+        "raw_expected_source_condition": true,
+        "raw_controls_and_payload_by_all_uavs": true,
+        "raw_route_identity": true,
+        "raw_native_capture_and_position_journal": true,
+        "analyzed_payload_writer_matches_runtime": true,
+        "analyzed_loaded_wifi_matches_runtime": true,
+        "analyzed_coordination_writer_matches_runtime": true,
+        "analyzed_spool_matches_runtime": true
+      },
+      "maximum_applied_pose_age_ms": 93.889204
+    },
+    {
+      "run_id": "refined-source-20261112-k-c0003",
+      "status": "passed",
+      "checks": {
+        "recorded_complete_ram_spool_publication": true,
+        "recorded_spool_proof_matches_small_artifacts": true,
+        "fresh_full_spool_verification_matches_runtime": true,
+        "successful_closed_runtime_and_mission": true,
+        "measurement_valid": true,
+        "clean_frozen_source_revision": true,
+        "actual_rebuilt_native_binary_identity": true,
+        "preamble_fix_rebuilt_and_physically_qualified": true,
+        "frozen_preamble_fix_is_qualified_patch": true,
+        "actual_loaded_wifi_matches_qualified_build": true,
+        "runtime_storage_matches_predeclared_policy": true,
+        "qualified_ram_spool_and_persisted_verifiers": true,
+        "actual_sdformat_log_bound_and_published": true,
+        "ram_spool_qualification_predeclared": true,
+        "matches_predeclared_series_build": true,
+        "actual_spectrum_matches_qualified_build": true,
+        "installed_spectrum_exact_numeric_contract": true,
+        "frozen_siso_fix_is_qualified_patch": true,
+        "predeclared_spectrum_qualification": true,
+        "qualified_route_fix_without_age_or_dwell_relaxation": true,
+        "frozen_radio_identity": true,
+        "frozen_model_lockstep_first_timeout_recovery": true,
+        "unchanged_ray_physics_and_expanded_allocation": true,
+        "one_native_sionna_channel_without_fallback": true,
+        "unchanged_age_guards": true,
+        "measured_pose_age_at_most_100ms": true,
+        "closed_full_mesh_no_clipping": true,
+        "no_expired_or_rejected_rt_channel": true,
+        "closed_primary_journal_ledgers": true,
+        "native_worker_journal_full_verification": true,
+        "all_coordination_journals_closed_and_verified": true,
+        "closed_bounded_payload_writer": true,
+        "payload_trace_matches_closed_writer": true,
+        "source_batches_no_clipping": true,
+        "measurement90s_complete": true,
+        "five_actual_flight_lifecycles": true,
+        "every_route_point_delivered_and_reached": true,
+        "both_mavlink_channels_observed": true,
+        "expected_source_condition": true,
+        "actual_rng_matches_frozen_input": true,
+        "closed_raw_analysis_refined_case": true,
+        "raw_expected_source_condition": true,
+        "raw_controls_and_payload_by_all_uavs": true,
+        "raw_route_identity": true,
+        "raw_native_capture_and_position_journal": true,
+        "analyzed_payload_writer_matches_runtime": true,
+        "analyzed_loaded_wifi_matches_runtime": true,
+        "analyzed_coordination_writer_matches_runtime": true,
+        "analyzed_spool_matches_runtime": true
+      },
+      "maximum_applied_pose_age_ms": 82.244113
+    }
+  ],
+  "hitl": [
+    {
+      "run_id": "acceptance-hitl-serial-20261112-04",
+      "transport": "serial",
+      "verified": true,
+      "checks": {
+        "inputs": true,
+        "scenario": true,
+        "observation_window": true,
+        "native_radio": true,
+        "readonly_exchange": true,
+        "external_endpoints": true,
+        "no_bypass": true
+      },
+      "endpoints": {
+        "control": {
+          "controller_kind": "serial",
+          "endpoint_to_radio_bytes": 4575,
+          "radio_to_endpoint_bytes": 1038,
+          "io_errors": 0,
+          "reconnects": 1,
+          "serial_baud_requested": 115200,
+          "serial_baud_observed": 115200,
+          "serial_baud_observed_reason": "standard_termios_input_output_match"
+        },
+        "payload": {
+          "controller_kind": "serial",
+          "endpoint_to_radio_bytes": 2133,
+          "radio_to_endpoint_bytes": 44,
+          "io_errors": 0,
+          "reconnects": 1,
+          "serial_baud_requested": 115200,
+          "serial_baud_observed": 115200,
+          "serial_baud_observed_reason": "standard_termios_input_output_match"
+        }
+      },
+      "hardware_validation": "not_performed"
+    },
+    {
+      "run_id": "acceptance-hitl-ethernet-20261112-03",
+      "transport": "ethernet",
+      "verified": true,
+      "checks": {
+        "inputs": true,
+        "scenario": true,
+        "observation_window": true,
+        "native_radio": true,
+        "readonly_exchange": true,
+        "external_endpoints": true,
+        "no_bypass": true
+      },
+      "endpoints": {
+        "control": {
+          "controller_kind": "udp",
+          "endpoint_to_radio_bytes": 4575,
+          "radio_to_endpoint_bytes": 1038,
+          "io_errors": 0,
+          "reconnects": 1,
+          "serial_baud_requested": null,
+          "serial_baud_observed": null,
+          "serial_baud_observed_reason": null
+        },
+        "payload": {
+          "controller_kind": "tcp_client",
+          "endpoint_to_radio_bytes": 2133,
+          "radio_to_endpoint_bytes": 44,
+          "io_errors": 0,
+          "reconnects": 1,
+          "serial_baud_requested": null,
+          "serial_baud_observed": null,
+          "serial_baud_observed_reason": null
+        }
+      },
+      "hardware_validation": "not_performed"
+    }
+  ],
+  "python_tests": {
+    "tests_run": 746,
+    "passed": 744,
+    "expected_skips": 2,
+    "returncode": 0,
+    "source_commit": "cb439d1274aefe6f9bad0217ffb79efb8986be68"
+  },
+  "comparison": {
+    "paired_rng_count": 3,
+    "cohort_phase_comparisons": 135,
+    "checks": {
+      "all_refined_case_gates": true,
+      "all_six_closed_valid": true,
+      "analysis_bound_to_closed_run_metadata": true,
+      "coordination_writer_raw_proofs_match": true,
+      "declared_phase_cohorts_and_accounting": true,
+      "exact_predeclared_run_ids": true,
+      "frozen_scene_radio_source_hashes": true,
+      "one_frozen_runtime_and_actual_libraries": true,
+      "paired_inputs_differ_only_source_and_rng": true,
+      "payload_writer_raw_proofs_match": true,
+      "runtime_spool_publication_verified": true,
+      "same_planned_analyzer": true,
+      "three_rng_pairs_complete": true
+    },
+    "pooled_delivery_counts": {
+      "before": {
+        "control": {
+          "baseline": {
+            "offered": 300,
+            "delivered": 275,
+            "fraction": 0.9166666666666666,
+            "all_windows_fully_observed": true
+          },
+          "source": {
+            "offered": 300,
+            "delivered": 276,
+            "fraction": 0.92,
+            "all_windows_fully_observed": true
+          }
+        },
+        "payload": {
+          "baseline": {
+            "offered": 8321,
+            "delivered": 8294,
+            "fraction": 0.996755197692585,
+            "all_windows_fully_observed": true
+          },
+          "source": {
+            "offered": 8306,
+            "delivered": 8288,
+            "fraction": 0.997832891885384,
+            "all_windows_fully_observed": true
+          }
+        }
+      },
+      "source_window": {
+        "control": {
+          "baseline": {
+            "offered": 300,
+            "delivered": 300,
+            "fraction": 1.0,
+            "all_windows_fully_observed": true
+          },
+          "source": {
+            "offered": 300,
+            "delivered": 5,
+            "fraction": 0.016666666666666666,
+            "all_windows_fully_observed": true
+          }
+        },
+        "payload": {
+          "baseline": {
+            "offered": 8344,
+            "delivered": 8330,
+            "fraction": 0.9983221476510067,
+            "all_windows_fully_observed": true
+          },
+          "source": {
+            "offered": 8196,
+            "delivered": 171,
+            "fraction": 0.020863836017569547,
+            "all_windows_fully_observed": true
+          }
+        }
+      },
+      "after": {
+        "control": {
+          "baseline": {
+            "offered": 750,
+            "delivered": 750,
+            "fraction": 1.0,
+            "all_windows_fully_observed": true
+          },
+          "source": {
+            "offered": 750,
+            "delivered": 692,
+            "fraction": 0.9226666666666666,
+            "all_windows_fully_observed": true
+          }
+        },
+        "payload": {
+          "baseline": {
+            "offered": 20810,
+            "delivered": 20810,
+            "fraction": 1.0,
+            "all_windows_fully_observed": true
+          },
+          "source": {
+            "offered": 20813,
+            "delivered": 20772,
+            "fraction": 0.998030077355499,
+            "all_windows_fully_observed": true
+          }
+        }
+      }
+    },
+    "scope": "Pooled offered/delivered counts across three RNG pairs; control is admission, payload is delivery; no pooled delay quantiles or SLA claim."
+  },
+  "independent_series_checks": {
+    "all_six_closed_reviews_passed": true,
+    "one_frozen_code_revision": true,
+    "one_native_binary": true,
+    "matching_profiles_except_source_and_replicate": true,
+    "paired_declared_rng": true
+  },
+  "artifacts": [
+    {
+      "path": "runs/control/refined-publication-20261112/postflight-01/result.json",
+      "bytes": 11868,
+      "sha256": "967e917e7746b7ce23a9bd2e08d7d84df6d207bc581236d9dcd4aca17f12b6d0"
+    },
+    {
+      "path": "runs/control/refined-publication-20261112/postflight-01/evidence.json",
+      "bytes": 3262595,
+      "sha256": "d4fb80b56349d2e6a40bd01956de3b3c1437ef1e1b1fc0e09d23e422143249ec"
+    },
+    {
+      "path": "runs/analysis/refined-series-20261112-k-comparison.json",
+      "bytes": 864730,
+      "sha256": "485c41c62895de7a38637cec42f7addf591f22df53ca67a33d457baa396b78a1"
+    }
+  ],
+  "publication": {
+    "status": "pending",
+    "raw_logs_preserved_on": "PC4",
+    "release_tag": "refined-case-validation-20261112"
+  }
+}

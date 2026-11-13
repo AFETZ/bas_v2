@@ -345,7 +345,11 @@ class RelayExperiment:
         service_args.radio_watchdog_file = args.radio_watchdog_file
         service_args.watchdog_s = args.watchdog_s
         self.emit = Events(service_args.event_log, args.run_id, 0)
-        self.gcs = GCSService(service_args, self.emit)
+        try:
+            self.gcs = GCSService(service_args, self.emit)
+        except BaseException:
+            self.emit.close()
+            raise
         self.reader = PoseReader(args.node_state, self.uav_ids)
         self.observer = GoalObserver(self.emit, args)
         self.tails = {i: EventTail(args.run_dir / f"logs/coordination_uav{i}.jsonl") for i in self.uav_ids}
@@ -524,6 +528,9 @@ class RelayExperiment:
                 except (ProtocolError, BlockingIOError):
                     pass
                 next_retry = time.monotonic() + retry_s
+        diagnostic = self.gcs.selection_diagnostics()
+        self.summary.setdefault("selection_diagnostics", diagnostic)
+        self.emit("mission_wait_timeout", label=label, selection_diagnostics=diagnostic)
         raise ScenarioError(f"timeout: {label}")
 
     def prepare(self):
@@ -770,7 +777,10 @@ class RelayExperiment:
             pose = self.telemetry_pose(i)
             hold = self.urban_holds[i]
             if pose is None:
-                hold.started_s = None
+                # An unavailable host poll cannot advance a route, but is not
+                # an autopilot observation. The next fresh sample determines
+                # continuity: RegionHold still resets on source gaps >0.5 s or
+                # an outside sample. Receive jitter must not invent a gap.
                 continue
             previous = self.urban_last_sample.get(i)
             if previous is not None and pose.sample_ns <= previous.sample_ns:
@@ -917,6 +927,32 @@ class RelayExperiment:
                 armed=local["armed"]))
         return max(observed, key=lambda row: row["stamp_ns"]) if observed else None
 
+    def close_landing_observation(self, reason):
+        """Close the controller observation without inventing radio delivery.
+
+        A final UART heartbeat may still be in the modeled channel when the
+        lifecycle completes. Missing application receipt at this boundary is
+        censored observation, not proof of a dropped RF packet.
+        """
+        closed_ns = time.monotonic_ns()
+        self.summary["landing_observation"] = dict(
+            closed_host_monotonic_ns=closed_ns, reason=reason,
+            policy="ends_with_lifecycle_no_radio_drain")
+        for i in self.uav_ids:
+            heartbeat = self.fresh(i, "HEARTBEAT")
+            confirmed = heartbeat is not None and not bool(
+                heartbeat.base_mode & self.mav.MAV_MODE_FLAG_SAFETY_ARMED)
+            self.summary["uavs"][str(i)].update(
+                landing_radio_confirmation=confirmed,
+                radio_confirmation_status=("observed" if confirmed else
+                    "not_observed_before_observation_end"),
+                radio_observation_end_host_monotonic_ns=closed_ns,
+                radio_heartbeat_producer_host_monotonic_ns=(
+                    self.gcs.latest_message_ns.get(i, {}).get("HEARTBEAT")),
+                radio_heartbeat_received_host_monotonic_ns=(
+                    self.gcs.latest_message_received_ns.get(i, {}).get("HEARTBEAT")))
+        self.emit("landing_observation_closed", **self.summary["landing_observation"])
+
     def land(self):
         self.stopping = True
         self.phase("experiment_landing")  # native fault is explicitly removed for bounded cleanup
@@ -970,8 +1006,10 @@ class RelayExperiment:
                 if any(trace.terminal_reason for trace in self.landing_traces.values()):
                     raise ScenarioError(f"terminal disarm without controlled LAND evidence: {incomplete}")
                 if not incomplete:
+                    self.close_landing_observation("all_lifecycle_observed")
                     return
         incomplete = [i for i, trace in self.landing_traces.items() if not trace.completed]
+        self.close_landing_observation("landing_timeout")
         self.summary["landing_unconfirmed_uavs"] = incomplete
         raise ScenarioError(f"landing/automatic disarm not observed for UAVs {incomplete}")
 
@@ -988,14 +1026,20 @@ class RelayExperiment:
         except StopRequested:
             stopped = True
             self.summary["stop_requested_source_sim_time_s"] = self.source_s
-            self.emit("stop_requested", source_sim_time_s=self.source_s)
+            try:
+                self.emit("stop_requested", source_sim_time_s=self.source_s)
+            except Exception as exc:
+                runtime_errors.append(f'coordination journal {type(exc).__name__}: {exc}')
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
             if isinstance(exc, MeasurementError):
                 self.summary.setdefault("measurement_errors", []).append(error)
             if not isinstance(exc, ScenarioError):
                 runtime_errors.append(error)
-            self.emit("experiment_failed", reason=error)
+            try:
+                self.emit("experiment_failed", reason=error)
+            except Exception as journal_error:
+                runtime_errors.append(f'coordination journal {type(journal_error).__name__}: {journal_error}')
         try:
             self.land()
             landed = True
@@ -1042,14 +1086,29 @@ class RelayExperiment:
         self.summary["criteria"]["all_uav_lifecycle"] = self.summary["criteria"]["five_uav_lifecycle"]
         if "payload_channel" in self.summary:
             self.summary["criteria"]["payload_bidirectional_all_uavs"] = self.summary["payload_channel"].get("measurement_window", {}).get("all_bidirectional_observed", False)
+        try:
+            self.phase("experiment_failed" if error else "experiment_stopped" if stopped else "experiment_done")
+        except Exception as exc:
+            runtime_errors.append(f'final phase {type(exc).__name__}: {exc}')
+        try:
+            self.gcs.close()
+        except Exception as exc:
+            runtime_errors.append(f'coordination close {type(exc).__name__}: {exc}')
+        finally:
+            try:
+                self.emit.close()
+            except Exception as exc:
+                runtime_errors.append(f'coordination journal close {type(exc).__name__}: {exc}')
+            finally:
+                self.csv_handle.close()
+        if runtime_errors:
+            error = (error + '; ' if error else '') + '; '.join(runtime_errors)
+            self.summary['error'] = error
+            self.summary['status'] = 'failed'
         self.summary.update(outcome_fields(self.summary, window_complete=window_complete,
                                           stopped=stopped, runtime_errors=runtime_errors))
-        self.phase("experiment_failed" if error else "experiment_stopped" if stopped else "experiment_done")
         output = self.args.run_dir / "metrics/relay_experiment_summary.json"
         output.write_text(json.dumps(self.summary, indent=2, allow_nan=False) + "\n")
-        self.csv_handle.close()
-        self.gcs.close()
-        self.emit.stream.close()
         if error:
             raise ScenarioError(error)
         return self.summary

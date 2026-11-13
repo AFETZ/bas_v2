@@ -1,0 +1,15 @@
+diff --git a/src/wifi/model/phy-entity.cc b/src/wifi/model/phy-entity.cc
+--- a/src/wifi/model/phy-entity.cc
++++ b/src/wifi/model/phy-entity.cc
+@@ -1022,6 +1022,11 @@ PhyEntity::StartPreambleDetectionPeriod(Ptr<Event> event)
+     m_wifiPhy->m_interference->NotifyRxStart(
+         m_wifiPhy->GetCurrentFrequencyRange()); // We need to notify it now so that it starts
+                                                 // recording events
++    // Failed preambles leave completed callbacks owning their Event/PPDU data.
++    // Release only expired IDs here so a later successful preamble does not
++    // destroy the whole interference interval's history in one realtime burst.
++    std::erase_if(m_endPreambleDetectionEvents,
++                  [](const EventId& id) { return id.IsExpired(); });
+     m_endPreambleDetectionEvents.push_back(
+         Simulator::Schedule(WifiPhy::GetPreambleDetectionDuration(),
+                             &PhyEntity::EndPreambleDetectionPeriod,

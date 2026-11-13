@@ -199,8 +199,75 @@ class UrbanMissionTests(unittest.TestCase):
                 scenario.advance_urban(goals)
         with patch("scripts.product.relay_experiment.time.monotonic_ns", return_value=4*NS):
             scenario.advance_urban(goals)
-        self.assertTrue(all(hold.started_s is None for hold in scenario.urban_holds.values()))
+        self.assertEqual(list(scenario.urban_indices.values()), [0]*5)
         self.assertFalse(any(event == "waypoint_reached_telemetry" for event, _ in events))
+        # Only an actual fresh sample can establish the source-clock gap. A
+        # true gap still restarts the unchanged dwell instead of completing it.
+        radio_sample(scenario, 4*NS, 2.5)
+        with patch("scripts.product.relay_experiment.time.monotonic_ns", return_value=4*NS):
+            scenario.advance_urban(goals)
+        self.assertTrue(all(hold.started_s == 2.5 for hold in scenario.urban_holds.values()))
+        self.assertEqual(list(scenario.urban_indices.values()), [0]*5)
+        for boot in (3., 3.5, 4., 4.5):
+            now = int((boot + 1.5)*NS)
+            radio_sample(scenario, now, boot)
+            with patch("scripts.product.relay_experiment.time.monotonic_ns", return_value=now):
+                scenario.advance_urban(goals)
+        self.assertEqual(list(scenario.urban_indices.values()), [1]*5)
+
+    def test_delayed_fresh_samples_complete_source_dwell_despite_unavailable_host_polls(self):
+        scenario, events = control_fixture()
+        raw = scenario_dict(); raw['mission']['waypoint_dwell_s'] = 3
+        scenario.urban = load(raw)
+        goals = {}
+        with patch("scripts.product.relay_experiment.time.monotonic_ns", return_value=NS):
+            scenario.advance_urban(goals)
+        # Source samples are 400 ms apart and each arrives 150 ms late. Between
+        # arrivals the previous sample is briefly >500 ms old, so no fresh
+        # control input is available. That poll is not a new source observation.
+        for index in range(9):
+            producer = NS + 200_000_000 + index*400_000_000
+            if index:
+                stale_poll = producer - 400_000_000 + 510_000_000
+                with patch("scripts.product.relay_experiment.time.monotonic_ns", return_value=stale_poll):
+                    self.assertIsNone(scenario.telemetry_pose(1))
+                    scenario.advance_urban(goals)
+                self.assertEqual(list(scenario.urban_indices.values()), [0]*5)
+                self.assertFalse(any(event == 'waypoint_reached_telemetry' for event, _ in events))
+            radio_sample(scenario, producer, index*.4)
+            arrived = producer + 150_000_000
+            for uav in range(1, 6):
+                scenario.gcs.latest_message_received_ns[uav]['LOCAL_POSITION_NED'] = arrived
+            with patch("scripts.product.relay_experiment.time.monotonic_ns", return_value=arrived):
+                scenario.advance_urban(goals)
+                scenario.advance_urban(goals)  # duplicated publication adds no dwell
+        self.assertEqual(list(scenario.urban_indices.values()), [1]*5)
+        self.assertTrue(all(reached == [0] for reached in scenario.urban_reached.values()))
+        reached = [fields for event, fields in events if event == 'waypoint_reached_telemetry']
+        self.assertEqual(len(reached), 5)
+        self.assertTrue(all(row['dwell_s'] == 3 and row['time_boot_ms'] == 3200 for row in reached))
+
+    def test_fresh_outside_observation_after_unavailable_poll_restarts_dwell(self):
+        scenario, events = control_fixture()
+        goals = {}
+        for boot in (0., .5, 1., 1.5):
+            now = NS + int(boot*NS)
+            radio_sample(scenario, now, boot)
+            with patch("scripts.product.relay_experiment.time.monotonic_ns", return_value=now):
+                scenario.advance_urban(goals)
+        with patch("scripts.product.relay_experiment.time.monotonic_ns", return_value=3_010_000_000):
+            scenario.advance_urban(goals)  # 510 ms-old previous sample: no advancement
+        outside = {i: (target[0]+10, target[1], target[2])
+                   for i, route in scenario.urban.routes.items() for target in route[:1]}
+        radio_sample(scenario, 3*NS, 2., outside)
+        with patch("scripts.product.relay_experiment.time.monotonic_ns", return_value=3_150_000_000):
+            scenario.advance_urban(goals)
+        self.assertTrue(all(hold.started_s is None for hold in scenario.urban_holds.values()))
+        radio_sample(scenario, 3_500_000_000, 2.5)
+        with patch("scripts.product.relay_experiment.time.monotonic_ns", return_value=3_650_000_000):
+            scenario.advance_urban(goals)
+        self.assertEqual(list(scenario.urban_indices.values()), [0]*5)
+        self.assertTrue(all(hold.started_s == 2.5 for hold in scenario.urban_holds.values()))
 
     def test_autopilot_time_reset_fails_instead_of_reanchoring(self):
         scenario, _ = control_fixture()

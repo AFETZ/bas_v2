@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "profile_id": "bas_service_profiles_v1",
+  "scope": "project_engineering_defaults_not_external_certification",
+  "units": {
+    "useful_bitrate_bps": "useful application bit/s, decimal",
+    "deadline_ms": "ms from unique creation to UART OS-write completion",
+    "timely_delivery_ratio_min": "fraction of unique offered records"
+  },
+  "minimum_observation_s": 60,
+  "rolling_window_s": 60,
+  "rolling_step_s": 1,
+  "minimum_offered_records": 100,
+  "minimum_records_per_stream": 10000,
+  "record_boundary": "application_creation_to_uart_os_write_end",
+  "profiles": {
+    "1kbps": {
+      "useful_bitrate_bps": 1000,
+      "deadline_ms": 250,
+      "timely_delivery_ratio_min": 0.999,
+      "application": "critical_commands_and_telemetry"
+    },
+    "10kbps": {
+      "useful_bitrate_bps": 10000,
+      "deadline_ms": 250,
+      "timely_delivery_ratio_min": 0.999,
+      "application": "structured_critical_reports"
+    },
+    "100kbps": {
+      "useful_bitrate_bps": 100000,
+      "deadline_ms": 500,
+      "timely_delivery_ratio_min": 0.99,
+      "application": "extended_records_and_situation"
+    },
+    "500kbps": {
+      "useful_bitrate_bps": 500000,
+      "deadline_ms": 1000,
+      "timely_delivery_ratio_min": 0.99,
+      "application": "still_image_objects"
+    },
+    "2mbps": {
+      "useful_bitrate_bps": 2000000,
+      "deadline_ms": 1000,
+      "timely_delivery_ratio_min": 0.999,
+      "application": "recorded_video_clips"
+    },
+    "20mbps_plus": {
+      "useful_bitrate_bps": 20000000,
+      "deadline_ms": 5000,
+      "timely_delivery_ratio_min": 0.99,
+      "application": "bulk_data_synchronization"
+    }
+  },
+  "evidence_policy": "Observed limits require complete60s windows. Ten independent replications and10000 records per stream are explicit project engineering planning defaults, not3GPP requirements. Use a fixed ns3seed with different RngRun substreams; repeated(seed,run) execution is not another independent replication. RTsolver seed and fixed inputs/stream assignment are recorded separately. Current syntheticTUNNEL records qualify a transport proxy, not application semantics or physical wire completion.",
+  "sources": [
+    {
+      "url": "https://docs.google.com/document/d/1sgiyis_40Qhkn7w2SwA7hpFQFvdSquJzDOfV0xBpY3s/edit",
+      "basis": "Customer application categories/useful rates only; deadline/reliability values are selected project defaults."
+    },
+    {
+      "url": "https://www.etsi.org/deliver/etsi_ts/122100_122199/122125/19.02.00_60/ts_122125v190200p.pdf",
+      "basis": "3GPP22.125v19.2 tables7.2-1/7.2-2: waypoint C2 and video are distinct service profiles. Preserve project's existing250ms C2; no claim of40ms direct-stick control."
+    },
+    {
+      "url": "https://mavlink.io/en/services/command.html",
+      "basis": "Command acknowledgement and retries are separate from execution."
+    },
+    {
+      "url": "https://gitlab.com/nsnam/ns-3-dev/-/blob/d2add90b452d600cfb4859baed8e9ea633519447/doc/manual/source/random-variables.rst",
+      "basis": "Pinnedns3.48 manual seeding/independent-replications: prefer fixedseed and different run-number substreams. The selected10-replication/10000-record evidence budget is project planning, not a standard threshold."
+    }
+  ],
+  "minimum_independent_replications": 10
+}

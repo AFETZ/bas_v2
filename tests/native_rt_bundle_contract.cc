@@ -167,8 +167,56 @@ class FixtureTransport:
         ~Fixture(){if(pool){pool->Close();pool.reset();}cache->Dispose();for(auto& source:sourceCaches)source->Dispose();Simulator::Destroy();}
     };
   public:
+    static py::dict MeasurePickup(const std::filesystem::path& prefix)
+    {
+        py::list samples;
+        for(size_t repeat=0;repeat<9;++repeat)
+        {
+            Fixture f(prefix.string()+"-pickup-"+std::to_string(repeat),1);
+            f.required=false;f.Configure(3);
+            // Exercise the actual Python empty-result queue/worker scan.
+            // Synthetic pending state supplies no result, process or GPU.
+            py::dict scope;
+            py::exec(R"(
+import queue,time,types
+from scripts.product.native_rt_workers import NativeRtWorkerPool
+native=NativeRtWorkerPool.__new__(NativeRtWorkerPool)
+native._messages=queue.Queue()
+native._workers={i:types.SimpleNamespace(pending=({'request_id':1} if i==0 else None),
+    failed=None,submitted_ns=time.monotonic_ns()) for i in range(3)}
+native.job_timeout_ns=10**12
+native.stage_trace_enabled=True
+)",scope);
+            f.pool->m_pool.attr("poll")=scope["native"].attr("poll");
+            Simulator::ScheduleNow(&NativeRtPool::Poll,f.pool.get());
+            Simulator::Stop(Seconds(1));
+            const auto begin=NativeRtPool::ConsumerTick();
+            Simulator::Run();
+            const auto end=NativeRtPool::ConsumerTick();
+            Require(f.pool->m_pollCalls>0,"Pickup probe executed no production callbacks");
+            samples.append(py::dict("repeat"_a=repeat,"model_duration_ns"_a=1000000000,
+                "effective_poll_period_ns"_a=NativeRtPrefetch::kPollPeriodNs,
+                "poll_calls"_a=f.pool->m_pollCalls,"wall_ns"_a=end.first-begin.first,
+                "main_thread_cpu_ns"_a=end.second-begin.second));
+        }
+        return py::dict("samples"_a=samples,
+            "scope"_a="CPU component overhead for real native Poll and Python empty-result queue with three synthetic worker states; fixture transport only, no live IPC/RT/physics/flight or real-time performance qualification");
+    }
     static size_t Run(const std::filesystem::path& prefix)
     {
+        {
+            // A completion may be ready with less than one old 1ms pickup
+            // period left before an independent callback needs the frame.
+            // Model-time scheduling only: no wall-clock or RT SLA is asserted.
+            Fixture f(prefix.string()+"-submillisecond-deadline",0);f.Configure(1);
+            Simulator::Schedule(MicroSeconds(98250),[&]{f.Reply(0);});
+            Simulator::Schedule(MicroSeconds(98750),[&]{
+                Require(f.pool->m_committedPoseFrames==1,
+                    "Ready cohort remained queued past a submillisecond independent deadline");
+            });
+            Simulator::ScheduleNow(&NativeRtPool::Poll,f.pool.get());
+            Simulator::Stop(MicroSeconds(98751));Simulator::Run();
+        }
         {
             // A decoded candidate is ready between two old 5ms poll ticks.
             // The independent pose deadline was registered before the pool's
@@ -269,12 +317,14 @@ class FixtureTransport:
 } // namespace bas
 int main(int argc,char** argv)
 {
-    if(argc!=2||std::filesystem::exists(argv[1]))throw std::runtime_error("Expected a new result.json path");
-    py::scoped_interpreter python;std::string error;size_t checks=0;
-    try{checks=bas::NativeRtBundleContract::Run(std::filesystem::path(argv[1]).replace_extension());}
+    if((argc!=2&&argc!=3)||std::filesystem::exists(argv[1])||(argc==3&&std::string(argv[2])!="--measure-pickup"))throw std::runtime_error("Expected a new result.json path");
+    py::scoped_interpreter python;std::string error;size_t checks=0;py::object pickup=py::none();
+    try{if(argc==3)pickup=bas::NativeRtBundleContract::MeasurePickup(std::filesystem::path(argv[1]).replace_extension());
+        else checks=bas::NativeRtBundleContract::Run(std::filesystem::path(argv[1]).replace_extension());}
     catch(const std::exception& failure){error=failure.what();Simulator::Destroy();}
     const auto result=py::dict("schema"_a=1,"passed"_a=error.empty(),"checks"_a=checks,"error"_a=error,
-        "scope"_a="CPU production bundle decoder/cache/quiet-publish-notify boundary with fixture transport; no RT or hardware qualification");
+        "scope"_a="CPU production bundle decoder/cache/quiet-publish-notify boundary with fixture transport; no RT or hardware qualification",
+        "pickup_probe"_a=pickup);
     const auto encoded=py::module_::import("json").attr("dumps")(result,"indent"_a=2).cast<std::string>();
     std::ofstream(argv[1])<<encoded<<'\n';std::cout<<encoded<<'\n';return error.empty()?0:1;
 }

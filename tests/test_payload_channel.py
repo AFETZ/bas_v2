@@ -5,6 +5,10 @@ from pathlib import Path
 import socket
 import tempfile
 import time
+import threading
+import builtins
+import io
+import hashlib
 import unittest
 from unittest.mock import patch
 from collections import deque
@@ -183,6 +187,143 @@ class PayloadChannelTests(unittest.TestCase):
             metrics=self.helper().close()
         self.assertEqual(metrics['application_lineage']['status'],'not_evaluated_logging_disabled')
         self.assertFalse((self.folder/'payload/logs/scenario_events.jsonl').exists())
+        import bas
+        self.assertEqual(bas.payload_journal_verification(self.folder),
+                         dict(status='not_requested_legacy', passed=None))
+
+    def test_slow_payload_offer_file_write_cannot_stall_later_uav_slots(self):
+        """A real 75ms file-write pause reproduces the old four late UAV offers."""
+        entered, finished = threading.Event(), threading.Event()
+        path = self.folder/'payload/logs/scenario_events.jsonl'
+        original_builtin, original_io = builtins.open, io.open
+        class SlowOfferStream:
+            def __init__(self, stream):self.stream=stream
+            def write(self, value):
+                row=json.loads(value)
+                if (row.get('event')=='payload_frame_offered' and row.get('uav_id')==1
+                        and row.get('application_load',{}).get('sequence')==0):
+                    entered.set()
+                    time.sleep(.075)
+                    finished.set()
+                return self.stream.write(value)
+            def __enter__(self):return self
+            def __exit__(self,*args):return self.stream.__exit__(*args)
+            def __getattr__(self,name):return getattr(self.stream,name)
+        def opener(original):
+            def opened(file,*args,**kwargs):
+                stream=original(file,*args,**kwargs)
+                return SlowOfferStream(stream) if isinstance(file,(str,os.PathLike)) and Path(file)==path else stream
+            return opened
+        peers=[]
+        for system_id in range(1,6):
+            peer=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
+            self.addCleanup(peer.close)
+            peer.bind(('127.0.0.1',14700+system_id));peer.settimeout(1)
+            peers.append(peer)
+        with patch('builtins.open',opener(original_builtin)), patch('io.open',opener(original_io)):
+            helper=self.helper((1,2,3,4,5),event_logging='batched_trace',load={'class':'10kbps'})
+            start=time.monotonic_ns();end=start+51_200_000
+            helper.start_measurement(start,end)
+            helper._pump_load(start)
+            produced=time.monotonic_ns()
+            self.assertTrue(entered.wait(1),'actual offered-record file write was not reached')
+            self.assertTrue(all(s['outside_slot']==0 and s['created']==s['sent']==1
+                                for s in helper.load_counters.values()),helper.load_counters)
+            self.assertFalse(finished.is_set(),'producer waited for the offered-record disk write')
+            self.assertLess(produced,end)
+            for system_id,peer in enumerate(peers,1):
+                receiver=Reassembler(channel='payload',uav_id=system_id,direction='gcs_to_uart')
+                records=receiver.ingest(peer.recvfrom(65535)[0])
+                message=helper.mav.MAVLink(None).parse_buffer(records[0])[0]
+                self.assertEqual((message.get_type(),message.payload_length),('TUNNEL',64))
+            self.assertTrue(finished.wait(1))
+            result=helper.close()
+        rows=[json.loads(line) for line in path.read_text().splitlines()]
+        offers=[row for row in rows if row.get('event')=='payload_frame_offered']
+        self.assertEqual([row['uav_id'] for row in offers],[1,2,3,4,5])
+        self.assertTrue(all(start<=row['created_host_monotonic_ns']<end for row in offers))
+        self.assertTrue(result['offered_load']['generator_eligible'])
+        audit=result['application_lineage']['writer']
+        self.assertEqual(audit['accepted'],audit['written'])
+        self.assertEqual(audit['written'],len(rows))
+        self.assertEqual(audit['sha256'],hashlib.sha256(path.read_bytes()).hexdigest())
+        self.assertGreaterEqual(audit['maximum_write_wall_ns'],70_000_000)
+        self.assertTrue(audit['closed'] and audit['drained'])
+        self.assertFalse(audit['listener_alive'])
+
+    def test_payload_file_failure_stops_pump_and_preserves_closed_failure_audit(self):
+        helper=self.helper(event_logging='batched_trace')
+        writer=helper._trace_writer
+        entered=threading.Event()
+        original=writer._file_handler.stream
+        class FailedStream:
+            def write(self,value):
+                entered.set()
+                raise OSError('injected payload trace write failure')
+            def __getattr__(self,name):return getattr(original,name)
+        writer._file_handler.stream=FailedStream()
+        helper._lineage_event('failure_probe')
+        self.assertTrue(entered.wait(1))
+        deadline=time.monotonic()+1
+        while writer.snapshot()['first_exception'] is None and time.monotonic()<deadline:time.sleep(.001)
+        with self.assertRaisesRegex(RuntimeError,'result log failed'):helper.pump()
+        with self.assertRaises(RuntimeError):helper.close()
+        saved=json.loads((self.folder/'metrics/payload_channel.json').read_text())
+        audit=saved['application_lineage']['writer']
+        self.assertEqual(saved['application_lineage']['status'],'failed')
+        self.assertIn('injected payload trace write failure',saved['close_error'])
+        self.assertGreater(audit['accepted'],audit['written'])
+        self.assertFalse(audit['listener_alive'])
+        import bas
+        self.assertFalse(bas.payload_journal_verification(self.folder)['passed'])
+
+    def test_full_payload_trace_queue_fails_even_after_accepted_records_drain(self):
+        helper=self.helper(event_logging='batched_trace')
+        writer=helper._trace_writer
+        entered,release=threading.Event(),threading.Event()
+        self.addCleanup(release.set)
+        original=writer._file_handler.stream
+        class BlockedStream:
+            def write(self,value):
+                entered.set()
+                if not release.wait(2):raise OSError('test writer was not released')
+                return original.write(value)
+            def __getattr__(self,name):return getattr(original,name)
+        writer._file_handler.stream=BlockedStream()
+        helper._lineage_event('blocked_writer_probe')
+        self.assertTrue(entered.wait(1))
+        with self.assertRaisesRegex(RuntimeError,'not accepted'):
+            for sequence in range(writer.capacity+1):
+                helper._lineage_event('queue_capacity_probe',sequence=sequence)
+        self.assertEqual(writer.snapshot()['first_exception']['stage'],'queue_full')
+        release.set()
+        with self.assertRaises(RuntimeError):helper.close()
+        saved=json.loads((self.folder/'metrics/payload_channel.json').read_text())
+        audit=saved['application_lineage']['writer']
+        self.assertEqual(audit['accepted'],audit['written'])
+        self.assertEqual(audit['rejected'],1)
+        self.assertFalse(audit['listener_alive'])
+        self.assertEqual(saved['application_lineage']['status'],'failed')
+        import bas
+        self.assertFalse(bas.payload_journal_verification(self.folder)['passed'])
+
+    def test_logger_drain_cannot_turn_early_producer_close_into_completed_window(self):
+        with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as peer:
+            peer.bind(('127.0.0.1',14701))
+            helper=self.helper(event_logging='batched_trace',load={'class':'10kbps'})
+            start=time.monotonic_ns();end=start+40_000_000
+            helper.start_measurement(start,end);helper._pump_load(start)
+            close=helper._trace_writer.close
+            def slow_close():
+                time.sleep(.075)
+                return close()
+            with patch.object(helper._trace_writer,'close',slow_close):metrics=helper.close()
+        self.assertLess(helper.closed_ns,end)
+        self.assertGreater(time.monotonic_ns(),end)
+        self.assertFalse(metrics['offered_load']['generator_eligible'])
+        rows=[json.loads(line) for line in helper.harness.events_path.read_text().splitlines()]
+        ledger=next(row['offered_load'] for row in rows if row['event']=='payload_load_closed')
+        self.assertEqual(ledger,metrics['offered_load'])
 
     def test_software_udp_uplink_lineage_survives_reorder_duplicate_corrupt_and_missing_tail(self):
         """Development E2E only: real UDP/shared framing/parser; no RF or UART hardware."""
@@ -431,6 +572,7 @@ class PayloadOfferedLoadTests(unittest.TestCase):
         self.assertEqual(helper.load_next, 562500000)
         self.assertEqual(helper.load_counters[1]['skipped'], 562500000)
         self.assertEqual(helper.load_counters[1]['created'], 0)
+        helper.close()  # Inspect only the explicitly drained asynchronous trace.
         rows = [json.loads(line) for line in helper.harness.events_path.read_text(encoding='utf-8').splitlines()]
         skipped = [row for row in rows if row['event']=='payload_load_slots_skipped']
         self.assertEqual(len(skipped), 1)

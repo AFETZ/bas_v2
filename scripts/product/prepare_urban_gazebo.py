@@ -24,6 +24,19 @@ if str(ROOT) not in sys.path:
 from scripts.product.urban_mission import UrbanScenario
 
 
+def validate_native_wifi_modes(radio):
+    # Pinned ns-3 ConstantRateWifiManager derives HT NSS as 1 + MCS//8.
+    # This reference profile installs one antenna and one TX/RX spatial stream.
+    # Reject incompatible/unknown mode names before starting any runtime.
+    modes = {
+        "data_mode": tuple(f"HtMcs{i}" for i in range(8)),
+        "control_mode": tuple(f"ErpOfdmRate{i}Mbps" for i in (6, 9, 12, 18, 24, 36, 48, 54)),
+    }
+    for field, allowed in modes.items():
+        if not isinstance(radio[field], str) or radio[field] not in allowed:
+            raise ValueError(f"{field} requires a supported single-stream 20-MHz mode: {', '.join(allowed)}")
+
+
 def read_rt_radio_profile(path: Path, scene: dict):
     """Check the explicit native Wi-Fi/Sionna profile before launching any simulator."""
     class UniqueSafeLoader(yaml.SafeLoader):
@@ -86,6 +99,7 @@ def read_rt_radio_profile(path: Path, scene: dict):
                             "calibration": "uncalibrated_standard_reference"}.items():
         if radio[field] != selected:
             raise ValueError(f"current native reference profile requires {field}={selected}")
+    validate_native_wifi_modes(radio)
     channel = radio["channel_number"]
     if (type(channel) is not int or not 1 <= channel <= 13
             or type(radio["channel_width_mhz"]) is not int or radio["channel_width_mhz"] != 20):
@@ -194,23 +208,26 @@ def prepare(config: Path, output: Path, uav_count: int | None = None, *,
     output.relative_to(ROOT.resolve())
     if output == scenario.terrain_bundle_path:
         raise ValueError("run output cannot overwrite its input terrain bundle")
-    if propagation_profile not in ("geometry_logdistance", "sionna"):
-        raise ValueError("urban propagation must explicitly be geometry_logdistance or sionna")
-    if scenario.terrain_bundle_path is not None and propagation_profile != "sionna":
+    if propagation_profile not in ("geometry_logdistance", "sionna", "hybrid"):
+        raise ValueError("urban propagation must explicitly be geometry_logdistance, sionna or hybrid")
+    if scenario.terrain_bundle_path is not None and propagation_profile not in ("sionna", "hybrid"):
         raise ValueError("terrain_bundle requires Sionna; flat geometry propagation cannot represent terrain")
-    if propagation_profile == "sionna":
+    if propagation_profile in ("sionna", "hybrid"):
         if radio_config is None or ground_material is None or building_material is None or thickness_m is None:
             raise ValueError("Sionna requires an explicit radio config and ITU ground/building materials/thickness")
         radio_config = radio_config.resolve()
         radio_config.relative_to(ROOT.resolve())
         radio_profile = read_rt_radio_profile(radio_config, data)
+        if propagation_profile == "hybrid":
+            from scripts.product.hybrid_policy import validate_radio_profile
+            validate_radio_profile(radio_profile)
         if scenario.terrain_manifest is not None:
             materials = scenario.terrain_manifest["materials"]
             if (ground_material != materials["ground_material"] or building_material != materials["building_material"]
                     or thickness_m != materials["thickness_m"]):
                 raise ValueError("RT profile materials/thickness must match the shared terrain bundle")
     elif any(value is not None for value in (radio_config, ground_material, building_material, thickness_m)):
-        raise ValueError("explicit RT radio/material arguments require propagation_profile=sionna")
+        raise ValueError("explicit RT radio/material arguments require propagation_profile=sionna or hybrid")
     buildings = (data["buildings"] if scenario.terrain_manifest is None else
                  [dict(id=name, min=building["bounds_m"][0], max=building["bounds_m"][1])
                   for name, building in scenario.terrain_manifest["building_bounds"].items()])
@@ -228,6 +245,8 @@ def prepare(config: Path, output: Path, uav_count: int | None = None, *,
                     raise ValueError(f"route UAV{uid} intersects building safety envelope {b['id']}")
     output.mkdir(parents=True, exist_ok=True)
     resolved = copy.deepcopy(data)
+    settings = scenario.execution_settings()
+    resolved["physics"] = {"max_step_size_s": settings["physics"]["max_step_size_s"]}
     if scenario.terrain_bundle_path is not None:
         frozen_bundle = output / "terrain"
         frozen_bundle.mkdir(exist_ok=False)
@@ -247,8 +266,9 @@ def prepare(config: Path, output: Path, uav_count: int | None = None, *,
     UrbanScenario.load(mission_scene, root=ROOT)
     sdf = ET.Element("sdf", version="1.9")
     world = sub(sdf, "world", name="map")
-    physics = sub(world, "physics", name="1ms", type="ode")
-    for tag, value in (("max_step_size", .001), ("real_time_factor", 1), ("real_time_update_rate", 1000)):
+    step = settings["physics"]["max_step_size_s"]
+    physics = sub(world, "physics", name="1ms" if step == .001 else "configured_step", type="ode")
+    for tag, value in (("max_step_size", step), ("real_time_factor", 1), ("real_time_update_rate", round(1 / step))):
         sub(physics, tag, value)
     systems = {"physics": "Physics", "user-commands": "UserCommands", "scene-broadcaster": "SceneBroadcaster",
                "contact": "Contact", "imu": "Imu", "air-pressure": "AirPressure", "air-speed": "AirSpeed",
@@ -290,6 +310,15 @@ def prepare(config: Path, output: Path, uav_count: int | None = None, *,
     defaults = output / "urban_sitl.parm"
     defaults.write_text((ROOT / "network/config/town01_sitl.parm").read_text()
                         + f"\n# Pinned ArduCopter4.8 native waypoint speed, m/s\nWP_SPD {speed:.9g}\n")
+    if settings["failsafe"]["configured"]:
+        with defaults.open("a") as stream:
+            stream.write("\n# Explicit scene GCS failsafe; pinned ArduCopter4.8 parameter names\n")
+            for name, value in settings["failsafe"]["parameter_overrides"].items():
+                stream.write(f"{name} {value:.9g}\n")
+    settings["generated_inputs"] = {
+        "world_sdf_sha256": hashlib.sha256((output / "world.sdf").read_bytes()).hexdigest(),
+        "sitl_defaults_sha256": hashlib.sha256(defaults.read_bytes()).hexdigest()}
+    (output / "runtime-settings.json").write_text(json.dumps(settings, indent=2, allow_nan=False) + "\n")
     launch["base_simulation"]["sitl_defaults"] = defaults.resolve().relative_to(ROOT).as_posix()
     launch["base_simulation"]["sitl_home"] = ",".join(str(frame[key]) for key in
             ("origin_latitude_deg", "origin_longitude_deg", "origin_elevation_m", "spherical_heading_deg"))
@@ -299,7 +328,7 @@ def prepare(config: Path, output: Path, uav_count: int | None = None, *,
                                       world_file=(output / "world.sdf").resolve().relative_to(ROOT).as_posix(), scene_xml="not_used_no_rt.xml",
                                       camera_fragment="network/ns3/runtime_live_cameras.sdf.inc",
                                       gazebo_models=["urban_ground"] + ["urban_building_" + b["id"] for b in buildings])
-    if propagation_profile == "sionna":
+    if propagation_profile in ("sionna", "hybrid"):
         if scenario.terrain_bundle_path is None:
             from scripts.product.prepare_sionna_scene import prepare as prepare_rt
             scene = prepare_rt(config, output / "world.sdf", output / "rt", ground_material=ground_material,
@@ -337,7 +366,7 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--output", type=Path, default=ROOT / ".external/urban_ns3")
     parser.add_argument("--uav-count", type=int, choices=range(1, 6), help="expected exact scene roster size")
-    parser.add_argument("--propagation-profile", choices=("geometry_logdistance", "sionna"), default="geometry_logdistance")
+    parser.add_argument("--propagation-profile", choices=("geometry_logdistance", "sionna", "hybrid"), default="geometry_logdistance")
     parser.add_argument("--radio-config", type=Path)
     parser.add_argument("--ground-material")
     parser.add_argument("--building-material")

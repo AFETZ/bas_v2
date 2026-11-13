@@ -9,7 +9,7 @@ processes; CUDA threads stay inside it. No process-group or unrelated PID kills.
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import copy
 import gc
 import hashlib
@@ -28,6 +28,18 @@ from network.jsonl import AsyncJsonlWriter as NativeResultLog
 
 
 VERSIONS = {'sionna_rt': '1.2.0', 'mitsuba': '3.7.1', 'drjit': '1.2.0'}
+JOB_STAGES = ('job_received', 'preparation_done', 'solver_call_start', 'solver_call_end',
+              'result_send_start', 'result_send_end')
+STAGE_RECORD_LIMIT = 64
+
+
+def job_fingerprints(job):
+    """Canonical exact submitted job and geometry identities; no CIR serialization."""
+    encode = lambda value: json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False).encode('utf-8')
+    return dict(job_sha256=hashlib.sha256(encode(job)).hexdigest(),
+                geometry_sha256=hashlib.sha256(encode(job['poses'])).hexdigest())
+
+
 PATH_STORAGE_SOURCE_HASHES = {
     'paths_source_sha256': '8526de9e478100d87c4f08969ade5f8e32f8499d13c21f5c310fdfd1e4b54765',
     'path_solver_source_sha256': '0b32228bdde831079cfa4478d092d4634e2e994ecae1b5cbd843404bb2d2afe2',
@@ -282,6 +294,9 @@ class _Worker:
     # transport evidence only; correlation/producer validation stays in poll().
     last_transport_receive: dict | None = None
     last_path_storage_stats: dict | None = None
+    stage_requests: dict = field(default_factory=dict)
+    stage_records: deque = field(default_factory=lambda: deque(maxlen=STAGE_RECORD_LIMIT))
+    stage_records_overwritten: int = 0
 
 
 class _GcObserver:
@@ -372,6 +387,10 @@ class NativeRtWorkerPool:
         self.applied_config = None if allow_development_stub else validate_config(config_value)
         self.size, self.startup_timeout_s, self.job_timeout_ns = workers, startup_timeout_s, round(job_timeout_s * 1e9)
         self.allow_development_stub = allow_development_stub
+        stage_setting = os.environ.get('BAS_NATIVE_RT_STAGE_TRACE', '0')
+        if stage_setting not in ('0', '1'):
+            raise ValueError('BAS_NATIVE_RT_STAGE_TRACE must be 0 or 1')
+        self.stage_trace_enabled = stage_setting == '1'
         self._messages = queue.Queue(maxsize=2 * workers)
         self._closing = threading.Event()
         self._workers, self._last_request_id = {}, 0
@@ -387,6 +406,29 @@ class NativeRtWorkerPool:
             except queue.Full:
                 pass
 
+    def _record_stage(self, worker, message, received_ns):
+        fields = {'schema', 'kind', 'worker_id', 'request_id', 'stage', 'host_monotonic_ns',
+                  'thread_cpu_ns', 'job_sha256', 'geometry_sha256'}
+        identity = message.get('request_id') if type(message) is dict else None
+        request = worker.stage_requests.get(identity) if type(identity) is int else None
+        if (not self.stage_trace_enabled or type(message) is not dict or set(message) != fields
+                or message['schema'] != 1 or message['kind'] != 'progress'
+                or message['worker_id'] != worker.identity or request is None):
+            raise ValueError('uncorrelated or invalid worker stage progress')
+        stages = request['stages']
+        if (len(stages) >= len(JOB_STAGES) or message['stage'] != JOB_STAGES[len(stages)]
+                or any(type(message[key]) is not int or message[key] < 0
+                       for key in ('host_monotonic_ns', 'thread_cpu_ns'))
+                or not request['submitted_host_monotonic_ns'] <= message['host_monotonic_ns'] <= received_ns
+                or any(message[key] != request[key] for key in ('job_sha256', 'geometry_sha256'))
+                or stages and any(message[key] < stages[-1][key]
+                                  for key in ('host_monotonic_ns', 'thread_cpu_ns'))):
+            raise ValueError('worker stage ordering/clock/job fingerprint mismatch')
+        record = dict(message, receiver_host_monotonic_ns=received_ns)
+        stages.append(record)
+        worker.stage_records_overwritten += len(worker.stage_records) == worker.stage_records.maxlen
+        worker.stage_records.append(record)
+
     def _receive(self, worker):
         try:
             connection = worker.listener.accept()
@@ -399,7 +441,12 @@ class NativeRtWorkerPool:
                 worker.last_transport_receive = dict(host_monotonic_ns=received_ns,
                     kind=message.get('kind') if type(message) is dict else None,
                     request_id=message.get('request_id') if type(message) is dict else None)
-                self._emit(worker.identity, message, received_ns)
+                if type(message) is dict and message.get('kind') == 'progress':
+                    # Progress never fills the completed-result queue. The
+                    # existing receiver alone updates bounded diagnostic state.
+                    self._record_stage(worker, message, received_ns)
+                else:
+                    self._emit(worker.identity, message, received_ns)
         except Exception as error:
             self._emit(worker.identity, {'kind': 'transport_error', 'error': f'{type(error).__name__}: {error}'})
 
@@ -458,6 +505,8 @@ class NativeRtWorkerPool:
                         self.applied_config['radio']['max_number_of_paths'])
                     if message['path_storage']['attempted_calls'] != 0:
                         raise RuntimeError('worker readiness must precede its first solver request')
+                if message.get('job_stage_trace_enabled', False) is not self.stage_trace_enabled:
+                    raise RuntimeError('worker stage tracing differs from the resolved runtime setting')
                 if worker.ready is not None:
                     raise RuntimeError('duplicate worker readiness')
                 worker.ready = dict(message, receiver_enqueued_host_monotonic_ns=received_ns)
@@ -480,6 +529,13 @@ class NativeRtWorkerPool:
         frozen = copy.deepcopy(job)
         self._last_request_id = frozen['request_id']
         worker.pending, worker.submitted_ns = frozen, time.monotonic_ns()
+        if self.stage_trace_enabled:
+            worker.stage_requests[frozen['request_id']] = dict(request_id=frozen['request_id'],
+                submitted_host_monotonic_ns=worker.submitted_ns, **job_fingerprints(frozen), stages=[])
+            # One current plus one just-completed request accepts result_send_end
+            # even if the main thread has already submitted the next request.
+            while len(worker.stage_requests)>2:
+                worker.stage_requests.pop(next(iter(worker.stage_requests)))
         try:
             # Validated fixed-size 2..7-pose messages and one in-flight job bound
             # the write; no result read or result wait occurs on this path.
@@ -561,16 +617,27 @@ class NativeRtWorkerPool:
                     'request_id': worker.pending['request_id'], 'error': worker.failed,
                     'received_host_monotonic_ns': now})
                 worker.pending = None
+        if self.stage_trace_enabled:
+            for message in completed:
+                worker = self._workers[message['worker_id']]
+                request = worker.stage_requests.get(message.get('request_id'))
+                if request is not None:
+                    message['job_stage_trace'] = copy.deepcopy(request)
         return completed
 
     def snapshot(self):
         return {'schema': 1, 'scope': 'development_stub' if self.allow_development_stub else 'native_rt_worker_pool',
             'closed': self._closing.is_set(), 'socket_dir': str(self.socket_dir) if self.socket_dir else None,
             'last_request_id': self._last_request_id,
+            'job_stage_tracing': dict(enabled=self.stage_trace_enabled, record_limit_per_worker=STAGE_RECORD_LIMIT,
+                retained_requests_per_worker=2, transport='existing_AF_UNIX;receiver_threads;not_result_queue',
+                scope='child_host_and_thread_cpu_API_boundaries;SDK_refresh_includes_scene_solver_extraction'),
             'garbage_collection': self._gc_observer.snapshot(),
             'workers': [{'worker_id': w.identity, 'pid': w.process.pid, 'ready': w.ready,
                 'busy': w.pending is not None, 'request_id': w.pending['request_id'] if w.pending else None,
                 'failed': w.failed, 'completed': w.completed,
+                'job_stage_trace': dict(requests=copy.deepcopy(list(w.stage_requests.values())),
+                    records=copy.deepcopy(list(w.stage_records)), overwritten_records=w.stage_records_overwritten),
                 'full_mesh_completed_jobs': w.full_mesh_completed_jobs,
                 'last_full_mesh_stats': copy.deepcopy(w.last_full_mesh_stats),
                 'emitter_batch_completed_jobs': w.emitter_batch_completed_jobs,

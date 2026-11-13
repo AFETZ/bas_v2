@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Offline Sionna RT1.2 RF snapshots, not MAC/packet/service availability maps.
+"""Offline Sionna RT1.2 RF snapshots and separately audited service observations.
 
 Uses the existing prepared scene, radio profile and resolved native emitters.
 No propagation or renderer is implemented here. Outputs linear SI arrays and
 explicit sampling masks; a Monte Carlo zero does not prove absence of a path.
+Service overlays re-audit actual offered packets; RF values never qualify a class.
 """
 from __future__ import annotations
 
@@ -125,7 +126,7 @@ def validate(config, root=ROOT):
     profile = read_rt_radio_profile(paths['radio_config'], mission.raw)
     if mission.terrain_bundle_path is not None and paths['scene_xml'] != mission.terrain_bundle_path / 'scene.xml':
         raise ValueError('map and mission must use the same terrain scene')
-    manifest_path = paths['scene_xml'].parent / 'scene-manifest.json'
+    manifest_path = inside(root, str(paths['scene_xml'].parent / 'scene-manifest.json'))
     manifest = load_json(manifest_path)
     if manifest.get('coordinate_frame') != 'ENU' or manifest.get('units') != 'm':
         raise ValueError('scene requires the prepared ENU/metre manifest')
@@ -443,16 +444,316 @@ def execute(config, output, *, root=ROOT, variant='cuda_ad_mono_polarized', plot
     return metadata
 
 
+SERVICE_STATUS = {"not_measured": 0, "invalid": 1, "insufficient_evidence": 2,
+                  "measured_fail": 3, "measured_pass": 4}
+
+
+def _stream_sha(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _constant_source_state(segment, start_s, stop_s, expected):
+    """Check the already-resolved schedule; never average a pulsed source."""
+    tick = lambda v: math.floor(v * 1e9 + .5)
+    a, b, first, last, period = map(tick, (start_s, stop_s, segment["start_s"],
+                                         segment["stop_s"], segment["period_s"]))
+    width = math.floor(period * segment["duty_cycle"] + .5)
+    if b <= a or width <= 0:
+        return not expected
+    if expected:
+        if not first <= a < b <= last:
+            return False
+        return width >= period or (a-first)//period == (b-1-first)//period and (b-1-first)%period < width
+    low, high = max(a, first), min(b, last)
+    if high <= low:
+        return True
+    cycle = max(0, (low-first)//period)
+    on = first + cycle*period
+    if on+width <= low:
+        on += period
+    return on >= high
+
+
+def _service_run(run_id, root):
+    """Re-audit raw payload identity/deadlines and the recorded native clock."""
+    from scripts.product.analyze_relay_experiment import analyze_payload_lineage, runtime_timing_evidence
+    from scripts.product.summarize_native_radio_five_uav import iter_native_events
+    if not isinstance(run_id, str) or not run_id or any(c not in
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for c in run_id):
+        raise ValueError("service evidence requires a simple immutable run ID")
+    native = root / "runs/native-radio-realtime" / run_id
+    meta = load_json(root / "runs/control" / run_id / "run.json")
+    mission = load_json(native / "metrics/relay_experiment_summary.json")
+    stats = load_json(native / "metrics/native_radio_stats.json")
+    if (meta.get("run_id") != run_id or meta.get("measurement_validity") != "valid"
+            or meta.get("runtime_status") != "completed" or meta.get("source_dirty") is not False
+            or meta.get("runtime_verification_errors") != []):
+        raise ValueError("run is not an unchanged verified valid runtime")
+    for label in ("node_state_journal_verification", "native_rt_worker_verification"):
+        if meta.get(label, {}).get("passed") is not True:
+            raise ValueError("closed native/pose evidence missing: " + label)
+    start, end = mission.get("measurement_start_host_monotonic_ns"), mission.get("measurement_end_host_monotonic_ns")
+    if type(start) is not int or type(end) is not int or not start < end:
+        raise ValueError("exact recorded host observation window missing")
+    pose, lag = {}, []
+    capture = native / "logs/native_radio_events.csv"
+    for row in iter_native_events(capture, event_names={"live_pose", "realtime_lag"}):
+        if row["event"] == "realtime_lag":
+            lag.append({key: row[key] for key in ("event", "wall_monotonic_ns", "time_s", "value")})
+        elif start <= row["wall_monotonic_ns"] < end:
+            node = row["node"]
+            stamp = row["wall_monotonic_ns"]
+            xyz = np.array([row["x"], row["y"], row["z"]], dtype=float)
+            if not np.isfinite(xyz).all() or row["value"] is None or not 0 <= row["value"] <= 100:
+                raise ValueError("unqualified applied native pose age/coordinates")
+            item = pose.setdefault(node, dict(first_ns=stamp, last_ns=stamp, samples=0,
+                gap_max_ns=stamp-start, minimum=xyz.copy(), maximum=xyz.copy(),
+                native_min_s=row["time_s"], native_max_s=row["time_s"]))
+            if item["samples"] and stamp <= item["last_ns"]:
+                raise ValueError("applied pose host clock is not strictly increasing")
+            item["gap_max_ns"] = max(item["gap_max_ns"], stamp-item["last_ns"])
+            item["last_ns"] = stamp
+            item["samples"] += 1
+            item["minimum"] = np.minimum(item["minimum"], xyz)
+            item["maximum"] = np.maximum(item["maximum"], xyz)
+            item["native_min_s"] = min(item["native_min_s"], row["time_s"])
+            item["native_max_s"] = max(item["native_max_s"], row["time_s"])
+    for item in pose.values():
+        item["gap_max_ns"] = max(item["gap_max_ns"], end-item["last_ns"])
+    timing = runtime_timing_evidence(mission, lag, stats)
+    lineage = analyze_payload_lineage(native, start, end, complete=timing["eligible"])
+    if not timing["eligible"]:
+        lineage["measurement_eligible"] = False
+    artifacts = [dict(path=str(path.relative_to(root)), bytes=path.stat().st_size, sha256=_stream_sha(path))
+        for path in (root/"runs/control"/run_id/"run.json", native/"metrics/relay_experiment_summary.json",
+                     native/"metrics/native_radio_stats.json")]
+    return dict(native=native, meta=meta, stats=stats, mission=mission, pose=pose,
+                lineage=lineage, timing=timing, capture_sha256=_stream_sha(capture), artifacts=artifacts)
+
+
+def service_maps(snapshot, evidence, output, *, profile_path=None, root=ROOT, plot=False):
+    """Attach observed transport-class windows to a spatial snapshot.
+
+    Unknown cells stay unknown. A cell stores observations inside the explicitly
+    declared position box; it does not extrapolate to the rest of its area.
+    """
+    from network.coordination.service_profiles import load_service_profiles, qualify_payload_services
+    snapshot, output, root = Path(snapshot).resolve(), Path(output).resolve(), Path(root).resolve()
+    snapshot.relative_to(root); output.relative_to(root)
+    snapshot_files = {name: inside(root, str(snapshot / name)) for name in ("metadata.json", "maps.npz")}
+    metadata = load_json(snapshot_files["metadata.json"])
+    if metadata.get("status") != "completed":
+        raise ValueError("service maps require a completed RF snapshot")
+    fields(evidence, {"schema_version", "snapshot_metadata_sha256", "snapshot_npz_sha256",
+        "uav_count", "target_uav_id", "direction", "peer_positions_m", "position_tolerance_m",
+        "bindings"}, "service-map evidence")
+    if type(evidence["schema_version"]) is not int or evidence["schema_version"] != 1:
+        raise ValueError("service-map evidence schema must be integer 1")
+    for name, key in (("metadata.json", "snapshot_metadata_sha256"), ("maps.npz", "snapshot_npz_sha256")):
+        if _stream_sha(snapshot_files[name]) != evidence[key]:
+            raise ValueError("RF snapshot hash mismatch: " + name)
+    count, target = evidence["uav_count"], evidence["target_uav_id"]
+    if type(count) is not int or type(target) is not int or not 1 <= target <= count <= 5:
+        raise ValueError("service map requires a target inside a 1..5 roster")
+    if evidence["direction"] != "gcs_to_uav" or metadata["desired"]["id"] != "cp":
+        raise ValueError("only measured CP to UAV payload direction is supported")
+    tolerance = np.array(vector(evidence["position_tolerance_m"], 3, "position tolerance"))
+    if (tolerance < 0).any() or any(tolerance[i] > metadata["map"]["cell_size_m"][i]/2 for i in range(2)):
+        raise ValueError("horizontal position tolerance must fit inside one cell")
+    peers = evidence["peer_positions_m"]
+    required = {"cp", *(f"uav{i}" for i in range(1,count+1) if i != target)}
+    fields(peers, required, "fixed peer positions")
+    for name, point in peers.items():
+        vector(point, 3, name + " fixed peer position")
+    if peers["cp"] != metadata["desired"]["position_m"]:
+        raise ValueError("fixed CP differs from the RF snapshot transmitter")
+    if not isinstance(evidence["bindings"], list):
+        raise ValueError("service bindings must be an explicit list")
+    profiles = load_service_profiles(profile_path)
+    names = list(profiles["config"]["profiles"])
+    with np.load(snapshot_files["maps.npz"], allow_pickle=False) as data:
+        centers = np.array(data["cell_centers_enu_m"], copy=True)
+    if centers.ndim != 3 or centers.shape[-1] != 3 or not np.isfinite(centers).all():
+        raise ValueError("RF snapshot lacks a rectangular ENU grid")
+    statuses = np.zeros((len(names), *centers.shape[:2]), dtype=np.uint8)
+    observations = np.zeros_like(statuses, dtype=np.uint32)
+    rows, all_statuses, seen = [], {}, set()
+    cached_id, cached_run = None, None
+    for binding in evidence["bindings"]:
+        fields(binding, {"row", "column", "run_id"}, "service binding")
+        row, col = binding["row"], binding["column"]
+        if (type(row) is not int or type(col) is not int or not 0 <= row < centers.shape[0]
+                or not 0 <= col < centers.shape[1]):
+            raise ValueError("service binding outside RF grid")
+        identity = (row, col, binding["run_id"])
+        if identity in seen:
+            raise ValueError("duplicate cell/run binding")
+        seen.add(identity)
+        detail = dict(binding, status="invalid", errors=[])
+        selected_class = None
+        try:
+            run_id = binding["run_id"]
+            if run_id != cached_id:
+                cached_run = _service_run(run_id, root)
+                cached_id = run_id
+            observed = cached_run
+            native, meta, stats = observed["native"], observed["meta"], observed["stats"]
+            lineage = observed["lineage"]
+            selected_class = lineage.get("offered_load", {}).get("profile", {}).get("class")
+            if (stats.get("uav_count") != count or stats.get("sionna_solver_enabled") is not True
+                    or stats.get("sionna_drives_rx_psd") is not True):
+                raise ValueError("observed radio/roster differs from the declared RT context")
+            if meta.get("radio_sha256") != metadata["inputs"]["radio_config"]["sha256"]:
+                raise ValueError("radio profile fingerprint mismatch")
+            desired, receiver = metadata["desired"], metadata["receiver"]
+            if (desired["pattern"] != "iso" or desired["gain_dbi"] != 0
+                    or desired["power_w"] != stats.get("tx_power_w")
+                    or any(endpoint["center_hz"] != stats.get("wifi_actual_center_frequency_hz")
+                           or endpoint["bandwidth_hz"] != stats.get("wifi_channel_width_mhz", 0)*1e6
+                           for endpoint in (desired, receiver))):
+                raise ValueError("RF snapshot transmitter or receive band differs from the native radio")
+            geometry = load_json(native/"configuration/final/inputs/geometry_source/value.json")
+            for key in ("origin_latitude_deg", "origin_longitude_deg", "origin_elevation_m", "spherical_heading_deg"):
+                if geometry["frame"][key] != metadata["origin"][key]:
+                    raise ValueError("ENU origin mismatch")
+            manifest = load_json(native/"configuration/final/inputs/sionna_geometry_manifest/value.json")
+            for key, record in metadata["inputs"].items():
+                if key.startswith("scene/") and key.endswith((".obj", ".xml")):
+                    if manifest["files"][key[6:]]["sha256"] != record["sha256"]:
+                        raise ValueError("scene geometry fingerprint mismatch")
+            if _stream_sha(native/"configuration/final/inputs/sionna_scene/value.xml") != metadata["inputs"]["scene_xml"]["sha256"]:
+                raise ValueError("used Sionna scene XML mismatch")
+            sources = metadata["inputs"].get("sources")
+            actual_path = native/"logs/native_sources_actual.json"
+            if sources:
+                if not actual_path.is_file() or _stream_sha(actual_path) != sources["sha256"]:
+                    raise ValueError("resolved native source fingerprint mismatch")
+            elif actual_path.exists() and load_json(actual_path).get("segments"):
+                raise ValueError("RF snapshot omitted configured native sources")
+            expected_positions = dict(peers, **{f"uav{target}": centers[row,col].tolist()})
+            envelopes = {}
+            for node, expected in expected_positions.items():
+                pose = observed["pose"].get(node)
+                if not pose or pose["samples"] < 2 or pose["gap_max_ns"] > 100_000_000:
+                    raise ValueError("applied pose observation incomplete for " + node)
+                point = np.array(expected)
+                if (pose["minimum"] < point-tolerance).any() or (pose["maximum"] > point+tolerance).any():
+                    raise ValueError("run left the declared observed position box: " + node)
+                envelopes[node] = dict(minimum_enu_m=pose["minimum"].tolist(), maximum_enu_m=pose["maximum"].tolist())
+            native_low = min(p["native_min_s"] for p in observed["pose"].values())
+            native_high = max(p["native_max_s"] for p in observed["pose"].values())
+            if not native_low <= metadata["map"]["time_s"] <= native_high:
+                raise ValueError("RF snapshot time outside observed native window")
+            for state in metadata.get("source_states", []):
+                if not _constant_source_state(state["segment"], max(0.,native_low-.1), native_high+.1, state["active"]):
+                    raise ValueError("source activity changed across the measured class window")
+            qualified = qualify_payload_services(lineage, profiles, run_metadata=dict(meta,
+                rng_seed=stats.get("rng_seed"), rng_run=stats.get("rng_run"),
+                rt_solver_seed=stats.get("sionna_solver", {}).get("seed")))
+            if selected_class not in names:
+                raise ValueError("no supported offered class observed")
+            streams = [s for s in qualified["classes"][selected_class]["streams"]
+                       if s["uav_id"] == target and s["direction"] == evidence["direction"]]
+            if not streams:
+                raise ValueError("no matching audited directional stream")
+            result_statuses = [s["status"] for s in streams]
+            status = next((s for s in ("invalid","measured_fail","insufficient_evidence")
+                           if s in result_statuses), "measured_pass" if all(s=="measured_pass" for s in result_statuses) else "not_measured")
+            detail.update(status=status, class_name=selected_class, source_commit=meta["source_commit"],
+                qualification=qualified, position_envelopes=envelopes,
+                native_window_s=[native_low,native_high], native_capture_sha256=observed["capture_sha256"],
+                run_artifacts=observed.get("artifacts", []),
+                independent_series_status="insufficient_evidence")
+        except (ValueError, KeyError, OSError, TypeError) as error:
+            detail["errors"].append(str(error))
+        if selected_class in names:
+            key = (names.index(selected_class), row, col)
+            all_statuses.setdefault(key, []).append(detail["status"])
+            observations[key] += 1
+        rows.append(detail)
+    for key, values in all_statuses.items():
+        status = next((s for s in ("invalid","measured_fail","insufficient_evidence") if s in values),
+                      "measured_pass" if all(s=="measured_pass" for s in values) else "not_measured")
+        statuses[key] = SERVICE_STATUS[status]
+    output.mkdir(parents=True, exist_ok=False)
+    np.savez_compressed(output/"service_maps.npz", status=statuses, observed_bindings=observations,
+                        cell_centers_enu_m=centers)
+    result = dict(schema_version=1, status="completed", evidence_kind="measured_transport_observations",
+        qualification_scope="observed_single_run_limits_only",
+        semantic_scope="synthetic_transport_load_proxy_not_object_or_critical_command_semantics",
+        independent_series_status="insufficient_evidence",
+        rf_snapshot_equivalence="not_evaluated_observed_transport_overlay_only",
+        service_profile_sha256=profiles["sha256"],
+        service_profile_id=profiles["config"]["profile_id"], class_order=names, status_codes=SERVICE_STATUS,
+        snapshot=str(snapshot.relative_to(root)), snapshot_metadata_sha256=evidence["snapshot_metadata_sha256"],
+        snapshot_npz_sha256=evidence["snapshot_npz_sha256"], context=evidence,
+        observations=rows, map=metadata["map"], origin=metadata["origin"],
+        assumptions=["Only packet lineage determines observed class status; RSS/SINR never imply a passing class.",
+            "Unknown cells and unmeasured classes remain not_measured; no spatial or class extrapolation.",
+            "A colored cell represents its recorded position envelope, not qualification of its entire area.",
+            "Source state must be constant over the observed window with the existing100ms freshness margin.",
+            "Physical hardware and independent statistical series are separate qualifications."])
+    (output/"input-evidence.json").write_text(json.dumps(evidence,indent=2,allow_nan=False)+"\n")
+    (output/"service_metadata.json").write_text(json.dumps(result,indent=2,allow_nan=False)+"\n")
+    if plot:
+        render_service_maps(output)
+    return result
+
+
+def render_service_maps(output):
+    import matplotlib
+    matplotlib.use("Agg")
+    from matplotlib import pyplot as plt
+    from matplotlib.colors import ListedColormap, BoundaryNorm
+    from matplotlib.patches import Patch
+    output = Path(output)
+    meta = load_json(output/"service_metadata.json")
+    with np.load(output/"service_maps.npz", allow_pickle=False) as stored:
+        status = np.array(stored["status"], copy=True)
+    colors = ["#999999","#b36b00","#4678a5","#b73535","#298f50"]
+    cmap = ListedColormap(colors); norm = BoundaryNorm(np.arange(-.5,5.5),5)
+    x,y,_ = meta["map"]["center_m"]; w,h = meta["map"]["size_m"]
+    fig,axes = plt.subplots(2,3,figsize=(13,8),sharex=True,sharey=True)
+    try:
+        for i,axis in enumerate(axes.flat):
+            axis.imshow(status[i],origin="lower",extent=(x-w/2,x+w/2,y-h/2,y+h/2),cmap=cmap,norm=norm,interpolation="nearest")
+            axis.set(title=meta["class_order"][i],xlabel="ENU x [m]",ylabel="ENU y [m]")
+        fig.suptitle("Observed transport-class samples; engineering profile; no area extrapolation")
+        fig.legend(handles=[Patch(color=colors[v],label=k) for k,v in SERVICE_STATUS.items()],
+                   loc="lower center",ncol=5)
+        fig.tight_layout(rect=(0,.07,1,.95));fig.savefig(output/"service_maps.png",dpi=150)
+    finally:
+        plt.close(fig)
+    return output/"service_maps.png"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config', type=Path, required=True)
+    parser.add_argument('--config', type=Path)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--service-map-from', type=Path, help='Attach observed classes to an existing completed RF snapshot; CPU only')
+    parser.add_argument('--service-evidence', type=Path, help='Strict cell/run binding JSON for --service-map-from')
+    parser.add_argument('--service-profile', type=Path, help='Versioned engineering profile; default service_profiles_v1.json')
+
     parser.add_argument('--validate-only', action='store_true')
     parser.add_argument('--plot', action='store_true', help='also render RSS/SINR/J/S PNG using Matplotlib Agg')
     parser.add_argument('--variant', choices=('cuda_ad_mono_polarized', 'llvm_ad_mono_polarized'), default='cuda_ad_mono_polarized')
     args = parser.parse_args()
     if args.validate_only and args.plot:
         parser.error('--plot requires computation; omit --validate-only')
+    if args.service_map_from:
+        if args.config or args.validate_only or args.service_evidence is None:
+            parser.error('--service-map-from requires --service-evidence and excludes --config/--validate-only')
+        result = service_maps(args.service_map_from, load_json(args.service_evidence), args.output,
+                              profile_path=args.service_profile, plot=args.plot)
+        print(json.dumps(dict(status=result['status'], service_profile_sha256=result['service_profile_sha256'])))
+        return
+    if args.config is None or args.service_evidence is not None or args.service_profile is not None:
+        parser.error('RF computation requires --config; service arguments require --service-map-from')
     config = load_json(args.config)
     if args.validate_only:
         validate(config)

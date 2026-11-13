@@ -13,7 +13,8 @@ import json
 from pathlib import Path
 
 from network.scripts import simulation_clock as clock
-from scripts.product.town01_full_stack_scenario import FlightHarness, write_json, append_jsonl
+from scripts.product.town01_full_stack_scenario import FlightHarness, write_json
+from network.jsonl import AsyncJsonlWriter
 from network.scripts.serial_transport import mavlink_payload_lineage
 
 
@@ -88,24 +89,45 @@ class PayloadChannel:
         self.load_counters = {i: dict(created=0, sent=0, skipped=0, outside_slot=0, send_failed=0,
                                      maximum_creation_lag_ns=0) for i in self.load['uav_ids']} if self.load else {}
         self._load_offer = None
+        self._trace_writer = None
+        self._trace_error = None
         self.run_dir = Path(run_dir)
         self.interval_s, self.heartbeat_s, self.request_s = interval_s, heartbeat_s, request_s
         self.harness = FlightHarness(self.run_dir / 'payload', Path(node_state), 1.,
             channels=('payload',), uav_ids=tuple(uav_ids), observer=self._on_message,
             frame_observer=self._on_frame if self.event_logging == 'batched_trace' else None,
-            send_observer=self._on_send if self.event_logging == 'batched_trace' else None)
+            send_observer=self._on_send if self.event_logging == 'batched_trace' else None,
+            event_sink=self._write_trace_event if self.event_logging == 'batched_trace' else None)
         self.uav_ids = self.harness.uav_ids
         self.mav = self.harness.mavutil.mavlink
         self.started_ns = clock.monotonic_ns()
         self.next_heartbeat_ns = self.next_request_ns = 0
         self.closed = False
+        self.closed_ns = None
         self.heartbeats_sent = {i: 0 for i in self.uav_ids}
         self.requests_sent = {i: 0 for i in self.uav_ids}
         self.last_request_sent_ns = {i: 0 for i in self.uav_ids}
         self.accepted_acknowledgements = {i: 0 for i in self.uav_ids}
         self.backpressure_events = 0
         self.window = None
-        self._lineage_event('payload_lineage_started', uav_ids=list(self.uav_ids))
+        try:
+            if self.event_logging == 'batched_trace':
+                self.harness.events_path.parent.mkdir(parents=True, exist_ok=True)
+                self._trace_writer = AsyncJsonlWriter(self.harness.events_path)
+            self._lineage_event('payload_lineage_started', uav_ids=list(self.uav_ids),
+                                journal_mode='bounded_async_jsonl_v1')
+        except Exception:
+            try:
+                if self._trace_writer is not None:
+                    self._trace_writer.close()
+            finally:
+                self.harness.close()
+            raise
+
+    def _write_trace_event(self, value):
+        # Keep actual producer timestamps and immutable bytes. Only file I/O
+        # moves to the bounded owned writer; no slots or offers are backdated.
+        self._trace_writer.write(json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False))
 
     def _lineage_event(self, event, **fields):
         if self.event_logging == 'batched_trace':
@@ -113,7 +135,7 @@ class PayloadChannel:
                 process_epoch=f'gcs:{self.started_ns}', clock_domain='host_monotonic',
                 observed_host_monotonic_ns=clock.monotonic_ns())
             value.update(fields)
-            append_jsonl(self.harness.events_path, value)
+            self._write_trace_event(value)
 
     def _on_frame(self, channel, system_id, message, observed_ns, spans):
         lineage = mavlink_payload_lineage(message, spans, run_id=self.run_dir.name,
@@ -256,7 +278,7 @@ class PayloadChannel:
     def load_snapshot(self, now=None):
         if self.load is None:
             return dict(status='disabled', configured=False, generator_eligible=None)
-        now = clock.monotonic_ns() if now is None else now
+        now = self.closed_ns if self.closed else clock.monotonic_ns() if now is None else now
         planned = payload_load_slots(self.load, self.window['end_ns'] - self.window['start_ns']) if self.window else 0
         eligible = bool(self.closed and self.window and now >= self.window['end_ns'] and self.load_next == planned
             and all(stat['created'] == stat['sent'] == planned and not any(stat[k] for k in ('skipped','outside_slot','send_failed'))
@@ -274,6 +296,8 @@ class PayloadChannel:
         """Nonblocking; call from the mission's existing event loop."""
         if self.closed:
             raise RuntimeError('payload channel is closed')
+        if self._trace_writer is not None:
+            self._trace_writer.check()
         self.harness.pump(0.)
         now = clock.monotonic_ns()
         if now >= self.next_heartbeat_ns:
@@ -324,8 +348,10 @@ class PayloadChannel:
                     offered_load=self.load_snapshot(now),
                     hardware_validation='not_performed', transport=self.harness.transport_summary(),
                     application_lineage=dict(event_logging=self.event_logging,
-                        status=('gcs_boundary_trace_closed' if self.closed else 'recording_enabled')
+                        status=('failed' if self._trace_error else 'gcs_boundary_trace_closed' if self.closed else 'recording_enabled')
                             if self.event_logging == 'batched_trace' else 'not_evaluated_logging_disabled',
+                        **(dict(journal_mode='bounded_async_jsonl_v1', writer=self._trace_writer.snapshot())
+                           if self._trace_writer is not None else {}),
                         path='payload/logs/scenario_events.jsonl', byte_definition='MAVLink wire body, excluding all framing; not semantic customer content',
                         service_classes='not_evaluated', sensor_creation_time='not_measured'))
 
@@ -341,12 +367,24 @@ class PayloadChannel:
             except Exception as exc:
                 error = error or exc
             self.closed = True
-            if self.load and self.window:
-                planned = payload_load_slots(self.load, self.window['end_ns'] - self.window['start_ns'])
-                self._skip_load(self.load_next, planned - self.load_next, 'producer_closed_before_generation')
-                self.load_next = planned
-                self._lineage_event('payload_load_closed', load_id='payload_load', offered_load=self.load_snapshot())
-            self._lineage_event('payload_lineage_closed', close_error=str(error) if error else None)
+            self.closed_ns = clock.monotonic_ns()
+            try:
+                if self.load and self.window:
+                    planned = payload_load_slots(self.load, self.window['end_ns'] - self.window['start_ns'])
+                    self._skip_load(self.load_next, planned - self.load_next, 'producer_closed_before_generation')
+                    self.load_next = planned
+                    self._lineage_event('payload_load_closed', load_id='payload_load', offered_load=self.load_snapshot())
+                self._lineage_event('payload_lineage_closed', close_error=str(error) if error else None,
+                                    journal_mode='bounded_async_jsonl_v1')
+            except Exception as exc:
+                error = error or exc
+            finally:
+                if self._trace_writer is not None:
+                    try:
+                        self._trace_writer.close()
+                    except Exception as exc:
+                        error = error or exc
+            self._trace_error = f'{type(error).__name__}: {error}' if error is not None else None
             self.metrics = self.snapshot()
             if error is not None:
                 self.metrics['close_error'] = f'{type(error).__name__}: {error}'

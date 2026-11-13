@@ -1,7 +1,9 @@
 """Source clock evidence/copying; no native runtime or activation is synthesized."""
 import copy
 import csv
+import hashlib
 import json
+import sqlite3
 from pathlib import Path
 import subprocess
 import sys
@@ -11,7 +13,8 @@ import unittest
 from scripts.product.capture_effective_config import capture_snapshot
 from scripts.product.prepare_native_sources import materialize, prepare
 from scripts.product.summarize_native_radio_five_uav import (
-    _native_source_report_lines, export_live_metrics, summarize_native_sources,
+    _native_source_report_lines, _SourceDistributions, distribution, export_live_metrics,
+    iter_native_events, native_events, summarize_native_sources,
 )
 
 
@@ -117,6 +120,140 @@ class SourceArtifactTests(unittest.TestCase):
         self.assertEqual(report['windows']['active']['start_sim_s'], 110)
         self.assertFalse((self.run / 'metrics/native_source_summary.json').exists())
         self.assertTrue(all((self.run / p).read_bytes() == contents for p, contents in before.items()))
+
+    def test_source_only_filter_preserves_full_summary_and_capture_hash(self):
+        self.actual()
+        self.logging(native='batched_trace', configured='batched_trace')
+        (self.run / 'metrics/native_radio_stats.json').write_text(
+            json.dumps(dict(uav_count=1, event_logging='batched_trace')))
+        path = self.run / 'logs/native_radio_events.csv'
+        fields = 'time_s,wall_monotonic_ns,phase,event,node,peer,bytes,x,y,z,value,details'.split(',')
+        # Quoted separators/newlines, malformed numbers, aliases, and unrelated
+        # nodes exercise the CSV/parser boundaries rather than synthetic metrics.
+        with path.open('w', newline='') as stream:
+            writer = csv.DictWriter(stream, fieldnames=list(reversed(fields)))
+            writer.writeheader()
+            for when, event, node, value, detail in (
+                    (110, 'jammer_on', 'source', 1, ''),
+                    (111, 'live_pose', 'unrelated', 1, 'ignored, bookkeeping\nline'),
+                    (111, 'phy_rx_ok', 'uav1', 2, ''),
+                    (112, 'phy_rx_error', 'cp', 1, ''),
+                    (113, 'spectrum_signal_arrival', 'cp', -75, 'foreign_signal=1'),
+                    (114, 'wifi_monitor_rx', 'cp', 1, 'noise_interference_dbm=-85;sinr_db=10'),
+                    (115, 'phy_rx_drop', 'uav1', 1, ''),
+                    (116, 'phy_rx_ok', 'cp', 'not_a_number', ''),
+                    (120, 'jammer_off', 'source', 0, '')):
+                writer.writerow(dict(time_s=when, wall_monotonic_ns=int(when * 1e9),
+                    phase='experiment_normal', event=event, node=node, peer='',
+                    bytes=64, x=0, y=0, z=1, value=value, details=detail))
+        baseline = summarize_native_sources(self.run, native_events(path),
+                                             output_dir=self.run / 'baseline')
+        script = Path(__file__).resolve().parents[1] / 'scripts/product/summarize_native_radio_five_uav.py'
+        output = self.run / 'filtered'
+        result = subprocess.run([sys.executable, str(script), '--run-dir', str(self.run),
+            '--native-sources-only', '--output-dir', str(output)],
+            capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads((output / 'metrics/native_source_summary.json').read_text()), baseline)
+        self.assertEqual(baseline['windows']['active']['decoder_success_attempts'], 1)
+        self.assertEqual(baseline['windows']['active']['decoder_failure_attempts'], 1)
+        self.assertEqual(baseline['receiver_roster'], ['cp', 'uav1'])
+
+    def test_disk_distributions_preserve_exact_float_definitions_and_clean_tempfiles(self):
+        for values in ([-0., 0., -0.], [0., -0.], [5., 5., -7., 1e-200, -1e200, 1e200, 9., 11.],
+                       [float('nan'), float('inf'), -float('inf')], []):
+            with self.subTest(values=values):
+                with _SourceDistributions(self.run) as samples:
+                    for value in values:
+                        samples.add('same', value)
+                    self.assertEqual(json.dumps(samples.distribution('same')),
+                                     json.dumps(distribution(values)))
+                self.assertEqual(list(self.run.glob('.native-source-*')), [])
+        with self.assertRaisesRegex(RuntimeError, 'fixture failure'):
+            with _SourceDistributions(self.run) as samples:
+                samples.add('same', 1.)
+                raise RuntimeError('fixture failure')
+        self.assertEqual(list(self.run.glob('.native-source-*')), [])
+
+    def test_explicit_spill_budget_is_applied_and_exhaustion_fails_without_leaks(self):
+        with self.assertRaisesRegex(sqlite3.DatabaseError, 'full'):
+            with _SourceDistributions(self.run, max_bytes=1024**2) as samples:
+                self.assertEqual(samples.connection.execute(
+                    'PRAGMA max_page_count').fetchone()[0], 256)
+                for index in range(100000):
+                    samples.add('bounded', float(index))
+        self.assertEqual(list(self.run.glob('.native-source-*')), [])
+
+    def test_source_cli_disk_exhaustion_preserves_raw_capture_and_reports_failure(self):
+        self.actual()
+        self.logging(native='batched_trace')
+        path = self.run / 'logs/native_radio_events.csv'
+        with path.open('w') as stream:
+            stream.write('time_s,wall_monotonic_ns,phase,event,node,peer,bytes,x,y,z,value,details\n')
+            stream.write('110,100,experiment_normal,jammer_on,source,,0,0,0,0,1,\n')
+            for index in range(12000):
+                stream.write(f'111,{101+index},experiment_normal,wifi_monitor_rx,cp,,20,0,0,0,1,'
+                             f'noise_interference_dbm=-85;sinr_db={index/1000}\n')
+            stream.write('120,20000,experiment_normal,jammer_off,source,,0,0,0,0,0,\n')
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        output = self.run / 'bounded'
+        script = Path(__file__).resolve().parents[1] / 'scripts/product/summarize_native_radio_five_uav.py'
+        result = subprocess.run([sys.executable, str(script), '--run-dir', str(self.run),
+            '--native-sources-only', '--source-spill-max-bytes', '1048576',
+            '--output-dir', str(output)], capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('database or disk is full', result.stderr)
+        self.assertFalse((output / 'metrics/native_source_summary.json').exists())
+        self.assertEqual(list(output.glob('.native-source-*')), [])
+        self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), digest)
+
+    def test_source_spill_cli_rejects_invalid_budgets_and_incompatible_modes(self):
+        script = Path(__file__).resolve().parents[1] / 'scripts/product/summarize_native_radio_five_uav.py'
+        for options in (['--native-sources-only', '--source-spill-max-bytes', '0'],
+                        ['--native-sources-only', '--source-spill-max-bytes', '1048577'],
+                        ['--live-metrics-only', '--source-spill-max-bytes', '1048576']):
+            result = subprocess.run([sys.executable, str(script), '--run-dir', str(self.run), *options],
+                capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn('--source-spill-max-bytes', result.stderr)
+
+    def test_streaming_reducer_keeps_duplicate_switches_and_half_open_time_windows(self):
+        self.actual()
+        self.logging(native='batched_trace')
+        switches = self.switches(110., 120.) + self.switches(110., 120.)
+        event = lambda when, kind, **kw: dict(time_s=when, event=kind, node='cp', **kw)
+        events = switches + [event(100.1, 'phy_rx_ok'), event(110., 'phy_rx_error'),
+            event(119.999, 'wifi_monitor_rx', noise_interference_dbm=-80., sinr_db=10.),
+            event(120., 'phy_rx_ok'), event(130., 'phy_rx_error'),
+            event(120., 'live_pose', x=1, y=2, z=3)]
+        result = summarize_native_sources(self.run, iter(events), source_switches=switches,
+                                           spill_samples=True)
+        self.assertEqual(len(result['sources']), 4)
+        baseline, active, recovery = (result['windows'][name] for name in ('baseline', 'active', 'recovery'))
+        self.assertEqual((baseline['start_sim_s'], baseline['stop_sim_s']), (100.000000007, 110.))
+        self.assertEqual(baseline['decoder_success_attempts'], 1)
+        self.assertEqual(active['decoder_failure_attempts'], 1)
+        self.assertEqual(active['decoded_mpdu_samples'], 1)
+        self.assertEqual(recovery['decoder_success_attempts'], 1)
+        self.assertEqual(recovery['decoder_failure_attempts'], 0)  # t=130 is excluded
+        self.assertEqual(result['trace_observations']['decoder']['observed_event_rows'], 4)
+
+    def test_source_only_without_roster_keeps_nodes_from_unrelated_events(self):
+        self.actual()
+        path = self.run / 'logs/native_radio_events.csv'
+        path.write_text('time_s,wall_monotonic_ns,phase,event,node,peer,bytes,x,y,z,value,details\n'
+            '110,100,experiment_normal,jammer_on,source,,0,0,0,0,1,\n'
+            '111,101,experiment_normal,live_pose,uav3,,0,0,0,0,1,\n'
+            '120,102,experiment_normal,jammer_off,source,,0,0,0,0,0,\n')
+        script = Path(__file__).resolve().parents[1] / 'scripts/product/summarize_native_radio_five_uav.py'
+        output = self.run / 'filtered'
+        result = subprocess.run([sys.executable, str(script), '--run-dir', str(self.run),
+            '--native-sources-only', '--output-dir', str(output)],
+            capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        summary = json.loads((output / 'metrics/native_source_summary.json').read_text())
+        self.assertEqual(summary['receiver_roster'], ['uav3'])
+        self.assertIn('uav3', summary['windows']['active']['foreign_power_dbm_by_receiver'])
 
     def test_source_cli_cannot_publish_an_empty_report_before_tmpfs_capture_is_copied(self):
         self.actual()

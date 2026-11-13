@@ -49,6 +49,133 @@ class NedFrame:
 
 
 ROOT = Path(__file__).resolve().parents[2]
+EXECUTION_SETTINGS_IMAGE = "sha256:89d78eff9914b1644a1b01b793612e9ee8b19916c5a7bf5f578ba6d8bfbfafe5"
+
+
+def _unique_scene_fields(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate scene field: {key}")
+        result[key] = value
+    return result
+
+
+def _scene_fields(value, required, optional, label):
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be an object")
+    unknown, missing = set(value) - required - optional, required - set(value)
+    if unknown or missing:
+        raise ValueError(f"unknown or missing {label} fields: unknown={sorted(unknown)}, missing={sorted(missing)}")
+
+
+def _scene_number(value, label):
+    try:
+        valid = type(value) in (int, float) and math.isfinite(value)
+    except OverflowError:
+        valid = False
+    if not valid:
+        raise ValueError(f"{label} must be a finite JSON number")
+    return value
+
+
+def _scene_point(value, label):
+    if not isinstance(value, list) or len(value) != 3:
+        raise ValueError(f"{label} requires three metre coordinates")
+    for item in value:
+        _scene_number(item, label)
+
+
+def validate_scene_fields(raw):
+    """Validate the existing scene contract before either adapter consumes it.
+
+    Small control-only fixtures may omit environment/radio metadata as before.
+    Present fields must describe the fixed ENU/native contract; unsupported
+    settings must not look successfully applied in UI exports.
+    """
+    _scene_fields(raw, {"spawns", "routes", "mission"},
+        {"schema_version", "scenario", "status", "frame", "gcs", "buildings", "radio", "terrain_bundle", "physics", "failsafe"}, "scene")
+    if "schema_version" in raw and (type(raw["schema_version"]) is not int or raw["schema_version"] != 1):
+        raise ValueError("scene schema_version must be integer 1")
+    if "physics" in raw:
+        _scene_fields(raw["physics"], set(), {"max_step_size_s"}, "physics")
+        step = _scene_number(raw["physics"].get("max_step_size_s", .001), "physics.max_step_size_s")
+        if step not in (.00025, .0005, .001):
+            raise ValueError("physics.max_step_size_s must be 0.00025, 0.0005 or 0.001 seconds; 1/2/4 substeps per 1000 Hz IMU period")
+    if "failsafe" in raw:
+        _scene_fields(raw["failsafe"], set(), {"gcs_action", "gcs_timeout_s"}, "failsafe")
+        if raw["failsafe"].get("gcs_action", "disabled") not in ("disabled", "rtl", "land"):
+            raise ValueError("failsafe.gcs_action must be disabled, rtl or land")
+        timeout = _scene_number(raw["failsafe"].get("gcs_timeout_s", 5), "failsafe.gcs_timeout_s")
+        if not 2 <= timeout <= 120:
+            raise ValueError("failsafe.gcs_timeout_s must be between 2 and 120 seconds")
+    if "frame" in raw:
+        frame = raw["frame"]
+        _scene_fields(frame, set(), {"coordinate_frame", "ground_surface_z_m", "spherical_heading_deg",
+            "origin_latitude_deg", "origin_longitude_deg", "origin_elevation_m", "datum",
+            "world_enu_to_local_ned"}, "frame")
+        if frame.get("coordinate_frame", "ENU") != "ENU":
+            raise ValueError("scene frame.coordinate_frame must be ENU")
+        if frame.get("world_enu_to_local_ned", "N=y,E=x,D=-z") not in (
+                "N=y,E=x,D=-z", "N=y,E=x,D=-z per iris_radio_headless gazeboXYZToNED"):
+            raise ValueError("scene world_enu_to_local_ned must declare N=y,E=x,D=-z")
+        for field in ("ground_surface_z_m", "spherical_heading_deg", "origin_latitude_deg",
+                      "origin_longitude_deg", "origin_elevation_m"):
+            if field in frame:
+                _scene_number(frame[field], "frame." + field)
+        if frame.get("ground_surface_z_m", 0) != 0:
+            raise ValueError("frame.ground_surface_z_m must be 0; translated flat datum is unsupported")
+        if "origin_latitude_deg" in frame and not -90 < frame["origin_latitude_deg"] < 90:
+            raise ValueError("frame.origin_latitude_deg must be strictly between -90 and 90")
+        if "origin_longitude_deg" in frame and not -180 <= frame["origin_longitude_deg"] <= 180:
+            raise ValueError("frame.origin_longitude_deg must be between -180 and 180")
+    mission = raw["mission"]
+    required = {"world_ground_reference_z_m", "telemetry_max_age_s", "speed_mps", "waypoint_dwell_s"}
+    _scene_fields(mission, required, {"ground_reference_source", "route_design_reason", "waypoint_dwell_reason",
+        "barriers", "ned_axes", "world_ground_reference_z_by_uav_m", "model_rest_clearance_m",
+        "ground_reference_derivation"}, "mission")
+    for field in required:
+        _scene_number(mission[field], "mission." + field)
+    if "model_rest_clearance_m" in mission and "terrain_bundle" not in raw:
+        raise ValueError("mission.model_rest_clearance_m requires terrain_bundle")
+    if "barriers" in mission:
+        if not isinstance(mission["barriers"], dict):
+            raise ValueError("mission.barriers must be an object")
+        for value in mission["barriers"].values():
+            _scene_fields(value, {"minimum_reached"}, set(), "mission barrier")
+            reached = value["minimum_reached"]
+            if not isinstance(reached, dict) or any(type(index) is not int for index in reached.values()):
+                raise ValueError("barrier minimum_reached indices must be integers")
+    if "gcs" in raw:
+        _scene_point(raw["gcs"], "gcs")
+    for uid, position in raw["spawns"].items():
+        _scene_point(position, f"spawns.{uid}")
+    for uid, route in raw["routes"].items():
+        if not isinstance(route, list):
+            raise ValueError(f"routes.{uid} must be a waypoint list")
+        for position in route:
+            _scene_point(position, f"routes.{uid}")
+    if "buildings" in raw:
+        if not isinstance(raw["buildings"], list):
+            raise ValueError("scene.buildings must be a list")
+        for building in raw["buildings"]:
+            _scene_fields(building, {"id", "min", "max"}, set(), "building")
+            _scene_point(building["min"], "building.min")
+            _scene_point(building["max"], "building.max")
+    if "radio" in raw:
+        radio = raw["radio"]
+        _scene_fields(radio, {"parameter_set", "mode", "frequency_hz", "los", "nlos"},
+            {"calibration", "sensitivity_exponents", "parameters_source"}, "radio")
+        if radio["mode"] not in ("geometry", "los_only"):
+            raise ValueError("scene radio.mode must be geometry or los_only")
+        if _scene_number(radio["frequency_hz"], "radio.frequency_hz") <= 0:
+            raise ValueError("radio.frequency_hz must be positive")
+        for kind in ("los", "nlos"):
+            _scene_fields(radio[kind], {"exponent", "reference_distance_m", "reference_loss_db"}, set(), "radio." + kind)
+            for field, number in radio[kind].items():
+                _scene_number(number, "radio." + kind + "." + field)
+                if number < 0 or (field != "reference_loss_db" and number == 0):
+                    raise ValueError("radio path-loss exponents/distances must be positive and reference loss nonnegative")
 
 
 def terrain_bundle(raw, root):
@@ -191,6 +318,38 @@ class UrbanScenario:
     model_rest_clearance_m: float | None = None
     ground_reference_derivation: str | None = None
 
+    def execution_settings(self):
+        """New-run settings; configured values are distinct from upstream read-back."""
+        step = self.raw.get("physics", {}).get("max_step_size_s", .001)
+        failsafe = self.raw.get("failsafe", {})
+        action = failsafe.get("gcs_action", "disabled")
+        parameters = dict(FS_GCS_ENABLE={"disabled": 0, "rtl": 1, "land": 5}[action],
+                          FS_GCS_TIMEOUT=failsafe.get("gcs_timeout_s", 5),
+                          MAV_GCS_SYSID=255, MAV_GCS_SYSID_HI=0)
+        configured = "failsafe" in self.raw
+        return dict(schema_version=1, lifecycle="new_run_only",
+            compatibility=dict(image=EXECUTION_SETTINGS_IMAGE,
+                gazebo_sim_version="8.14.0",
+                ardupilot_source_sha="3c073f9a09590307e99f49f960dd0f4dac7fc5bb"),
+            parameter_contract={
+                "physics.max_step_size_s": dict(type="number", units="s",
+                    allowed=[.00025, .0005, .001], default=.001),
+                "failsafe.gcs_action": dict(type="string", units=None,
+                    allowed=["disabled", "rtl", "land"], default="disabled"),
+                "failsafe.gcs_timeout_s": dict(type="number", units="s",
+                    minimum=2, maximum=120, default=5)},
+            physics=dict(max_step_size_s=step, real_time_factor=1,
+                imu_rate_hz=1000, imu_substeps=round(.001 / step),
+                supported_max_step_size_s=[.00025, .0005, .001],
+                scope="Gazebo SDF input; actual stepping requires runtime clock observation"),
+            failsafe=dict(gcs_action=action, gcs_timeout_s=parameters["FS_GCS_TIMEOUT"],
+                configured=configured, parameter_overrides=parameters if configured else {},
+                pinned_default_expectations=parameters if not configured else {},
+                inherited_parameters=["FS_OPTIONS"],
+                upstream_readback_status="not_recorded",
+                heartbeat_scope="Any accepted system255 GCS heartbeat on either UART refreshes the common upstream timer; a control-only outage is not total GCS loss.",
+                scope="Pinned ArduCopter4.8 GCS heartbeat failsafe; configured parameters do not prove reaction in flight."))
+
     def ground_for(self, uav_id):
         return self.ground_reference_by_uav_m[uav_id] if self.ground_reference_by_uav_m is not None else self.ground_reference_z_m
 
@@ -200,11 +359,12 @@ class UrbanScenario:
 
     @classmethod
     def load(cls, path: Path, root: Path = ROOT):
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_unique_scene_fields)
         if isinstance(raw, dict) and any(key.startswith("terrain") and key != "terrain_bundle" for key in raw):
             raise ValueError("unknown terrain scene field; use terrain_bundle")
         if not isinstance(raw, dict) or not isinstance(raw.get("spawns"), dict) or not isinstance(raw.get("routes"), dict):
             raise ValueError("urban scenario requires spawns and routes objects")
+        validate_scene_fields(raw)
         count = len(raw["spawns"])
         if not 1 <= count <= 5 or set(raw["spawns"]) != {str(i) for i in range(1, count + 1)}:
             raise ValueError("urban UAV IDs must be the contiguous canonical strings 1..N, N=1..5")

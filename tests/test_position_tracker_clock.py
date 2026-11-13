@@ -1,5 +1,6 @@
 """Production clock/odometry interleavings; host and source clocks are independent."""
 from types import SimpleNamespace as NS
+import math
 import unittest
 
 from network.position_tracker.tracker import LiveState
@@ -89,6 +90,44 @@ class MeasuredClockTests(unittest.TestCase):
         node = self.state.snapshot(8_000_000_000)['nodes'][1]
         self.assertAlmostEqual(node['sample_age_ms'], 20.)
         self.assertFalse(node['stale'])
+
+    def test_measured_motion_preserves_epochs_and_world_velocity_at_delayed_delivery(self):
+        # Analytic yaw cases exercise child-frame -> ENU motion independently
+        # of the live timestamp mapping and age-based publication pruning.
+        for speed in (0., 3., 30.):
+            for yaw in (0., math.pi/2, math.pi, -math.pi/2):
+                for delay_ns in (0, 25_000_000, 99_000_000, 100_000_001):
+                    with self.subTest(speed=speed, yaw=yaw, delay_ns=delay_ns):
+                        state = LiveState(dict(command_post=dict(position_m=[0, 0, 1]),
+                                               robots=[dict(name='uav1')]), .1)
+                        state.clock(10., 1_000_000_000)
+                        message = odometry(10_000_000_000)
+                        message.pose.pose.position = NS(x=17., y=-9., z=40.)
+                        message.pose.pose.orientation = NS(x=0., y=0., z=math.sin(yaw/2), w=math.cos(yaw/2))
+                        message.twist.twist.linear = NS(x=speed, y=0., z=-2.)
+                        message.twist.twist.angular = NS(x=0., y=0., z=.3)
+                        accepted = state.odometry('uav1', message, 1_000_000_000+delay_ns)
+                        self.assertEqual(accepted, delay_ns <= 100_000_000)
+                        if not accepted:
+                            self.assertEqual(state.rejection_reasons['clock_stale'], 1)
+                            self.assertFalse(state.history['uav1'])
+                            continue
+                        sample = state.history['uav1'][-1]
+                        self.assertEqual(sample['sample_monotonic_ns'], 1_000_000_000)
+                        self.assertEqual(sample['source_sim_time_s'], 10.)
+                        self.assertEqual(sample['position_m'], [17., -9., 40.])
+                        for observed, expected in zip(sample['velocity_enu_mps'],
+                                                     [speed*math.cos(yaw), speed*math.sin(yaw), -2.]):
+                            self.assertAlmostEqual(observed, expected, places=12)
+                        self.assertEqual(sample['angular_velocity_enu_radps'], [0., 0., .3])
+                        view = state.snapshot(1_100_000_000)['nodes'][1]
+                        self.assertEqual(view['sample_age_ms'], 100.)
+                        self.assertFalse(view['stale'])
+                        self.assertEqual(view['history'], [sample])
+                        expired = state.snapshot(1_100_000_001)['nodes'][1]
+                        self.assertTrue(expired['stale'])
+                        self.assertEqual(expired['history'], [])
+                        self.assertEqual(state.history['uav1'][-1], sample)
 
     def fill_history(self):
         for index in range(32):

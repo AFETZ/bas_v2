@@ -360,7 +360,8 @@ capture_effective_configuration() {
 '''
                 script += cleanup + '\ntrap cleanup EXIT\nset +e\n'
                 script += f'"$BASH" -c "exit {code}"\n' + status
-                env = dict(os.environ, BAS_TEST_PYTHON=sys.executable.replace('\\', '/'))
+                env = dict(os.environ, BAS_TEST_PYTHON=sys.executable.replace('\\', '/'),
+                           ROOT_DIR=str(bas.ROOT).replace('\\', '/'))
                 env.pop('BAS_NATIVE_SOURCES', None)
                 result = subprocess.run([bash, '-c', script], cwd=folder, env=env, capture_output=True, text=True)
                 self.assertEqual(result.returncode, code, result.stderr)
@@ -369,6 +370,12 @@ capture_effective_configuration() {
                 publication = json.loads((raw / 'logs/native_capture_storage.json').read_text())['publication']
                 self.assertEqual(publication['status'], 'direct_disk')
                 self.assertEqual(publication['errors'], [])
+                # The real helper rejects missing library evidence. Its failed
+                # closure must neither replace cancellation nor skip publication.
+                library_log = (raw / 'logs/native_library_close.log').read_text()
+                self.assertIn('native library identity:', library_log)
+                self.assertIn('native_library_expected.json', library_log)
+                self.assertIn('Native library closure verification failed', result.stderr)
 
     def test_radio_bench_frozen_input_tamper_cannot_pass(self):
         raw, folder, config = self.radio_bench_evidence()
@@ -403,6 +410,39 @@ capture_effective_configuration() {
                 config[section][key] = value
                 with self.assertRaises(ValueError):
                     self.load(config)
+
+    def test_worker_stage_trace_is_typed_default_off_and_frozen_as_effective_config(self):
+        resolved = self.load()
+        self.assertIs(resolved['runtime']['rt_stage_trace'], False)
+        self.assertEqual(bas.environment(resolved, 'trace-off', {'BAS_NATIVE_RT_STAGE_TRACE': '1'})
+                         ['BAS_NATIVE_RT_STAGE_TRACE'], '0')
+        for value in (0, 1, 'true', None, [], {}):
+            changed = copy.deepcopy(self.config)
+            changed['runtime']['rt_stage_trace'] = value
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'rt_stage_trace'):
+                self.load(changed)
+        self.config['runtime']['rt_stage_trace'] = True
+        with self.assertRaisesRegex(ValueError, 'worker_pool'):
+            self.load()
+        radio = self.root / 'radio.yaml'
+        radio.write_bytes((bas.ROOT / 'network/config/native_wifi_fullmesh_100ms.yaml').read_bytes())
+        self.config['propagation'] = dict(model='sionna', radio_config='radio.yaml',
+            ground_material='medium_dry_ground', building_material='concrete', thickness_m=.2)
+        resolved = self.load()
+        self.assertIs(resolved['runtime']['rt_stage_trace'], True)
+        env = bas.environment(resolved, 'trace-on', {'BAS_NATIVE_RT_STAGE_TRACE': '0'})
+        self.assertEqual(env['BAS_NATIVE_RT_STAGE_TRACE'], '1')
+        folder = self.root / 'runs/control/trace-on'
+        folder.mkdir(parents=True)
+        with patch.object(bas, 'ROOT', self.root):
+            bas.snapshot_inputs(resolved, folder, env)
+        frozen = json.loads((folder / 'config.json').read_text())
+        self.assertIs(frozen['runtime']['rt_stage_trace'], True)
+        # A recognized true setting cannot silently affect an in-process solver.
+        text = radio.read_text().replace('execution_mode: worker_pool', 'execution_mode: in_process')
+        radio.write_text(text.replace('receiver_batch_mode: full_mesh', 'receiver_batch_mode: pairwise'))
+        with self.assertRaisesRegex(ValueError, 'worker_pool'):
+            self.load()
 
     def test_diagnostic_log_level_is_explicit_and_cannot_inject_nslog_components(self):
         resolved = self.load()
@@ -717,6 +757,283 @@ capture_effective_configuration() {
         audit_path = raw / 'logs/node_state.jsonl.writer.json'
         audit_path.write_text(json.dumps(audit), encoding='utf-8')
         return raw, summary, path, audit_path, audit
+
+    def payload_journal_evidence(self):
+        from network.jsonl import AsyncJsonlWriter
+        raw, summary = self.qualified_source_run()
+        path = raw / 'payload/logs/scenario_events.jsonl'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        writer = AsyncJsonlWriter(path)
+        for event in ('payload_lineage_started', 'payload_lineage_closed'):
+            writer.write(json.dumps(dict(event=event, journal_mode='bounded_async_jsonl_v1',
+                run_id=raw.name, observed_host_monotonic_ns=123456789)))
+        writer.close()
+        metadata = dict(schema_version=1, channel='payload', status='closed', application_lineage=dict(
+            event_logging='batched_trace', status='gcs_boundary_trace_closed',
+            path='payload/logs/scenario_events.jsonl', journal_mode='bounded_async_jsonl_v1', writer=writer.snapshot()))
+        metadata_path = raw / 'metrics/payload_channel.json'
+        metadata_path.write_text(json.dumps(metadata))
+        with (raw / 'environment.txt').open('a') as stream:
+            stream.write('\npayload_journal_mode=bounded_async_jsonl_v1\n')
+        return raw, summary, path, metadata_path, metadata
+
+    def native_library_evidence(self, *, spectrum=True):
+        from scripts.product import native_library_identity as identity
+        raw, summary = self.qualified_source_run()
+        run_dir = '/workspace/runs/' + raw.name
+        mode = identity.MODE if spectrum else identity.LEGACY_MODE
+        files = {name: dict(path=path, bytes=1000, sha256=digest * 64, device_major=8,
+                           device_minor=1, inode=inode, mtime_ns=10, ctime_ns=11)
+                 for name, path, digest, inode in (
+                     ('executable', '/sdk/native-main', 'a', 20),
+                     ('wifi', '/sdk/libns3.48-wifi-default.so', 'b', 30),
+                     *([('spectrum', '/sdk/libns3.48-spectrum-default.so', 'c', 40)] if spectrum else []))}
+        expected = dict(schema_version=1, mode=mode, run_id=raw.name, run_dir=run_dir,
+                        prepared_host_monotonic_ns=100, files=files)
+        identity.write_new(raw / identity.EXPECTED, expected)
+        maps = '\n'.join(f'{1000+i*100:x}-{1100+i*100:x} r-xp 00000000 08:01 {row["inode"]} {row["path"]}'
+                         for i, row in enumerate(files.values())).encode() + b'\n'
+        (raw / identity.MAPS).write_bytes(maps)
+        process = dict(pid=123, start_ticks=100, uid=0, executable=files['executable']['path'],
+                       argv=[files['executable']['path'], f'--statsFile={run_dir}/metrics/native_radio_stats.json'])
+        observed = dict(schema_version=1, mode=mode, run_id=raw.name, status='observed', files=files,
+            expected_sha256=identity.digest(raw / identity.EXPECTED), process_before=process, process_after=process,
+            captured_host_monotonic_ns=200, maps=dict(path=identity.MAPS, bytes=len(maps), sha256=hashlib.sha256(maps).hexdigest()))
+        identity.write_new(raw / identity.OBSERVED, observed)
+        closed = dict(schema_version=1, mode=mode, run_id=raw.name, status='closed', files=files,
+            expected_sha256=identity.digest(raw / identity.EXPECTED), observed_sha256=identity.digest(raw / identity.OBSERVED),
+            closed_host_monotonic_ns=400)
+        identity.write_new(raw / identity.CLOSED, closed)
+        (raw / 'metrics/relay_experiment_summary.json').write_text(json.dumps(dict(measurement_start_host_monotonic_ns=300)))
+        (raw / 'environment.txt').write_text(f'native_library_identity_mode={mode}\nnative_binary_sha256={"a"*64}\n')
+        relative = 'inputs/native_library_expected/value.json'
+        for stage in ('initial', 'final'):
+            directory = raw / 'configuration' / stage
+            (directory / relative).parent.mkdir(parents=True, exist_ok=True)
+            data = (raw / identity.EXPECTED).read_bytes()
+            (directory / relative).write_bytes(data)
+            (directory / 'manifest.json').write_text(json.dumps(dict(stage=stage, files=[dict(
+                label='native_library_expected', status='observed', kind='configured_input', copied_path=relative, bytes=len(data))])))
+        return raw, summary, identity
+
+    def test_native_loaded_library_gate_is_portable_and_legacy_is_explicit(self):
+        raw, summary, identity = self.native_library_evidence()
+        proof = bas.recorded_outcome(raw, 0, summary)['native_library_verification']
+        self.assertTrue(proof['passed'], proof)
+        self.assertEqual(proof['wifi_sha256'], 'b' * 64)
+        self.assertEqual(proof['spectrum_sha256'], 'c' * 64)
+        self.assertEqual(proof, identity.verify(raw))
+        absent = self.root / 'legacy'; absent.mkdir()
+        self.assertEqual(bas.native_library_verification(absent), dict(status='not_requested_legacy', passed=None))
+        (absent / 'environment.txt').write_text(f'native_library_identity_mode={identity.MODE}\n')
+        self.assertFalse(bas.native_library_verification(absent)['passed'])
+
+    def test_historical_v1_proof_remains_valid_without_claiming_spectrum(self):
+        raw, summary, identity = self.native_library_evidence(spectrum=False)
+        proof = identity.verify(raw)
+        self.assertTrue(proof['passed'], proof)
+        self.assertNotIn('spectrum_sha256', proof)
+        self.assertNotIn('mapped_spectrum', proof['checks'])
+        # A new runtime cannot make this old capture satisfy its advertised v2.
+        path = raw / 'environment.txt'
+        path.write_text(path.read_text().replace(identity.LEGACY_MODE, identity.MODE))
+        self.assertFalse(identity.verify(raw)['passed'])
+
+    def test_spectrum_requires_its_actual_mapping_and_unchanged_closed_identity(self):
+        raw, summary, identity = self.native_library_evidence()
+        path = raw / identity.MAPS; original = path.read_bytes()
+        observed_path = raw / identity.OBSERVED; observed_original = observed_path.read_bytes()
+        closed_path = raw / identity.CLOSED; closed_original = closed_path.read_bytes()
+        candidates = (b'\n'.join(line for line in original.splitlines() if b'-spectrum' not in line) + b'\n',
+            original.replace(b' 40 ', b' 41 '), original.replace(b'08:01 40', b'08:02 40'),
+            original.replace(b'spectrum-default.so', b'spectrum-default.so (deleted)'),
+            original + b'100-200 r-xp 00000000 08:01 50 /other/libns3.48-spectrum-default.so\n')
+        for candidate in candidates:
+            with self.subTest(maps=candidate):
+                path.write_bytes(candidate)
+                observed = json.loads(observed_original)
+                observed['maps'].update(bytes=len(candidate), sha256=hashlib.sha256(candidate).hexdigest())
+                observed_path.write_text(json.dumps(observed))
+                closed = json.loads(closed_original)
+                closed['observed_sha256'] = identity.digest(observed_path)
+                closed_path.write_text(json.dumps(closed))
+                self.assertFalse(identity.verify(raw)['passed'])
+        path.write_bytes(original); observed_path.write_bytes(observed_original)
+        closed = json.loads(closed_original); closed['files']['spectrum']['sha256'] = 'd' * 64
+        closed_path.write_text(json.dumps(closed))
+        self.assertFalse(identity.verify(raw)['passed'])
+        closed_path.write_bytes(closed_original)
+        environment = raw / 'environment.txt'
+        environment.write_text(environment.read_text().replace(identity.MODE, identity.LEGACY_MODE))
+        self.assertFalse(identity.verify(raw)['passed'])  # No v2 -> v1 downgrade.
+
+    def test_native_loaded_library_missing_capture_frozen_input_or_closed_proof_fails(self):
+        raw, summary, identity = self.native_library_evidence()
+        for name in (identity.EXPECTED, identity.OBSERVED, identity.CLOSED, identity.MAPS,
+                     'configuration/initial/inputs/native_library_expected/value.json',
+                     'configuration/final/inputs/native_library_expected/value.json', 'environment.txt'):
+            path = raw / name; original = path.read_bytes(); path.unlink()
+            with self.subTest(missing=name):
+                result = bas.recorded_outcome(raw, 0, summary)
+                self.assertFalse(result['native_library_verification']['passed'])
+                self.assertEqual(result['runtime_status'], 'failed')
+                self.assertEqual(result['measurement_validity'], 'invalid')
+                self.assertIn('native_library_identity_invalid', result['runtime_verification_errors'])
+            path.write_bytes(original)
+
+    def test_native_maps_hash_inode_deleted_duplicate_and_missing_execute_cannot_pass(self):
+        raw, summary, identity = self.native_library_evidence()
+        path = raw / identity.MAPS; original = path.read_bytes()
+        observed_path = raw / identity.OBSERVED; observed_original = observed_path.read_bytes()
+        closed_path = raw / identity.CLOSED; closed_original = closed_path.read_bytes()
+        candidates = (original + b'malformed\n', original.replace(b' 30 ', b' 31 '),
+                      original.replace(b'wifi-default.so', b'wifi-default.so (deleted)'),
+                      original.replace(b'r-xp', b'r--p'),
+                      original + b'100-200 r-xp 00000000 08:01 40 /other/libns3.48-wifi-default.so\n')
+        for candidate in candidates:
+            path.write_bytes(candidate)
+            # Rehash the receipt to test map semantics, beyond a stale digest.
+            observed = json.loads(observed_original)
+            observed['maps'].update(bytes=len(candidate), sha256=hashlib.sha256(candidate).hexdigest())
+            observed_path.write_text(json.dumps(observed))
+            closed = json.loads(closed_original); closed['observed_sha256'] = identity.digest(observed_path)
+            closed_path.write_text(json.dumps(closed))
+            self.assertFalse(identity.verify(raw)['passed'], candidate)
+        path.write_bytes(original + b'\n')
+        observed_path.write_bytes(observed_original); closed_path.write_bytes(closed_original)
+        self.assertFalse(identity.verify(raw)['passed'])
+
+    def test_native_process_reuse_foreign_run_and_late_capture_fail(self):
+        raw, summary, identity = self.native_library_evidence()
+        path = raw / identity.OBSERVED; original = json.loads(path.read_bytes())
+        closed_path = raw / identity.CLOSED; closed_original = json.loads(closed_path.read_bytes())
+        for changes in (dict(process_after=dict(original['process_after'], start_ticks=101)),
+                        dict(process_before=dict(original['process_before'], pid=True)),
+                        dict(process_before=dict(original['process_before'], argv=['/sdk/native-main', '--statsFile=/foreign'])),
+                        dict(captured_host_monotonic_ns=301), dict(captured_host_monotonic_ns=float('inf')),
+                        dict(run_id='foreign'), dict(status='failed')):
+            path.write_text(json.dumps(dict(original, **changes)))
+            closed_path.write_text(json.dumps(dict(closed_original, observed_sha256=identity.digest(path))))
+            self.assertFalse(identity.verify(raw)['passed'], changes)
+
+    def test_analyzer_reuses_native_library_proof_and_rejects_missing_closed_evidence(self):
+        from scripts.product.analyze_relay_experiment import analyze_run
+        raw, summary, identity = self.native_library_evidence()
+        output = self.root / 'library-analysis'
+        result = analyze_run(raw, output, plots=False, live_export=False)
+        self.assertEqual(result['native_library_verification'], identity.verify(raw))
+        self.assertTrue(result['native_library_verification']['passed'])
+        (raw / identity.CLOSED).unlink()
+        result = analyze_run(raw, output, plots=False, live_export=False)
+        self.assertFalse(result['native_library_verification']['passed'])
+        self.assertIn('native loaded library identity is not verified', result['data_quality_errors'])
+
+    def test_native_mapping_producer_does_not_follow_a_reused_pid_during_exec_wait(self):
+        raw, summary, identity = self.native_library_evidence()
+        observed = json.loads((raw / identity.OBSERVED).read_bytes())
+        maps = (raw / identity.MAPS).read_bytes()
+        process = observed['process_before']
+        with patch.object(identity, 'process_identity', side_effect=[dict(process, executable='/bin/wrapper'),
+                                                                    dict(process, start_ticks=101)]), \
+                patch.object(Path, 'read_bytes', return_value=maps), \
+                patch.object(identity.time, 'monotonic', side_effect=[0, 0, 16]), \
+                patch.object(identity.time, 'sleep'), patch.object(identity, 'file_identity') as hashing:
+            with self.assertRaisesRegex(ValueError, 'PID was reused'):
+                identity.observe(raw, process['pid'], 15)
+            hashing.assert_not_called()
+
+    @unittest.skipUnless(sys.platform.startswith('linux') and Path('/lib/x86_64-linux-gnu/libm.so.6').is_file(),
+                         'actual proc maps capture needs Linux libm fixture')
+    def test_native_library_producer_reads_actual_process_mapping_and_rejects_replaced_file(self):
+        from scripts.product import native_library_identity as identity
+        raw = self.root / 'loaded-library'; (raw / 'logs').mkdir(parents=True)
+        wifi = self.root / 'libns3.48-wifi-default.so'
+        spectrum = self.root / 'libns3.48-spectrum-default.so'
+        shutil.copyfile('/lib/x86_64-linux-gnu/libm.so.6', wifi)
+        shutil.copyfile('/lib/x86_64-linux-gnu/libm.so.6', spectrum)
+        # This is a real mapping/identity contract test, not an ns-3 physics test.
+        child = subprocess.Popen([sys.executable, '-c',
+            'import ctypes,sys,time; libraries=[ctypes.CDLL(p) for p in sys.argv[1:3]]; time.sleep(20)', str(wifi), str(spectrum),
+            f'--statsFile={raw}/metrics/native_radio_stats.json'])
+        try:
+            expected = identity.prepare(raw, sys.executable, wifi, spectrum)
+            observed = identity.observe(raw, child.pid, 5)
+            self.assertEqual(observed['files'], expected['files'])
+            self.assertEqual(observed['process_before']['pid'], child.pid)
+            self.assertIn(str(wifi).encode(), (raw / identity.MAPS).read_bytes())
+            self.assertIn(str(spectrum).encode(), (raw / identity.MAPS).read_bytes())
+        finally:
+            child.terminate(); child.wait(timeout=5)
+        closed = identity.close(raw)
+        self.assertEqual(closed['files'], expected['files'])
+        # Replacement after closure is detected by a fresh closure attempt.
+        (raw / identity.CLOSED).unlink()
+        spectrum.unlink(); spectrum.write_bytes(b'different library')
+        with self.assertRaisesRegex(ValueError, 'changed'):
+            identity.close(raw)
+
+    def test_actual_closed_payload_writer_is_verified_and_legacy_is_unrequested(self):
+        raw, summary, path, metadata_path, metadata = self.payload_journal_evidence()
+        original = path.read_bytes()
+        result = bas.recorded_outcome(raw, 0, summary)
+        proof = result['payload_journal_verification']
+        self.assertTrue(proof['passed'], proof)
+        self.assertEqual((proof['rows'], proof['bytes'], proof['sha256']),
+                         (2, len(original), hashlib.sha256(original).hexdigest()))
+        self.assertEqual(result['measurement_validity'], 'valid')
+        self.assertEqual(path.read_bytes(), original)
+        (raw / 'environment.txt').write_text('')
+        metadata_path.unlink()
+        # An async first-row marker also prevents a missing export becoming legacy.
+        self.assertFalse(bas.payload_journal_verification(raw)['passed'])
+        path.write_text('{"event":"legacy"}\n')
+        self.assertEqual(bas.payload_journal_verification(raw), dict(status='not_requested_legacy', passed=None))
+
+    def test_advertised_payload_writer_requires_metadata_and_file(self):
+        raw, summary, path, metadata_path, metadata = self.payload_journal_evidence()
+        for missing in (path, metadata_path):
+            original = missing.read_bytes(); missing.unlink()
+            result = bas.recorded_outcome(raw, 0, summary)
+            self.assertFalse(result['payload_journal_verification']['passed'])
+            self.assertIn('payload_journal_invalid', result['runtime_verification_errors'])
+            self.assertEqual(result['measurement_validity'], 'invalid')
+            missing.write_bytes(original)
+        (raw / 'environment.txt').write_text('payload_journal_mode=unknown\n')
+        self.assertFalse(bas.payload_journal_verification(raw)['passed'])
+
+    def test_payload_writer_error_undrained_and_foreign_identity_cannot_pass(self):
+        raw, summary, path, metadata_path, original = self.payload_journal_evidence()
+        writer = original['application_lineage']['writer']
+        for changes in (dict(closed=False), dict(drained=False), dict(listener_alive=True),
+                        dict(error_count=1), dict(queue_depth=1), dict(rejected=1),
+                        dict(accepted=writer['written'] + 1), dict(accepted_bytes=writer['written_bytes'] + 1),
+                        dict(writer=dict(writer['writer'], pid=writer['producer']['pid'] + 1)),
+                        dict(path='/different-run/payload/logs/scenario_events.jsonl')):
+            changed = copy.deepcopy(original)
+            changed['application_lineage']['writer'].update(changes)
+            metadata_path.write_text(json.dumps(changed))
+            self.assertFalse(bas.payload_journal_verification(raw)['passed'], changes)
+        changed = copy.deepcopy(original); changed['close_error'] = 'drain failed'
+        metadata_path.write_text(json.dumps(changed))
+        self.assertFalse(bas.payload_journal_verification(raw)['passed'])
+
+    def test_payload_raw_tamper_missing_tail_and_extra_record_fail_ledger(self):
+        raw, summary, path, metadata_path, metadata = self.payload_journal_evidence()
+        original = path.read_bytes()
+        for data in (original[:-1], original.replace(b'123456789', b'123456788', 1), original + b'{}\n'):
+            path.write_bytes(data)
+            self.assertFalse(bas.payload_journal_verification(raw)['passed'])
+
+    def test_payload_analyzer_reuses_closed_writer_proof_and_reports_tampering(self):
+        from scripts.product.analyze_relay_experiment import analyze_payload_lineage
+        raw, summary, path, metadata_path, metadata = self.payload_journal_evidence()
+        result = analyze_payload_lineage(raw)
+        self.assertEqual(result['writer_verification'], bas.payload_journal_verification(raw))
+        self.assertTrue(result['writer_verification']['passed'])
+        path.write_bytes(path.read_bytes() + b'{}\n')
+        result = analyze_payload_lineage(raw)
+        self.assertFalse(result['writer_verification']['passed'])
+        self.assertIn('payload async writer journal is not verified closed', result['audit_errors'])
 
     def test_actual_closed_position_writer_is_verified_without_changing_pose_epochs(self):
         raw, summary, path, audit_path, audit = self.position_journal_evidence()

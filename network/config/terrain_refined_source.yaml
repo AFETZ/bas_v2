@@ -1,0 +1,21 @@
+time_reference: measurement_start
+sources:
+- id: directional1
+  position_m:
+  - -1950
+  - -1900
+  - 105
+  orientation_rad:
+  - 0
+  - 0
+  pattern: tr38901
+  gain_dbi: 0
+  power_w: 1
+  center_hz: 2412000000
+  bandwidth_hz: 20000000
+  start_s: 20
+  stop_s: 40
+  period_s: 0.01
+  duty_cycle: 1
+  mode: continuous
+  spectral_shape: rectangular

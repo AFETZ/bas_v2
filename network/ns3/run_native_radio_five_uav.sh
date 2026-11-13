@@ -77,6 +77,10 @@ WIFI_AGGREGATION="${BAS_NATIVE_WIFI_AGGREGATION:-$WIFI_AGGREGATION_DEFAULT}"
   printf 'BAS_NATIVE_WIFI_AGGREGATION must be 0 or 1.\n' >&2; exit 2;
 }
 PROPAGATION_PROFILE="${BAS_NATIVE_PROPAGATION_PROFILE:-sionna}"
+RT_STAGE_TRACE="${BAS_NATIVE_RT_STAGE_TRACE:-0}"
+[[ "$RT_STAGE_TRACE" == 0 || "$RT_STAGE_TRACE" == 1 ]] || {
+  printf 'BAS_NATIVE_RT_STAGE_TRACE must be 0 or 1.\n' >&2; exit 2;
+}
 SIONNA_LOG_LEVEL="${BAS_NATIVE_SIONNA_LOG_LEVEL:-info}"
 [[ "$SIONNA_LOG_LEVEL" == info || "$SIONNA_LOG_LEVEL" == debug ]] || {
   printf 'BAS_NATIVE_SIONNA_LOG_LEVEL must be info or debug.\n' >&2; exit 2;
@@ -157,11 +161,11 @@ PYEXTERNAL
   EXTERNAL_BENCH=1
 fi
 if [[ "$SCENARIO_KEY" == urban ]]; then
-  [[ ( "$PROPAGATION_PROFILE" == geometry_logdistance || "$PROPAGATION_PROFILE" == sionna ) && "$FAULT_PROFILE" == none &&
+  [[ ( "$PROPAGATION_PROFILE" == geometry_logdistance || "$REQUIRES_RT" == 1 ) && "$FAULT_PROFILE" == none &&
      ( "$COORDINATION_POLICY" != off || "$EXTERNAL_BENCH" == 1 ) ]] || {
-    printf 'Urban mission requires explicit geometry_logdistance or Sionna, coordinator policy and no injected fault.\n' >&2; exit 2;
+    printf 'Urban mission requires explicit geometry_logdistance, Sionna or qualified hybrid, coordinator policy and no injected fault.\n' >&2; exit 2;
   }
-  if [[ "$PROPAGATION_PROFILE" == sionna ]]; then
+  if [[ "$REQUIRES_RT" == 1 ]]; then
     [[ -n "$RADIO_CONFIG_OVERRIDE" && -n "${BAS_NATIVE_RT_GROUND_MATERIAL:-}" &&
        -n "${BAS_NATIVE_RT_BUILDING_MATERIAL:-}" && -n "${BAS_NATIVE_RT_THICKNESS_M:-}" ]] || {
       printf 'Urban Sionna requires an explicit radio config and ITU material/thickness profile.\n' >&2; exit 2;
@@ -182,10 +186,10 @@ if not name or ':' in name or relative.is_absolute() or '..' in relative.parts o
     raise ValueError('native sources require a workspace-relative YAML input without traversal')
 path = (root / relative).resolve()
 canonical = path.relative_to(root).as_posix()
-if sys.argv[3:5] == ['urban', 'sionna']:
+if sys.argv[3] == 'urban' and sys.argv[4] in ('sionna', 'hybrid'):
     from bas import _interference_input
     _interference_input(dict(interference=dict(sources=canonical), propagation=dict(
-        model='sionna', ground_material=sys.argv[5], building_material=sys.argv[6])), root)
+        model=sys.argv[4], ground_material=sys.argv[5], building_material=sys.argv[6])), root)
 else:
     import yaml
     from scripts.product.prepare_native_sources import UniqueSafeLoader, prepare
@@ -213,7 +217,7 @@ run_in_container() {
   if [[ "$SCENARIO_KEY" == urban ]]; then
     local -a urban_args=(--config "$GEOMETRY_CONFIG" --output "$URBAN_OUTPUT" --uav-count "$UAV_COUNT"
                          --propagation-profile "$PROPAGATION_PROFILE")
-    if [[ "$PROPAGATION_PROFILE" == sionna ]]; then
+    if [[ "$REQUIRES_RT" == 1 ]]; then
       urban_args+=(--radio-config "$RADIO_CONFIG_OVERRIDE" --ground-material "$BAS_NATIVE_RT_GROUND_MATERIAL"
                    --building-material "$BAS_NATIVE_RT_BUILDING_MATERIAL" --thickness-m "$BAS_NATIVE_RT_THICKNESS_M")
     fi
@@ -250,11 +254,25 @@ run_in_container() {
       gui_args+=(-e XAUTHORITY=/tmp/bas-native-xauthority -v "$xauthority_file:/tmp/bas-native-xauthority:ro")
     fi
   fi
+  local -a storage_args=()
+  if [[ "$CAPTURE_STORAGE" == tmpfs ]]; then
+    [[ -n "${BAS_RUNTIME_SPOOL:-}" ]] || { printf 'tmpfs runtime requires the public BAS owned spool.\n' >&2; return 2; }
+    python3 "$ROOT_DIR/scripts/product/runtime_storage.py" --root "$ROOT_DIR" \
+      --run-id "$BAS_NATIVE_FIVE_RUN_ID" --spool "$BAS_RUNTIME_SPOOL" >/dev/null
+    storage_args=(--log-driver=none --cidfile "$BAS_RUNTIME_SPOOL/container.id"
+      --mount "type=bind,src=$BAS_RUNTIME_SPOOL,dst=$BAS_RUNTIME_SPOOL"
+      --mount "type=bind,src=$BAS_RUNTIME_SPOOL/caches/drjit,dst=/home/ubuntu/.drjit"
+      --mount "type=bind,src=$BAS_RUNTIME_SPOOL/caches/gz,dst=/home/ubuntu/.gz"
+      --mount "type=bind,src=$BAS_RUNTIME_SPOOL/raw/$BAS_NATIVE_FIVE_RUN_ID/logs/sdformat,dst=/home/ubuntu/.sdformat"
+      -e BAS_RUNTIME_SPOOL -e CUDA_CACHE_PATH="$BAS_RUNTIME_SPOOL/caches/cuda"
+      -e XDG_CACHE_HOME="$BAS_RUNTIME_SPOOL/caches/xdg")
+  fi
   docker run --rm \
     --name "$CONTAINER_NAME" \
     --label bas.product=native-radio-five-uav \
     --privileged --network=host --user 0:0 \
     --tmpfs "/tmp:rw,nosuid,size=$CONTAINER_TMPFS_SIZE,mode=1777" \
+    "${storage_args[@]}" \
     "${gpu_args[@]}" \
     "${gui_args[@]}" \
     -e BAS_SIMULATION_MODE -e BAS_LOCKSTEP_STEP_MS -e BAS_LOCKSTEP_TIMEOUT_S \
@@ -264,6 +282,7 @@ run_in_container() {
     -e BAS_SOURCE_HEAD="$(git -C "$ROOT_DIR" rev-parse HEAD)" \
     -e BAS_SOURCE_DIRTY="$(git -C "$ROOT_DIR" status --porcelain | wc -l)" \
     -e BAS_NATIVE_PROPAGATION_PROFILE="${BAS_NATIVE_PROPAGATION_PROFILE:-sionna}" \
+    -e BAS_NATIVE_RT_STAGE_TRACE="$RT_STAGE_TRACE" \
     -e BAS_NATIVE_SIONNA_LOG_LEVEL="$SIONNA_LOG_LEVEL" \
     -e BAS_NATIVE_URBAN_CONFIG="$container_geometry" \
     -e BAS_NATIVE_URBAN_OUTPUT="$container_urban_output" \
@@ -321,6 +340,7 @@ run_in_container() {
     -e BAS_NATIVE_FIVE_HOST_UID="$(id -u)" \
     -e BAS_NATIVE_FIVE_HOST_GID="$(id -g)" \
     -e XDG_RUNTIME_DIR=/tmp/bas-native-five-xdg \
+    -e PYTHONDONTWRITEBYTECODE=1 \
     -e PYTHONPATH=/home/ubuntu/.local/lib/python3.10/site-packages \
     -v "$ROOT_DIR":/workspace/multiagent_simulation \
     -v "$ROOT_DIR":/home/bas/bas_v2 \
@@ -373,11 +393,11 @@ if [[ "${BAS_NATIVE_FLIGHT_DIAGNOSTIC:-0}" == 1 ]]; then
 fi
 if [[ "$COORDINATION_POLICY" != off ]]; then
   [[ "$BAS_SIMULATION_MODE" == realtime &&
-     ( "$PROPAGATION_PROFILE" == friis || "$PROPAGATION_PROFILE" == geometry_logdistance || "$PROPAGATION_PROFILE" == sionna ) && "$WIFI_TOPOLOGY" == adhoc &&
+     ( "$PROPAGATION_PROFILE" == friis || "$PROPAGATION_PROFILE" == geometry_logdistance || "$REQUIRES_RT" == 1 ) && "$WIFI_TOPOLOGY" == adhoc &&
      "$SCENARIO_MODE" == product && ( "$ACTIVE_UART_CHANNELS" == control || "$ACTIVE_UART_CHANNELS" == control,payload ) &&
      -z "${BAS_NATIVE_EXTERNAL_CONFIG:-}" && -z "$EXTERNAL_BUNDLE" &&
-     ( -z "${BAS_NATIVE_SOURCES:-}" || "$PROPAGATION_PROFILE" == sionna ) ]] || {
-    printf 'Coordination requires 1..5 realtime UAVs, explicit Friis/geometry_logdistance/Sionna ad-hoc, control with optional payload UART, and no other scenario mode.\n' >&2
+     ( -z "${BAS_NATIVE_SOURCES:-}" || "$REQUIRES_RT" == 1 ) ]] || {
+    printf 'Coordination requires 1..5 realtime UAVs, explicit Friis/geometry_logdistance/Sionna/qualified hybrid ad-hoc, control with optional payload UART, and no other scenario mode.\n' >&2
     exit 2
   }
   SCENARIO_MODE="relay_experiment"
@@ -421,7 +441,16 @@ for index in "${UAV_INDICES[@]}"; do
   TAP_ENDPOINTS+=("uav$index")
 done
 RUN_DIR="$ROOT_DIR/runs/native-radio-$BAS_SIMULATION_MODE/$RUN_ID"
-[[ ! -e "$RUN_DIR" ]] || { printf 'Run directory exists: %s\n' "$RUN_DIR" >&2; exit 2; }
+if [[ "$CAPTURE_STORAGE" == tmpfs ]]; then
+  python3 "$ROOT_DIR/scripts/product/runtime_storage.py" --root "$ROOT_DIR" \
+    --run-id "$RUN_ID" --spool "$BAS_RUNTIME_SPOOL" >/dev/null
+  RUN_DIR="$BAS_RUNTIME_SPOOL/raw/$RUN_ID"
+  export ROS_LOG_DIR="$RUN_DIR/ros-logs"
+  export GZ_LOG_PATH="$RUN_DIR/gazebo-logs"
+  mkdir -p "$ROS_LOG_DIR" "$GZ_LOG_PATH"
+else
+  [[ ! -e "$RUN_DIR" && ! -L "$RUN_DIR" ]] || { printf 'Run directory exists: %s\n' "$RUN_DIR" >&2; exit 2; }
+fi
 RUNTIME_DIR="/tmp/bas-native-five-$RUN_ID"
 NATIVE_CAPTURE_SPOOL=""
 NATIVE_EVENT_CSV="$RUN_DIR/logs/native_radio_events.csv"
@@ -456,6 +485,8 @@ EMITTER_BATCH_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-emitter-batch.patch"
 FIXED_PATH_STORAGE_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-fixed-path-storage.patch"
 PROMISC_QOS_RECEIVE_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-promisc-qos-receive-context.patch"
 DOPPLER_FACTORIZATION_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-cfr-doppler-factorization.patch"
+EXPIRED_PREAMBLE_EVENTS_PATCH="$ROOT_DIR/network/ns3/patches/ns3-expired-preamble-events.patch"
+SISO_PRECODER_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-siso-identity-precoder.patch"
 TAP_QUEUE_SELECTION_PATCH="$ROOT_DIR/network/ns3/patches/mr2608-tap-device-queue-selection.patch"
 if [[ "$SCENARIO_KEY" == urban ]]; then
   SCENARIO="$URBAN_OUTPUT/scenario.yaml"
@@ -531,19 +562,23 @@ MAP_ID="${SCENARIO_VALUES[5]}"
 
 for required_file in "$ROOT_DIR/scripts/product/capture_effective_config.py" \
   "$PROJECT_SOURCE" "$PATCH_FILE" "$REALTIME_CACHE_PATCH" \
-    "$PHASED_ARRAY_ADAPTER_PATCH" "$LOCKSTEP_TAP_PATCH" "$SOLVER_BUDGET_PATCH" "$BASEBAND_PHASE_PATCH" "$DOPPLER_EPOCH_PATCH" "$RECEIVER_BATCH_PATCH" "$DYNAMIC_RT_INPUTS_PATCH" "$FULL_MESH_PATCH" "$EMITTER_BATCH_PATCH" "$FIXED_PATH_STORAGE_PATCH" "$PROMISC_QOS_RECEIVE_PATCH" "$DOPPLER_FACTORIZATION_PATCH" "$TAP_QUEUE_SELECTION_PATCH" "$RADIO_CONFIG" "$WORLD" "$CAMERA_FRAGMENT" "$SITL_DEFAULTS"; do
+    "$PHASED_ARRAY_ADAPTER_PATCH" "$LOCKSTEP_TAP_PATCH" "$SOLVER_BUDGET_PATCH" "$BASEBAND_PHASE_PATCH" "$DOPPLER_EPOCH_PATCH" "$RECEIVER_BATCH_PATCH" "$DYNAMIC_RT_INPUTS_PATCH" "$FULL_MESH_PATCH" "$EMITTER_BATCH_PATCH" "$FIXED_PATH_STORAGE_PATCH" "$PROMISC_QOS_RECEIVE_PATCH" "$DOPPLER_FACTORIZATION_PATCH" "$EXPIRED_PREAMBLE_EVENTS_PATCH" "$SISO_PRECODER_PATCH" "$TAP_QUEUE_SELECTION_PATCH" "$RADIO_CONFIG" "$WORLD" "$CAMERA_FRAGMENT" "$SITL_DEFAULTS"; do
   [[ -f "$required_file" ]] || { printf 'Missing input: %s\n' "$required_file" >&2; exit 2; }
 done
 if [[ "$REQUIRES_RT" == 1 && ! -f "$SCENE" ]]; then
   printf 'Missing RT scene: %s\n' "$SCENE" >&2; exit 2
 fi
 export GZ_SIM_RESOURCE_PATH="${GZ_SIM_RESOURCE_PATH:-}:$(dirname "$WORLD")"
-mapfile -t RADIO_VALUES < <(python3 - "$RADIO_CONFIG" <<'PY'
+mapfile -t RADIO_VALUES < <(python3 - "$RADIO_CONFIG" "$ROOT_DIR" <<'PY'
 import sys
 import yaml
+sys.path.insert(0, sys.argv[2])
+from scripts.product.prepare_urban_gazebo import validate_native_wifi_modes
 
 value = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
 radio = value["radio"]
+if radio["backend"] == "wifi":
+    validate_native_wifi_modes(radio)
 sionna = value["sionna"]
 coupling = value.get("coupling", {})
 for item in (
@@ -627,6 +662,15 @@ SIONNA_MAX_NUM_PATHS_PER_SOURCE="${RADIO_VALUES[32]}"
 SIONNA_RECEIVER_BATCH_MODE="${RADIO_VALUES[33]}"
 SIONNA_RT_EXECUTION_MODE="${RADIO_VALUES[34]}"
 SIONNA_WORKER_COUNT="${RADIO_VALUES[35]}"
+if [[ "$PROPAGATION_PROFILE" == hybrid ]]; then
+  python3 - "$ROOT_DIR" "$SIONNA_RT_EXECUTION_MODE" "$STATE_MAX_AGE_S" "$CHANNEL_STATE_MAX_AGE_S" <<'PYHYBRIDPROFILE'
+import sys
+sys.path.insert(0,sys.argv[1])
+from scripts.product.hybrid_policy import validate_radio_profile
+validate_radio_profile(dict(sionna=dict(execution_mode=sys.argv[2],channel_state_max_age_s=float(sys.argv[4])),
+                            coupling=dict(state_max_age_s=float(sys.argv[3]))))
+PYHYBRIDPROFILE
+fi
 POSE_PUBLICATION_RATE_HZ=50
 [[ "$SIONNA_RT_EXECUTION_MODE" != worker_pool ]] || POSE_PUBLICATION_RATE_HZ=100
 [[ "$SIONNA_RT_EXECUTION_MODE" == in_process || "$SIONNA_RT_EXECUTION_MODE" == worker_pool ]] || {
@@ -697,6 +741,10 @@ PY
 [[ -x "$PYTHON_TOOLING/bin/cmake" ]] || { printf 'Pinned CMake tooling is absent.\n' >&2; exit 2; }
 
 mkdir -p "$RUN_DIR"/{logs,metrics,pcap,screenshots,plots} "$UART_DIR" "$WORK_DIR"
+if [[ "$CAPTURE_STORAGE" == tmpfs ]]; then
+  python3 "$ROOT_DIR/scripts/product/runtime_storage.py" --root "$ROOT_DIR" \
+    --run-id "$RUN_ID" --spool "$BAS_RUNTIME_SPOOL" --container > "$RUN_DIR/logs/runtime_storage_container.json"
+fi
 printf '%s\n' "$CPU_PARTITION_JSON" > "$RUN_DIR/logs/cpu_partition.json"
 printf '%s\n' "$NATIVE_SDK_VERIFICATION" > "$RUN_DIR/logs/native_sdk_source_verification.json"
 mkdir -p "$(dirname "$NATIVE_EVENT_CSV")" "$(dirname "$NATIVE_PCAP_PREFIX")"
@@ -718,7 +766,8 @@ if profile == "tmpfs" and (observed["filesystem"] != "tmpfs" or observed["total_
 value = dict(requested_profile=profile, effective_profile=profile,
     declared_container_tmpfs_limit_bytes=int(limit), observed_mount=observed,
     native_event_csv_path=events, native_pcap_prefix_path=pcap, spool_directory=spool,
-    scope="native ns-3 PCAPs and event CSV; TAP/sidecar logs remain separate disk writers",
+    scope=("native ns-3 PCAPs and event CSV on container tmpfs; the complete live run uses owned host tmpfs"
+           if profile == "tmpfs" else "native ns-3 PCAPs, event CSV and sidecars use explicit disk storage"),
     memory_accounting="tmpfs raw bytes are memory use outside native process RSS",
     publication=dict(status="pending" if profile == "tmpfs" else "direct_disk"))
 Path(manifest).write_text(json.dumps(value, indent=2) + "\n")
@@ -779,7 +828,7 @@ export PYTHONPATH="$PYTHON_TOOLING:$PYTHON_DEPS:${PYTHONPATH:-}"
 cp "$PROJECT_SOURCE" "$UPSTREAM_SOURCE"
 cp "$ROOT_DIR/network/ns3/scratch/native-geometry-loss.h" "$ROOT_DIR/network/ns3/scratch/native-spectrum-sources.h" "$ROOT_DIR/network/ns3/scratch/native-live-state.h" "$ROOT_DIR/network/ns3/scratch/native-lockstep.h" "$NS3_DIR/scratch/"
 cp "$ROOT_DIR/network/ns3/scratch/native-rt-cache.h" "$ROOT_DIR/network/ns3/scratch/native-rt-pool.h" "$ROOT_DIR/network/ns3/scratch/native-rt-worker.cc" "$NS3_DIR/scratch/"
-cp "$ROOT_DIR/network/ns3/scratch/native-log-phase.h" "$NS3_DIR/scratch/"
+cp "$ROOT_DIR/network/ns3/scratch/native-log-phase.h" "$ROOT_DIR/network/ns3/scratch/native-timing-distribution.h" "$NS3_DIR/scratch/"
 source_args=()
 if [[ "$SCENARIO_KEY" == urban ]]; then
   cp "$GEOMETRY_CONFIG" "$RUN_DIR/logs/urban_scenario.json"
@@ -808,8 +857,14 @@ if [[ "${BAS_NATIVE_FIVE_SKIP_BUILD:-0}" == 1 ]]; then
   [[ -s "$SPECTRUM_LIBRARY" && "$SPECTRUM_LIBRARY" -nt "$DOPPLER_FACTORIZATION_PATCH" ]] || {
     printf 'Spectrum library predates per-path Doppler factorization.\n' >&2; exit 2;
   }
+  [[ "$SPECTRUM_LIBRARY" -nt "$SISO_PRECODER_PATCH" ]] || {
+    printf 'Spectrum library predates the SISO identity-precoder specialization.\n' >&2; exit 2;
+  }
   [[ -s "$WIFI_LIBRARY" && "$WIFI_LIBRARY" -nt "$PROMISC_QOS_RECEIVE_PATCH" ]] || {
     printf 'Wi-Fi library predates promiscuous QoS receive context fix.\n' >&2; exit 2;
+  }
+  [[ "$WIFI_LIBRARY" -nt "$EXPIRED_PREAMBLE_EVENTS_PATCH" ]] || {
+    printf 'Wi-Fi library predates expired preamble callback release.\n' >&2; exit 2;
   }
   [[ "$SPECTRUM_LIBRARY" -nt "$DYNAMIC_RT_INPUTS_PATCH" ]] || {
     printf 'Spectrum library predates dynamic RT input storage fix.\n' >&2; exit 2;
@@ -829,8 +884,8 @@ if [[ "${BAS_NATIVE_FIVE_SKIP_BUILD:-0}" == 1 ]]; then
   [[ "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-rt-cache.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-rt-pool.h" ]] || {
     printf 'Binary predates native RT cache/pool header.\n' >&2; exit 2;
   }
-  [[ "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-log-phase.h" ]] || {
-    printf 'Binary predates logging phase observer.\n' >&2; exit 2;
+  [[ "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-log-phase.h" && "$BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-timing-distribution.h" ]] || {
+    printf 'Binary predates logging phase observer or timing distribution header.\n' >&2; exit 2;
   }
   if [[ "$SIONNA_RT_EXECUTION_MODE" == worker_pool ]]; then
     [[ -x "$RT_WORKER_BINARY" && "$RT_WORKER_BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-rt-worker.cc" && "$RT_WORKER_BINARY" -nt "$ROOT_DIR/network/ns3/scratch/native-live-state.h" ]] || {
@@ -861,6 +916,11 @@ import sys
 print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())
 PYBINARYSHA
 )"
+python3 "$ROOT_DIR/scripts/product/native_library_identity.py" prepare \
+  --run-dir "$RUN_DIR" --executable "$BINARY" \
+  --wifi "$NS3_DIR/build/lib/libns3.48-wifi-default.so" \
+  --spectrum "$NS3_DIR/build/lib/libns3.48-spectrum-default.so" \
+  > "$RUN_DIR/logs/native_library_prepare.log" 2>&1
 
 mapfile -t DEPENDENCIES < <(PYTHONPATH="$PYTHON_DEPS" python3 - <<'PY'
 from importlib.metadata import PackageNotFoundError, version
@@ -878,6 +938,9 @@ PY
   printf 'git_head=%s\n' "${BAS_SOURCE_HEAD:-$(git -C "$ROOT_DIR" rev-parse HEAD)}"
   printf 'source_dirty_paths=%s\n' "${BAS_SOURCE_DIRTY:-unknown}"
   printf 'coordination_policy=%s\nactive_uart_channels=%s\n' "$COORDINATION_POLICY" "$ACTIVE_UART_CHANNELS"
+  if [[ "$COORDINATION_POLICY" != off ]]; then
+    printf 'coordination_journal_mode=bounded_async_jsonl_v1\n'
+  fi
   printf 'physics_profile=%s\n' "$PHYSICS_PROFILE"
   printf 'wifi_topology=%s\n' "$WIFI_TOPOLOGY"
   printf 'wifi_explicit_bar_after_missed_block_ack_requested=%s\n' "$WIFI_EXPLICIT_BAR"
@@ -889,6 +952,7 @@ PY
   printf 'ns3_rng_seed=%s\nns3_rng_run=%s\n' "$RNG_SEED" "$RNG_RUN"
   printf 'ns3_exact_sha=%s\n' "$(git -c safe.directory="$NS3_DIR" -C "$NS3_DIR" rev-parse HEAD)"
   printf 'native_binary_sha256=%s\n' "$NATIVE_BINARY_SHA256"
+  printf 'native_library_identity_mode=proc_maps_sha256_v2\n'
   printf 'ns3_compatibility_patch=true\n'
   printf 'python_version=%s\n' "$(python3 --version | awk '{print $2}')"
   printf '%s\n' "${DEPENDENCIES[@]}"
@@ -921,9 +985,15 @@ PY
     "$CARRIER_HZ" "$WIFI_CHANNEL_NUMBER" "$WIFI_CHANNEL_WIDTH_MHZ" "$WIFI_DATA_MODE" "$WIFI_CONTROL_MODE"
   printf 'phy_rate_bps=%s\ntx_power_w=%s\nwifi_ssid=%s\n' "$PHY_RATE_BPS" "$TX_POWER_W" "$WIFI_SSID"
   printf 'event_logging=%s\nactive_uart_channels=%s\nlatency_mode=%s\n' "$EVENT_LOGGING" "$ACTIVE_UART_CHANNELS" "$LATENCY_MODE"
+  if [[ "$SCENARIO_MODE" == relay_experiment && "$EVENT_LOGGING" == batched_trace && ",$ACTIVE_UART_CHANNELS," == *,payload,* ]]; then
+    printf 'payload_journal_mode=bounded_async_jsonl_v1\n'
+  fi
   printf 'native_duration_s=%s\nservice_duration_s=%s\nruntime_duration_budget=%s\n' \
     "$NATIVE_DURATION_S" "$SERVICE_DURATION_S" "$RUNTIME_BUDGET_JSON"
   printf 'native_capture_storage_requested=%s\nnative_capture_storage_effective=%s\n' "$CAPTURE_STORAGE" "$CAPTURE_STORAGE"
+  if [[ "$CAPTURE_STORAGE" == tmpfs ]]; then
+    printf 'runtime_storage_mode=host_tmpfs_run_v1\n'
+  fi
   printf 'native_capture_tmpfs_limit_bytes=%s\nnative_capture_mount_fstype=%s\nnative_capture_mount_total_bytes=%s\n' \
     "$NATIVE_CAPTURE_TMPFS_LIMIT_BYTES" "${NATIVE_CAPTURE_MOUNT[0]}" "${NATIVE_CAPTURE_MOUNT[1]}"
   printf 'native_event_csv_path=%s\nnative_pcap_prefix_path=%s\nnative_capture_spool_path=%s\n' \
@@ -1068,7 +1138,9 @@ capture_effective_configuration() {
     --config "native_routes=$RUN_DIR/logs/native_routes.txt"
     --config "native_neighbors=$RUN_DIR/logs/static_neighbors.txt"
     --config "native_capture_storage=$RUN_DIR/logs/native_capture_storage.json"
+    --config "native_library_expected=$RUN_DIR/logs/native_library_expected.json"
     --config "async_jsonl_writer=$ROOT_DIR/network/jsonl.py"
+    --config "runtime_storage_helper=$ROOT_DIR/scripts/product/runtime_storage.py"
     --config "cpu_partition=$RUN_DIR/logs/cpu_partition.json"
     --config "sionna_solver_budget_patch=$SOLVER_BUDGET_PATCH"
     --config "sionna_baseband_phase_patch=$BASEBAND_PHASE_PATCH"
@@ -1080,12 +1152,23 @@ capture_effective_configuration() {
     --config "sionna_fixed_path_storage_patch=$FIXED_PATH_STORAGE_PATCH"
     --config "promisc_qos_receive_context_patch=$PROMISC_QOS_RECEIVE_PATCH"
     --config "sionna_doppler_factorization_patch=$DOPPLER_FACTORIZATION_PATCH"
+    --config "expired_preamble_events_patch=$EXPIRED_PREAMBLE_EVENTS_PATCH"
+    --config "sionna_siso_precoder_patch=$SISO_PRECODER_PATCH"
     --observed-params "native_sdk_sources=$RUN_DIR/logs/native_sdk_source_verification.json"
     --config "tap_queue_selection_patch=$TAP_QUEUE_SELECTION_PATCH"
     --config "native_rt_pool_source=$ROOT_DIR/network/ns3/scratch/native-rt-pool.h"
     --config "native_rt_cache_source=$ROOT_DIR/network/ns3/scratch/native-rt-cache.h"
     --config "native_log_phase_header=$ROOT_DIR/network/ns3/scratch/native-log-phase.h"
+    --config "native_timing_distribution_header=$ROOT_DIR/network/ns3/scratch/native-timing-distribution.h"
   )
+  if [[ "$CAPTURE_STORAGE" == tmpfs ]]; then
+    config_args+=(--config "runtime_storage_initial=$RUN_DIR/logs/runtime_storage_initial.json"
+      --observed-params "runtime_storage_container=$RUN_DIR/logs/runtime_storage_container.json")
+  fi
+  local scene_execution_settings="$(dirname "$LAUNCH_WORLD")/runtime-settings.json"
+  if [[ -f "$scene_execution_settings" ]]; then
+    config_args+=(--config "scene_execution=$scene_execution_settings")
+  fi
   if [[ "$SIONNA_RT_EXECUTION_MODE" == worker_pool ]]; then
     config_args+=(--config "native_rt_worker_source=$ROOT_DIR/network/ns3/scratch/native-rt-worker.cc"
                   --config "native_rt_pool_adapter=$ROOT_DIR/scripts/product/native_rt_workers.py")
@@ -1122,6 +1205,8 @@ capture_effective_configuration() {
   done
   if [[ "$stage" == final ]]; then
     config_args+=(--dataflash-params
+      --observed-params "native_library_observed=$RUN_DIR/logs/native_library_observed.json"
+      --observed-params "native_library_closed=$RUN_DIR/logs/native_library_closed.json"
       --observed-params "ns3_attributes=$RUN_DIR/logs/ns3_attributes.txt"
       --observed-params "ros_topics=$RUN_DIR/logs/ros_topics.txt"
       --observed-params "ros_qos=$RUN_DIR/logs/ros_qos.json")
@@ -1145,6 +1230,11 @@ cleanup() {
     stop_pid "${managed_pids[$pid_index]}"
   done
   [[ -n "$NS3_LOGGER_PID" ]] && wait "$NS3_LOGGER_PID" 2>/dev/null || true
+  if ! python3 "$ROOT_DIR/scripts/product/native_library_identity.py" close \
+    --run-dir "$RUN_DIR" > "$RUN_DIR/logs/native_library_close.log" 2>&1; then
+    printf 'Native library closure verification failed; inspect logs/native_library_close.log.\n' >&2
+    ((status != 0)) || status=1
+  fi
   # Every native writer is closed before copying, including on ns-3 hard abort.
   # Use the same upstream PCAP bytes; this changes storage, never capture scope.
   if ! python3 - "$RUN_DIR" "$NATIVE_EVENT_CSV" "$NATIVE_PCAP_PREFIX" <<'PYPUBLISH' \
@@ -1634,6 +1724,9 @@ setsid ip netns exec ams-ns3 env \
   --readinessConsecutiveSamples="$READINESS_CONSECUTIVE_SAMPLES" \
   > "$NS3_FIFO" 2>&1 &
 NS3_PID=$!
+taskset -c "$STACK_CPUSET" python3 "$ROOT_DIR/scripts/product/native_library_identity.py" observe \
+  --run-dir "$RUN_DIR" --pid "$NS3_PID" --timeout-s 15 \
+  > "$RUN_DIR/logs/native_library_observe.log" 2>&1
 for _ in $(seq 1 1800); do
   [[ -s "$NS3_READY" ]] && break
   if [[ -n "$LOCKSTEP_PID" ]] && ! kill -0 "$LOCKSTEP_PID" 2>/dev/null; then

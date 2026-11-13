@@ -38,6 +38,7 @@
 #include "native-geometry-loss.h"
 #include "native-rt-pool.h"
 #include "native-log-phase.h"
+#include "native-timing-distribution.h"
 #include <memory>
 
 #include <algorithm>
@@ -101,11 +102,14 @@ size_t g_spectrumMaximumBins{0};
 uint64_t g_stalePoseSamples{0};
 uint64_t g_pathObservations{0};
 uint64_t g_realtimeLagSamples{0};
+bas::TimingDistribution g_realtimeLagDistribution;
 double g_latestRealtimeLagMs{std::numeric_limits<double>::infinity()};
 double g_readinessLagMaxMs{50.0};
 uint32_t g_readinessConsecutiveSamples{3};
 uint32_t g_healthyLagSamples{0};
 Ptr<PcapFileWrapper> g_radioPcap;
+// Non-owning: WriteStats is called only while main owns its local sourceRouter.
+bas::SourcePropagation* g_sourceRouterForStats{nullptr};
 std::ofstream g_events;
 volatile std::sig_atomic_t g_stopRequested = 0;
 std::string g_stopReason = "duration";
@@ -363,6 +367,25 @@ LogEvent(const std::string& event,
         g_pendingEventWrites = 0;
         g_lastEventFlush = now;
     }
+}
+
+// Exceptional diagnostics can contain CSV delimiters or traceback lines.
+// Call this at failure sites so packet tracing keeps its original hot path.
+std::string
+QuoteEventCsvField(const std::string& value)
+{
+    if (value.find_first_of(",\"\r\n") == std::string::npos)
+        return value;
+    std::string quoted;
+    quoted.reserve(value.size() + 2);
+    quoted.push_back('"');
+    for (const char c : value)
+    {
+        if (c == '"') quoted.push_back('"');
+        quoted.push_back(c);
+    }
+    quoted.push_back('"');
+    return quoted;
 }
 
 void
@@ -727,12 +750,12 @@ WifiSignalArrival(uint32_t receiver, Ptr<const SpectrumSignalParameters> signal,
                   uint32_t sender, double powerDbm, Time duration)
 {
     if (g_eventLogging == "metrics_only") return;
-    std::ostringstream details;
-    details << "sender_node_id=" << sender << ";duration_s=" << std::setprecision(17)
-            << duration.GetSeconds() << ";source=SpectrumWifiPhy.SignalArrival"
-            << ";foreign_signal=" << bool(DynamicCast<WaveformGenerator>(signal->txPhy));
+    const auto details = fmt::format(
+        "sender_node_id={};duration_s={:.17g};source=SpectrumWifiPhy.SignalArrival;foreign_signal={}",
+        sender, duration.GetSeconds(),
+        static_cast<unsigned>(bool(DynamicCast<WaveformGenerator>(signal->txPhy))));
     LogEvent("spectrum_signal_arrival", g_nodeNames.at(receiver), std::to_string(sender),
-             0, powerDbm, details.str());
+             0, powerDbm, details);
 }
 
 void
@@ -927,6 +950,18 @@ class LivePositionSource
     uint64_t ObservedSnapshots() const { return m_observedSnapshots; }
     uint64_t AppliedSnapshots() const { return m_appliedSnapshots; }
     uint64_t MaximumAppliedPoseAgeNs() const { return m_maximumAppliedAgeNs; }
+    void WriteAgeDistributions(std::ostream& output) const
+    {
+        output << "{\"enabled\":" << (!g_lockstep ? "true" : "false")
+               << ",\"scope\":\"realtime_operational;maximum_host_age_of_complete_applied_cohort;"
+                  "includes_static_cp;sampled_at_refresh_entry_freshness_checks_candidate_validation_application;"
+                  "not_per_packet_or_continuous_age\",\"freshness_checks\":";
+        m_freshnessAge.Write(output);
+        output << ",\"refresh_entry_held_frame\":"; m_refreshHeldAge.Write(output);
+        output << ",\"candidate_validation\":"; m_candidateAge.Write(output);
+        output << ",\"successful_applications\":"; m_applicationAge.Write(output);
+        output << '}';
+    }
 
     void Poll()
     {
@@ -940,6 +975,15 @@ class LivePositionSource
         m_started = true;
         py::gil_scoped_acquire gil;
         const int64_t nowNs = HostNowNs();
+        // A failed reader/lag guard must not erase an already held stale frame.
+        // This is observation only; the existing validation order is unchanged.
+        if (!g_lockstep && g_runtimeOperational && !m_applied.empty())
+        {
+            const auto ageNs=bas::MaximumMeasuredPoseAgeNs(m_applied,nowNs);
+            m_maximumAppliedAgeNs=std::max(m_maximumAppliedAgeNs,ageNs);
+            m_refreshHeldAge.Observe(DistributionAgeNs(m_applied,nowNs),nowNs,
+                                     static_cast<int64_t>(g_stateMaxAgeS*1e9));
+        }
         try
         {
             const int64_t eventNs = EventHostNs(nowNs);
@@ -1017,12 +1061,21 @@ class LivePositionSource
         return bas::MeasuredEventHostNs(m_deferred,g_runtimeOperational,g_radioEpochNs,
                                         Simulator::Now().GetNanoSeconds(),wallNs);
     }
+    static int64_t DistributionAgeNs(const std::vector<bas::MeasuredState>& states,int64_t wallNs)
+    {
+        if (states.empty() || std::any_of(states.begin(),states.end(),[&](const auto& state) {
+                return state.sampleNs<0 || state.sampleNs>wallNs;
+            })) return -1;
+        return static_cast<int64_t>(bas::MaximumMeasuredPoseAgeNs(states,wallNs));
+    }
     void CheckAppliedFreshness(int64_t eventNs, int64_t wallNs)
     {
         if (!m_deferred || !g_runtimeOperational) return;
         // Record a known violating age before rejecting it. A fresh observation
         // cannot make an old held geometry frame fresh or invent an application.
-        m_maximumAppliedAgeNs = std::max(m_maximumAppliedAgeNs,bas::MaximumMeasuredPoseAgeNs(m_applied,wallNs));
+        const auto ageNs=bas::MaximumMeasuredPoseAgeNs(m_applied,wallNs);
+        m_maximumAppliedAgeNs = std::max(m_maximumAppliedAgeNs,ageNs);
+        m_freshnessAge.Observe(DistributionAgeNs(m_applied,wallNs),wallNs,static_cast<int64_t>(g_stateMaxAgeS*1e9));
         bas::ValidateMeasuredCohort(m_applied,m_mobility.size(),eventNs,wallNs,
                                    static_cast<int64_t>(g_stateMaxAgeS*1e9));
     }
@@ -1031,6 +1084,11 @@ class LivePositionSource
     {
         if (m_deferred)
         {
+            // Observe the attempted measured frame before the unchanged guard.
+            // A rejected candidate must remain visible in the distribution.
+            if (g_runtimeOperational)
+                m_candidateAge.Observe(DistributionAgeNs(snapshot,wallNs),
+                                       wallNs,static_cast<int64_t>(g_stateMaxAgeS*1e9));
             bas::CommitMeasuredCohort(snapshot,m_mobility,g_positions,m_applied,eventNs,wallNs,
                 static_cast<int64_t>(g_stateMaxAgeS*1e9),true,[&] {
                     if (publishDependents) publishDependents();
@@ -1055,8 +1113,12 @@ class LivePositionSource
     {
         ++m_appliedSnapshots;
         ++g_poseSnapshots;
-        if (m_deferred && g_runtimeOperational)
-            m_maximumAppliedAgeNs = std::max(m_maximumAppliedAgeNs,bas::MaximumMeasuredPoseAgeNs(m_applied,wallNs));
+        if (!g_lockstep && g_runtimeOperational)
+        {
+            const auto ageNs=bas::MaximumMeasuredPoseAgeNs(m_applied,wallNs);
+            m_maximumAppliedAgeNs = std::max(m_maximumAppliedAgeNs,ageNs);
+            m_applicationAge.Observe(DistributionAgeNs(m_applied,wallNs),wallNs,static_cast<int64_t>(g_stateMaxAgeS*1e9));
+        }
         for (size_t i=0; i<snapshot.size(); ++i)
         {
             const double ageMs = g_lockstep ? (i==0 ? 0 :
@@ -1074,7 +1136,7 @@ class LivePositionSource
     {
         g_liveStateValid=false;
         LogEvent("position_snapshot_rejected","tracker","",0,
-                 std::numeric_limits<double>::quiet_NaN(),error.what());
+                 std::numeric_limits<double>::quiet_NaN(),QuoteEventCsvField(error.what()));
         if (g_runtimeOperational || g_lockstep)
         {
             ++g_stalePoseSamples;
@@ -1094,6 +1156,7 @@ class LivePositionSource
     std::vector<bas::MeasuredState> m_applied;
     bool m_deferred{false}, m_started{false};
     uint64_t m_observedSnapshots{0}, m_appliedSnapshots{0}, m_maximumAppliedAgeNs{0};
+    bas::TimingDistribution m_freshnessAge,m_refreshHeldAge,m_candidateAge,m_applicationAge;
 };
 
 // Non-owning statistics view; the run closes it before the local pose owner dies.
@@ -1117,7 +1180,13 @@ class NativeRuntimeSampler
             DynamicCast<RealtimeSimulatorImpl>(Simulator::GetImplementation());
         if (realtime)
         {
-            const double lagMs = (realtime->RealtimeNow() - Simulator::Now()).GetSeconds() * 1000.0;
+            const auto lag = realtime->RealtimeNow() - Simulator::Now();
+            const double lagMs = lag.GetSeconds() * 1000.0;
+            const int64_t observedNs=std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            if (g_runtimeOperational)
+                g_realtimeLagDistribution.Observe(lag.GetNanoSeconds(),observedNs,
+                                                  static_cast<int64_t>(g_runtimeLagMaxMs*1e6));
             ++g_realtimeLagSamples;
             g_latestRealtimeLagMs = lagMs;
             if (lagMs <= g_readinessLagMaxMs)
@@ -1491,10 +1560,11 @@ WriteStats(const std::string& path)
         wifiAssociations += counters.wifiAssociations;
         wifiDeassociations += counters.wifiDeassociations;
     }
+    const bool hybridActive = g_propagationProfile=="hybrid" && g_sourceRouterForStats;
     const bool sionnaDrivesRxPsd =
-        g_propagationProfile == "sionna" && g_phasedArraySpectrumPropagationModels.size() == 1 &&
-        g_phasedArraySpectrumPropagationModels.front() ==
-            "ns3::SionnaRtSpectrumPropagationLossModel";
+        (g_propagationProfile == "sionna" && g_phasedArraySpectrumPropagationModels.size() == 1 &&
+         g_phasedArraySpectrumPropagationModels.front() == "ns3::SionnaRtSpectrumPropagationLossModel") ||
+        (hybridActive && g_sourceRouterForStats->HybridRtEvaluations()>0);
     std::ofstream output(path, std::ios::out | std::ios::trunc);
     output << "{\n"
            << "  \"stop_reason\": \"" << g_stopReason << "\",\n"
@@ -1542,7 +1612,11 @@ WriteStats(const std::string& path)
            << "\",\"observed_snapshots\":" << (g_poseSourceForStats ? g_poseSourceForStats->ObservedSnapshots() : 0)
            << ",\"applied_snapshots\":" << (g_poseSourceForStats ? g_poseSourceForStats->AppliedSnapshots() : 0)
            << ",\"maximum_applied_pose_age_ns\":" << (g_poseSourceForStats ? g_poseSourceForStats->MaximumAppliedPoseAgeNs() : 0)
-           << ",\"state_max_age_ns\":" << static_cast<int64_t>(g_stateMaxAgeS*1e9) << "},\n"
+           << ",\"state_max_age_ns\":" << static_cast<int64_t>(g_stateMaxAgeS*1e9)
+           << ",\"age_distributions\":";
+    if (g_poseSourceForStats) g_poseSourceForStats->WriteAgeDistributions(output);
+    else output << "null";
+    output << "},\n"
            << "  \"pose_poll_period_ms\": " << g_posePollPeriodMs << ",\n"
            << "  \"successful_pose_reader_calls\": " << g_poseReaderCalls << ",\n"
            << "  \"successful_pose_reader_wall_ns\": " << g_poseReaderWallNs << ",\n"
@@ -1577,6 +1651,10 @@ WriteStats(const std::string& path)
            << "  \"path_observation_scope\": \""
            << (g_eventLogging == "metrics_only" ? "periodic_cp_uav" : "periodic_and_decoded_packet_pairs") << "\",\n"
            << "  \"realtime_lag_samples\": " << g_realtimeLagSamples << ",\n"
+           << "  \"operational_realtime_lag_distribution\":";
+    g_realtimeLagDistribution.Write(output);
+    output << ",\n  \"realtime_lag_distribution_scope\":\"host realtime minus native event time;"
+              "50ms native poll;operational_only;not_odometry_age_or_control_latency\",\n"
            << "  \"readiness_lag_max_ms\": " << g_readinessLagMaxMs << ",\n"
            << "  \"readiness_consecutive_samples\": " << g_readinessConsecutiveSamples << ",\n"
            << "  \"mac_tx_total\": " << macTx << ",\n"
@@ -1670,6 +1748,7 @@ WriteStats(const std::string& path)
            << "  \"solver_profile\": \"" << g_solverProfile << "\",\n"
            << "  \"sionna_receiver_batch_mode\": \"" << g_sionnaReceiverBatchMode << "\",\n"
            << "  \"sionna_receiver_batch\": " << g_sionnaReceiverBatchStatsJson << ",\n"
+            << "  \"hybrid_selection\": " << (hybridActive ? g_sourceRouterForStats->HybridSnapshotJson() : "null") << ",\n"
            << "  \"sionna_rt_execution_mode\": \"" << g_sionnaRtExecutionMode << "\",\n"
            << "  \"sionna_rt_workers\": " << g_sionnaRtWorkersJson << ",\n"
            << "  \"sionna_solver\": {\"max_depth\": " << g_sionnaMaxDepth
@@ -1691,7 +1770,7 @@ WriteStats(const std::string& path)
            << ", \"cache_expiry_jitter_fraction\": " << g_sionnaCacheJitterFraction
            << "},\n"
            << "  \"packet_outcome_affected\": "
-           << ((sionnaDrivesRxPsd || g_geometry) ? "true" : "false") << "\n"
+           << ((sionnaDrivesRxPsd || g_geometry || (hybridActive && g_sourceRouterForStats->HybridFriisEvaluations()>0)) ? "true" : "false") << "\n"
            << "}\n";
 }
 
@@ -1910,12 +1989,15 @@ main(int argc, char* argv[])
                     sionnaReceiverBatchMode != "full_mesh",
                     "sionnaReceiverBatchMode must be pairwise, receiver_batch or explicit full_mesh");
     NS_ABORT_MSG_IF(sionnaReceiverBatchMode != "pairwise" &&
-                    (g_propagationProfile != "sionna" || radioBackend != "wifi" ||
+                    (!requiresRt || radioBackend != "wifi" ||
                      g_executionMode != "realtime" || !sionnaSyntheticArray),
                     "RT batching requires the native Wi-Fi/Sionna realtime iso 1x1 reference");
     NS_ABORT_MSG_IF(sionnaRtExecutionMode != "in_process" && sionnaRtExecutionMode != "worker_pool",
                     "sionnaRtExecutionMode must be in_process or worker_pool");
     const bool useRtWorkers = sionnaRtExecutionMode == "worker_pool";
+    NS_ABORT_MSG_IF(g_propagationProfile=="hybrid" &&
+                    (!useRtWorkers || g_stateMaxAgeS>0.1 || channelStateMaxAgeS>0.1),
+                    "qualified hybrid requires worker_pool and pose/cache age limits <=100 ms");
     NS_ABORT_MSG_IF(sionnaReceiverBatchMode == "full_mesh" && !useRtWorkers,
                     "full_mesh requires the explicit worker_pool execution mode");
     NS_ABORT_MSG_IF(sionnaWorkerCount < 1 || sionnaWorkerCount > 3 ||
@@ -2087,20 +2169,29 @@ main(int argc, char* argv[])
     else
     {
         auto& router = sourceRouter;
-        if (sourceConfig.empty()) { router=CreateObject<bas::SourcePropagation>(); router->reference=sionna; }
+        if (sourceConfig.empty())
+        {
+            router=CreateObject<bas::SourcePropagation>(); router->reference=sionna;
+            if (g_propagationProfile=="hybrid") router->ConfigureHybridScene(scene,
+                [](const auto& event,const auto& id,double value,const auto& details) {
+                    LogEvent(event,id,"",0,value,details);
+                });
+        }
         else router = bas::InstallSpectrumSources(sionna, channel, sourceConfig, scene,
             solver, sionnaMaxNumberOfPaths, g_propagationProfile,
             [](const std::string& event, const std::string& id, double value,
                const std::string& details) { LogEvent(event, id, "", 0, value, details); },
             sionnaReceiverBatchMode != "pairwise", []() { return ReadPhase(); });
         router->profile=g_propagationProfile;
+        if (g_propagationProfile=="hybrid") router->hybridCommandPost=mobility.front();
+        g_sourceRouterForStats=PeekPointer(router);
         channel->AddPhasedArraySpectrumPropagationLossModel(router);
         LogEvent("source_propagation_dispatch", "ns3", "", 0, router->sources.size(),
                  "wrapper=bas::SourcePropagation;selected_profile=" + g_propagationProfile + ";one_model_per_signal=true");
     }
     if (!geometryProfile) g_phasedArraySpectrumPropagationModels.push_back(g_propagationProfile == "sionna"
         ? sionna->GetInstanceTypeId().GetName() : (g_propagationProfile == "friis"
-            ? "ns3::FriisSpectrumPropagationLossModel" : "bas::ExplicitNativeSionnaFriisSelection"));
+            ? "ns3::FriisSpectrumPropagationLossModel" : "bas::QualifiedSionnaFriisSelection"));
     LogEvent("rx_psd_model_binding",
              "ns3",
              "",
@@ -2446,7 +2537,12 @@ main(int argc, char* argv[])
             rtPool = std::make_unique<bas::NativeRtPool>(rtCache, endpoints,
                 [&positions]() { return positions.Snapshot(); },
                 [](const std::string& event, const std::string& id, double value,
-                   const std::string& details) { LogEvent(event, id, "", 0, value, details); },
+                   const std::string& details) {
+                    if (event == "rt_pool_failed")
+                        LogEvent(event, id, "", 0, value, QuoteEventCsvField(details));
+                    else
+                        LogEvent(event, id, "", 0, value, details);
+                },
                 sionnaReceiverBatchMode == "full_mesh" ? bas::NativeRtPool::CommitSnapshot(
                     [&positions](const std::vector<bas::MeasuredState>& state, const std::function<void()>& publish) {
                         positions.Commit(state,publish);
